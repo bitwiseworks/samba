@@ -62,3 +62,5 @@ semantic.cache
 .testrepository
 /bin/.confcache/*/*
 /bin/.conf_check_*/*
+conftest.*
+coherent.*
