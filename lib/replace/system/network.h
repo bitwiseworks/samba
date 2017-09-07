@@ -296,9 +296,11 @@ int rep_socketpair(int d, int type, int protocol, int sv[2]);
 #define MAXHOSTNAMELEN HOST_NAME_MAX
 #endif
 
+#ifndef __OS2__
 #ifndef HAVE_SA_FAMILY_T
 #define HAVE_SA_FAMILY_T
 typedef unsigned short int sa_family_t;
+#endif
 #endif
 
 #ifndef HAVE_STRUCT_SOCKADDR_STORAGE

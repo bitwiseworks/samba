@@ -17,6 +17,7 @@ cxx_compiler = {
 'irix':   ['g++'],
 'hpux':   ['g++'],
 'gnu':    ['g++'],
+'os2knix':['g++'],
 'default': ['g++']
 }
 

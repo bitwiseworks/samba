@@ -468,7 +468,7 @@ class BuildContext(Utils.Context):
 		# TODO remove in waf 1.6
 		if hasattr(self, 'repository'): self.repository(src_dir_node)
 
-		if not src_dir_node.name and sys.platform == 'win32':
+		if not src_dir_node.name and (sys.platform == 'win32' or sys.platform == 'os2knix'):
 			# the root has no name, contains drive letters, and cannot be listed
 			return
 

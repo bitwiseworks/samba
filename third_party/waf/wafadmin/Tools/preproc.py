@@ -46,6 +46,9 @@ standard_includes = ['/usr/include']
 if sys.platform == "win32":
 	standard_includes = []
 
+if sys.platform == "os2knix":
+	standard_includes = ['/@unixroot/usr/include']
+
 use_trigraphs = 0
 'apply the trigraph rules first'
 

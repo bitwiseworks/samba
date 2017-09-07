@@ -425,6 +425,9 @@ class Node(object):
 			if not self.parent:
 				val = os.sep == '/' and os.sep or ''
 			elif not self.parent.name: # root
+			  if sys.platform == 'os2knix': # no / prefix in root
+				val = self.name
+			  else:
 				val = (os.sep == '/' and os.sep or '') + self.name
 			else:
 				val = self.parent.abspath() + os.sep + self.name

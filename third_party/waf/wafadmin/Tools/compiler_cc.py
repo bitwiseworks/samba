@@ -17,6 +17,7 @@ c_compiler = {
 	'irix':   ['gcc'],
 	'hpux':   ['gcc'],
 	'gnu':    ['gcc'],
+	'os2knix':['gcc'],
 	'default': ['gcc']
 }
 

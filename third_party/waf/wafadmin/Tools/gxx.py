@@ -83,6 +83,15 @@ def gxx_modifier_win32(conf):
 	v.append_value('LINKFLAGS', '-Wl,--enable-auto-import')
 
 @conftest
+def gxx_modifier_os2knix(conf):
+	v = conf.env
+	v['program_PATTERN']     = '%s.exe'
+	v['shlib_PATTERN']       = '%s.dll'
+	v['implib_PATTERN']      = 'lib%s_dll.a'
+	v['SHLIB_MARKER']        = ''
+	v['STATICLIB_MARKER']    = ''
+
+@conftest
 def gxx_modifier_cygwin(conf):
 	gxx_modifier_win32(conf)
 	v = conf.env
