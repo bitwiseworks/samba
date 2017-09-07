@@ -1,0 +1,7 @@
+export LDFLAGS="-Zhigh-mem -Zomf -Zargs-wild -Zargs-resp -lcx0"
+./configure --without-ad-dc --without-acl-support --without-ldap --without-ads \
+--program-prefix= --prefix=/@unixroot/usr --exec-prefix=/@unixroot/usr --bindir=/@unixroot/usr/bin \
+--sbindir=/@unixroot/usr/sbin --sysconfdir=/@unixroot/etc --datadir=/@unixroot/usr/share \
+--includedir=/@unixroot/usr/include --libdir=/@unixroot/usr/lib --libexecdir=/@unixroot/usr/libexec \
+--localstatedir=/@unixroot/var --sharedstatedir=/@unixroot/usr/com --mandir=/@unixroot/usr/share/man \
+--infodir=/@unixroot/usr/share/info
