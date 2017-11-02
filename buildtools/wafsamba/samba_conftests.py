@@ -4,7 +4,7 @@
 import os, shutil, re
 import Build, Configure, Utils, Options, Logs
 from Configure import conf
-from samba_utils import TO_LIST, ADD_LD_LIBRARY_PATH
+from samba_utils import TO_LIST, ADD_LD_LIBRARY_PATH, SET_LD_LIBRARY_PATH
 
 
 def add_option(self, *k, **kw):
@@ -329,11 +329,7 @@ def CHECK_LIBRARY_SUPPORT(conf, rpath=False, version_script=False, msg=None):
     lastprog = o.link_task.outputs[0].abspath(env)
 
     if not rpath:
-        if 'LD_LIBRARY_PATH' in os.environ:
-            old_ld_library_path = os.environ['LD_LIBRARY_PATH']
-        else:
-            old_ld_library_path = None
-        ADD_LD_LIBRARY_PATH(os.path.join(bdir, 'default/libdir'))
+        old_ld_library_path = ADD_LD_LIBRARY_PATH(os.path.join(bdir, 'default/libdir'))
 
     # we need to run the program, try to get its result
     args = conf.SAMBA_CROSS_ARGS(msg=msg)
@@ -347,7 +343,7 @@ def CHECK_LIBRARY_SUPPORT(conf, rpath=False, version_script=False, msg=None):
     ret = (proc.returncode == 0)
 
     if not rpath:
-        os.environ['LD_LIBRARY_PATH'] = old_ld_library_path or ''
+        SET_LD_LIBRARY_PATH(old_ld_library_path)
 
     conf.check_message(msg, '', ret)
     return ret

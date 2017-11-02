@@ -36,15 +36,23 @@ def GET_TARGET_TYPE(ctx, target):
 
 
 def ADD_LD_LIBRARY_PATH(path):
-    '''add something to LD_LIBRARY_PATH'''
-    if 'LD_LIBRARY_PATH' in os.environ:
-        oldpath = os.environ['LD_LIBRARY_PATH']
+    '''add something to LD_LIBRARY_PATH (BEGINLIBPATH on OS/2) and return its previous contents'''
+    var = 'BEGINLIBPATH' if os.name == 'os2' else 'LD_LIBRARY_PATH'
+    if var in os.environ:
+        oldpath = os.environ[var]
     else:
         oldpath = ''
-    newpath = oldpath.split(':')
+    newpath = [] if oldpath == '' else oldpath.split(os.pathsep)
     if not path in newpath:
         newpath.append(path)
-        os.environ['LD_LIBRARY_PATH'] = ':'.join(newpath)
+        os.environ[var] = os.pathsep.join(newpath)
+    return oldpath
+
+
+def SET_LD_LIBRARY_PATH(path):
+    '''set LD_LIBRARY_PATH (BEGINLIBPATH on OS/2) to path'''
+    var = 'BEGINLIBPATH' if os.name == 'os2' else 'LD_LIBRARY_PATH'
+    os.environ[var] = path
 
 
 def needs_private_lib(bld, target):
