@@ -124,6 +124,8 @@ class unit_test(object):
 					elif sys.platform == 'darwin':
 						add_path(v, ld_library_path, 'DYLD_LIBRARY_PATH')
 						add_path(v, ld_library_path, 'LD_LIBRARY_PATH')
+					elif os.name == 'os2':
+						add_path(v, ld_library_path, 'BEGINLIBPATH')
 					else:
 						add_path(v, ld_library_path, 'LD_LIBRARY_PATH')
 
@@ -255,6 +257,8 @@ def exec_test(self):
 		elif sys.platform == 'darwin':
 			add_path(fu, lst, 'DYLD_LIBRARY_PATH')
 			add_path(fu, lst, 'LD_LIBRARY_PATH')
+		elif os.name == 'os2':
+			add_path(fu, lst, 'BEGINLIBPATH')
 		else:
 			add_path(fu, lst, 'LD_LIBRARY_PATH')
 
