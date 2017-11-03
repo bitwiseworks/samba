@@ -78,6 +78,7 @@ def get_cc_version(conf, cc, gcc=False, icc=False):
 			'_WIN64'      : 'win32',
 			'_WIN32'      : 'win32',
 			'__POWERPC__' : 'powerpc',
+			'__OS2__'     : 'os2knix',
 			}
 
 		for i in mp1:
@@ -96,6 +97,8 @@ def get_cc_version(conf, cc, gcc=False, icc=False):
 			conf.env.DEST_BINFMT = 'pe'
 		elif isD('__APPLE__'):
 			conf.env.DEST_BINFMT = 'mac-o'
+		elif isD('__OS2__'):
+			conf.env.DEST_BINFMT = 'lx'
 
 		mp2 = {
 				'__x86_64__'  : 'x86_64',

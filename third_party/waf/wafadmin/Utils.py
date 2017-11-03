@@ -511,6 +511,8 @@ def unversioned_sys_platform_to_binary_format(unversioned_sys_platform):
 		return 'mac-o'
 	elif unversioned_sys_platform in ('win32', 'cygwin', 'uwin', 'msys'):
 		return 'pe'
+	elif unversioned_sys_platform in ('os2', 'os2knix'):
+		return 'lx'
 	# TODO we assume all other operating systems are elf, which is not true.
 	# we may set this to 'unknown' and have ccroot and other tools handle the case "gracefully" (whatever that means).
 	return 'elf'
