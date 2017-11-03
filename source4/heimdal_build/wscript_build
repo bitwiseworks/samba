@@ -132,6 +132,9 @@ def HEIMDAL_ASN1(name, source,
             samba_includes = includes + ["/usr/include/heimdal"],
             local_include  = True)
 
+    if (os.name == 'os2'):
+        t.samba_includes = includes
+
 
 def HEIMDAL_ERRTABLE(name, source):
     '''Build a heimdal errtable from a .et file'''
@@ -351,7 +354,7 @@ if not bld.CONFIG_SET('USING_SYSTEM_ROKEN'):
     if not bld.CONFIG_SET('HAVE_IFADDRS_H'):
         HEIMDAL_GENERATOR(
             name="HEIMDAL_IFADDRS_H",
-            rule="rm -f ${TGT} && ln ${SRC} ${TGT}",
+            rule="rm -f ${TGT} && cp ${SRC} ${TGT}",
             source = 'ifaddrs.hin',
             target = 'ifaddrs.h',
             )
@@ -360,7 +363,7 @@ if not bld.CONFIG_SET('USING_SYSTEM_ROKEN'):
         HEIMDAL_GENERATOR(
             group='build_compiler_source',
             name="HEIMDAL_ERR_H",
-            rule="rm -f ${TGT} && ln ${SRC} ${TGT}",
+            rule="rm -f ${TGT} && cp ${SRC} ${TGT}",
             source = '../heimdal/lib/roken/err.hin',
             target = '../heimdal/lib/roken/err.h',
             )
