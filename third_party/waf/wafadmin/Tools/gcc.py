@@ -92,6 +92,7 @@ def gcc_modifier_os2knix(conf):
 	v['implib_PATTERN']      = 'lib%s_dll.a'
 	v['SHLIB_MARKER']        = ''
 	v['STATICLIB_MARKER']    = ''
+	v['shlib_CCFLAGS']       = ['-DPIC']
 
 @conftest
 def gcc_modifier_cygwin(conf):
