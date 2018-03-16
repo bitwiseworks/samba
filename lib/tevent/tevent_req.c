@@ -31,19 +31,24 @@ char *tevent_req_default_print(struct tevent_req *req, TALLOC_CTX *mem_ctx)
 {
 	return talloc_asprintf(mem_ctx,
 			       "tevent_req[%p/%s]: state[%d] error[%lld (0x%llX)] "
-			       " state[%s (%p)] timer[%p]",
+			       " state[%s (%p)] timer[%p] finish[%s]",
 			       req, req->internal.create_location,
 			       req->internal.state,
 			       (unsigned long long)req->internal.error,
 			       (unsigned long long)req->internal.error,
-			       talloc_get_name(req->data),
+			       req->internal.private_type,
 			       req->data,
-			       req->internal.timer
+			       req->internal.timer,
+			       req->internal.finish_location
 			       );
 }
 
 char *tevent_req_print(TALLOC_CTX *mem_ctx, struct tevent_req *req)
 {
+	if (req == NULL) {
+		return talloc_strdup(mem_ctx, "tevent_req[NULL]");
+	}
+
 	if (!req->private_print) {
 		return tevent_req_default_print(req, mem_ctx);
 	}

@@ -594,7 +594,9 @@ char *sys_getwd(void)
 			break;
 		}
 		if (errno != ERANGE) {
+			int saved_errno = errno;
 			SAFE_FREE(s);
+			errno = saved_errno;
 			break;
 		}
 		allocated *= 2;
@@ -605,11 +607,18 @@ char *sys_getwd(void)
 	}
 	return wd;
 #else
+	char *wd = NULL;
 	char *s = SMB_MALLOC_ARRAY(char, PATH_MAX);
 	if (s == NULL) {
 		return NULL;
 	}
-	return getwd(s);
+	wd = getwd(s);
+	if (wd == NULL) {
+		int saved_errno = errno;
+		SAFE_FREE(s);
+		errno = saved_errno;
+	}
+	return wd;
 #endif
 }
 

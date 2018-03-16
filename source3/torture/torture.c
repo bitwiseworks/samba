@@ -3153,6 +3153,29 @@ static bool run_browsetest(int dummy)
 
 }
 
+static bool check_attributes(struct cli_state *cli,
+				const char *fname,
+				uint16_t expected_attrs)
+{
+	uint16_t attrs = 0;
+	NTSTATUS status = cli_getatr(cli,
+				fname,
+				&attrs,
+				NULL,
+				NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("cli_getatr failed with %s\n",
+			nt_errstr(status));
+		return false;
+	}
+	if (attrs != expected_attrs) {
+		printf("Attributes incorrect 0x%x, should be 0x%x\n",
+			(unsigned int)attrs,
+			(unsigned int)expected_attrs);
+		return false;
+	}
+	return true;
+}
 
 /*
   This checks how the getatr calls works
@@ -3212,6 +3235,120 @@ static bool run_attrtest(int dummy)
 	}
 
 	cli_unlink(cli, fname, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN);
+
+	/* Check cli_setpathinfo_basic() */
+	/* Re-create the file. */
+	status = cli_openx(cli, fname,
+			O_RDWR | O_CREAT | O_TRUNC, DENY_NONE, &fnum);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("Failed to recreate %s (%s)\n",
+			fname, nt_errstr(status));
+		correct = false;
+	}
+	cli_close(cli, fnum);
+
+	status = cli_setpathinfo_basic(cli,
+					fname,
+					0, /* create */
+					0, /* access */
+					0, /* write */
+					0, /* change */
+					FILE_ATTRIBUTE_SYSTEM |
+					FILE_ATTRIBUTE_HIDDEN |
+					FILE_ATTRIBUTE_READONLY);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("cli_setpathinfo_basic failed with %s\n",
+			nt_errstr(status));
+		correct = false;
+	}
+
+	/* Check attributes are correct. */
+	correct = check_attributes(cli,
+			fname,
+			FILE_ATTRIBUTE_SYSTEM |
+			FILE_ATTRIBUTE_HIDDEN |
+			FILE_ATTRIBUTE_READONLY);
+	if (correct == false) {
+		goto out;
+	}
+
+	/* Setting to FILE_ATTRIBUTE_NORMAL should be ignored. */
+	status = cli_setpathinfo_basic(cli,
+					fname,
+					0, /* create */
+					0, /* access */
+					0, /* write */
+					0, /* change */
+					FILE_ATTRIBUTE_NORMAL);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("cli_setpathinfo_basic failed with %s\n",
+			nt_errstr(status));
+		correct = false;
+	}
+
+	/* Check attributes are correct. */
+	correct = check_attributes(cli,
+			fname,
+			FILE_ATTRIBUTE_SYSTEM |
+			FILE_ATTRIBUTE_HIDDEN |
+			FILE_ATTRIBUTE_READONLY);
+	if (correct == false) {
+		goto out;
+	}
+
+	/* Setting to (uint16_t)-1 should also be ignored. */
+	status = cli_setpathinfo_basic(cli,
+					fname,
+					0, /* create */
+					0, /* access */
+					0, /* write */
+					0, /* change */
+					(uint16_t)-1);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("cli_setpathinfo_basic failed with %s\n",
+			nt_errstr(status));
+		correct = false;
+	}
+
+	/* Check attributes are correct. */
+	correct = check_attributes(cli,
+			fname,
+			FILE_ATTRIBUTE_SYSTEM |
+			FILE_ATTRIBUTE_HIDDEN |
+			FILE_ATTRIBUTE_READONLY);
+	if (correct == false) {
+		goto out;
+	}
+
+	/* Setting to 0 should clear them all. */
+	status = cli_setpathinfo_basic(cli,
+					fname,
+					0, /* create */
+					0, /* access */
+					0, /* write */
+					0, /* change */
+					0);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("cli_setpathinfo_basic failed with %s\n",
+			nt_errstr(status));
+		correct = false;
+	}
+
+	/* Check attributes are correct. */
+	correct = check_attributes(cli,
+			fname,
+			FILE_ATTRIBUTE_NORMAL);
+	if (correct == false) {
+		goto out;
+	}
+
+  out:
+
+	cli_unlink(cli,
+		fname,
+		FILE_ATTRIBUTE_SYSTEM |
+		FILE_ATTRIBUTE_HIDDEN|
+		FILE_ATTRIBUTE_READONLY);
 
 	if (!torture_close_connection(cli)) {
 		correct = False;
@@ -10773,17 +10910,17 @@ static bool run_local_dbtrans(int dummy)
 
 /*
  * Just a dummy test to be run under a debugger. There's no real way
- * to inspect the tevent_select specific function from outside of
- * tevent_select.c.
+ * to inspect the tevent_poll specific function from outside of
+ * tevent_poll.c.
  */
 
-static bool run_local_tevent_select(int dummy)
+static bool run_local_tevent_poll(int dummy)
 {
 	struct tevent_context *ev;
 	struct tevent_fd *fd1, *fd2;
 	bool result = false;
 
-	ev = tevent_context_init_byname(NULL, "select");
+	ev = tevent_context_init_byname(NULL, "poll");
 	if (ev == NULL) {
 		d_fprintf(stderr, "tevent_context_init_byname failed\n");
 		goto fail;
@@ -11334,7 +11471,7 @@ static struct {
 	{ "LOCAL-sid_to_string", run_local_sid_to_string, 0},
 	{ "LOCAL-binary_to_sid", run_local_binary_to_sid, 0},
 	{ "LOCAL-DBTRANS", run_local_dbtrans, 0},
-	{ "LOCAL-TEVENT-SELECT", run_local_tevent_select, 0},
+	{ "LOCAL-TEVENT-POLL", run_local_tevent_poll, 0},
 	{ "LOCAL-CONVERT-STRING", run_local_convert_string, 0},
 	{ "LOCAL-CONV-AUTH-INFO", run_local_conv_auth_info, 0},
 	{ "LOCAL-hex_encode_buf", run_local_hex_encode_buf, 0},
@@ -11348,15 +11485,6 @@ static struct {
 	{ "LOCAL-CANONICALIZE-PATH", run_local_canonicalize_path, 0 },
 	{ "qpathinfo-bufsize", run_qpathinfo_bufsize, 0 },
 	{NULL, NULL, 0}};
-
-/*
- * dummy function to satisfy linker dependency
- */
-struct tevent_context *winbind_event_context(void);
-struct tevent_context *winbind_event_context(void)
-{
-	return NULL;
-}
 
 /****************************************************************************
 run a specified test or "ALL"

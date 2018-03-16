@@ -170,6 +170,7 @@
 ^samba3.smb2.setinfo.setinfo
 ^samba3.smb2.session.*reauth5 # some special anonymous checks?
 ^samba3.smb2.compound.interim2 # wrong return code (STATUS_CANCELLED)
+^samba3.smb2.compound.aio.interim2 # wrong return code (STATUS_CANCELLED)
 ^samba3.smb2.replay.channel-sequence
 ^samba3.smb2.replay.replay3
 ^samba3.smb2.replay.replay4
@@ -306,3 +307,4 @@
 ^samba.tests.dcerpc.dnsserver.samba.tests.dcerpc.dnsserver.DnsserverTests.test_add_duplicate_different_type.*
 ^samba.tests.dcerpc.dnsserver.samba.tests.dcerpc.dnsserver.DnsserverTests.test_rank_none.*
 ^samba.tests.dcerpc.dnsserver.samba.tests.dcerpc.dnsserver.DnsserverTests.test_security_descriptor.*
+^samba3.vfs.fruit streams_depot.OS X AppleDouble file conversion\(nt4_dc\)

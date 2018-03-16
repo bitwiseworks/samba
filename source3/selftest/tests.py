@@ -56,6 +56,7 @@ finally:
 
 have_libarchive = ("HAVE_LIBARCHIVE" in config_hash)
 have_linux_kernel_oplocks = ("HAVE_KERNEL_OPLOCKS_LINUX" in config_hash)
+have_inotify = ("HAVE_INOTIFY" in config_hash)
 
 plantestsuite("samba3.blackbox.success", "nt4_dc:local", [os.path.join(samba3srcdir, "script/tests/test_success.sh")])
 plantestsuite("samba3.blackbox.failure", "nt4_dc:local", [os.path.join(samba3srcdir, "script/tests/test_failure.sh")])
@@ -127,7 +128,7 @@ local_tests = [
     "LOCAL-sid_to_string",
     "LOCAL-binary_to_sid",
     "LOCAL-DBTRANS",
-    "LOCAL-TEVENT-SELECT",
+    "LOCAL-TEVENT-POLL",
     "LOCAL-CONVERT-STRING",
     "LOCAL-CONV-AUTH-INFO",
     "LOCAL-IDMAP-TDB-COMMON",
@@ -221,10 +222,11 @@ for env in ["fileserver"]:
     plantestsuite("samba3.blackbox.netshareenum (%s)" % env, env, [os.path.join(samba3srcdir, "script/tests/test_shareenum.sh"), '$SERVER', '$USERNAME', '$PASSWORD', rpcclient])
     plantestsuite("samba3.blackbox.acl_xattr (%s)" % env, env, [os.path.join(samba3srcdir, "script/tests/test_acl_xattr.sh"), '$SERVER', '$USERNAME', '$PASSWORD', '$PREFIX', smbclient3, smbcacls])
     plantestsuite("samba3.blackbox.smb2.not_casesensitive (%s)" % env, env, [os.path.join(samba3srcdir, "script/tests/test_smb2_not_casesensitive.sh"), '//$SERVER/tmp', '$SERVER_IP', '$USERNAME', '$PASSWORD', '$LOCAL_PATH', smbclient3])
-    plantestsuite("samba3.blackbox.inherit_owner.default(%s)" % env, env, [os.path.join(samba3srcdir, "script/tests/test_inherit_owner.sh"), '$SERVER', '$USERNAME', '$PASSWORD', '$PREFIX', smbclient3, smbcacls, 'tmp', '0', '0', '-m', 'NT1'])
-    plantestsuite("samba3.blackbox.inherit_owner.full (%s)" % env, env, [os.path.join(samba3srcdir, "script/tests/test_inherit_owner.sh"), '$SERVER', '$USERNAME', '$PASSWORD', '$PREFIX', smbclient3, smbcacls, 'inherit_owner', '1', '1', '-m', 'NT1'])
-    plantestsuite("samba3.blackbox.inherit_owner.unix (%s)" % env, env, [os.path.join(samba3srcdir, "script/tests/test_inherit_owner.sh"), '$SERVER', '$USERNAME', '$PASSWORD', '$PREFIX', smbclient3, smbcacls, 'inherit_owner_u', '0', '1', '-m', 'NT1'])
+    plantestsuite("samba3.blackbox.inherit_owner.default(%s)" % env, env, [os.path.join(samba3srcdir, "script/tests/test_inherit_owner.sh"), '$SERVER', '$USERNAME', '$PASSWORD', '$PREFIX', smbclient3, smbcacls, net, 'tmp', '0', '0', '-m', 'NT1'])
+    plantestsuite("samba3.blackbox.inherit_owner.full (%s)" % env, env, [os.path.join(samba3srcdir, "script/tests/test_inherit_owner.sh"), '$SERVER', '$USERNAME', '$PASSWORD', '$PREFIX', smbclient3, smbcacls, net, 'inherit_owner', '1', '1', '-m', 'NT1'])
+    plantestsuite("samba3.blackbox.inherit_owner.unix (%s)" % env, env, [os.path.join(samba3srcdir, "script/tests/test_inherit_owner.sh"), '$SERVER', '$USERNAME', '$PASSWORD', '$PREFIX', smbclient3, smbcacls, net, 'inherit_owner_u', '0', '1', '-m', 'NT1'])
     plantestsuite("samba3.blackbox.large_acl (%s)" % env, env, [os.path.join(samba3srcdir, "script/tests/test_large_acl.sh"), '$SERVER', '$USERNAME', '$PASSWORD', smbclient3, smbcacls])
+    plantestsuite("samba3.blackbox.give_owner (%s)" % env, env, [os.path.join(samba3srcdir, "script/tests/test_give_owner.sh"), '$SERVER', '$SERVER_IP', '$USERNAME', '$PASSWORD', '$PREFIX', smbclient3, smbcacls, net, 'tmp'])
 
     #
     # tar command tests
@@ -433,8 +435,8 @@ for t in tests:
         plansmbtorture4testsuite(t, "ad_dc", '//$SERVER/tmp -U$USERNAME%$PASSWORD')
     elif t == "vfs.fruit":
         plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/vfs_fruit -U$USERNAME%$PASSWORD --option=torture:localdir=$SELFTEST_PREFIX/nt4_dc/share --option=torture:share2=vfs_wo_fruit', 'metadata_netatalk')
-        plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/vfs_fruit_metadata_stream --option=torture:share2=vfs_wo_fruit -U$USERNAME%$PASSWORD', 'metadata_stream')
-        plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/vfs_fruit_stream_depot --option=torture:share2=vfs_wo_fruit_stream_depot -U$USERNAME%$PASSWORD', 'streams_depot')
+        plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/vfs_fruit_metadata_stream -U$USERNAME%$PASSWORD --option=torture:localdir=$SELFTEST_PREFIX/nt4_dc/share --option=torture:share2=vfs_wo_fruit', 'metadata_stream')
+        plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/vfs_fruit_stream_depot -U$USERNAME%$PASSWORD --option=torture:localdir=$SELFTEST_PREFIX/nt4_dc/share --option=torture:share2=vfs_wo_fruit_stream_depot', 'streams_depot')
     elif t == "vfs.fruit_netatalk":
         plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/vfs_fruit -U$USERNAME%$PASSWORD --option=torture:localdir=$SELFTEST_PREFIX/nt4_dc/share')
     elif t == "vfs.fruit_file_id":
@@ -455,9 +457,16 @@ for t in tests:
         plansmbtorture4testsuite(t, "simpleserver", '//$SERVER/dosmode -U$USERNAME%$PASSWORD')
     elif t == "smb2.kernel-oplocks":
         if have_linux_kernel_oplocks:
-            plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER/kernel_oplocks -U$USERNAME%$PASSWORD')
+            plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER/kernel_oplocks -U$USERNAME%$PASSWORD --option=torture:localdir=$SELFTEST_PREFIX/nt4_dc/share')
+    elif t == "smb2.notify-inotify":
+        if have_inotify:
+            plansmbtorture4testsuite(t, "fileserver", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
     elif t == "vfs.acl_xattr":
         plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
+    elif t == "smb2.compound":
+        plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
+        plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/aio -U$USERNAME%$PASSWORD', 'aio')
+        plansmbtorture4testsuite(t, "ad_dc", '//$SERVER/tmp -U$USERNAME%$PASSWORD')
     else:
         plansmbtorture4testsuite(t, "nt4_dc", '//$SERVER_IP/tmp -U$USERNAME%$PASSWORD')
         plansmbtorture4testsuite(t, "ad_dc", '//$SERVER/tmp -U$USERNAME%$PASSWORD')
@@ -504,6 +513,9 @@ plantestsuite("samba3.blackbox.sharesec", "simpleserver:local",
               [os.path.join(samba3srcdir, "script/tests/test_sharesec.sh"),
                configuration, os.path.join(bindir(), "sharesec"), "tmp"])
 
+plantestsuite("samba3.blackbox.smbd_error", "simpleserver:local",
+              [ os.path.join(samba3srcdir, "script/tests/test_smbd_error.sh") ])
+
 plantestsuite("samba3.blackbox.net_dom_join_fail_dc", "nt4_dc",
               [os.path.join(samba3srcdir, "script/tests/test_net_dom_join_fail_dc.sh"),
                "$USERNAME", "$PASSWORD", "$SERVER", "$PREFIX/net_dom_join_fail_dc",
@@ -512,6 +524,10 @@ plantestsuite("samba3.blackbox.net_rpc_join", "nt4_dc",
               [os.path.join(samba3srcdir, "script/tests/test_net_rpc_join.sh"),
                "$USERNAME", "$PASSWORD", "$SERVER", "$PREFIX/net_rpc_join",
                configuration])
+plantestsuite("samba3.blackbox.net_rpc_oldjoin", "nt4_dc:local",
+              [os.path.join(samba3srcdir, "script/tests/test_net_rpc_oldjoin.sh"),
+               "$SERVER", "$PREFIX/net_rpc_oldjoin",
+               "$SMB_CONF_PATH"])
 
 plantestsuite("samba3.blackbox.rpcclient_srvsvc", "simpleserver",
               [os.path.join(samba3srcdir, "script/tests/test_rpcclientsrvsvc.sh"),

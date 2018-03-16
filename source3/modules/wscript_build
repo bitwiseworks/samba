@@ -22,6 +22,9 @@ bld.SAMBA3_SUBSYSTEM('vfs',
                     source='',
                     deps='smbd_base')
 
+bld.SAMBA3_SUBSYSTEM('STRING_REPLACE',
+                    source='string_replace.c')
+
 bld.SAMBA3_MODULE('vfs_default',
                  subsystem='vfs',
                  source='vfs_default.c',
@@ -89,7 +92,7 @@ bld.SAMBA3_MODULE('vfs_netatalk',
 bld.SAMBA3_MODULE('vfs_fruit',
                  subsystem='vfs',
                  source='vfs_fruit.c',
-                 deps='samba-util',
+                 deps='samba-util STRING_REPLACE',
                  init_function='',
                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_fruit'),
                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_fruit'))
@@ -232,7 +235,7 @@ bld.SAMBA3_MODULE('vfs_tru64acl',
 bld.SAMBA3_MODULE('vfs_catia',
                  subsystem='vfs',
                  source='vfs_catia.c',
-                 deps='samba-util',
+                 deps='samba-util STRING_REPLACE',
                  init_function='',
                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_catia'),
                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_catia'))
@@ -502,3 +505,10 @@ bld.SAMBA3_MODULE('vfs_fake_dfq',
                  init_function='',
                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_fake_dfq'),
                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_fake_dfq'))
+
+bld.SAMBA3_MODULE('vfs_error_inject',
+                 subsystem='vfs',
+                 source='vfs_error_inject.c',
+                 init_function='',
+                 internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_error_inject'),
+                 enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_error_inject'))

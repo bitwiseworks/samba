@@ -381,6 +381,23 @@ static int tevent_threaded_context_destructor(
 		DLIST_REMOVE(tctx->event_ctx->threaded_contexts, tctx);
 	}
 
+	/*
+	 * We have to coordinate with _tevent_threaded_schedule_immediate's
+	 * unlock of the event_ctx_mutex. We're in the main thread here,
+	 * and we can be scheduled before the helper thread finalizes its
+	 * call _tevent_threaded_schedule_immediate. This means we would
+	 * pthreadpool_destroy a locked mutex, which is illegal.
+	 */
+	ret = pthread_mutex_lock(&tctx->event_ctx_mutex);
+	if (ret != 0) {
+		abort();
+	}
+
+	ret = pthread_mutex_unlock(&tctx->event_ctx_mutex);
+	if (ret != 0) {
+		abort();
+	}
+
 	ret = pthread_mutex_destroy(&tctx->event_ctx_mutex);
 	if (ret != 0) {
 		abort();
@@ -434,7 +451,7 @@ void _tevent_threaded_schedule_immediate(struct tevent_threaded_context *tctx,
 {
 #ifdef HAVE_PTHREAD
 	struct tevent_context *ev;
-	int ret;
+	int ret, wakeup_fd;
 
 	ret = pthread_mutex_lock(&tctx->event_ctx_mutex);
 	if (ret != 0) {
@@ -443,15 +460,14 @@ void _tevent_threaded_schedule_immediate(struct tevent_threaded_context *tctx,
 
 	ev = tctx->event_ctx;
 
-	ret = pthread_mutex_unlock(&tctx->event_ctx_mutex);
-	if (ret != 0) {
-		abort();
-	}
-
 	if (ev == NULL) {
 		/*
 		 * Our event context is already gone.
 		 */
+		ret = pthread_mutex_unlock(&tctx->event_ctx_mutex);
+		if (ret != 0) {
+			abort();
+		}
 		return;
 	}
 
@@ -479,6 +495,13 @@ void _tevent_threaded_schedule_immediate(struct tevent_threaded_context *tctx,
 		abort();
 	}
 
+	wakeup_fd = tctx->wakeup_fd;
+
+	ret = pthread_mutex_unlock(&tctx->event_ctx_mutex);
+	if (ret != 0) {
+		abort();
+	}
+
 	/*
 	 * We might want to wake up the main thread under the lock. We
 	 * had a slightly similar situation in pthreadpool, changed
@@ -489,7 +512,7 @@ void _tevent_threaded_schedule_immediate(struct tevent_threaded_context *tctx,
 	 * than a noncontended one. So I'd opt for the lower footprint
 	 * initially. Maybe we have to change that later.
 	 */
-	tevent_common_wakeup_fd(tctx->wakeup_fd);
+	tevent_common_wakeup_fd(wakeup_fd);
 #else
 	/*
 	 * tevent_threaded_context_create() returned NULL with ENOSYS...

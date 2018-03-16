@@ -781,6 +781,8 @@ sub setup_fileserver($$)
 	push(@dirs,$tarmode_sharedir);
 
 	my $fileserver_options = "
+	kernel change notify = yes
+
 [lowercase]
 	path = $lower_case_share_dir
 	comment = smb username is [%U]
@@ -1787,6 +1789,7 @@ sub provision($$$$$$$$)
 	fruit:metadata = netatalk
 	fruit:locking = netatalk
 	fruit:encoding = native
+	fruit:veto_appledouble = no
 
 [vfs_fruit_metadata_stream]
 	path = $shrdir
@@ -1794,6 +1797,7 @@ sub provision($$$$$$$$)
 	ea support = yes
 	fruit:resource = file
 	fruit:metadata = stream
+	fruit:veto_appledouble = no
 
 [vfs_fruit_stream_depot]
 	path = $shrdir
@@ -1801,6 +1805,7 @@ sub provision($$$$$$$$)
 	ea support = yes
 	fruit:resource = stream
 	fruit:metadata = stream
+	fruit:veto_appledouble = no
 
 [vfs_wo_fruit]
 	path = $shrdir
@@ -2005,6 +2010,10 @@ sub provision($$$$$$$$)
 	copy = tmp
 	kernel oplocks = yes
 	vfs objects = streams_xattr xattr_tdb
+[error_inject]
+	copy = tmp
+	vfs objects = error_inject
+	include = $libdir/error_inject.conf
 	";
 	close(CONF);
 

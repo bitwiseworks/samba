@@ -182,6 +182,11 @@ static void prune_printername_cache(void);
 static const char *canon_servername(const char *servername)
 {
 	const char *pservername = servername;
+
+	if (servername == NULL) {
+		return "";
+	}
+
 	while (*pservername == '\\') {
 		pservername++;
 	}
@@ -2082,6 +2087,10 @@ WERROR _spoolss_DeletePrinterDriver(struct pipes_struct *p,
 		return WERR_ACCESS_DENIED;
 	}
 
+	if (r->in.architecture == NULL || r->in.driver == NULL) {
+		return WERR_INVALID_ENVIRONMENT;
+	}
+
 	/* check that we have a valid driver name first */
 
 	if ((version = get_version_id(r->in.architecture)) == -1) {
@@ -2219,6 +2228,10 @@ WERROR _spoolss_DeletePrinterDriverEx(struct pipes_struct *p,
 	    !security_token_has_privilege(p->session_info->security_token,
 					  SEC_PRIV_PRINT_OPERATOR)) {
 		return WERR_ACCESS_DENIED;
+	}
+
+	if (r->in.architecture == NULL || r->in.driver == NULL) {
+		return WERR_INVALID_ENVIRONMENT;
 	}
 
 	/* check that we have a valid driver name first */
@@ -4263,7 +4276,7 @@ static WERROR construct_printer_info7(TALLOC_CTX *mem_ctx,
 	if (is_printer_published(tmp_ctx, session_info, msg_ctx,
 				 servername, printer, &pinfo2)) {
 		struct GUID guid;
-		struct GUID_txt_buf guid_txt;
+		char *guidstr;
 		werr = nt_printer_guid_get(tmp_ctx, session_info, msg_ctx,
 					   printer, &guid);
 		if (!W_ERROR_IS_OK(werr)) {
@@ -4310,9 +4323,19 @@ static WERROR construct_printer_info7(TALLOC_CTX *mem_ctx,
 					  printer));
 			}
 		}
-		r->guid = talloc_strdup_upper(mem_ctx,
-					     GUID_buf_string(&guid, &guid_txt));
+
+		/* [MS-RPRN] section 2.2: must use curly-braced GUIDs */
+		guidstr = GUID_string2(mem_ctx, &guid);
+		if (guidstr == NULL) {
+			werr = WERR_NOT_ENOUGH_MEMORY;
+			goto out_tmp_free;
+		}
+		/* Convert GUID string to uppercase otherwise printers
+		 * are pruned */
+		r->guid = talloc_strdup_upper(mem_ctx, guidstr);
 		r->action = DSPRINT_PUBLISH;
+
+		TALLOC_FREE(guidstr);
 	} else {
 		r->guid = talloc_strdup(mem_ctx, "");
 		r->action = DSPRINT_UNPUBLISH;
