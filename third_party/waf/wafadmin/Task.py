@@ -417,6 +417,39 @@ class TaskBase(object):
 		# TODO in waf 1.6, eliminate bld.exec_command, and move the cwd processing to here
 		if self.env['env']:
 			kw['env'] = self.env['env']
+
+		# create def files when in the link stage
+		if (sys.platform == 'os2knix') and self.name in ['cc_link', 'cxx_link']:
+			name,extention = self.outputs[0].name.split(".")
+			if (extention  in ["dll" ,"exe"]):
+				log_save = None
+				version = Utils.g_module.VERSION
+				deffile = self.outputs[0].bldpath(self.env) + ".def"
+				description = "DESCRIPTION \"@#%s:%s#@##1## %s     %s::::0::@@%s\"" % (os.getenv('Vendor' ,"community"), version, datetime.datetime.today().strftime("%d %b %Y %H:%M:%S"), os.getenv('Hostname' ,"None"), name)
+
+				# save a possible log feature as we override it
+				if 'log' in kw:
+					log_save = kw['log']
+				kw['log'] = open(deffile, "w")
+
+				# create the def for the dll
+				if (extention == "dll"):
+					cmd = ["printf", "LIBRARY " + name + " INITINSTANCE TERMINSTANCE\n" + description + "\nDATA MULTIPLE\nEXPORTS\n"]
+					self.generator.bld.exec_command(cmd, **kw)
+					cmd = ["emxexp"]
+					cmd.extend([a.srcpath(self.env) for a in self.inputs])
+					self.generator.bld.exec_command(cmd, **kw)
+				# create the def for the exe
+				else:
+					cmd = ["printf", "NAME " + name + "\n" + description + "\n"]
+					self.generator.bld.exec_command(cmd, **kw)
+
+				# put the old log feature back
+				kw['log'].close()
+				del(kw['log'])
+				if log_save:
+					kw['log'] = log_save
+
 		return self.generator.bld.exec_command(*k, **kw)
 
 	def runnable_status(self):
@@ -1010,6 +1043,9 @@ def compile_fun_noshell(name, line):
 		elif var == 'TGT':
 			if meth: app('lst.append(task.outputs%s)' % meth)
 			else: app("lst.extend([a.bldpath(env) for a in task.outputs])")
+		elif var == 'DEFFILE':
+			if (sys.platform == 'os2knix'):
+				app('lst.append(task.outputs[0].bldpath(env) + ".def")')
 		else:
 			app('lst.extend(to_list(env[%r]))' % var)
 			if not var in dvars: dvars.append(var)
