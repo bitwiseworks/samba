@@ -693,6 +693,7 @@ def build(bld):
         REPLACE_SOURCE += ' closefrom.c'
 
     bld.SAMBA_LIBRARY('replace',
+                      bundled_name='repls4',
                       source=REPLACE_SOURCE,
                       group='base_libraries',
                       # FIXME: Ideally symbols should be hidden here so they 
