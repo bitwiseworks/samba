@@ -1710,7 +1710,7 @@ main() {
     if conf.CONFIG_SET('HAVE_DIRFD_DECL'):
         default_shared_modules.extend(TO_LIST('vfs_syncops vfs_dirsort'))
 
-    if conf.CONFIG_SET('HAVE_STATFS_F_FSID'):
+    if conf.CONFIG_SET('HAVE_STATFS_F_FSID') and (sys.platform != 'os2knix'):
         default_shared_modules.extend(TO_LIST('vfs_fileid'))
 
     if (conf.CONFIG_SET('HAVE_STRUCT_MSGHDR_MSG_CONTROL') or conf.CONFIG_SET('HAVE_STRUCT_MSGHDR_MSG_ACCRIGHTS')):
