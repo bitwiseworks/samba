@@ -420,12 +420,13 @@ class TaskBase(object):
 
 		# create def files when in the link stage
 		if (sys.platform == 'os2knix') and self.name in ['cc_link', 'cxx_link']:
-			name,extention = self.outputs[0].name.split(".")
-			if (extention  in ["dll" ,"exe"]):
+			name,extention = self.outputs[0].bldpath(self.env).split(".")
+			if (extention  in ["dll", "pyd", "exe"]):
 				log_save = None
 				version = Utils.g_module.VERSION
-				deffile = self.outputs[0].bldpath(self.env) + ".def"
-				description = "DESCRIPTION \"@#%s:%s#@##1## %s     %s::::0::@@%s\"" % (os.getenv('Vendor' ,"community"), version, datetime.datetime.today().strftime("%d %b %Y %H:%M:%S"), os.getenv('Hostname' ,"None"), name)
+				deffile = name + ".def"
+				library = self.outputs[0].name.split(".")[0]
+				description = "DESCRIPTION \"@#%s:%s#@##1## %s     %s::::0::@@%s\"" % (os.getenv('Vendor' ,"community"), version, datetime.datetime.today().strftime("%d %b %Y %H:%M:%S"), os.getenv('Hostname' ,"None"), library)
 
 				# save a possible log feature as we override it
 				if 'log' in kw:
@@ -433,11 +434,16 @@ class TaskBase(object):
 				kw['log'] = open(deffile, "w")
 
 				# create the def for the dll
-				if (extention == "dll"):
-					cmd = ["printf", "LIBRARY " + name + " INITINSTANCE TERMINSTANCE\n" + description + "\nDATA MULTIPLE\nEXPORTS\n"]
+				if (extention in ["dll", "pyd"]):
+					cmd = ["printf", "LIBRARY " + library + " INITINSTANCE TERMINSTANCE\n" + description + "\nDATA MULTIPLE\nEXPORTS\n"]
 					self.generator.bld.exec_command(cmd, **kw)
 					cmd = ["emxexp"]
 					cmd.extend([a.srcpath(self.env) for a in self.inputs])
+					self.generator.bld.exec_command(cmd, **kw)
+					# close and remove the log here
+					kw['log'].close()
+					del(kw['log'])
+					cmd = ["emximp", "-o", name + ".a", deffile]
 					self.generator.bld.exec_command(cmd, **kw)
 				# create the def for the exe
 				else:
@@ -445,8 +451,9 @@ class TaskBase(object):
 					self.generator.bld.exec_command(cmd, **kw)
 
 				# put the old log feature back
-				kw['log'].close()
-				del(kw['log'])
+				if 'log' in kw:
+					kw['log'].close()
+					del(kw['log'])
 				if log_save:
 					kw['log'] = log_save
 
@@ -1045,7 +1052,7 @@ def compile_fun_noshell(name, line):
 			else: app("lst.extend([a.bldpath(env) for a in task.outputs])")
 		elif var == 'DEFFILE':
 			if (sys.platform == 'os2knix'):
-				app('lst.append(task.outputs[0].bldpath(env) + ".def")')
+				app('lst.append("%s.def" % task.outputs[0].bldpath(env).split(".")[0])')
 		else:
 			app('lst.extend(to_list(env[%r]))' % var)
 			if not var in dvars: dvars.append(var)
