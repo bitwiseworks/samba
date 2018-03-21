@@ -688,6 +688,7 @@ def build(bld):
     if not bld.CONFIG_SET('HAVE_INET_PTON'):     REPLACE_SOURCE += ' inet_pton.c'
     if not bld.CONFIG_SET('HAVE_GETXATTR') or bld.CONFIG_SET('XATTR_ADDITIONAL_OPTIONS'):
                                                  REPLACE_SOURCE += ' xattr.c'
+    if (sys.platform == 'os2knix'):              REPLACE_SOURCE += ' if_nameindex.c'
 
     if not bld.CONFIG_SET('HAVE_CLOSEFROM'):
         REPLACE_SOURCE += ' closefrom.c'

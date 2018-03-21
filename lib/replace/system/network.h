@@ -91,7 +91,7 @@
 #include <stropts.h>
 #endif
 
-#ifndef HAVE_SOCKLEN_T
+#if !defined(HAVE_SOCKLEN_T) && !defined(socklen_t)
 #define HAVE_SOCKLEN_T
 typedef int socklen_t;
 #endif
@@ -350,6 +350,10 @@ struct addrinfo {
 	struct addrinfo		*ai_next;
 };
 #endif   /* HAVE_STRUCT_ADDRINFO */
+
+#ifdef __OS2__
+#include "if_nameindex.h"
+#endif
 
 #if !defined(HAVE_GETADDRINFO)
 #include "getaddrinfo.h"
