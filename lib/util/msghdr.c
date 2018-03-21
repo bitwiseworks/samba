@@ -17,6 +17,9 @@
  */
 
 #include "replace.h"
+#ifdef __OS2__
+#include "system/network.h"
+#endif
 #include "lib/util/msghdr.h"
 #include "lib/util/iov_buf.h"
 #include <sys/socket.h>
