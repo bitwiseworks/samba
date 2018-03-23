@@ -50,15 +50,30 @@
 
 #define SCRUB_CLIENTS_INTERVAL 5
 
+#if !defined(__OS2__) || !defined(WINBINDD_EXE)
 static bool client_is_idle(struct winbindd_cli_state *state);
 static void remove_client(struct winbindd_cli_state *state);
 static void winbindd_setup_max_fds(void);
+#endif
 
+#ifndef __OS2__
 static bool opt_nocache = False;
 static bool interactive = False;
+#else
+
+#ifndef WINBINDD_EXE
+bool opt_nocache = False;
+bool interactive = False;
+#else
+extern bool opt_nocache;
+extern bool interactive;
+#endif
+
+#endif
 
 extern bool override_logfile;
 
+#if !defined(__OS2__) || !defined(WINBINDD_EXE)
 struct imessaging_context *winbind_imessaging_context(void)
 {
 	static struct imessaging_context *msg = NULL;
@@ -96,7 +111,11 @@ struct imessaging_context *winbind_imessaging_context(void)
 
 /* Reload configuration */
 
+#ifndef __OS2__
 static bool reload_services_file(const char *lfile)
+#else
+bool reload_services_file(const char *lfile)
+#endif
 {
 	bool ret;
 
@@ -1191,7 +1210,11 @@ static void winbindd_setup_max_fds(void)
 	}
 }
 
+#ifndef __OS2__
 static bool winbindd_setup_listeners(void)
+#else
+bool winbindd_setup_listeners(void)
+#endif
 {
 	struct winbindd_listen_state *pub_state = NULL;
 	struct winbindd_listen_state *priv_state = NULL;
@@ -1276,8 +1299,13 @@ bool winbindd_use_cache(void)
 	return !opt_nocache;
 }
 
+#ifndef __OS2__
 static void winbindd_register_handlers(struct messaging_context *msg_ctx,
 				       bool foreground)
+#else
+void winbindd_register_handlers(struct messaging_context *msg_ctx,
+				       bool foreground)
+#endif
 {
 	NTSTATUS status;
 	/* Setup signal handlers */
@@ -1395,9 +1423,15 @@ struct winbindd_addrchanged_state {
 
 static void winbindd_addr_changed(struct tevent_req *req);
 
+#ifndef __OS2__
 static void winbindd_init_addrchange(TALLOC_CTX *mem_ctx,
 				     struct tevent_context *ev,
 				     struct messaging_context *msg_ctx)
+#else
+void winbindd_init_addrchange(TALLOC_CTX *mem_ctx,
+				     struct tevent_context *ev,
+				     struct messaging_context *msg_ctx)
+#endif
 {
 	struct winbindd_addrchanged_state *state;
 	struct tevent_req *req;
@@ -1470,9 +1504,11 @@ static void winbindd_addr_changed(struct tevent_req *req)
 	}
 	tevent_req_set_callback(req, winbindd_addr_changed, state);
 }
+#endif
 
 /* Main function */
 
+#if !defined(__OS2__) || defined(WINBINDD_EXE)
 int main(int argc, const char **argv)
 {
 	static bool is_daemon = False;
@@ -1799,3 +1835,4 @@ int main(int argc, const char **argv)
 
 	return 0;
 }
+#endif
