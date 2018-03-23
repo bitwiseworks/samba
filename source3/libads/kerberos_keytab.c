@@ -639,11 +639,15 @@ int ads_keytab_list(const char *keytab_name)
 		return ret;
 	}
 
+#ifdef HAVE_ADS
 	if (keytab_name == NULL) {
 		ret = ads_keytab_open(context, &keytab);
 	} else {
+#endif
 		ret = smb_krb5_kt_open(context, keytab_name, False, &keytab);
+#ifdef HAVE_ADS
 	}
+#endif
 	if (ret) {
 		DEBUG(1, ("smb_krb5_kt_open failed (%s)\n",
 			  error_message(ret)));
