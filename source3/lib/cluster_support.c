@@ -59,10 +59,12 @@ const char *lp_ctdbd_socket(void)
 {
 	const char *ret;
 
+#ifndef __OS2__  //@todo bww resolve it eventually in the build system
 	ret = lp__ctdbd_socket();
 	if (ret != NULL && strlen(ret) > 0) {
 		return ret;
 	}
+#endif
 
 #ifdef CTDB_SOCKET
 	return CTDB_SOCKET;
