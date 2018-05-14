@@ -1885,6 +1885,25 @@ static NTSTATUS smbd_smb2_request_check_session(struct smbd_smb2_request *req)
 		case SMB2_OP_SESSSETUP:
 			status = NT_STATUS_OK;
 			break;
+		case SMB2_OP_LOGOFF:
+		case SMB2_OP_CLOSE:
+		case SMB2_OP_LOCK:
+		case SMB2_OP_CANCEL:
+		case SMB2_OP_KEEPALIVE:
+			/*
+			 * [MS-SMB2] 3.3.5.2.9 Verifying the Session
+			 * specifies that LOGOFF, CLOSE and (UN)LOCK
+			 * should always be processed even on expired sessions.
+			 *
+			 * Also see the logic in
+			 * smbd_smb2_request_process_lock().
+			 *
+			 * The smb2.session.expire2 test shows that
+			 * CANCEL and KEEPALIVE/ECHO should also
+			 * be processed.
+			 */
+			status = NT_STATUS_OK;
+			break;
 		default:
 			break;
 		}
@@ -2122,13 +2141,14 @@ static NTSTATUS smbd_smb2_request_dispatch_update_counts(
 	struct smbXsrv_connection *xconn = req->xconn;
 	const uint8_t *inhdr;
 	uint16_t channel_sequence;
+	uint8_t generation_wrap = 0;
 	uint32_t flags;
 	int cmp;
 	struct smbXsrv_open *op;
 	bool update_open = false;
 	NTSTATUS status = NT_STATUS_OK;
 
-	req->request_counters_updated = false;
+	SMB_ASSERT(!req->request_counters_updated);
 
 	if (xconn->protocol < PROTOCOL_SMB2_22) {
 		return NT_STATUS_OK;
@@ -2148,6 +2168,14 @@ static NTSTATUS smbd_smb2_request_dispatch_update_counts(
 	channel_sequence = SVAL(inhdr, SMB2_HDR_CHANNEL_SEQUENCE);
 
 	cmp = channel_sequence - op->global->channel_sequence;
+	if (cmp < 0) {
+		/*
+		 * csn wrap. We need to watch out for long-running
+		 * requests that are still sitting on a previously
+		 * used csn. SMB2_OP_NOTIFY can take VERY long.
+		 */
+		generation_wrap += 1;
+	}
 
 	if (abs(cmp) > INT16_MAX) {
 		/*
@@ -2184,7 +2212,7 @@ static NTSTATUS smbd_smb2_request_dispatch_update_counts(
 		 * a 16 bit overflow of the client-submitted sequence
 		 * number:
 		 *
-		 * If the stored channel squence number is more than
+		 * If the stored channel sequence number is more than
 		 * 0x7FFF larger than the one from the request, then
 		 * the client-provided sequence number has likely
 		 * overflown. We treat this case as valid instead
@@ -2195,20 +2223,7 @@ static NTSTATUS smbd_smb2_request_dispatch_update_counts(
 		cmp *= -1;
 	}
 
-	if (!(flags & SMB2_HDR_FLAG_REPLAY_OPERATION)) {
-		if (cmp == 0) {
-			op->request_count += 1;
-			req->request_counters_updated = true;
-		} else if (cmp > 0) {
-			op->pre_request_count += op->request_count;
-			op->request_count = 1;
-			op->global->channel_sequence = channel_sequence;
-			update_open = true;
-			req->request_counters_updated = true;
-		} else if (modify_call) {
-			return NT_STATUS_FILE_NOT_AVAILABLE;
-		}
-	} else {
+	if (flags & SMB2_HDR_FLAG_REPLAY_OPERATION) {
 		if (cmp == 0 && op->pre_request_count == 0) {
 			op->request_count += 1;
 			req->request_counters_updated = true;
@@ -2216,12 +2231,28 @@ static NTSTATUS smbd_smb2_request_dispatch_update_counts(
 			op->pre_request_count += op->request_count;
 			op->request_count = 1;
 			op->global->channel_sequence = channel_sequence;
+			op->global->channel_generation += generation_wrap;
+			update_open = true;
+			req->request_counters_updated = true;
+		} else if (modify_call) {
+			return NT_STATUS_FILE_NOT_AVAILABLE;
+		}
+	} else {
+		if (cmp == 0) {
+			op->request_count += 1;
+			req->request_counters_updated = true;
+		} else if (cmp > 0) {
+			op->pre_request_count += op->request_count;
+			op->request_count = 1;
+			op->global->channel_sequence = channel_sequence;
+			op->global->channel_generation += generation_wrap;
 			update_open = true;
 			req->request_counters_updated = true;
 		} else if (modify_call) {
 			return NT_STATUS_FILE_NOT_AVAILABLE;
 		}
 	}
+	req->channel_generation = op->global->channel_generation;
 
 	if (update_open) {
 		status = smbXsrv_open_update(op);
@@ -2251,6 +2282,8 @@ NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 	inhdr = SMBD_SMB2_IN_HDR_PTR(req);
 
 	DO_PROFILE_INC(request);
+
+	SMB_ASSERT(!req->request_counters_updated);
 
 	/* TODO: verify more things */
 
@@ -2691,6 +2724,8 @@ static void smbd_smb2_request_reply_update_counts(struct smbd_smb2_request *req)
 		return;
 	}
 
+	req->request_counters_updated = false;
+
 	if (xconn->protocol < PROTOCOL_SMB2_22) {
 		return;
 	}
@@ -2707,7 +2742,8 @@ static void smbd_smb2_request_reply_update_counts(struct smbd_smb2_request *req)
 	inhdr = SMBD_SMB2_IN_HDR_PTR(req);
 	channel_sequence = SVAL(inhdr, SMB2_HDR_CHANNEL_SEQUENCE);
 
-	if (op->global->channel_sequence == channel_sequence) {
+	if ((op->global->channel_sequence == channel_sequence) &&
+	    (op->global->channel_generation == req->channel_generation)) {
 		SMB_ASSERT(op->request_count > 0);
 		op->request_count -= 1;
 	} else {

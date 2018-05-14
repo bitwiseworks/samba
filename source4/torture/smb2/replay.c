@@ -473,7 +473,7 @@ done:
 }
 
 /**
- * Test Durablity V2 Create Replay Detection on Single Channel.
+ * Test Durability V2 Create Replay Detection on Single Channel.
  */
 static bool test_replay_dhv2_oplock1(struct torture_context *tctx,
 				     struct smb2_tree *tree)
@@ -560,7 +560,7 @@ done:
 }
 
 /**
- * Test Durablity V2 Create Replay Detection on Single Channel.
+ * Test Durability V2 Create Replay Detection on Single Channel.
  * Hand in a different oplock level in the replay.
  * Server responds with the handed in oplock level and
  * corresponding durable status, but does not change the
@@ -697,7 +697,7 @@ done:
 }
 
 /**
- * Test Durablity V2 Create Replay Detection on Single Channel.
+ * Test Durability V2 Create Replay Detection on Single Channel.
  * Replay with a different share mode. The share mode of
  * the opened file is not changed by this.
  */
@@ -823,7 +823,7 @@ done:
 }
 
 /**
- * Test Durablity V2 Create Replay Detection on Single Channel.
+ * Test Durability V2 Create Replay Detection on Single Channel.
  * Create with an oplock, and replay with a lease.
  */
 static bool test_replay_dhv2_oplock_lease(struct torture_context *tctx,
@@ -927,7 +927,7 @@ done:
 
 
 /**
- * Test durablity v2 create replay detection on single channel.
+ * Test durability v2 create replay detection on single channel.
  * Variant with leases instead of oplocks:
  * - open a file with a rh lease
  * - upgrade to a rwh lease with a second create
@@ -1065,7 +1065,7 @@ done:
 }
 
 /**
- * Test durablity v2 create replay detection on single channel.
+ * Test durability v2 create replay detection on single channel.
  * Variant with leases instead of oplocks, where the
  * replay does not specify the original lease level but
  * just a "R" lease. This still gives the upgraded lease
@@ -1216,7 +1216,7 @@ done:
 }
 
 /**
- * Test durablity v2 create replay detection on single channel.
+ * Test durability v2 create replay detection on single channel.
  * create with a lease, and replay with a different lease key
  */
 static bool test_replay_dhv2_lease3(struct torture_context *tctx,
@@ -1349,7 +1349,7 @@ done:
 }
 
 /**
- * Test durablity v2 create replay detection on single channel.
+ * Test durability v2 create replay detection on single channel.
  * Do the original create with a lease, and do the replay
  * with an oplock.
  */
@@ -1758,7 +1758,7 @@ done:
 }
 
 /**
- * Test Durablity V2 Create Replay Detection on Multi Channel
+ * Test Durability V2 Create Replay Detection on Multi Channel
  */
 static bool test_replay3(struct torture_context *tctx, struct smb2_tree *tree1)
 {
@@ -2164,7 +2164,7 @@ done:
 }
 
 /**
- * Test Durablity V2 Persistent Create Replay on a Single Channel
+ * Test Durability V2 Persistent Create Replay on a Single Channel
  */
 static bool test_replay5(struct torture_context *tctx, struct smb2_tree *tree)
 {
@@ -2427,6 +2427,102 @@ done:
 	return ret;
 }
 
+static bool test_replay7(struct torture_context *tctx, struct smb2_tree *tree)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	struct smb2_transport *transport = tree->session->transport;
+	NTSTATUS status;
+	struct smb2_handle _dh;
+	struct smb2_handle *dh = NULL;
+	struct smb2_notify notify;
+	struct smb2_request *req;
+	union smb_fileinfo qfinfo;
+	bool ret = false;
+
+	if (smbXcli_conn_protocol(transport->conn) < PROTOCOL_SMB3_00) {
+		torture_skip(tctx, "SMB 3.X Dialect family required for "
+				   "replay tests\n");
+	}
+
+	torture_comment(tctx, "Notify across increment/decrement of csn\n");
+
+	smbXcli_conn_set_force_channel_sequence(transport->conn, true);
+
+	status = torture_smb2_testdir(tree, BASEDIR, &_dh);
+	CHECK_STATUS(status, NT_STATUS_OK);
+	dh = &_dh;
+
+	notify.in.recursive		= 0x0000;
+	notify.in.buffer_size	= 0xffff;
+	notify.in.file.handle	= _dh;
+	notify.in.completion_filter	= FILE_NOTIFY_CHANGE_FILE_NAME;
+	notify.in.unknown		= 0x00000000;
+
+	/*
+	 * This posts a long-running request with csn==0 to "dh". Now
+	 * op->request_count==1 in smb2_server.c.
+	 */
+	smb2cli_session_reset_channel_sequence(tree->session->smbXcli, 0);
+	req = smb2_notify_send(tree, &notify);
+
+	qfinfo = (union smb_fileinfo) {
+		.generic.level = RAW_FILEINFO_POSITION_INFORMATION,
+		.generic.in.file.handle = _dh
+	};
+
+	/*
+	 * This sequence of 2 dummy requests moves
+	 * op->request_count==1 to op->pre_request_count. The numbers
+	 * used avoid int16 overflow.
+	 */
+
+	smb2cli_session_reset_channel_sequence(tree->session->smbXcli, 30000);
+	status = smb2_getinfo_file(tree, mem_ctx, &qfinfo);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	smb2cli_session_reset_channel_sequence(tree->session->smbXcli, 60000);
+	status = smb2_getinfo_file(tree, mem_ctx, &qfinfo);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	/*
+	 * This final request turns the op->global->channel_sequence
+	 * to the same as we had when sending the notify above. The
+	 * notify's request count has in the meantime moved to
+	 * op->pre_request_count.
+	 */
+
+	smb2cli_session_reset_channel_sequence(tree->session->smbXcli, 0);
+	status = smb2_getinfo_file(tree, mem_ctx, &qfinfo);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	/*
+	 * At this point op->request_count==0.
+	 *
+	 * The next cancel makes us reply to the notify. Because the
+	 * csn we currently use is the same as we used when sending
+	 * the notify, smbd thinks it must decrement op->request_count
+	 * and not op->pre_request_count.
+	 */
+
+	status = smb2_cancel(req);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	status = smb2_notify_recv(req, mem_ctx, &notify);
+	CHECK_STATUS(status, NT_STATUS_CANCELLED);
+
+	ret = true;
+
+done:
+	if (dh != NULL) {
+		smb2_util_close(tree, _dh);
+	}
+	smb2_deltree(tree, BASEDIR);
+	talloc_free(tree);
+	talloc_free(mem_ctx);
+
+	return ret;
+}
+
 struct torture_suite *torture_smb2_replay_init(void)
 {
 	struct torture_suite *suite =
@@ -2447,6 +2543,7 @@ struct torture_suite *torture_smb2_replay_init(void)
 	torture_suite_add_1smb2_test(suite, "replay4", test_replay4);
 	torture_suite_add_1smb2_test(suite, "replay5", test_replay5);
 	torture_suite_add_1smb2_test(suite, "replay6", test_replay6);
+	torture_suite_add_1smb2_test(suite, "replay7", test_replay7);
 
 	suite->description = talloc_strdup(suite, "SMB2 REPLAY tests");
 
