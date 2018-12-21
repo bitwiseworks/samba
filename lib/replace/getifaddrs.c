@@ -293,9 +293,6 @@ int rep_getifaddrs(struct ifaddrs **ifap)
 	struct ifaddrs *curif;
 	struct ifaddrs *lastif = NULL;
 
-#ifdef __OS2__
-	int total = 0;
-#endif
 	*ifap = NULL;
 
 	if ((fd = socket(AF_INET, SOCK_DGRAM, 0)) == -1) {
@@ -321,12 +318,8 @@ int rep_getifaddrs(struct ifaddrs **ifap)
 		inc = ifr->ifr_addr.sa_len;
 
 		if (ioctl(fd, SIOCGIFADDR, ifr) != 0) {
-#ifndef __OS2__
 			freeaddrinfo(*ifap);
 			return -1;
-#else
-                        goto next;
-#endif
 		}
 
 		curif = calloc(1, sizeof(struct ifaddrs));
@@ -344,32 +337,21 @@ int rep_getifaddrs(struct ifaddrs **ifap)
 		curif->ifa_next = NULL;
 
 		if (ioctl(fd, SIOCGIFFLAGS, ifr) != 0) {
-#ifndef __OS2__
 			freeaddrinfo(*ifap);
 			return -1;
-#else
-                        goto next;
-#endif
 		}
 
 		curif->ifa_flags = ifr->ifr_flags;
 
 		if (ioctl(fd, SIOCGIFNETMASK, ifr) != 0) {
-#ifndef __OS2__
 			freeaddrinfo(*ifap);
 			return -1;
-#else
-                        goto next;
-#endif
 		}
 
 		curif->ifa_netmask = sockaddr_dup(&ifr->ifr_addr);
 
 		lastif = curif;
 
-#ifdef __OS2__
-                total ++;
-#endif
 	next:
 		/*
 		 * Patch from Archie Cobbs (archie@whistle.com).  The
@@ -387,12 +369,6 @@ int rep_getifaddrs(struct ifaddrs **ifap)
 	}
 
 	close(fd);
-#ifdef __OS2__
-        if (total == 0) {
-	       freeifaddrs(*ifap);
-	       return -1;
-        }
-#endif
 	return 0;
 }
 

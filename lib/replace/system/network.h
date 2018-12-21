@@ -91,7 +91,11 @@
 #include <stropts.h>
 #endif
 
-#if !defined(HAVE_SOCKLEN_T) && !defined(socklen_t)
+#ifdef __OS2__
+#include <libcx/net.h>
+#endif
+
+#ifndef HAVE_SOCKLEN_T
 #define HAVE_SOCKLEN_T
 typedef int socklen_t;
 #endif
@@ -296,11 +300,9 @@ int rep_socketpair(int d, int type, int protocol, int sv[2]);
 #define MAXHOSTNAMELEN HOST_NAME_MAX
 #endif
 
-#ifndef __OS2__
 #ifndef HAVE_SA_FAMILY_T
 #define HAVE_SA_FAMILY_T
 typedef unsigned short int sa_family_t;
-#endif
 #endif
 
 #ifndef HAVE_STRUCT_SOCKADDR_STORAGE
@@ -350,10 +352,6 @@ struct addrinfo {
 	struct addrinfo		*ai_next;
 };
 #endif   /* HAVE_STRUCT_ADDRINFO */
-
-#ifdef __OS2__
-#include "if_nameindex.h"
-#endif
 
 #if !defined(HAVE_GETADDRINFO)
 #include "getaddrinfo.h"
