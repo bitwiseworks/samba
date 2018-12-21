@@ -1,4 +1,4 @@
-export LDFLAGS="-Zhigh-mem -Zomf -Zargs-wild -Zargs-resp -lcx0 -lintl"
+export LDFLAGS="-Zhigh-mem -Zomf -Zargs-wild -Zargs-resp -lcx -lintl"
 ./configure --without-ad-dc --without-acl-support --without-ldap --without-ads \
 --program-prefix= --prefix=/@unixroot/usr --exec-prefix=/@unixroot/usr --bindir=/@unixroot/usr/bin \
 --sbindir=/@unixroot/usr/sbin --sysconfdir=/@unixroot/etc --datadir=/@unixroot/usr/share \
