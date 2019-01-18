@@ -129,7 +129,7 @@ bld.SAMBA3_SUBSYSTEM('IDMAP_TDB_COMMON',
 
 bld.SAMBA3_SUBSYSTEM('IDMAP_HASH',
                     source='idmap_hash/idmap_hash.c idmap_hash/mapfile.c',
-                    deps='samba-util krb5samba',
+                    deps='samba-util krb5samba idmap',
                     enabled=bld.SAMBA3_IS_ENABLED_MODULE('idmap_hash'))
 
 bld.SAMBA3_SUBSYSTEM('IDMAP_AD',
