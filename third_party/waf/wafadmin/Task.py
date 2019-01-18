@@ -425,7 +425,7 @@ class TaskBase(object):
 				log_save = None
 				version = Utils.g_module.VERSION
 				deffile = name + ".def"
-				library = self.outputs[0].name.split(".")[0]
+				target = self.outputs[0].name.split(".")[0]
 				description = "DESCRIPTION \"@#%s:%s#@##1## %s     %s::::0::@@%s\"" % (os.getenv('Vendor' ,"community"), version, datetime.datetime.today().strftime("%d %b %Y %H:%M:%S"), os.getenv('Hostname' ,"None"), self.generator.name)
 
 				# save a possible log feature as we override it
@@ -435,7 +435,7 @@ class TaskBase(object):
 
 				# create the def for the dll
 				if (extention in ["dll", "pyd"]):
-					cmd = ["printf", "LIBRARY " + library + " INITINSTANCE TERMINSTANCE\n" + description + "\nDATA MULTIPLE\nEXPORTS\n"]
+					cmd = ["printf", "LIBRARY " + target + " INITINSTANCE TERMINSTANCE\n" + description + "\nDATA MULTIPLE\nEXPORTS\n"]
 					Utils.exec_command(cmd, **kw)
 					cmd = ["emxexp"]
 					cmd.extend([a.srcpath(self.env) for a in self.inputs])
@@ -447,7 +447,7 @@ class TaskBase(object):
 					Utils.exec_command(cmd, **kw)
 				# create the def for the exe
 				else:
-					cmd = ["printf", "NAME " + name + "\n" + description + "\n"]
+					cmd = ["printf", "NAME " + target + "\n" + description + "\n"]
 					Utils.exec_command(cmd, **kw)
 
 				# put the old log feature back
