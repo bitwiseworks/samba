@@ -58,6 +58,10 @@ def build(bld):
         'lib/Parse/Pidl/Wireshark/NDR.pm': 'man3/Parse::Pidl::Wireshark::NDR.${PERLMAN3EXT}'
     }
 
+    if (os.name == 'os2'):
+       for k, v in pidl_manpages.iteritems():
+           pidl_manpages[k] =  pidl_manpages[k].replace('::', '.')
+
     for k, v in pidl_manpages.iteritems():
         pidl_manpages[k] = bld.EXPAND_VARIABLES(v)
 
