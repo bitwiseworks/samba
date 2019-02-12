@@ -2357,12 +2357,20 @@ void init_printer_values(struct loadparm_context *lp_ctx, TALLOC_CTX *ctx,
 
 		tmp = lpcfg_parm_string(lp_ctx, NULL, "vlp", "tdbfile");
 		if (tmp == NULL) {
+#ifdef __OS2__
+			tmp = talloc_asprintf(tmp_ctx, "%s/vlp.tdb", getenv("TEMP")
+#else
 			tmp = "/tmp/vlp.tdb";
+#endif
 		}
 
 		tdbfile = talloc_asprintf(tmp_ctx, "tdbfile=%s", tmp);
 		if (tdbfile == NULL) {
+#ifdef __OS2__
+			tdbfile = talloc_asprintf(tmp_ctx, "tdbfile=%s/vlp.tdb", getenv("TEMP")
+#else
 			tdbfile="tdbfile=/tmp/vlp.tdb";
+#endif
 		}
 
 		tmp = talloc_asprintf(tmp_ctx, "vlp %s print %%p %%s",
@@ -2487,6 +2495,9 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	struct loadparm_context *lp_ctx;
 	struct parmlist_entry *parm;
 	char *logfile;
+#ifdef __OS2__
+	char *homedir;
+#endif
 	struct defaults_hook_data *defaults_hook;
 
 	lp_ctx = talloc_zero(mem_ctx, struct loadparm_context);
@@ -2654,8 +2665,14 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter_var(lp_ctx, "spn update command", "%s/samba_spnupdate", dyn_SCRIPTSBINDIR);
 	lpcfg_do_global_parameter_var(lp_ctx, "samba kcc command",
 					"%s/samba_kcc", dyn_SCRIPTSBINDIR);
+#ifdef __OS2__
+	lpcfg_do_global_parameter(lp_ctx, "template shell", "/@unixroot/usr/bin/false");
+	homedir = talloc_asprintf(lp_ctx, "%s/%s", getenv("HOME"), "%D/%U");
+	lpcfg_do_global_parameter(lp_ctx, "template homedir", homedir);
+#else
 	lpcfg_do_global_parameter(lp_ctx, "template shell", "/bin/false");
 	lpcfg_do_global_parameter(lp_ctx, "template homedir", "/home/%D/%U");
+#endif
 
 	lpcfg_do_global_parameter(lp_ctx, "client signing", "default");
 	lpcfg_do_global_parameter(lp_ctx, "client ipc signing", "default");
@@ -2686,8 +2703,13 @@ struct loadparm_context *loadparm_init(TALLOC_CTX *mem_ctx)
 	lpcfg_do_global_parameter(lp_ctx, "tls priority", "NORMAL:-VERS-SSL3.0");
 	lpcfg_do_global_parameter(lp_ctx, "prefork children:smb", "4");
 
+#ifdef __OS2__
+	lpcfg_do_global_parameter(lp_ctx, "rndc command", "/@unixroot/usr/sbin/rndc");
+	lpcfg_do_global_parameter(lp_ctx, "nsupdate command", "/@unixroot/usr/bin/nsupdate -g");
+#else
 	lpcfg_do_global_parameter(lp_ctx, "rndc command", "/usr/sbin/rndc");
 	lpcfg_do_global_parameter(lp_ctx, "nsupdate command", "/usr/bin/nsupdate -g");
+#endif
 
         lpcfg_do_global_parameter(lp_ctx, "allow dns updates", "secure only");
         lpcfg_do_global_parameter(lp_ctx, "dns forwarder", "");

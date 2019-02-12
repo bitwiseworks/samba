@@ -63,7 +63,13 @@ static void logit(const char *format, ...)
 	if (!debug_enabled) {
 		return;
 	}
+#ifdef __OS2__
+	char *logname;
+	sprintf(logname, "%s/WINBIND_DEBUG.log", getenv("TEMP"));
+	f = fopen(logname, "a");
+#else
 	f = fopen("/tmp/WINBIND_DEBUG.log", "a");
+#endif
 	if (!f) return;
 	va_start(ap, format);
 	vfprintf(f, format, ap);

@@ -928,8 +928,15 @@ static NTSTATUS ldif_init_context(TALLOC_CTX *mem_ctx,
 {
 	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
 	struct samsync_ldif_context *r;
+#ifdef __OS2__
+	const char *add_template;
+	const char *mod_template;
+	sprintf(add_template, "%s/add.ldif.XXXXXX", getenv("TEMP");
+	sprintf(add_template, "%s/mod.ldif.XXXXXX", getenv("TEMP");
+#else
 	const char *add_template = "/tmp/add.ldif.XXXXXX";
 	const char *mod_template = "/tmp/mod.ldif.XXXXXX";
+#endif
 	const char *builtin_sid = "S-1-5-32";
 	mode_t mask;
 	int fd;

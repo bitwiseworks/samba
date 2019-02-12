@@ -181,19 +181,35 @@ int main(int argc, char *argv[])
 		return CUPS_BACKEND_FAILED;
 	}
 
+#ifdef __OS2__
+	snprintf(gen_cc, sizeof(gen_cc), "%s/krb5cc_%d", getenv("TEMP"), uid);
+#else
 	snprintf(gen_cc, sizeof(gen_cc), "/tmp/krb5cc_%d", uid);
+#endif
 
 	rc = lstat(gen_cc, &sb);
 	if (rc == 0) {
+#ifdef __OS2__
+		snprintf(gen_cc, sizeof(gen_cc), "FILE:%s/krb5cc_%d", getenv("TEMP"), uid);
+#else
 		snprintf(gen_cc, sizeof(gen_cc), "FILE:/tmp/krb5cc_%d", uid);
+#endif
 	} else {
+#ifdef __OS2__
+		snprintf(gen_cc, sizeof(gen_cc), "/@unixroot/var/run/user/%d/krb5cc", uid);
+#else
 		snprintf(gen_cc, sizeof(gen_cc), "/run/user/%d/krb5cc", uid);
+#endif
 
 		rc = lstat(gen_cc, &sb);
 		if (rc == 0 && S_ISDIR(sb.st_mode)) {
 			snprintf(gen_cc,
 				 sizeof(gen_cc),
+#ifdef __OS2__
+				 "DIR:/@unixroot/var/run/user/%d/krb5cc",
+#else
 				 "DIR:/run/user/%d/krb5cc",
+#endif
 				 uid);
 		} else {
 #if defined(__linux__)

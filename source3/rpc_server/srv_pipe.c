@@ -74,11 +74,21 @@ static void dump_pdu_region(const char *name, int v,
 	for (i = 1; i < 100; i++) {
 		if (v != -1) {
 			fname = talloc_asprintf(talloc_tos(),
+#ifdef __OS2__
+						"%s/%s_%d.%d.prs",
+						getenv("TEMP"),
+#else
 						"/tmp/%s_%d.%d.prs",
+#endif
 						name, v, i);
 		} else {
 			fname = talloc_asprintf(talloc_tos(),
+#ifdef __OS2__
+						"%s/%s_%d.prs",
+						getenv("TEMP"),
+#else
 						"/tmp/%s_%d.prs",
+#endif
 						name, i);
 		}
 		if (!fname) {

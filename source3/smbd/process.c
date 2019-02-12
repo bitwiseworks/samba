@@ -1409,7 +1409,12 @@ static void smb_dump(const char *name, int type, const char *data)
 	len = smb_len_tcp(data)+4;
 	for (i=1;i<100;i++) {
 		fname = talloc_asprintf(talloc_tos(),
+#ifdef __OS2__
+				"%s/%s.%d.%s",
+				getenv("TEMP"),
+#else
 				"/tmp/%s.%d.%s",
+#endif
 				name,
 				i,
 				type ? "req" : "resp");

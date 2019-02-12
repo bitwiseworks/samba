@@ -218,7 +218,12 @@ static int do_edit(struct ldb_context *ldb, struct ldb_message **msgs1,
 {
 	int fd, ret;
 	FILE *f;
+#ifdef __OS2__
+	char *file_template;
+	sprintf(file_template, "%s/ldbedit.XXXXXX", getenv("TEMP"));
+#else
 	char file_template[] = "/tmp/ldbedit.XXXXXX";
+#endif
 	char *cmd;
 	struct ldb_ldif *ldif;
 	struct ldb_message **msgs2 = NULL;

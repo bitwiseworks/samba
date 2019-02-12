@@ -789,9 +789,19 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.allow_trusted_domains = true;
 	lpcfg_string_set(Globals.ctx, &Globals.idmap_backend, "tdb");
 
+#ifdef __OS2__
+	lpcfg_string_set(Globals.ctx, &Globals.template_shell, "/@unixroot/usr/bin/false");
+	s = talloc_asprintf(talloc_tos(), "%s/%s", getenv("HOME"), "%D/%U");
+	if (s == NULL) {
+		smb_panic("init_globals: ENOMEM");
+	}
+	lpcfg_string_set(Globals.ctx, &Globals.template_homedir, s);
+	TALLOC_FREE(s);
+#else
 	lpcfg_string_set(Globals.ctx, &Globals.template_shell, "/bin/false");
 	lpcfg_string_set(Globals.ctx, &Globals.template_homedir,
 			 "/home/%D/%U");
+#endif
 	lpcfg_string_set(Globals.ctx, &Globals.winbind_separator, "\\");
 	lpcfg_string_set(Globals.ctx, &Globals.winbindd_socket_directory,
 			 dyn_WINBINDD_SOCKET_DIR);
@@ -921,9 +931,15 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.spn_update_command = str_list_make_v3_const(NULL, s, NULL);
 	TALLOC_FREE(s);
 
+#ifdef __OS2__
+	Globals.nsupdate_command = str_list_make_v3_const(NULL, "/@unixroot/usr/bin/nsupdate -g", NULL);
+
+	Globals.rndc_command = str_list_make_v3_const(NULL, "/@unixroot/usr/sbin/rndc", NULL);
+#else
 	Globals.nsupdate_command = str_list_make_v3_const(NULL, "/usr/bin/nsupdate -g", NULL);
 
 	Globals.rndc_command = str_list_make_v3_const(NULL, "/usr/sbin/rndc", NULL);
+#endif
 
 	Globals.cldap_port = 389;
 

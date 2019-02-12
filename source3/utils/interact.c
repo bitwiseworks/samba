@@ -76,7 +76,12 @@ int interact_prompt(const char* msg, const char* acc, char def) {
 
 
 char* interact_edit(TALLOC_CTX* mem_ctx, const char* str) {
+#ifdef __OS2__
+	char fname[_MAX_PATH];
+	snprintf(fname, sizeof(fname), "%s/net_idmap_check.XXXXXX", getenv("TEMP"));
+#else
 	char fname[] = "/tmp/net_idmap_check.XXXXXX";
+#endif
 	char buf[128];
 	char* ret = NULL;
 	FILE* file;
