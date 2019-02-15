@@ -331,6 +331,9 @@ _PUBLIC_ struct tdb_context *tdb_open_ex(const char *name, int hash_size, int td
 	tdb->name = NULL;
 	tdb->map_ptr = NULL;
 	tdb->flags = tdb_flags;
+#ifdef __OS2__
+	open_flags |= O_BINARY;
+#endif
 	tdb->open_flags = open_flags;
 	if (log_ctx) {
 		tdb->log = *log_ctx;
