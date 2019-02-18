@@ -90,6 +90,34 @@ static const struct charset_functions builtin_functions[] = {
 
 };
 
+#if defined(__OS2__)
+#include <uconv.h>
+
+typedef struct os2_iconv_t
+{
+	UconvObject from;
+} os2_iconv_t;
+
+iconv_t os2_iconv_open (const char *tocode, const char *fromcode)
+{
+	os2_iconv_t *os2_cd = (os2_iconv_t *)iconv_open(tocode, fromcode);
+
+	if (os2_cd != (iconv_t)(-1)) {
+	/* Assume strings contain pathnames */
+		uconv_attribute_t attr;
+
+		UniQueryUconvObject(os2_cd->from, &attr,
+			 sizeof(uconv_attribute_t), NULL, NULL, NULL );
+		attr.converttype |= CVTTYPE_PATH;
+		UniSetUconvObject(os2_cd->from, &attr);
+	}
+
+	return (iconv_t)os2_cd;
+}
+
+#define iconv_open os2_iconv_open
+#endif
+
 #ifdef HAVE_NATIVE_ICONV
 /* if there was an error then reset the internal state,
    this ensures that we don't have a shift state remaining for
