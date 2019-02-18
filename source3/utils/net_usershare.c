@@ -972,6 +972,9 @@ static int net_usershare_add(struct net_context *c, int argc, const char **argv)
 		return -1;
 	}
 
+#ifdef __OS2__  /* we can't rename a open file, so close it early */
+	close(tmpfd);
+#endif
 	/* Attempt to replace any existing share by this name. */
 	if (rename(full_path_tmp, full_path) != 0) {
 		unlink(full_path_tmp);
@@ -980,11 +983,15 @@ static int net_usershare_add(struct net_context *c, int argc, const char **argv)
 			  "was %s\n"),
 			sharename, strerror(errno));
 		TALLOC_FREE(ctx);
+#ifndef __OS2__ /* already closed, see above */
 		close(tmpfd);
+#endif
 		return -1;
 	}
 
+#ifndef __OS2__
 	close(tmpfd);
+#endif
 
 	if (c->opt_long_list_entries) {
 		const char *my_argv[2];
