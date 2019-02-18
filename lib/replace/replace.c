@@ -924,3 +924,15 @@ void rep_setproctitle(const char *fmt, ...)
 {
 }
 #endif
+
+#ifdef __OS2__
+/* OS/2 specific pipe implementation, we have to use socketpair as select on 
+   filehandle is not working. */
+int os2_pipe(int fds[2])
+{
+	int rc = 0;
+
+	rc = socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+	return rc;
+}
+#endif
