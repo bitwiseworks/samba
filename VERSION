@@ -123,5 +123,7 @@ SAMBA_VERSION_RELEASE_NICKNAME=
 #  ->  "3.0.0rc2-VendorVersion"                        #
 #                                                      #
 ########################################################
-SAMBA_VERSION_VENDOR_SUFFIX=
+SAMBA_VERSION_VENDOR_SUFFIX="OS/2 and OS/2 based systems"
+SAMBA_VERSION_RELEASE_NICKNAME="v2.0.0"
 SAMBA_VERSION_VENDOR_PATCH=
+SAMBA_VERSION_MAINTAINED_BY="Maintained by: bww bitwise works GmbH"

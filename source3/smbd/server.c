@@ -1652,6 +1652,9 @@ extern void build_options(bool screen);
 
 	DEBUG(0,("smbd version %s started.\n", samba_version_string()));
 	DEBUGADD(0,("%s\n", COPYRIGHT_STARTUP_MESSAGE));
+#ifdef __OS2__
+	DEBUGADD(0,("%s\n", maintained_by_string()));
+#endif
 
 	DEBUG(2,("uid=%d gid=%d euid=%d egid=%d\n",
 		 (int)getuid(),(int)getgid(),(int)geteuid(),(int)getegid()));

@@ -25,3 +25,10 @@ const char *samba_version_string(void)
 {
 	return SAMBA_VERSION_STRING;
 }
+
+#ifdef __OS2__
+const char *maintained_by_string(void)
+{
+	return MAINTAINED_BY;
+}
+#endif

@@ -94,6 +94,8 @@ also accepted as dictionary entries here
         self.RELEASE_NICKNAME=None
         self.VENDOR_SUFFIX=None
         self.VENDOR_PATCH=None
+        if os.name == 'os2':
+            self.MAINTAINED_BY=None
 
         for a, b in version_dict.iteritems():
             if a.startswith("SAMBA_VERSION_"):
@@ -225,6 +227,9 @@ also accepted as dictionary entries here
 #endif
 '''
         string+="/* Version for mkrelease.sh: \nSAMBA_VERSION_STRING=" + self.STRING_WITH_NICKNAME + "\n */\n"
+
+        if os.name == 'os2' and self.MAINTAINED_BY is not None:
+            string += "#define MAINTAINED_BY \"" + self.MAINTAINED_BY + "\"\n"
 
         return string
 

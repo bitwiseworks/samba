@@ -907,6 +907,9 @@ static bool open_sockets(bool isdaemon, int port)
 
 	DEBUG(0,("nmbd version %s started.\n", samba_version_string()));
 	DEBUGADD(0,("%s\n", COPYRIGHT_STARTUP_MESSAGE));
+#ifdef __OS2__
+	DEBUGADD(0,("%s\n", maintained_by_string()));
+#endif
 
 	if (!lp_load_initial_only(get_dyn_CONFIGFILE())) {
 		DEBUG(0, ("error opening config file '%s'\n", get_dyn_CONFIGFILE()));
