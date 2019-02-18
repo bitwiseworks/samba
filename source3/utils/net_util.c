@@ -108,6 +108,12 @@ NTSTATUS connect_to_service(struct net_context *c,
 	int flags = 0;
 	enum smb_signing_setting signing_setting = SMB_SIGNING_DEFAULT;
 
+#ifdef __OS2__
+        if (!c->opt_user_name || c->opt_user_name == NULL) {
+                d_printf("The username was not set.\n");
+                return NT_STATUS_LOGON_FAILURE;
+        }
+#endif
 	c->opt_password = net_prompt_pass(c, c->opt_user_name);
 
 	if (c->opt_kerberos) {
