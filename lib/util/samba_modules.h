@@ -30,7 +30,11 @@ NTSTATUS samba_init_module(void);
    previously used "init_module", but that meant that modules which
    did not define this function ended up calling the C library
    function init_module() which makes a system call */
+#ifdef __OS2__
+#define SAMBA_INIT_MODULE "_samba_init_module"
+#else
 #define SAMBA_INIT_MODULE "samba_init_module"
+#endif
 
 /**
  * Obtain the init function from a shared library file.  
