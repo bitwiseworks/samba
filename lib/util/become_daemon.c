@@ -66,6 +66,10 @@ _PUBLIC_ void close_low_fds(bool stdin_too, bool stdout_too, bool stderr_too)
 _PUBLIC_ void become_daemon(bool do_fork, bool no_process_group, bool log_stdout)
 {
 	pid_t newpid;
+#ifdef __OS2__
+// fork daemonize scheme not working in os/2, thus the parent process will currently kill and reap all children when it exits
+	do_fork = false;
+#endif
 	if (do_fork) {
 		newpid = fork();
 		if (newpid) {
