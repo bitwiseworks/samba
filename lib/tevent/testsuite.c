@@ -36,6 +36,10 @@
 #include <assert.h>
 #endif
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 static int fde_count;
 
 static void do_read(int fd, void *buf, size_t count)

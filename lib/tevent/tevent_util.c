@@ -28,6 +28,9 @@
 #include "tevent_internal.h"
 #include "tevent_util.h"
 #include <fcntl.h>
+#ifdef __OS2__
+#include <sys/filio.h>
+#endif
 
 /**
   return the number of elements in a string list
@@ -81,11 +84,20 @@ int ev_set_blocking(int fd, bool set)
 
 	if((val = fcntl(fd, F_GETFL, 0)) == -1)
 		return -1;
+#ifndef __OS2__
 	if(set) /* Turn blocking on - ie. clear nonblock flag */
 		val &= ~FLAG_TO_SET;
 	else
 		val |= FLAG_TO_SET;
 	return fcntl( fd, F_SETFL, val);
+#else
+	if(set) /* turn blocking on - ie. clear nonblock flag */
+		val = 0;
+	else
+		val = 1;
+	return os2_ioctl(fd, FIONBIO, (char *) &val, sizeof(val));
+#endif
+
 #undef FLAG_TO_SET
 }
 

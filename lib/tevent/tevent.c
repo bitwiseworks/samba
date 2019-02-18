@@ -70,6 +70,10 @@
 #include <sys/eventfd.h>
 #endif
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 static void tevent_abort(struct tevent_context *ev, const char *reason);
 
 struct tevent_ops_list {

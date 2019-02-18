@@ -29,6 +29,10 @@
 #include "tevent_util.h"
 #include "tevent_internal.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 struct poll_event_context {
 	/* a pointer back to the generic event_context */
 	struct tevent_context *ev;

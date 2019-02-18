@@ -701,6 +701,8 @@ def build(bld):
     if not bld.CONFIG_SET('HAVE_CLOSEFROM'):
         REPLACE_SOURCE += ' closefrom.c'
 
+    if sys.platform == 'os2knix':                REPLACE_SOURCE += ' os2helper.c'
+
     bld.SAMBA_LIBRARY('replace',
                       source=REPLACE_SOURCE,
                       group='base_libraries',
