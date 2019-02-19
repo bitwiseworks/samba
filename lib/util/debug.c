@@ -846,6 +846,13 @@ void debug_set_logfile(const char *name)
 	}
 	TALLOC_FREE(state.debugf);
 	state.debugf = talloc_strdup(NULL, name);
+#ifdef __OS2__
+	/* Remove trailing dots that may appear after using % variables in the
+	 * file name specification - rename() barfs on them. */
+	size_t len = strlen(state.debugf);
+	while (len && state.debugf[--len] == '.')
+		state.debugf[len] = '\0';
+#endif
 }
 
 static void debug_close_fd(int fd)
@@ -1024,6 +1031,9 @@ void check_log_size( void )
 {
 	int         maxlog;
 	struct stat st;
+#ifdef __OS2__
+	int         force_trunc = 0;
+#endif
 
 	/*
 	 *  We need to be root to check/change log-file, skip this and let the main
@@ -1062,12 +1072,32 @@ void check_log_size( void )
 
 			snprintf(name, sizeof(name), "%s.old", state.debugf);
 
+#ifdef __OS2__
+			/* Renaming an open file is not possible on
+			 * OS/2 so we close it and then rename. Note
+			 * that if this log file is also in use by
+			 * another process, rename will still fail; in
+			 * this case we fall back to simply truncating
+			 * the current file to stop its growth. */
+			debug_close_fd(state.fd);
+			state.fd = -1;
+			if (rename(state.debugf, name) == -1) {
+				/* Most likely, some other samba process
+				 * is using this log file. In either case
+				 * our only option is to truncate it. */
+				force_trunc = 1;
+			}
+			if (reopen_logs_internal() && force_trunc) {
+				ftruncate(state.fd, 0);
+			}
+#else
 			(void)rename(state.debugf, name);
 
 			if (!reopen_logs_internal()) {
 				/* We failed to reopen a log - continue using the old name. */
 				(void)rename(name, state.debugf);
 			}
+#endif
 		}
 	}
 
