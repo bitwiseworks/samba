@@ -24,6 +24,10 @@
 #include "lib/sys_popen.h"
 #include "lib/util/debug.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 /**************************************************************************
  Extract a command into an arg list.
 ****************************************************************************/

@@ -27,6 +27,10 @@
 #include "auth/credentials/pycredentials.h"
 #include "trans2.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 static PyTypeObject *get_pytype(const char *module, const char *type)
 {
 	PyObject *mod;

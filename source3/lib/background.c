@@ -23,6 +23,10 @@
 #include "include/messages.h"
 #include "background.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 struct background_job_state {
 	struct tevent_context *ev;
 	struct messaging_context *msg;

@@ -38,6 +38,10 @@
 
 #include "lib/util/sys_rw.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 #define CHECK_RANGE(v, min, max) do { \
 	if ((v) < (min) || (v) > (max)) { \
 		torture_result(tctx, TORTURE_FAIL, "(%s): wrong value for %s " \

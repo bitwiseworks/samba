@@ -29,6 +29,10 @@
 #include "param/param.h"
 #include "ldb_wrap.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 struct standard_child_state {
 	const char *name;
 	pid_t pid;

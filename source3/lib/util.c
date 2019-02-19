@@ -68,6 +68,10 @@
 #endif /* WITH_NISPLUS_HOME */
 #endif /* HAVE_NETGROUP && WITH_AUTOMOUNT */
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 static enum protocol_types Protocol = PROTOCOL_COREPLUS;
 
 enum protocol_types get_Protocol(void)

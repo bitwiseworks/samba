@@ -28,6 +28,10 @@
 #include "lib/util/tevent_unix.h"
 #include "librpc/gen_ndr/ioctl.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_VFS
 

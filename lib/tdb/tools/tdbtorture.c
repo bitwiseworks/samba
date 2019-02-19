@@ -14,7 +14,7 @@
 
 #ifdef __OS2__
 #include <sys/socket.h>
-#define pipe(A) socketpair(AF_UNIX, SOCK_STREAM, 0, A)
+#define pipe(A) os2_pipe(A)
 #endif
 
 #define REOPEN_PROB 30

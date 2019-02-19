@@ -22,6 +22,10 @@
 #include "lib/util/tevent_unix.h"
 #include "messages.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 struct msg_count_state {
 	struct tevent_context *ev;
 	struct messaging_context *msg_ctx;

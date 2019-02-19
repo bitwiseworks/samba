@@ -33,6 +33,10 @@
 #include "lib/util/tevent_ntstatus.h"
 #include "string_replace.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 /*
  * Enhanced OS X and Netatalk compatibility
  * ========================================

@@ -20,6 +20,10 @@
 #include "includes.h"
 #include "system/filesys.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 /* need to move this from here!! need some sleep ... */
 struct current_user current_user;
 

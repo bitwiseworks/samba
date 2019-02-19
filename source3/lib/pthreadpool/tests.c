@@ -11,6 +11,10 @@
 #include "pthreadpool_pipe.h"
 #include "pthreadpool_tevent.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 static int test_init(void)
 {
 	struct pthreadpool_pipe *p;

@@ -44,6 +44,10 @@
 #include "lib/util/sys_rw_data.h"
 #include "lib/util/base64.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 extern char *optarg;
 extern int optind;
 

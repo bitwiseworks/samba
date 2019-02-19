@@ -30,6 +30,10 @@
 #include "../lib/util/tevent_unix.h"
 #include "../lib/util/util_runcmd.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 static int samba_runcmd_state_destructor(struct samba_runcmd_state *state)
 {
 	if (state->pid > 0) {

@@ -33,6 +33,10 @@
 #include <cups/language.h>
 #include <cups/http.h>
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 /* CUPS prior to version 1.7 doesn't have HTTP_URI_STATUS_OK */
 #if (CUPS_VERSION_MAJOR == 1) && (CUPS_VERSION_MINOR < 7)
 #define HTTP_URI_STATUS_OK HTTP_URI_OK

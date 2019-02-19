@@ -43,6 +43,10 @@
 #define TRANSFER_BUF_SIZE (128*1024)
 #endif
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 static ssize_t default_sys_recvfile(int fromfd,
 			int tofd,
 			off_t offset,

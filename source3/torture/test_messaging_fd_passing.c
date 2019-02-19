@@ -23,6 +23,10 @@
 #include "lib/util/tevent_unix.h"
 #include "messages.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 /**
  * test fdpass1:
  *

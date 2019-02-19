@@ -30,6 +30,10 @@
 #include "system/filesys.h"
 #include "lib/crypto/md5.h"
 
+#ifdef __OS2__
+#define pipe(A) os2_pipe(A)
+#endif
+
 static uint32_t msg_pong;
 
 static void ping_message(struct imessaging_context *msg, void *private_data,
