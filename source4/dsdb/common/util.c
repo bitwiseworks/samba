@@ -2044,7 +2044,11 @@ enum samr_ValidationStatus samdb_check_password(TALLOC_CTX *mem_ctx,
 		struct tevent_req *req = NULL;
 		struct samba_runcmd_state *run_cmd = NULL;
 		const char * const cmd[4] = {
+#ifdef __OS2__
+			"/@unixroot/usr/bin/sh", "-c",
+#else
 			"/bin/sh", "-c",
+#endif
 			password_script,
 			NULL
 		};

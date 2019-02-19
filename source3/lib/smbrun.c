@@ -203,11 +203,19 @@ static int smbrun_internal(const char *cmd, int *outfd, bool sanitize,
 		}
 
 		if (env != NULL) {
+#ifdef __OS2__
+			execle("/@unixroot/usr/bin/sh","sh","-c",
+#else
 			execle("/bin/sh","sh","-c",
+#endif
 				newcmd ? (const char *)newcmd : cmd, NULL,
 				env);
 		} else {
+#ifdef __OS2__
+			execl("/@unixroot/usr/bin/sh","sh","-c",
+#else
 			execl("/bin/sh","sh","-c",
+#endif
 				newcmd ? (const char *)newcmd : cmd, NULL);
 		}
 
@@ -360,7 +368,11 @@ int smbrunsecret(const char *cmd, const char *secret)
 	}
 #endif
 
+#ifdef __OS2__
+	execl("/@unixroot/usr/bin/sh", "sh", "-c", cmd, NULL);  
+#else
 	execl("/bin/sh", "sh", "-c", cmd, NULL);  
+#endif
 
 	/* not reached */
 	exit(82);
