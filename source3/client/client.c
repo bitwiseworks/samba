@@ -2814,6 +2814,7 @@ static int cmd_open(void)
 	if (!mask) {
 		return 1;
 	}
+
 	mask = client_clean_name(ctx, mask);
 	if (mask == NULL) {
 		return 1;

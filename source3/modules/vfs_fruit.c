@@ -2175,7 +2175,7 @@ static bool filter_empty_rsrc_stream(unsigned int *num_streams,
 	}
 
 	for (i = 0; i < *num_streams; i++) {
-		if (strequal_m(tmp[i].name, name)) {
+		if (strequal_m(tmp[i].name, AFPRESOURCE_STREAM)) {
 			break;
 		}
 	}
@@ -2210,7 +2210,7 @@ static bool del_fruit_stream(TALLOC_CTX *mem_ctx, unsigned int *num_streams,
 	}
 
 	for (i = 0; i < *num_streams; i++) {
-		if (strequal_m(tmp[i].name, AFPRESOURCE_STREAM)) {
+		if (strequal_m(tmp[i].name, name)) {
 			break;
 		}
 	}

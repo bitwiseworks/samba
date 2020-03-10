@@ -957,4 +957,5 @@ int os2_pipe(int fds[2])
 
 	rc = socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
 	return rc;
+}
 #endif
