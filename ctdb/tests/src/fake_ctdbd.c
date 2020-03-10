@@ -3703,8 +3703,6 @@ static struct tevent_req *client_send(TALLOC_CTX *mem_ctx,
 {
 	struct tevent_req *req;
 	struct client_state *state;
-	struct ucred cr;
-	socklen_t crl = sizeof(struct ucred);
 	int ret;
 
 	req = tevent_req_create(mem_ctx, &state, struct client_state);

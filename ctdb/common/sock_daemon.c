@@ -893,7 +893,6 @@ static void sock_daemon_run_socket_fail(struct tevent_req *subreq)
 
 	status = sock_socket_start_recv(subreq, &ret, state, &sockpath);
 	TALLOC_FREE(subreq);
-	sock_daemon_run_shutdown(req);
 	if (! status) {
 		D_ERR("socket %s closed unexpectedly\n", sockpath);
 		state->exit_code = ret;

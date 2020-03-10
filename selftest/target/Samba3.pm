@@ -401,19 +401,6 @@ sub setup_ad_member
 	$substitution_path = "$share_dir/D_$dcvars->{DOMAIN}/u_$dcvars->{DOMAIN}/alice/g_$dcvars->{DOMAIN}/domain users";
 	push(@dirs, $substitution_path);
 
-	# Using '/' as the winbind separator is a bad idea ...
-	$substitution_path = "$share_dir/D_SAMBADOMAIN/u_SAMBADOMAIN";
-	push(@dirs, $substitution_path);
-
-	$substitution_path = "$share_dir/D_SAMBADOMAIN/u_SAMBADOMAIN/alice";
-	push(@dirs, $substitution_path);
-
-	$substitution_path = "$share_dir/D_SAMBADOMAIN/u_SAMBADOMAIN/alice/g_SAMBADOMAIN";
-	push(@dirs, $substitution_path);
-
-	$substitution_path = "$share_dir/D_SAMBADOMAIN/u_SAMBADOMAIN/alice/g_SAMBADOMAIN/domain users";
-	push(@dirs, $substitution_path);
-
 	my $member_options = "
 	security = ads
         workgroup = $dcvars->{DOMAIN}
@@ -2153,10 +2140,6 @@ sub provision($$$$$$$$$)
 	copy = tmp
 	acl_xattr:ignore system acls = yes
 	acl_xattr:default acl style = posix
-[nosymlinks]
-	copy = tmp
-	path = $nosymlinks_shrdir
-	follow symlinks = no
 [acl_xattr_ign_sysacl_windows]
 	copy = tmp
 	acl_xattr:ignore system acls = yes

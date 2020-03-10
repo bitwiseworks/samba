@@ -539,14 +539,6 @@ static void trustdom_list_done(struct tevent_req *req)
 			trust_flags &= ~NETR_TRUST_FLAG_PRIMARY;
 		}
 
-		if (!within_forest) {
-			trust_params.trust_flags &= ~NETR_TRUST_FLAG_IN_FOREST;
-		}
-
-		if (!state->domain->primary) {
-			trust_params.trust_flags &= ~NETR_TRUST_FLAG_PRIMARY;
-		}
-
 		/*
 		 * We always call add_trusted_domain() cause on an existing
 		 * domain structure, it will update the SID if necessary.

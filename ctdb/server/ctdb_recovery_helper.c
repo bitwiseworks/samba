@@ -615,8 +615,6 @@ static void pull_database_new_done(struct tevent_req *subreq)
 
 unregister:
 
-unregister:
-
 	subreq = ctdb_client_remove_message_handler_send(
 					state, state->ev, state->client,
 					state->srvid, req);

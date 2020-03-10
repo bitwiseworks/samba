@@ -457,7 +457,6 @@ static NTSTATUS gensec_gssapi_update_internal(struct gensec_security *gensec_sec
 		switch (gensec_security->gensec_role) {
 		case GENSEC_CLIENT:
 		{
-			bool fallback = false;
 #ifdef SAMBA4_USES_HEIMDAL
 			struct gsskrb5_send_to_kdc send_to_kdc;
 			krb5_error_code ret;

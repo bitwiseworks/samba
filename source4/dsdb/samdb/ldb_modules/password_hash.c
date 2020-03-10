@@ -3212,26 +3212,6 @@ static int setup_io(struct ph_context *ac,
 		io->u.is_krbtgt = true;
 	}
 
-	/* Ensure it has an objectSID too */
-	account_sid = samdb_result_dom_sid(ac, info_msg, "objectSid");
-	if (account_sid != NULL) {
-		NTSTATUS status;
-		uint32_t rid = 0;
-
-		status = dom_sid_split_rid(account_sid, account_sid, NULL, &rid);
-		if (NT_STATUS_IS_OK(status)) {
-			if (rid == DOMAIN_RID_KRBTGT) {
-				io->u.is_krbtgt = true;
-			}
-		}
-	}
-
-	rodc_krbtgt = ldb_msg_find_attr_as_int(info_msg,
-			"msDS-SecondaryKrbTgtNumber", 0);
-	if (rodc_krbtgt != 0) {
-		io->u.is_krbtgt = true;
-	}
-
 	if (io->u.sAMAccountName == NULL) {
 		ldb_asprintf_errstring(ldb,
 				       "setup_io: sAMAccountName attribute is missing on %s for attempted password set/change",
@@ -3259,12 +3239,6 @@ static int setup_io(struct ph_context *ac,
 	/* Only non-trust accounts have restrictions (possibly this test is the
 	 * wrong way around, but we like to be restrictive if possible */
 	io->u.restrictions = !(io->u.userAccountControl & UF_TRUST_ACCOUNT_MASK);
-
-	if (io->u.is_krbtgt) {
-		io->u.restrictions = 0;
-		io->ac->status->domain_data.pwdHistoryLength =
-			MAX(io->ac->status->domain_data.pwdHistoryLength, 3);
-	}
 
 	if (io->u.is_krbtgt) {
 		io->u.restrictions = 0;

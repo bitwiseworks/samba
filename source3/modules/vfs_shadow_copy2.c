@@ -2855,12 +2855,6 @@ static int shadow_copy2_get_quota(vfs_handle_struct *handle,
 	return ret;
 }
 
-static int shadow_copy2_private_destructor(struct shadow_copy2_private *priv)
-{
-	SAFE_FREE(priv->shadow_realpath);
-	return 0;
-}
-
 static int shadow_copy2_connect(struct vfs_handle_struct *handle,
 				const char *service, const char *user)
 {
@@ -2891,8 +2885,6 @@ static int shadow_copy2_connect(struct vfs_handle_struct *handle,
 		errno = ENOMEM;
 		return -1;
 	}
-
-	talloc_set_destructor(priv, shadow_copy2_private_destructor);
 
 	priv->snaps = talloc_zero(priv, struct shadow_copy2_snaplist_info);
 	if (priv->snaps == NULL) {

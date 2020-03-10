@@ -1631,7 +1631,7 @@ static int catia_fremovexattr(struct vfs_handle_struct *handle,
 	int ret;
 
 	status = catia_string_replace_allocate(handle->conn,
-				path, &mapped_name, vfs_translate_to_unix);
+				name, &mapped_name, vfs_translate_to_unix);
 	if (!NT_STATUS_IS_OK(status)) {
 		errno = map_errno_from_nt_status(status);
 		return -1;
@@ -1640,7 +1640,6 @@ static int catia_fremovexattr(struct vfs_handle_struct *handle,
 	ret = SMB_VFS_NEXT_FREMOVEXATTR(handle, fsp, mapped_name);
 
 	TALLOC_FREE(mapped_name);
-	TALLOC_FREE(mapped_ea_name);
 
 	return ret;
 }

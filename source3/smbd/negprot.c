@@ -725,23 +725,6 @@ void reply_negprot(struct smb_request *req)
 		min_proto = PROTOCOL_SMB2_10;
 	}
 
-	/*
-	 * Anything higher than PROTOCOL_SMB2_10 still
-	 * needs to go via "SMB 2.???", which is marked
-	 * as PROTOCOL_SMB2_10.
-	 *
-	 * The real negotiation happens via reply_smb20ff()
-	 * using SMB2 Negotiation.
-	 */
-	max_proto = lp_server_max_protocol();
-	if (max_proto > PROTOCOL_SMB2_10) {
-		max_proto = PROTOCOL_SMB2_10;
-	}
-	min_proto = lp_server_min_protocol();
-	if (min_proto > PROTOCOL_SMB2_10) {
-		min_proto = PROTOCOL_SMB2_10;
-	}
-
 	/* Check for protocols, most desirable first */
 	for (protocol = 0; supported_protocols[protocol].proto_name; protocol++) {
 		i = 0;

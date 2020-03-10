@@ -491,6 +491,7 @@ static AfpInfo *afpinfo_new(TALLOC_CTX *ctx);
 static ssize_t afpinfo_pack(const AfpInfo *ai, char *buf);
 static AfpInfo *afpinfo_unpack(TALLOC_CTX *ctx, const void *data);
 
+
 /**
  * Return a pointer to an AppleDouble entry
  *
@@ -2174,7 +2175,7 @@ static bool filter_empty_rsrc_stream(unsigned int *num_streams,
 	}
 
 	for (i = 0; i < *num_streams; i++) {
-		if (strequal_m(tmp[i].name, AFPRESOURCE_STREAM)) {
+		if (strequal_m(tmp[i].name, name)) {
 			break;
 		}
 	}
@@ -2215,10 +2216,6 @@ static bool del_fruit_stream(TALLOC_CTX *mem_ctx, unsigned int *num_streams,
 	}
 
 	if (i == *num_streams) {
-		return true;
-	}
-
-	if (tmp[i].size > 0) {
 		return true;
 	}
 
@@ -3521,15 +3518,6 @@ static int fruit_rename(struct vfs_handle_struct *handle,
 	if (rc != 0) {
 		goto done;
 	}
-	dst_adp_smb_fname = synthetic_smb_fname(talloc_tos(),
-						dst_adouble_path,
-						NULL, NULL,
-						smb_fname_dst->flags);
-	TALLOC_FREE(dst_adouble_path);
-	if (dst_adp_smb_fname == NULL) {
-		rc = -1;
-		goto done;
-	}
 
 	DBG_DEBUG("%s -> %s\n",
 		  smb_fname_str_dbg(src_adp_smb_fname),
@@ -3775,14 +3763,13 @@ static int fruit_chmod(vfs_handle_struct *handle,
 	struct fruit_config_data *config = NULL;
 	struct smb_filename *smb_fname_adp = NULL;
 
-	if (!force_unlink) {
-		ad = ad_get(talloc_tos(), handle, smb_fname->base_name,
-			    ADOUBLE_RSRC);
-		if (ad == NULL) {
-			errno = ENOENT;
-			return -1;
-		}
+	rc = SMB_VFS_NEXT_CHMOD(handle, smb_fname, mode);
+	if (rc != 0) {
+		return rc;
+	}
 
+	SMB_VFS_HANDLE_GET_DATA(handle, config,
+				struct fruit_config_data, return -1);
 
 	if (config->rsrc != FRUIT_RSRC_ADFILE) {
 		return 0;
@@ -4681,96 +4668,6 @@ static int fruit_stat_rsrc_netatalk(vfs_handle_struct *handle,
 					      smb_fname->stream_name);
 	TALLOC_FREE(ad);
 	return 0;
-}
-
-static int fruit_stat_rsrc_stream(vfs_handle_struct *handle,
-				  struct smb_filename *smb_fname,
-				  bool follow_links)
-{
-	int ret;
-
-	if (follow_links) {
-		ret = SMB_VFS_NEXT_STAT(handle, smb_fname);
-	} else {
-		ret = SMB_VFS_NEXT_LSTAT(handle, smb_fname);
-	}
-
-	return ret;
-}
-
-static int fruit_stat_rsrc_xattr(vfs_handle_struct *handle,
-				 struct smb_filename *smb_fname,
-				 bool follow_links)
-{
-#ifdef HAVE_ATTROPEN
-	int ret;
-	int fd = -1;
-
-	/* Populate the stat struct with info from the base file. */
-	ret = fruit_stat_base(handle, smb_fname, follow_links);
-	if (ret != 0) {
-		return -1;
-	}
-
-	fd = attropen(smb_fname->base_name,
-		      AFPRESOURCE_EA_NETATALK,
-		      O_RDONLY);
-	if (fd == -1) {
-		return 0;
-	}
-
-	ret = sys_fstat(fd, &smb_fname->st, false);
-	if (ret != 0) {
-		close(fd);
-		DBG_ERR("fstat [%s:%s] failed\n", smb_fname->base_name,
-			AFPRESOURCE_EA_NETATALK);
-		return -1;
-	}
-	close(fd);
-	fd = -1;
-
-	smb_fname->st.st_ex_ino = fruit_inode(&smb_fname->st,
-					      smb_fname->stream_name);
-
-	return ret;
-
-#else
-	errno = ENOSYS;
-	return -1;
-#endif
-}
-
-static int fruit_stat_meta(vfs_handle_struct *handle,
-			   struct smb_filename *smb_fname,
-			   bool follow_links)
-{
-	struct fruit_config_data *config = NULL;
-	int ret;
-
-	DBG_DEBUG("Path [%s]\n", smb_fname_str_dbg(smb_fname));
-
-	SMB_VFS_HANDLE_GET_DATA(handle, config,
-				struct fruit_config_data, return -1);
-
-	switch (config->rsrc) {
-	case FRUIT_RSRC_STREAM:
-		ret = fruit_stat_rsrc_stream(handle, smb_fname, follow_links);
-		break;
-
-	case FRUIT_RSRC_XATTR:
-		ret = fruit_stat_rsrc_xattr(handle, smb_fname, follow_links);
-		break;
-
-	case FRUIT_RSRC_ADFILE:
-		ret = fruit_stat_rsrc_netatalk(handle, smb_fname, follow_links);
-		break;
-
-	default:
-		DBG_ERR("Unexpected rsrc config [%d]\n", config->rsrc);
-		return -1;
-	}
-
-	return ret;
 }
 
 static int fruit_stat_rsrc_stream(vfs_handle_struct *handle,

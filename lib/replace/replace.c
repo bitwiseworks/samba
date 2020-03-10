@@ -942,7 +942,6 @@ void rep_setproctitle(const char *fmt, ...)
 {
 }
 #endif
-
 #ifndef HAVE_SETPROCTITLE_INIT
 void rep_setproctitle_init(int argc, char *argv[], char *envp[])
 {

@@ -116,10 +116,6 @@ static NTSTATUS idmap_hash_initialize(struct idmap_domain *dom)
 		"Please migrate to a different plugin. This module will be "
 		"removed in a future version of Samba\n");
 
-	DBG_ERR("The idmap_hash module is deprecated and should not be used. "
-		"Please migrate to a different plugin. This module will be "
-		"removed in a future version of Samba\n");
-
 	if (!strequal(dom->name, "*")) {
 		DBG_ERR("Error: idmap_hash configured for domain '%s'. "
 			"But the hash module can only be used for the default "

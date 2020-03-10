@@ -90,7 +90,7 @@ determine_algorithm(const struct ctdb_tunable_list *tunables)
 
 struct get_public_ips_state {
 	uint32_t *pnns;
-	int count, num_nodes;
+	int count;
 	struct ctdb_public_ip_list *ips;
 	uint32_t *ban_credits;
 };

@@ -678,8 +678,6 @@ int logging_init(TALLOC_CTX *mem_ctx, const char *logging,
 
 	setup_logging(app_name, DEBUG_STDERR);
 
-	setup_logging(app_name, DEBUG_STDERR);
-
 	if (debug_level == NULL) {
 		debug_level = getenv("CTDB_DEBUGLEVEL");
 	}

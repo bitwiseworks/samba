@@ -433,6 +433,7 @@ static int do_cd(const char *new_dir)
 			goto out;
 		}
 	}
+	client_set_cur_dir(new_cd);
 
 	new_cd = client_clean_name(ctx, new_cd);
 	client_set_cur_dir(new_cd);
@@ -2813,11 +2814,6 @@ static int cmd_open(void)
 	if (!mask) {
 		return 1;
 	}
-	mask = client_clean_name(ctx, mask);
-	if (mask == NULL) {
-		return 1;
-	}
-
 	mask = client_clean_name(ctx, mask);
 	if (mask == NULL) {
 		return 1;

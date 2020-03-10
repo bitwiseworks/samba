@@ -52,10 +52,6 @@ char *netlogon_creds_cli_debug_string(
 		const struct netlogon_creds_cli_context *context,
 		TALLOC_CTX *mem_ctx);
 
-char *netlogon_creds_cli_debug_string(
-		const struct netlogon_creds_cli_context *context,
-		TALLOC_CTX *mem_ctx);
-
 enum dcerpc_AuthLevel netlogon_creds_cli_auth_level(
 		struct netlogon_creds_cli_context *context);
 

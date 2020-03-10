@@ -386,20 +386,6 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             drsuapi.DRSUAPI_DRS_CRITICAL_ONLY|
             drsuapi.DRSUAPI_DRS_GET_ANC)
 
-        (hwm5, utdv5) = self._check_replication([dc3,ou1,ou2,self.ou,cn3],
-                            drsuapi.DRSUAPI_DRS_WRIT_REP)
-
-        self._check_replication([self.ou,ou1,ou2,dc3,cn3],
-            drsuapi.DRSUAPI_DRS_WRIT_REP|
-            drsuapi.DRSUAPI_DRS_GET_ANC)
-
-        self._check_replication([dc3],
-            drsuapi.DRSUAPI_DRS_CRITICAL_ONLY)
-
-        self._check_replication([self.ou,ou1,ou2,dc3],
-            drsuapi.DRSUAPI_DRS_CRITICAL_ONLY|
-            drsuapi.DRSUAPI_DRS_GET_ANC)
-
         m = ldb.Message()
         m.dn = ldb.Dn(self.ldb_dc1, ou2)
         m["managedBy"] = ldb.MessageElement(dc3, ldb.FLAG_MOD_ADD, "managedBy")

@@ -3562,22 +3562,6 @@ allowed:
 		r->out.ctr->ctr6.nc_linked_attributes_count = getnc_state->total_links;
 	}
 
-	if (req10->replica_flags & DRSUAPI_DRS_GET_NC_SIZE) {
-		/*
-		 * TODO: This implementation is wrong
-		 * we should find out the total number of
-		 * objects and links in the whole naming context
-		 * at the start of the cycle and return these
-		 * values in each message.
-		 *
-		 * For now we keep our current strategy and return
-		 * the number of objects for this cycle and the number
-		 * of links we found so far during the cycle.
-		 */
-		r->out.ctr->ctr6.nc_object_count = getnc_state->num_records;
-		r->out.ctr->ctr6.nc_linked_attributes_count = getnc_state->la_count;
-	}
-
 	if (!r->out.ctr->ctr6.more_data) {
 
 		/* this is the last response in the replication cycle */
