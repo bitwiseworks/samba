@@ -57,7 +57,7 @@ _PUBLIC_ const struct model_ops *process_model_startup(const char *model)
 
 	m = process_model_byname(model);
 	if (m == NULL) {
-		DEBUG(0,("Unknown process model '%s'\n", model));
+		DBG_ERR("Unknown process model '%s'\n", model);
 		exit(-1);
 	}
 
@@ -79,8 +79,7 @@ _PUBLIC_ NTSTATUS register_process_model(const struct model_ops *ops)
 {
 	if (process_model_byname(ops->name) != NULL) {
 		/* its already registered! */
-		DEBUG(0,("PROCESS_MODEL '%s' already registered\n", 
-			 ops->name));
+		DBG_ERR("PROCESS_MODEL '%s' already registered\n", ops->name);
 		return NT_STATUS_OBJECT_NAME_COLLISION;
 	}
 
@@ -94,14 +93,14 @@ _PUBLIC_ NTSTATUS register_process_model(const struct model_ops *ops)
 
 	num_models++;
 
-	DEBUG(3,("PROCESS_MODEL '%s' registered\n", ops->name));
+	DBG_NOTICE("PROCESS_MODEL '%s' registered\n", ops->name);
 
 	return NT_STATUS_OK;
 }
 
 _PUBLIC_ NTSTATUS process_model_init(struct loadparm_context *lp_ctx)
 {
-#define _MODULE_PROTO(init) extern NTSTATUS init(void);
+#define _MODULE_PROTO(init) extern NTSTATUS init(TALLOC_CTX *);
 	STATIC_process_model_MODULES_PROTO;
 	init_module_fn static_init[] = { STATIC_process_model_MODULES };
 	init_module_fn *shared_init;
@@ -114,8 +113,8 @@ _PUBLIC_ NTSTATUS process_model_init(struct loadparm_context *lp_ctx)
 
 	shared_init = load_samba_modules(NULL, "process_model");
 	
-	run_init_functions(static_init);
-	run_init_functions(shared_init);
+	run_init_functions(NULL, static_init);
+	run_init_functions(NULL, shared_init);
 
 	talloc_free(shared_init);
 

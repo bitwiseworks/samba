@@ -4,11 +4,13 @@
 
 define_test "Memory check, bad memory situation, custom memory warning"
 
-setup_memcheck 90 10
+setup
 
+setup_script_options <<EOF
 CTDB_MONITOR_MEMORY_USAGE="85:"
-CTDB_MONITOR_SWAP_USAGE=""
+EOF
 
+set_mem_usage 90 10
 ok <<EOF
 WARNING: System memory utilization 90% >= threshold 85%
 EOF

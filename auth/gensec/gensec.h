@@ -34,6 +34,9 @@
 #define GENSEC_OID_KERBEROS5_OLD "1.2.840.48018.1.2.2"
 #define GENSEC_OID_KERBEROS5_USER2USER "1.2.840.113554.1.2.2.3"
 
+#define GENSEC_FINAL_AUTH_TYPE_KRB5 "krb5"
+#define GENSEC_FINAL_AUTH_TYPE_NTLMSSP "NTLMSSP"
+
 enum gensec_priority {
 	GENSEC_SPNEGO = 90,
 	GENSEC_GSSAPI = 80,
@@ -50,6 +53,7 @@ struct gensec_target {
 	const char *principal;
 	const char *hostname;
 	const char *service;
+	const char *service_description;
 };
 
 #define GENSEC_FEATURE_SESSION_KEY	0x00000001
@@ -63,6 +67,9 @@ struct gensec_target {
 #define GENSEC_FEATURE_UNIX_TOKEN	0x00000100
 #define GENSEC_FEATURE_NTLM_CCACHE	0x00000200
 #define GENSEC_FEATURE_LDAP_STYLE	0x00000400
+#define GENSEC_FEATURE_NO_AUTHZ_LOG	0x00000800
+#define GENSEC_FEATURE_SMB_TRANSPORT	0x00001000
+#define GENSEC_FEATURE_LDAPS_TRANSPORT	0x00002000
 
 #define GENSEC_EXPIRE_TIME_INFINITY (NTTIME)0x8000000000000000LL
 
@@ -100,7 +107,8 @@ struct gensec_settings {
 struct gensec_security_ops;
 struct gensec_security_ops_wrapper;
 
-#define GENSEC_INTERFACE_VERSION 0
+/* Change to 1, loadable modules now take a TALLOC_CTX * init() parameter. */
+#define GENSEC_INTERFACE_VERSION 1
 
 /* this structure is used by backends to determine the size of some critical types */
 struct gensec_critical_sizes;
@@ -130,25 +138,86 @@ size_t gensec_max_update_size(struct gensec_security *gensec_security);
 NTSTATUS gensec_update(struct gensec_security *gensec_security,
 		       TALLOC_CTX *out_mem_ctx,
 		       const DATA_BLOB in, DATA_BLOB *out);
-NTSTATUS gensec_update_ev(struct gensec_security *gensec_security,
-			  TALLOC_CTX *out_mem_ctx,
-			  struct tevent_context *ev,
-			  const DATA_BLOB in, DATA_BLOB *out);
 struct tevent_req *gensec_update_send(TALLOC_CTX *mem_ctx,
 				      struct tevent_context *ev,
 				      struct gensec_security *gensec_security,
 				      const DATA_BLOB in);
 NTSTATUS gensec_update_recv(struct tevent_req *req, TALLOC_CTX *out_mem_ctx, DATA_BLOB *out);
+
+#define GENSEC_UPDATE_IS_NTERROR(status) ( \
+	!NT_STATUS_IS_OK(status) && \
+	!NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED) \
+	)
+
+/**
+ * @brief Ask for features for a following authentication
+ *
+ * Typically only one specific feature bit should be passed,
+ * but it also works to ask for more features.
+ *
+ * The features must be requested before starting the
+ * gensec_update*() loop.
+ *
+ * The current expection is GENSEC_FEATURE_SIGN_PKT_HEADER,
+ * it can also be requested once the gensec_update*() loop
+ * returned NT_STATUS_OK.
+ *
+ * The features should not be changed during the gensec_update*()
+ * loop.
+ *
+ * @param[in]  gensec_security The context to be used
+ *
+ * @param[in]  feature         The requested feature[s].
+ *
+ */
 void gensec_want_feature(struct gensec_security *gensec_security,
 			 uint32_t feature);
+/**
+ * @brief Ask for one feature after the finished authentication
+ *
+ * Because the return value is bool, the caller can only
+ * ask for one feature at a time.
+ *
+ * The features must be requested after the finished
+ * gensec_update*() loop.
+ *
+ * The current expection is GENSEC_FEATURE_SIGN_PKT_HEADER,
+ * it can also be requested before the gensec_update*() loop,
+ * as the return value only indicates if the backend supports
+ * dcerpc header signing, not if header signing will be used
+ * between client and server. It will be used only if the caller
+ * also used gensec_want_feature(GENSEC_FEATURE_SIGN_PKT_HEADER).
+ *
+ * @param[in]  gensec_security The context to be used.
+ *
+ * @param[in]  feature         The requested feature.
+ *
+ * @return                     true if the feature is supported, false if not.
+ */
 bool gensec_have_feature(struct gensec_security *gensec_security,
 			 uint32_t feature);
 NTTIME gensec_expire_time(struct gensec_security *gensec_security);
 NTSTATUS gensec_set_credentials(struct gensec_security *gensec_security, struct cli_credentials *credentials);
+/**
+ * Set the target service (such as 'http' or 'host') on a GENSEC context - ensures it is talloc()ed
+ *
+ * This is used for Kerberos service principal name resolution.
+ */
+
 NTSTATUS gensec_set_target_service(struct gensec_security *gensec_security, const char *service);
 const char *gensec_get_target_service(struct gensec_security *gensec_security);
 NTSTATUS gensec_set_target_hostname(struct gensec_security *gensec_security, const char *hostname);
 const char *gensec_get_target_hostname(struct gensec_security *gensec_security);
+/**
+ * Set the target service (such as 'samr') on an GENSEC context - ensures it is talloc()ed.
+ *
+ * This is not the Kerberos service principal, instead this is a
+ * constant value that can be logged as part of authentication and
+ * authorization logging
+ */
+const char *gensec_get_target_service_description(struct gensec_security *gensec_security);
+NTSTATUS gensec_set_target_service_description(struct gensec_security *gensec_security,
+					       const char *service);
 NTSTATUS gensec_session_key(struct gensec_security *gensec_security,
 			    TALLOC_CTX *mem_ctx,
 			    DATA_BLOB *session_key);
@@ -157,7 +226,8 @@ NTSTATUS gensec_start_mech_by_oid(struct gensec_security *gensec_security,
 const char *gensec_get_name_by_oid(struct gensec_security *gensec_security, const char *oid_string);
 struct cli_credentials *gensec_get_credentials(struct gensec_security *gensec_security);
 NTSTATUS gensec_init(void);
-NTSTATUS gensec_register(const struct gensec_security_ops *ops);
+NTSTATUS gensec_register(TALLOC_CTX *ctx,
+		const struct gensec_security_ops *ops);
 const struct gensec_security_ops *gensec_security_by_oid(struct gensec_security *gensec_security,
 							 const char *oid_string);
 const struct gensec_security_ops *gensec_security_by_sasl_name(struct gensec_security *gensec_security,
@@ -200,7 +270,6 @@ NTSTATUS gensec_sign_packet(struct gensec_security *gensec_security,
 			    const uint8_t *data, size_t length,
 			    const uint8_t *whole_pdu, size_t pdu_length,
 			    DATA_BLOB *sig);
-NTSTATUS gensec_start_mech(struct gensec_security *gensec_security);
 NTSTATUS gensec_start_mech_by_authtype(struct gensec_security *gensec_security,
 				       uint8_t auth_type, uint8_t auth_level);
 const char *gensec_get_name_by_authtype(struct gensec_security *gensec_security, uint8_t authtype);

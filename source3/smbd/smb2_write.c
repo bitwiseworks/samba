@@ -25,6 +25,9 @@
 #include "../lib/util/tevent_ntstatus.h"
 #include "rpc_server/srv_pipe_hnd.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_SMB2
+
 static struct tevent_req *smbd_smb2_write_send(TALLOC_CTX *mem_ctx,
 					       struct tevent_context *ev,
 					       struct smbd_smb2_request *smb2req,
@@ -106,7 +109,7 @@ NTSTATUS smbd_smb2_request_process_write(struct smbd_smb2_request *req)
 		return smbd_smb2_request_error(req, NT_STATUS_FILE_CLOSED);
 	}
 
-	subreq = smbd_smb2_write_send(req, req->sconn->ev_ctx,
+	subreq = smbd_smb2_write_send(req, req->ev_ctx,
 				      req, in_fsp,
 				      in_data_buffer,
 				      in_offset,
@@ -354,7 +357,7 @@ static struct tevent_req *smbd_smb2_write_send(TALLOC_CTX *mem_ctx,
 				WRITE_LOCK,
 				&lock);
 
-	if (!SMB_VFS_STRICT_LOCK(conn, fsp, &lock)) {
+	if (!SMB_VFS_STRICT_LOCK_CHECK(conn, fsp, &lock)) {
 		tevent_req_nterror(req, NT_STATUS_FILE_LOCK_CONFLICT);
 		return tevent_req_post(req, ev);
 	}
@@ -368,8 +371,6 @@ static struct tevent_req *smbd_smb2_write_send(TALLOC_CTX *mem_ctx,
 			      in_data.length);
 
 	status = smb2_write_complete(req, nwritten, errno);
-
-	SMB_VFS_STRICT_UNLOCK(conn, fsp, &lock);
 
 	DEBUG(10,("smb2: write on "
 		"file %s, offset %.0f, requested %u, written = %u\n",

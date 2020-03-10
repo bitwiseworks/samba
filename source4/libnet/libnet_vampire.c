@@ -42,6 +42,9 @@
 #include "libcli/security/security.h"
 #include "dsdb/common/util.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS            DBGC_DRS_REPL
+
 /* 
 List of tasks vampire.py must perform:
 - Domain Join
@@ -328,7 +331,7 @@ static WERROR libnet_vampire_cb_apply_schema(struct libnet_vampire_cb_state *s,
 		provision_schema = dsdb_get_schema(s->ldb, s);
 	} else {
 		provision_schema = dsdb_get_schema(schema_ldb, s);
-		ret = dsdb_reference_schema(s->ldb, provision_schema, false);
+		ret = dsdb_reference_schema(s->ldb, provision_schema, SCHEMA_MEMORY_ONLY);
 		if (ret != LDB_SUCCESS) {
 			DEBUG(0,("Failed to attach schema from local provision using remote prefixMap."));
 			return WERR_INTERNAL_ERROR;
@@ -365,7 +368,7 @@ static WERROR libnet_vampire_cb_apply_schema(struct libnet_vampire_cb_state *s,
 	 * attach the schema we just brought over DRS to the ldb,
 	 * so we can use it in dsdb_convert_object_ex below
 	 */
-	ret = dsdb_set_schema(s->ldb, s->self_made_schema);
+	ret = dsdb_set_schema(s->ldb, s->self_made_schema, SCHEMA_WRITE);
 	if (ret != LDB_SUCCESS) {
 		DEBUG(0,("Failed to attach working schema from DRS.\n"));
 		return WERR_INTERNAL_ERROR;
@@ -647,19 +650,24 @@ WERROR libnet_vampire_cb_store_chunk(void *private_data,
 			is_exop = true;
 		}
 		req_replica_flags = c->req10->replica_flags;
+
+		if (c->req10->more_flags & DRSUAPI_DRS_GET_TGT) {
+			dsdb_repl_flags |= DSDB_REPL_FLAG_TARGETS_UPTODATE;
+		}
 		break;
 	default:
 		return WERR_INVALID_PARAMETER;
 	}
 
-	if (req_replica_flags & DRSUAPI_DRS_CRITICAL_ONLY) {
+	if (req_replica_flags & DRSUAPI_DRS_CRITICAL_ONLY || is_exop) {
 		/*
-		 * If we only replicate the critical objects
-		 * we should not remember what we already
+		 * If we only replicate the critical objects, or this
+		 * is an exop we should not remember what we already
 		 * got, as it is incomplete.
 		 */
 		ZERO_STRUCT(s_dsa->highwatermark);
 		uptodateness_vector = NULL;
+		dsdb_repl_flags |= DSDB_REPL_FLAG_OBJECT_SUBSET;
 	}
 
 	/* TODO: avoid hardcoded flags */
@@ -686,7 +694,7 @@ WERROR libnet_vampire_cb_store_chunk(void *private_data,
 	}
 	s->total_objects += object_count;
 
-	partition_dn = ldb_dn_new(s, s->ldb, c->partition->nc.dn);
+	partition_dn = ldb_dn_new(s_dsa, s->ldb, c->partition->nc.dn);
 	if (partition_dn == NULL) {
 		DEBUG(0,("Failed to parse partition DN from DRS.\n"));
 		return WERR_INVALID_PARAMETER;
@@ -702,7 +710,7 @@ WERROR libnet_vampire_cb_store_chunk(void *private_data,
 			DEBUG(0,("Exop on[%s] objects[%u] linked_values[%u]\n",
 			c->partition->nc.dn, s->total_objects, linked_attributes_count));
 		}
-		ret = dsdb_find_nc_root(s->ldb, s,
+		ret = dsdb_find_nc_root(s->ldb, s_dsa,
 					partition_dn, &nc_root);
 		if (ret != LDB_SUCCESS) {
 			DEBUG(0,(__location__ ": Failed to find nc_root for %s\n",

@@ -18,6 +18,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import print_function
 """Blackbox tests for ndrdump."""
 
 import os
@@ -25,7 +26,7 @@ from samba.tests import BlackboxTestCase
 
 for p in [ "../../../../../source4/librpc/tests", "../../../../../librpc/tests"]:
     data_path_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), p))
-    print data_path_dir
+    print(data_path_dir)
     if os.path.exists(data_path_dir):
         break
 
@@ -47,3 +48,7 @@ class NdrDumpTests(BlackboxTestCase):
 
     def test_ndrdump_with_validate(self):
         self.check_run("ndrdump --validate samr samr_CreateUser in %s" % (self.data_path("samr-CreateUser-in.dat")))
+
+    def test_ndrdump_with_hex(self):
+        self.check_run("ndrdump dns decode_dns_name_packet in --hex-input %s" %
+                       self.data_path("dns-decode_dns_name_packet-hex.dat"))

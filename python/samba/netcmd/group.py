@@ -26,6 +26,7 @@ from getpass import getpass
 from samba.auth import system_session
 from samba.samdb import SamDB
 from samba.dsdb import (
+    ATYPE_SECURITY_GLOBAL_GROUP,
     GTYPE_SECURITY_BUILTIN_LOCAL_GROUP,
     GTYPE_SECURITY_DOMAIN_LOCAL_GROUP,
     GTYPE_SECURITY_GLOBAL_GROUP,
@@ -124,7 +125,7 @@ Example3 adds a new RFC2307 enabled group for NIS domain samdom and GID 12345 (b
             samdb.newgroup(groupname, groupou=groupou, grouptype = gtype,
                           description=description, mailaddress=mail_address, notes=notes,
                           gidnumber=gid_number, nisdomain=nis_domain)
-        except Exception, e:
+        except Exception as e:
             # FIXME: catch more specific exception
             raise CommandError('Failed to create group "%s"' % groupname, e)
         self.outf.write("Added group %s\n" % groupname)
@@ -186,7 +187,7 @@ Example2 deletes group Group2 from the local server.  The command is run under r
 
         try:
             samdb.delete(group_dn)
-        except Exception, e:
+        except Exception as e:
             # FIXME: catch more specific exception
             raise CommandError('Failed to remove group "%s"' % groupname, e)
         self.outf.write("Deleted group %s\n" % groupname)
@@ -198,6 +199,8 @@ class cmd_group_add_members(Command):
 This command adds one or more members to an existing Active Directory group. The command accepts one or more group member names separated by commas.  A group member may be a user or computer account or another Active Directory group.
 
 When a member is added to a group the member may inherit permissions and rights from the group.  Likewise, when permission or rights of a group are changed, the changes may reflect in the members through inheritance.
+
+The member names specified on the command must be the sAMaccountName.
 
 Example1:
 samba-tool group addmembers supergroup Group1,Group2,User1 -H ldap://samba.samdom.example.com -Uadministrator%passw0rd
@@ -237,7 +240,7 @@ Example2 shows how to add a single user account, User2, to the supergroup AD gro
             groupmembers = listofmembers.split(',')
             samdb.add_remove_group_members(groupname, groupmembers,
                     add_members_operation=True)
-        except Exception, e:
+        except Exception as e:
             # FIXME: catch more specific exception
             raise CommandError('Failed to add members "%s" to group "%s"' % (
                 listofmembers, groupname), e)
@@ -288,7 +291,7 @@ Example2 shows how to remove a single user account, User2, from the supergroup A
                           credentials=creds, lp=lp)
             samdb.add_remove_group_members(groupname, listofmembers.split(","),
                     add_members_operation=False)
-        except Exception, e:
+        except Exception as e:
             # FIXME: Catch more specific exception
             raise CommandError('Failed to remove members "%s" from group "%s"' % (listofmembers, groupname), e)
         self.outf.write("Removed members from group %s\n" % groupname)
@@ -416,9 +419,166 @@ samba-tool group listmembers \"Domain Users\" -H ldap://samba.samdom.example.com
                     member_name = msg.get("cn", idx=0)
                 self.outf.write("%s\n" % member_name)
 
-        except Exception, e:
+        except Exception as e:
             raise CommandError('Failed to list members of "%s" group ' % groupname, e)
 
+class cmd_group_move(Command):
+    """Move a group to an organizational unit/container.
+
+    This command moves a group object into the specified organizational unit
+    or container.
+    The groupname specified on the command is the sAMAccountName.
+    The name of the organizational unit or container can be specified as a
+    full DN or without the domainDN component.
+
+    The command may be run from the root userid or another authorized userid.
+
+    The -H or --URL= option can be used to execute the command against a remote
+    server.
+
+    Example1:
+    samba-tool group move Group1 'OU=OrgUnit,DC=samdom.DC=example,DC=com' \
+        -H ldap://samba.samdom.example.com -U administrator
+
+    Example1 shows how to move a group Group1 into the 'OrgUnit' organizational
+    unit on a remote LDAP server.
+
+    The -H parameter is used to specify the remote target server.
+
+    Example2:
+    samba-tool group move Group1 CN=Users
+
+    Example2 shows how to move a group Group1 back into the CN=Users container
+    on the local server.
+    """
+
+    synopsis = "%prog <groupname> <new_parent_dn> [options]"
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server",
+               type=str, metavar="URL", dest="H"),
+    ]
+
+    takes_args = [ "groupname", "new_parent_dn" ]
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "credopts": options.CredentialsOptions,
+        "versionopts": options.VersionOptions,
+        }
+
+    def run(self, groupname, new_parent_dn, credopts=None, sambaopts=None,
+            versionopts=None, H=None):
+        lp = sambaopts.get_loadparm()
+        creds = credopts.get_credentials(lp, fallback_machine=True)
+        samdb = SamDB(url=H, session_info=system_session(),
+                      credentials=creds, lp=lp)
+        domain_dn = ldb.Dn(samdb, samdb.domain_dn())
+
+        filter = ("(&(sAMAccountName=%s)(objectClass=group))" %
+                  groupname)
+        try:
+            res = samdb.search(base=domain_dn,
+                               expression=filter,
+                               scope=ldb.SCOPE_SUBTREE)
+            group_dn = res[0].dn
+        except IndexError:
+            raise CommandError('Unable to find group "%s"' % (groupname))
+
+        try:
+            full_new_parent_dn = samdb.normalize_dn_in_domain(new_parent_dn)
+        except Exception as e:
+            raise CommandError('Invalid new_parent_dn "%s": %s' %
+                               (new_parent_dn, e.message))
+
+        full_new_group_dn = ldb.Dn(samdb, str(group_dn))
+        full_new_group_dn.remove_base_components(len(group_dn)-1)
+        full_new_group_dn.add_base(full_new_parent_dn)
+
+        try:
+            samdb.rename(group_dn, full_new_group_dn)
+        except Exception as e:
+            raise CommandError('Failed to move group "%s"' % groupname, e)
+        self.outf.write('Moved group "%s" into "%s"\n' %
+                        (groupname, full_new_parent_dn))
+
+class cmd_group_show(Command):
+    """Display a group AD object.
+
+This command displays a group object and it's attributes in the Active
+Directory domain.
+The group name specified on the command is the sAMAccountName of the group.
+
+The command may be run from the root userid or another authorized userid.
+
+The -H or --URL= option can be used to execute the command against a remote
+server.
+
+Example1:
+samba-tool group show Group1 -H ldap://samba.samdom.example.com \
+-U administrator --password=passw1rd
+
+Example1 shows how to display a group's attributes in the domain against a remote
+LDAP server.
+
+The -H parameter is used to specify the remote target server.
+
+Example2:
+samba-tool group show Group2
+
+Example2 shows how to display a group's attributes in the domain against a local
+LDAP server.
+
+Example3:
+samba-tool group show Group3 --attributes=member,objectGUID
+
+Example3 shows how to display a users objectGUID and member attributes.
+"""
+    synopsis = "%prog <group name> [options]"
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server",
+               type=str, metavar="URL", dest="H"),
+        Option("--attributes",
+               help=("Comma separated list of attributes, "
+                     "which will be printed."),
+               type=str, dest="group_attrs"),
+    ]
+
+    takes_args = ["groupname"]
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "credopts": options.CredentialsOptions,
+        "versionopts": options.VersionOptions,
+        }
+
+    def run(self, groupname, credopts=None, sambaopts=None, versionopts=None,
+            H=None, group_attrs=None):
+
+        lp = sambaopts.get_loadparm()
+        creds = credopts.get_credentials(lp, fallback_machine=True)
+        samdb = SamDB(url=H, session_info=system_session(),
+                      credentials=creds, lp=lp)
+
+        attrs = None
+        if group_attrs:
+            attrs = group_attrs.split(",")
+
+        filter = ("(&(sAMAccountType=%d)(sAMAccountName=%s))" %
+                     ( ATYPE_SECURITY_GLOBAL_GROUP,
+                       ldb.binary_encode(groupname)))
+
+        domaindn = samdb.domain_dn()
+
+        try:
+            res = samdb.search(base=domaindn, expression=filter,
+                               scope=ldb.SCOPE_SUBTREE, attrs=attrs)
+            user_dn = res[0].dn
+        except IndexError:
+            raise CommandError('Unable to find group "%s"' % (groupname))
+
+        for msg in res:
+            user_ldif = samdb.write_ldif(msg, ldb.CHANGETYPE_NONE)
+            self.outf.write(user_ldif)
 
 class cmd_group(SuperCommand):
     """Group management."""
@@ -430,3 +590,5 @@ class cmd_group(SuperCommand):
     subcommands["removemembers"] = cmd_group_remove_members()
     subcommands["list"] = cmd_group_list()
     subcommands["listmembers"] = cmd_group_list_members()
+    subcommands["move"] = cmd_group_move()
+    subcommands["show"] = cmd_group_show()

@@ -19,6 +19,8 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+#include "rpc_server/dnsserver/dnsserver.h"
+
 #ifndef __DNSSERVER_COMMON_H__
 #define __DNSSERVER_COMMON_H__
 
@@ -35,7 +37,8 @@ struct dns_server_zone {
 	struct ldb_dn *dn;
 };
 
-WERROR dns_common_extract(const struct ldb_message_element *el,
+WERROR dns_common_extract(struct ldb_context *samdb,
+			  const struct ldb_message_element *el,
 			  TALLOC_CTX *mem_ctx,
 			  struct dnsp_DnssrvRpcRecord **records,
 			  uint16_t *num_records);
@@ -46,9 +49,20 @@ WERROR dns_common_lookup(struct ldb_context *samdb,
 			 struct dnsp_DnssrvRpcRecord **records,
 			 uint16_t *num_records,
 			 bool *tombstoned);
+WERROR dns_common_wildcard_lookup(struct ldb_context *samdb,
+				  TALLOC_CTX *mem_ctx,
+				  struct ldb_dn *dn,
+				  struct dnsp_DnssrvRpcRecord **records,
+				  uint16_t *num_records);
 WERROR dns_name_check(TALLOC_CTX *mem_ctx,
 		      size_t len,
 		      const char *name);
+WERROR dns_get_zone_properties(struct ldb_context *samdb,
+			       TALLOC_CTX *mem_ctx,
+			       struct ldb_dn *zone_dn,
+			       struct dnsserver_zoneinfo *zoneinfo);
+bool dns_name_is_static(struct dnsp_DnssrvRpcRecord *records,
+			uint16_t rec_count);
 WERROR dns_common_replace(struct ldb_context *samdb,
 			  TALLOC_CTX *mem_ctx,
 			  struct ldb_dn *dn,
@@ -62,7 +76,15 @@ WERROR dns_common_name2dn(struct ldb_context *samdb,
 			  TALLOC_CTX *mem_ctx,
 			  const char *name,
 			  struct ldb_dn **_dn);
+bool dns_name_equal(const char *name1, const char *name2);
+
+/*
+ * For this routine, base_dn is generally NULL.  The exception comes
+ * from the python bindings to support setting ACLs on DNS objects
+ * when joining Windows
+ */
 NTSTATUS dns_common_zones(struct ldb_context *samdb,
 			  TALLOC_CTX *mem_ctx,
+			  struct ldb_dn *base_dn,
 			  struct dns_server_zone **zones_ret);
 #endif /* __DNSSERVER_COMMON_H__ */

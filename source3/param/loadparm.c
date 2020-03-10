@@ -71,6 +71,7 @@
 #include "../lib/util/bitmap.h"
 #include "librpc/gen_ndr/nbt.h"
 #include "source4/lib/tls/tls.h"
+#include "libcli/auth/ntlm_check.h"
 
 #ifdef HAVE_SYS_SYSCTL_H
 #include <sys/sysctl.h>
@@ -167,7 +168,6 @@ static const struct loadparm_service _sDefault =
 	.max_connections = 0,
 	.default_case = CASE_LOWER,
 	.printing = DEFAULT_PRINTING,
-	.oplock_contention_limit = 2,
 	.csc_policy = 0,
 	.block_size = 1024,
 	.dfree_cache_time = 0,
@@ -193,7 +193,7 @@ static const struct loadparm_service _sDefault =
 	.map_system = false,
 	.map_hidden = false,
 	.map_archive = true,
-	.store_dos_attributes = false,
+	.store_dos_attributes = true,
 	.dmapi_support = false,
 	.locking = true,
 	.strict_locking = Auto,
@@ -201,13 +201,13 @@ static const struct loadparm_service _sDefault =
 	.oplocks = true,
 	.kernel_oplocks = false,
 	.level2_oplocks = true,
-	.mangled_names = true,
+	.mangled_names = MANGLED_NAMES_YES,
 	.wide_links = false,
 	.follow_symlinks = true,
 	.sync_always = false,
 	.strict_allocate = false,
 	.strict_rename = false,
-	.strict_sync = false,
+	.strict_sync = true,
 	.mangling_char = '~',
 	.copymap = NULL,
 	.delete_readonly = false,
@@ -229,22 +229,22 @@ static const struct loadparm_service _sDefault =
 	.nt_acl_support = true,
 	.force_unknown_acl_user = false,
 	._use_sendfile = false,
-	.profile_acls = false,
 	.map_acl_inherit = false,
 	.afs_share = false,
-	.ea_support = false,
+	.ea_support = true,
 	.acl_check_permissions = true,
 	.acl_map_full_control = true,
 	.acl_group_control = false,
 	.acl_allow_execute_always = false,
 	.allocation_roundup_size = SMB_ROUNDUP_ALLOCATION_SIZE,
-	.aio_read_size = 0,
-	.aio_write_size = 0,
-	.map_readonly = MAP_READONLY_YES,
+	.aio_read_size = 1,
+	.aio_write_size = 1,
+	.map_readonly = MAP_READONLY_NO,
 	.directory_name_cache_size = 100,
 	.smb_encrypt = SMB_SIGNING_DEFAULT,
 	.kernel_share_modes = true,
 	.durable_handles = true,
+	.check_parent_directory_delete_on_close = false,
 	.param_opt = NULL,
 	.dummy = ""
 };
@@ -555,6 +555,8 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 			 get_dyn_SMB_PASSWD_FILE());
 	lpcfg_string_set(Globals.ctx, &Globals.private_dir,
 			 get_dyn_PRIVATE_DIR());
+	lpcfg_string_set(Globals.ctx, &Globals.binddns_dir,
+			 get_dyn_BINDDNS_DIR());
 
 	/* use the new 'hash2' method by default, with a prefix of 1 */
 	lpcfg_string_set(Globals.ctx, &Globals.mangling_method, "hash2");
@@ -615,7 +617,10 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	lpcfg_string_set(Globals.ctx, &Globals.logon_path,
 			 "\\\\%N\\%U\\profile");
 
-	Globals.name_resolve_order = str_list_make_v3_const(NULL, "lmhosts wins host bcast", NULL);
+	Globals.name_resolve_order =
+			str_list_make_v3_const(Globals.ctx,
+					       DEFAULT_NAME_RESOLVE_ORDER,
+					       NULL);
 	lpcfg_string_set(Globals.ctx, &Globals.password_server, "*");
 
 	Globals.algorithmic_rid_base = BASE_RID;
@@ -647,10 +652,10 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals._client_ipc_min_protocol = PROTOCOL_DEFAULT;
 	Globals._security = SEC_AUTO;
 	Globals.encrypt_passwords = true;
-	Globals.client_schannel = Auto;
+	Globals.client_schannel = true;
 	Globals.winbind_sealed_pipes = true;
 	Globals.require_strong_key = true;
-	Globals.server_schannel = Auto;
+	Globals.server_schannel = true;
 	Globals.read_raw = true;
 	Globals.write_raw = true;
 	Globals.null_passwords = false;
@@ -695,8 +700,8 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.restrict_anonymous = 0;
 	Globals.client_lanman_auth = false;	/* Do NOT use the LanMan hash if it is available */
 	Globals.client_plaintext_auth = false;	/* Do NOT use a plaintext password even if is requested by the server */
-	Globals.lanman_auth = false;	/* Do NOT use the LanMan hash, even if it is supplied */
-	Globals.ntlm_auth = false;	/* Do NOT use NTLMv1 if it is supplied by the client (otherwise NTLMv2) */
+	Globals._lanman_auth = false;	/* Do NOT use the LanMan hash, even if it is supplied */
+	Globals.ntlm_auth = NTLM_AUTH_NTLMV2_ONLY;	/* Do NOT use NTLMv1 if it is supplied by the client (otherwise NTLMv2) */
 	Globals.raw_ntlmv2_auth = false; /* Reject NTLMv2 without NTLMSSP */
 	Globals.client_ntlmv2_auth = true; /* Client should always use use NTLMv2, as we can't tell that the server supports it, but most modern servers do */
 	/* Note, that we will also use NTLM2 session security (which is different), if it is available */
@@ -823,12 +828,12 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.winbind_enum_users = false;
 	Globals.winbind_enum_groups = false;
 	Globals.winbind_use_default_domain = false;
-	Globals.winbind_trusted_domains_only = false;
 	Globals.winbind_nested_groups = true;
 	Globals.winbind_expand_groups = 0;
 	Globals.winbind_nss_info = str_list_make_v3_const(NULL, "template", NULL);
 	Globals.winbind_refresh_tickets = false;
 	Globals.winbind_offline_logon = false;
+	Globals.winbind_scan_trusted_domains = true;
 
 	Globals.idmap_cache_time = 86400 * 7; /* a week by default */
 	Globals.idmap_negative_cache_time = 120; /* 2 minutes by default */
@@ -837,7 +842,6 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 
 	Globals.name_cache_timeout = 660; /* In seconds */
 
-	Globals.use_spnego = true;
 	Globals.client_use_spnego = true;
 
 	Globals.client_signing = SMB_SIGNING_DEFAULT;
@@ -872,7 +876,6 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 
 	Globals.min_receivefile_size = 0;
 
-	Globals.map_untrusted_to_domain = false;
 	Globals.multicast_dns_register = true;
 
 	Globals.smb2_max_read = DEFAULT_SMB2_MAX_READ;
@@ -902,13 +905,10 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals._preferred_master = Auto;
 
 	Globals.allow_dns_updates = DNS_UPDATE_SIGNED;
+	Globals.dns_zone_scavenging = false;
 
 	lpcfg_string_set(Globals.ctx, &Globals.ntp_signd_socket_directory,
 			 get_dyn_NTP_SIGND_SOCKET_DIR());
-
-	lpcfg_string_set(Globals.ctx,
-			 &Globals.winbindd_privileged_socket_directory,
-			 get_dyn_WINBINDD_PRIVILEGED_SOCKET_DIR());
 
 	s = talloc_asprintf(talloc_tos(), "%s/samba_kcc", get_dyn_SCRIPTSBINDIR());
 	if (s == NULL) {
@@ -917,12 +917,25 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.samba_kcc_command = str_list_make_v3_const(NULL, s, NULL);
 	TALLOC_FREE(s);
 
+#ifdef MIT_KDC_PATH
+	Globals.mit_kdc_command = str_list_make_v3_const(NULL, MIT_KDC_PATH, NULL);
+#endif
+
 	s = talloc_asprintf(talloc_tos(), "%s/samba_dnsupdate", get_dyn_SCRIPTSBINDIR());
 	if (s == NULL) {
 		smb_panic("init_globals: ENOMEM");
 	}
 	Globals.dns_update_command = str_list_make_v3_const(NULL, s, NULL);
 	TALLOC_FREE(s);
+
+	s = talloc_asprintf(talloc_tos(), "%s/samba-gpupdate", get_dyn_SCRIPTSBINDIR());
+	if (s == NULL) {
+		smb_panic("init_globals: ENOMEM");
+	}
+	Globals.gpo_update_command = str_list_make_v3_const(NULL, s, NULL);
+	TALLOC_FREE(s);
+
+	Globals.apply_group_policies = false;
 
 	s = talloc_asprintf(talloc_tos(), "%s/samba_spnupdate", get_dyn_SCRIPTSBINDIR());
 	if (s == NULL) {
@@ -954,6 +967,13 @@ static void init_globals(struct loadparm_context *lp_ctx, bool reinit_globals)
 	Globals.web_port = 901;
 
 	Globals.aio_max_threads = 100;
+
+	lpcfg_string_set(Globals.ctx,
+			 &Globals.rpc_server_dynamic_port_range,
+			 "49152-65535");
+	Globals.rpc_low_port = SERVER_TCP_LOW_PORT;
+	Globals.rpc_high_port = SERVER_TCP_HIGH_PORT;
+	Globals.prefork_children = 1;
 
 	/* Now put back the settings that were set with lp_set_cmdline() */
 	apply_lp_set_cmdline();
@@ -1527,6 +1547,7 @@ bool lp_add_home(const char *pszHomename, int iDefaultService,
 		 const char *user, const char *pszHomedir)
 {
 	int i;
+	char *global_path;
 
 	if (pszHomename == NULL || user == NULL || pszHomedir == NULL ||
 			pszHomedir[0] == '\0') {
@@ -1538,12 +1559,13 @@ bool lp_add_home(const char *pszHomename, int iDefaultService,
 	if (i < 0)
 		return false;
 
+	global_path = lp_path(talloc_tos(), GLOBAL_SECTION_SNUM);
 	if (!(*(ServicePtrs[iDefaultService]->path))
-	    || strequal(ServicePtrs[iDefaultService]->path,
-			lp_path(talloc_tos(), GLOBAL_SECTION_SNUM))) {
+	    || strequal(ServicePtrs[iDefaultService]->path, global_path)) {
 		lpcfg_string_set(ServicePtrs[i], &ServicePtrs[i]->path,
 				 pszHomedir);
 	}
+	TALLOC_FREE(global_path);
 
 	if (!(*(ServicePtrs[i]->comment))) {
 		char *comment = talloc_asprintf(talloc_tos(), "Home directory of %s", user);
@@ -1830,8 +1852,8 @@ static bool is_synonym_of(int parm1, int parm2, bool *inverse)
 
 static void show_parameter(int parmIndex)
 {
-	int enumIndex, flagIndex;
-	int parmIndex2;
+	size_t enumIndex, flagIndex;
+	size_t parmIndex2;
 	bool hadFlag;
 	bool hadSyn;
 	bool inverse;
@@ -2392,9 +2414,14 @@ bool lp_file_list_changed(void)
  **/
 static void init_iconv(void)
 {
-	global_iconv_handle = smb_iconv_handle_reinit(NULL, lp_dos_charset(),
-						      lp_unix_charset(),
-						      true, global_iconv_handle);
+	struct smb_iconv_handle *ret = NULL;
+
+	ret = reinit_iconv_handle(NULL,
+				  lp_dos_charset(),
+				  lp_unix_charset());
+	if (ret == NULL) {
+		smb_panic("reinit_iconv_handle failed");
+	}
 }
 
 /***************************************************************************
@@ -3528,6 +3555,19 @@ static bool usershare_exists(int iService, struct timespec *last_mod)
 	return true;
 }
 
+static bool usershare_directory_is_root(uid_t uid)
+{
+	if (uid == 0) {
+		return true;
+	}
+
+	if (uid_wrapper_enabled()) {
+		return true;
+	}
+
+	return false;
+}
+
 /***************************************************************************
  Load a usershare service by name. Returns a valid servicenumber or -1.
 ***************************************************************************/
@@ -3561,9 +3601,11 @@ int load_usershare_service(const char *servicename)
 	 */
 
 #ifdef S_ISVTX
-	if (sbuf.st_ex_uid != 0 || !(sbuf.st_ex_mode & S_ISVTX) || (sbuf.st_ex_mode & S_IWOTH)) {
+	if (!usershare_directory_is_root(sbuf.st_ex_uid) ||
+	    !(sbuf.st_ex_mode & S_ISVTX) || (sbuf.st_ex_mode & S_IWOTH)) {
 #else
-	if (sbuf.st_ex_uid != 0 || (sbuf.st_ex_mode & S_IWOTH)) {
+	if (!usershare_directory_is_root(sbuf.st_ex_uid) ||
+	    (sbuf.st_ex_mode & S_IWOTH)) {
 #endif
 		DEBUG(0,("load_usershare_service: directory %s is not owned by root "
 			"or does not have the sticky bit 't' set or is writable by anyone.\n",
@@ -4133,6 +4175,7 @@ void lp_dump(FILE *f, bool show_defaults, int maxtoprint)
 		fprintf(f,"\n");
 		lp_dump_one(f, show_defaults, iService);
 	}
+	TALLOC_FREE(lp_ctx);
 }
 
 /***************************************************************************
@@ -4186,7 +4229,7 @@ int lp_servicenumber(const char *pszServiceName)
 
 		if (!usershare_exists(iService, &last_mod)) {
 			/* Remove the share security tdb entry for it. */
-			delete_share_security(lp_servicename(talloc_tos(), iService));
+			delete_share_security(lp_const_servicename(iService));
 			/* Remove it from the array. */
 			free_service_byindex(iService);
 			/* Doesn't exist anymore. */
@@ -4503,10 +4546,10 @@ void widelinks_warning(int snum)
 	}
 
 	if (lp_unix_extensions() && lp_wide_links(snum)) {
-		DEBUG(0,("Share '%s' has wide links and unix extensions enabled. "
+		DBG_ERR("Share '%s' has wide links and unix extensions enabled. "
 			"These parameters are incompatible. "
 			"Wide links will be disabled for this share.\n",
-			 lp_servicename(talloc_tos(), snum) ));
+			 lp_const_servicename(snum));
 	}
 }
 
@@ -4544,7 +4587,7 @@ int lp_client_max_protocol(void)
 {
 	int client_max_protocol = lp__client_max_protocol();
 	if (client_max_protocol == PROTOCOL_DEFAULT) {
-		return PROTOCOL_NT1;
+		return PROTOCOL_LATEST;
 	}
 	return client_max_protocol;
 }
@@ -4580,6 +4623,32 @@ int lp_client_ipc_signing(void)
 		return SMB_SIGNING_REQUIRED;
 	}
 	return client_ipc_signing;
+}
+
+int lp_rpc_low_port(void)
+{
+	return Globals.rpc_low_port;
+}
+
+int lp_rpc_high_port(void)
+{
+	return Globals.rpc_high_port;
+}
+
+/*
+ * Do not allow LanMan auth if unless NTLMv1 is also allowed
+ *
+ * This also ensures it is disabled if NTLM is totally disabled
+ */
+bool lp_lanman_auth(void)
+{
+	enum ntlm_auth_level ntlm_auth_level = lp_ntlm_auth();
+
+	if (ntlm_auth_level == NTLM_AUTH_ON) {
+		return lp__lanman_auth();
+	} else {
+		return false;
+	}
 }
 
 struct loadparm_global * get_globals(void)

@@ -18,6 +18,7 @@
  */
 
 #include "includes.h"
+#include "../libcli/auth/netlogon_creds_cli.h"
 #include "lib/netapi/netapi.h"
 #include "lib/netapi/netapi_private.h"
 #include "secrets.h"
@@ -183,6 +184,8 @@ NET_API_STATUS libnetapi_free(struct libnetapi_ctx *ctx)
 	gfree_interfaces();
 
 	secrets_shutdown();
+
+	netlogon_creds_cli_close_global_db();
 
 	if (ctx == stat_ctx) {
 		stat_ctx = NULL;

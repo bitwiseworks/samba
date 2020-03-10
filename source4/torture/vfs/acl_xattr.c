@@ -57,7 +57,6 @@ static bool torture_smb2_con_share(struct torture_context *tctx,
         struct smbcli_options options;
         NTSTATUS status;
         const char *host = torture_setting_string(tctx, "host", NULL);
-        struct cli_credentials *credentials = cmdline_credentials;
 
         lpcfg_smbcli_options(tctx->lp_ctx, &options);
 
@@ -66,7 +65,7 @@ static bool torture_smb2_con_share(struct torture_context *tctx,
                                   lpcfg_smb_ports(tctx->lp_ctx),
                                   share,
                                   lpcfg_resolve_context(tctx->lp_ctx),
-                                  credentials,
+                                  popt_get_cmdline_credentials(),
                                   0,
                                   tree,
                                   tctx->ev,
@@ -303,9 +302,9 @@ done:
 /*
    basic testing of vfs_acl_xattr
 */
-struct torture_suite *torture_acl_xattr(void)
+struct torture_suite *torture_acl_xattr(TALLOC_CTX *ctx)
 {
-	struct torture_suite *suite = torture_suite_create(talloc_autofree_context(), "acl_xattr");
+	struct torture_suite *suite = torture_suite_create(ctx, "acl_xattr");
 
 	torture_suite_add_1smb2_test(suite, "default-acl-style-posix", test_default_acl_posix);
 	torture_suite_add_1smb2_test(suite, "default-acl-style-windows", test_default_acl_win);

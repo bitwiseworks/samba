@@ -29,6 +29,7 @@
 #include "libcli/smb/smbXcli_base.h"
 #include "libcli/security/security.h"
 #include "lib/param/param.h"
+#include "lease_break_handler.h"
 
 #define CHECK_VAL(v, correct) do { \
 	if ((v) != (correct)) { \
@@ -384,140 +385,6 @@ static bool test_lease_upgrade2(struct torture_context *tctx,
 }
 
 
-#define CHECK_LEASE_BREAK(__lb, __oldstate, __state, __key)		\
-	do {								\
-		uint16_t __new = smb2_util_lease_state(__state); \
-		uint16_t __old = smb2_util_lease_state(__oldstate); \
-		CHECK_VAL((__lb)->new_lease_state, __new);	\
-		CHECK_VAL((__lb)->current_lease.lease_state, __old); \
-		CHECK_VAL((__lb)->current_lease.lease_key.data[0], (__key)); \
-		CHECK_VAL((__lb)->current_lease.lease_key.data[1], ~(__key)); \
-		if (__old & (SMB2_LEASE_WRITE | SMB2_LEASE_HANDLE)) { \
-			CHECK_VAL((__lb)->break_flags, \
-				  SMB2_NOTIFY_BREAK_LEASE_FLAG_ACK_REQUIRED);	\
-		} else { \
-			CHECK_VAL((__lb)->break_flags, 0); \
-		} \
-	} while(0)
-
-#define CHECK_LEASE_BREAK_ACK(__lba, __state, __key)			\
-	do {								\
-		CHECK_VAL((__lba)->out.reserved, 0);			\
-		CHECK_VAL((__lba)->out.lease.lease_key.data[0], (__key)); \
-		CHECK_VAL((__lba)->out.lease.lease_key.data[1], ~(__key)); \
-		CHECK_VAL((__lba)->out.lease.lease_state, smb2_util_lease_state(__state)); \
-		CHECK_VAL((__lba)->out.lease.lease_flags, 0);		\
-		CHECK_VAL((__lba)->out.lease.lease_duration, 0);	\
-	} while(0)
-
-static struct torture_lease_break {
-	struct smb2_lease_break lease_break;
-	struct smb2_transport *lease_transport;
-	bool lease_skip_ack;
-	struct smb2_lease_break_ack lease_break_ack;
-	int count;
-	int failures;
-
-	struct smb2_handle oplock_handle;
-	uint8_t held_oplock_level;
-	uint8_t oplock_level;
-	int oplock_count;
-	int oplock_failures;
-} break_info;
-
-#define CHECK_NO_BREAK(tctx)	\
-	do {								\
-		torture_wait_for_lease_break(tctx);			\
-		CHECK_VAL(break_info.failures, 0);			\
-		CHECK_VAL(break_info.count, 0);				\
-		CHECK_VAL(break_info.oplock_failures, 0);		\
-		CHECK_VAL(break_info.oplock_count, 0);			\
-	} while(0)
-
-#define CHECK_OPLOCK_BREAK(__brokento)	\
-	do {								\
-		torture_wait_for_lease_break(tctx);			\
-		CHECK_VAL(break_info.oplock_count, 1);			\
-		CHECK_VAL(break_info.oplock_failures, 0);		\
-		CHECK_VAL(break_info.oplock_level,			\
-			  smb2_util_oplock_level(__brokento)); \
-		break_info.held_oplock_level = break_info.oplock_level; \
-	} while(0)
-
-#define _CHECK_BREAK_INFO(__oldstate, __state, __key)			\
-	do {								\
-		torture_wait_for_lease_break(tctx);			\
-		CHECK_VAL(break_info.failures, 0);			\
-		CHECK_VAL(break_info.count, 1);				\
-		CHECK_LEASE_BREAK(&break_info.lease_break, (__oldstate), \
-		    (__state), (__key));				\
-		if (!break_info.lease_skip_ack && \
-		    (break_info.lease_break.break_flags &		\
-		     SMB2_NOTIFY_BREAK_LEASE_FLAG_ACK_REQUIRED))	\
-		{	\
-			torture_wait_for_lease_break(tctx);		\
-			CHECK_LEASE_BREAK_ACK(&break_info.lease_break_ack, \
-				              (__state), (__key));	\
-		}							\
-	} while(0)
-
-#define CHECK_BREAK_INFO(__oldstate, __state, __key)			\
-	do {								\
-		_CHECK_BREAK_INFO(__oldstate, __state, __key);		\
-		CHECK_VAL(break_info.lease_break.new_epoch, 0);		\
-	} while(0)
-
-#define CHECK_BREAK_INFO_V2(__transport, __oldstate, __state, __key, __epoch) \
-	do {								\
-		_CHECK_BREAK_INFO(__oldstate, __state, __key);		\
-		CHECK_VAL(break_info.lease_break.new_epoch, __epoch);	\
-		if (!TARGET_IS_SAMBA3(tctx)) {				\
-			CHECK_VAL((uintptr_t)break_info.lease_transport, \
-				  (uintptr_t)__transport);		\
-		} \
-	} while(0)
-
-static void torture_lease_break_callback(struct smb2_request *req)
-{
-	NTSTATUS status;
-
-	status = smb2_lease_break_ack_recv(req, &break_info.lease_break_ack);
-	if (!NT_STATUS_IS_OK(status))
-		break_info.failures++;
-
-	return;
-}
-
-/* a lease break request handler */
-static bool torture_lease_handler(struct smb2_transport *transport,
-				  const struct smb2_lease_break *lb,
-				  void *private_data)
-{
-	struct smb2_tree *tree = private_data;
-	struct smb2_lease_break_ack io;
-	struct smb2_request *req;
-
-	break_info.lease_transport = transport;
-	break_info.lease_break = *lb;
-	break_info.count++;
-
-	if (break_info.lease_skip_ack) {
-		return true;
-	}
-
-	if (lb->break_flags & SMB2_NOTIFY_BREAK_LEASE_FLAG_ACK_REQUIRED) {
-		ZERO_STRUCT(io);
-		io.in.lease.lease_key = lb->current_lease.lease_key;
-		io.in.lease.lease_state = lb->new_lease_state;
-
-		req = smb2_lease_break_ack_send(tree, &io);
-		req->async.fn = torture_lease_break_callback;
-		req->async.private_data = NULL;
-	}
-
-	return true;
-}
-
 /**
  * upgrade3:
  * full matrix of lease upgrade combinations
@@ -607,7 +474,7 @@ static bool test_lease_upgrade3(struct torture_context *tctx,
 
 		smb2_util_unlink(tree, fname);
 
-		ZERO_STRUCT(break_info);
+		ZERO_STRUCT(lease_break_info);
 
 		/* grab first lease */
 		smb2_lease_create(&io, &ls, false, fname, LEASE1, smb2_util_lease_state(t.held1));
@@ -626,8 +493,8 @@ static bool test_lease_upgrade3(struct torture_context *tctx,
 		h2 = io.out.file.handle;
 
 		/* no break has happened */
-		CHECK_VAL(break_info.count, 0);
-		CHECK_VAL(break_info.failures, 0);
+		CHECK_VAL(lease_break_info.count, 0);
+		CHECK_VAL(lease_break_info.failures, 0);
 
 		/* try to upgrade lease1 */
 		smb2_lease_create(&io, &ls, false, fname, LEASE1, smb2_util_lease_state(t.upgrade_to));
@@ -638,8 +505,8 @@ static bool test_lease_upgrade3(struct torture_context *tctx,
 		hnew = io.out.file.handle;
 
 		/* no break has happened */
-		CHECK_VAL(break_info.count, 0);
-		CHECK_VAL(break_info.failures, 0);
+		CHECK_VAL(lease_break_info.count, 0);
+		CHECK_VAL(lease_break_info.failures, 0);
 
 		smb2_util_close(tree, hnew);
 		smb2_util_close(tree, h);
@@ -659,59 +526,6 @@ static bool test_lease_upgrade3(struct torture_context *tctx,
 }
 
 
-
-/*
-   Timer handler function notifies the registering function that time is up
-*/
-static void timeout_cb(struct tevent_context *ev,
-		       struct tevent_timer *te,
-		       struct timeval current_time,
-		       void *private_data)
-{
-	bool *timesup = (bool *)private_data;
-	*timesup = true;
-	return;
-}
-
-/*
-   Wait a short period of time to receive a single oplock break request
-*/
-static void torture_wait_for_lease_break(struct torture_context *tctx)
-{
-	TALLOC_CTX *tmp_ctx = talloc_new(NULL);
-	struct tevent_timer *te = NULL;
-	struct timeval ne;
-	bool timesup = false;
-	int old_count = break_info.count;
-
-	/* Wait .1 seconds for an lease break */
-	ne = tevent_timeval_current_ofs(0, 100000);
-
-	te = tevent_add_timer(tctx->ev, tmp_ctx, ne, timeout_cb, &timesup);
-	if (te == NULL) {
-		torture_comment(tctx, "Failed to wait for an oplock break. "
-				      "test results may not be accurate.");
-		goto done;
-	}
-
-	while (!timesup && break_info.count < old_count + 1) {
-		if (tevent_loop_once(tctx->ev) != 0) {
-			torture_comment(tctx, "Failed to wait for an oplock "
-					      "break. test results may not be "
-					      "accurate.");
-			goto done;
-		}
-	}
-
-done:
-	/* We don't know if the timed event fired and was freed, we received
-	 * our oplock break, or some other event triggered the loop.  Thus,
-	 * we create a tmp_ctx to be able to safely free/remove the timed
-	 * event in all 3 cases. */
-	talloc_free(tmp_ctx);
-
-	return;
-}
 
 /*
   break_results should be read as "held lease, new lease, hold broken to, new
@@ -778,7 +592,7 @@ static bool test_lease_break(struct torture_context *tctx,
 		    held, smb2_util_lease_state(held), contend, smb2_util_lease_state(contend),
 		    brokento, smb2_util_lease_state(brokento), granted, smb2_util_lease_state(granted));
 
-		ZERO_STRUCT(break_info);
+		ZERO_STRUCT(lease_break_info);
 
 		/* Grab lease. */
 		smb2_lease_create(&io, &ls, false, fname, LEASE1, smb2_util_lease_state(held));
@@ -802,7 +616,7 @@ static bool test_lease_break(struct torture_context *tctx,
 			CHECK_NO_BREAK(tctx);
 		}
 
-		ZERO_STRUCT(break_info);
+		ZERO_STRUCT(lease_break_info);
 
 		/*
 		  Now verify that an attempt to upgrade LEASE1 results in no
@@ -814,8 +628,8 @@ static bool test_lease_break(struct torture_context *tctx,
 		h3 = io.out.file.handle;
 		CHECK_CREATED(&io, EXISTED, FILE_ATTRIBUTE_ARCHIVE);
 		CHECK_LEASE(&io, brokento, true, LEASE1, 0);
-		CHECK_VAL(break_info.count, 0);
-		CHECK_VAL(break_info.failures, 0);
+		CHECK_VAL(lease_break_info.count, 0);
+		CHECK_VAL(lease_break_info.failures, 0);
 
 		smb2_util_close(tree, h);
 		smb2_util_close(tree, h2);
@@ -874,7 +688,7 @@ static bool test_lease_nobreakself(struct torture_context *tctx,
 	h2 = io.out.file.handle;
 	CHECK_LEASE(&io, "R", true, LEASE2, 0);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	tree->session->transport->lease.handler	= torture_lease_handler;
 	tree->session->transport->lease.private_data = tree;
@@ -896,14 +710,14 @@ static bool test_lease_nobreakself(struct torture_context *tctx,
 
 	/* Now break LEASE1 via h2 */
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 	status = smb2_util_write(tree, h2, &c, 0, 1);
 	CHECK_STATUS(status, NT_STATUS_OK);
 	CHECK_BREAK_INFO("R", "", LEASE1);
 
 	/* .. and break LEASE2 via h1 */
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 	status = smb2_util_write(tree, h1, &c, 0, 1);
 	CHECK_STATUS(status, NT_STATUS_OK);
 	CHECK_BREAK_INFO("R", "", LEASE2);
@@ -956,7 +770,7 @@ static bool test_lease_statopen(struct torture_context *tctx,
 	h2 = io.out.file.handle;
 	CHECK_LEASE(&io, "RWH", true, LEASE1, 0);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	tree->session->transport->lease.handler	= torture_lease_handler;
 	tree->session->transport->lease.private_data = tree;
@@ -1014,7 +828,7 @@ static bool test_lease_statopen2(struct torture_context *tctx,
 	}
 
 	smb2_util_unlink(tree, fname);
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 	tree->session->transport->lease.handler	= torture_lease_handler;
 	tree->session->transport->lease.private_data = tree;
 
@@ -1075,6 +889,72 @@ done:
 	return ret;
 }
 
+static bool test_lease_statopen3(struct torture_context *tctx,
+				 struct smb2_tree *tree)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	struct smb2_create io;
+	struct smb2_lease ls;
+	struct smb2_handle h1 = {{0}};
+	struct smb2_handle h2 = {{0}};
+	NTSTATUS status;
+	const char *fname = "lease_statopen3.dat";
+	bool ret = true;
+	uint32_t caps;
+
+	caps = smb2cli_conn_server_capabilities(
+		tree->session->transport->conn);
+	if (!(caps & SMB2_CAP_LEASING)) {
+		torture_skip(tctx, "leases are not supported");
+	}
+
+	smb2_util_unlink(tree, fname);
+	ZERO_STRUCT(lease_break_info);
+	tree->session->transport->lease.handler	= torture_lease_handler;
+	tree->session->transport->lease.private_data = tree;
+
+	status = torture_smb2_testfile(tree, fname, &h1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	smb2_util_close(tree, h1);
+	ZERO_STRUCT(h1);
+
+	/* Stat open */
+	ZERO_STRUCT(io);
+	io.in.desired_access = FILE_READ_ATTRIBUTES;
+	io.in.share_access = NTCREATEX_SHARE_ACCESS_MASK;
+	io.in.file_attributes = FILE_ATTRIBUTE_NORMAL;
+	io.in.create_disposition = NTCREATEX_DISP_OPEN;
+	io.in.fname = fname;
+	status = smb2_create(tree, mem_ctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h1 = io.out.file.handle;
+
+	/* Open file with RWH lease. */
+	smb2_lease_create_share(&io, &ls, false, fname,
+				smb2_util_share_access("RWD"),
+				LEASE1,
+				smb2_util_lease_state("RWH"));
+	io.in.desired_access = SEC_FILE_WRITE_DATA;
+	status = smb2_create(tree, mem_ctx, &io);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed\n");
+	h2 = io.out.file.handle;
+	CHECK_LEASE(&io, "RWH", true, LEASE1, 0);
+
+done:
+	if (!smb2_util_handle_empty(h1)) {
+		smb2_util_close(tree, h1);
+	}
+	if (!smb2_util_handle_empty(h2)) {
+		smb2_util_close(tree, h2);
+	}
+	smb2_util_unlink(tree, fname);
+	talloc_free(mem_ctx);
+	return ret;
+}
+
 static void torture_oplock_break_callback(struct smb2_request *req)
 {
 	NTSTATUS status;
@@ -1083,7 +963,7 @@ static void torture_oplock_break_callback(struct smb2_request *req)
 	ZERO_STRUCT(br);
 	status = smb2_break_recv(req, &br);
 	if (!NT_STATUS_IS_OK(status))
-		break_info.oplock_failures++;
+		lease_break_info.oplock_failures++;
 
 	return;
 }
@@ -1097,20 +977,20 @@ static bool torture_oplock_handler(struct smb2_transport *transport,
 	struct smb2_request *req;
 	struct smb2_break br;
 
-	break_info.oplock_handle = *handle;
-	break_info.oplock_level	= level;
-	break_info.oplock_count++;
+	lease_break_info.oplock_handle = *handle;
+	lease_break_info.oplock_level	= level;
+	lease_break_info.oplock_count++;
 
 	ZERO_STRUCT(br);
 	br.in.file.handle = *handle;
 	br.in.oplock_level = level;
 
-	if (break_info.held_oplock_level > SMB2_OPLOCK_LEVEL_II) {
+	if (lease_break_info.held_oplock_level > SMB2_OPLOCK_LEVEL_II) {
 		req = smb2_break_send(tree, &br);
 		req->async.fn = torture_oplock_break_callback;
 		req->async.private_data = NULL;
 	}
-	break_info.held_oplock_level = level;
+	lease_break_info.held_oplock_level = level;
 
 	return true;
 }
@@ -1186,7 +1066,7 @@ static bool test_lease_oplock(struct torture_context *tctx,
 		    held, smb2_util_lease_state(held), contend, smb2_util_oplock_level(contend),
 		    brokento, smb2_util_lease_state(brokento), granted, smb2_util_oplock_level(granted));
 
-		ZERO_STRUCT(break_info);
+		ZERO_STRUCT(lease_break_info);
 
 		/* Grab lease. */
 		smb2_lease_create(&io, &ls, false, fname, LEASE1, smb2_util_lease_state(held));
@@ -1203,7 +1083,7 @@ static bool test_lease_oplock(struct torture_context *tctx,
 		h2 = io.out.file.handle;
 		CHECK_CREATED(&io, EXISTED, FILE_ATTRIBUTE_ARCHIVE);
 		CHECK_VAL(io.out.oplock_level, smb2_util_oplock_level(granted));
-		break_info.held_oplock_level = io.out.oplock_level;
+		lease_break_info.held_oplock_level = io.out.oplock_level;
 
 		if (smb2_util_lease_state(held) != smb2_util_lease_state(brokento)) {
 			CHECK_BREAK_INFO(held, brokento, LEASE1);
@@ -1228,7 +1108,7 @@ static bool test_lease_oplock(struct torture_context *tctx,
 		    held, smb2_util_oplock_level(held), contend, smb2_util_lease_state(contend),
 		    brokento, smb2_util_oplock_level(brokento), granted, smb2_util_lease_state(granted));
 
-		ZERO_STRUCT(break_info);
+		ZERO_STRUCT(lease_break_info);
 
 		/* Grab an oplock. */
 		smb2_oplock_create(&io, fname, smb2_util_oplock_level(held));
@@ -1237,7 +1117,7 @@ static bool test_lease_oplock(struct torture_context *tctx,
 		h = io.out.file.handle;
 		CHECK_CREATED(&io, CREATED, FILE_ATTRIBUTE_ARCHIVE);
 		CHECK_VAL(io.out.oplock_level, smb2_util_oplock_level(held));
-		break_info.held_oplock_level = io.out.oplock_level;
+		lease_break_info.held_oplock_level = io.out.oplock_level;
 
 		/* Grab lease. */
 		smb2_lease_create(&io, &ls, false, fname, LEASE1, smb2_util_lease_state(contend));
@@ -1298,7 +1178,7 @@ static bool test_lease_multibreak(struct torture_context *tctx,
 
 	smb2_util_unlink(tree, fname);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	/* Grab lease, upgrade to RHW .. */
 	smb2_lease_create(&io, &ls, false, fname, LEASE1, smb2_util_lease_state("RH"));
@@ -1334,7 +1214,7 @@ static bool test_lease_multibreak(struct torture_context *tctx,
 	status = smb2_util_close(tree, h3);
 	CHECK_STATUS(status, NT_STATUS_OK);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	/* Grab an R lease. */
 	smb2_lease_create(&io, &ls, false, fname, LEASE1, smb2_util_lease_state("R"));
@@ -1351,7 +1231,7 @@ static bool test_lease_multibreak(struct torture_context *tctx,
 	h2 = io.out.file.handle;
 	CHECK_CREATED(&io, EXISTED, FILE_ATTRIBUTE_ARCHIVE);
 	CHECK_VAL(io.out.oplock_level, smb2_util_oplock_level("s"));
-	break_info.held_oplock_level = io.out.oplock_level;
+	lease_break_info.held_oplock_level = io.out.oplock_level;
 
 	/* Verify no breaks. */
 	CHECK_NO_BREAK(tctx);
@@ -1364,7 +1244,7 @@ static bool test_lease_multibreak(struct torture_context *tctx,
 	h3 = io.out.file.handle;
 	CHECK_CREATED(&io, TRUNCATED, FILE_ATTRIBUTE_ARCHIVE);
 	CHECK_VAL(io.out.oplock_level, smb2_util_oplock_level(""));
-	break_info.held_oplock_level = io.out.oplock_level;
+	lease_break_info.held_oplock_level = io.out.oplock_level;
 
 	/* Sleep, use a write to clear the recv queue. */
 	smb_msleep(250);
@@ -1421,7 +1301,7 @@ static bool test_lease_v2_request_parent(struct torture_context *tctx,
 
 	smb2_util_unlink(tree, fname);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	ZERO_STRUCT(io);
 	smb2_lease_v2_create_share(&io, &ls, false, fname,
@@ -1474,7 +1354,7 @@ static bool test_lease_break_twice(struct torture_context *tctx,
 
 	smb2_util_unlink(tree, fname);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 	ZERO_STRUCT(io);
 
 	smb2_lease_v2_create_share(
@@ -1490,7 +1370,7 @@ static bool test_lease_break_twice(struct torture_context *tctx,
 	tree->session->transport->lease.handler = torture_lease_handler;
 	tree->session->transport->lease.private_data = tree;
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	smb2_lease_v2_create_share(
 		&io, &ls2, false, fname, smb2_util_share_access("R"),
@@ -1505,7 +1385,7 @@ static bool test_lease_break_twice(struct torture_context *tctx,
 		&io, &ls2, false, fname, smb2_util_share_access("RWD"),
 		LEASE2, NULL, smb2_util_lease_state("RWH"), 0x22);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	status = smb2_create(tree, mem_ctx, &io);
 	CHECK_STATUS(status, NT_STATUS_OK);
@@ -1562,7 +1442,7 @@ static bool test_lease_v2_request(struct torture_context *tctx,
 	tree->session->transport->oplock.handler = torture_oplock_handler;
 	tree->session->transport->oplock.private_data = tree;
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	ZERO_STRUCT(io);
 	smb2_lease_v2_create_share(&io, &ls1, false, fname,
@@ -1620,7 +1500,7 @@ static bool test_lease_v2_request(struct torture_context *tctx,
 	CHECK_BREAK_INFO_V2(tree->session->transport,
 			    "RH", "", LEASE2, ls2.lease_epoch + 2);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	ZERO_STRUCT(io);
 	smb2_lease_v2_create_share(&io, &ls2t, true, dname,
@@ -1705,7 +1585,7 @@ static bool test_lease_v2_epoch1(struct torture_context *tctx,
 	tree->session->transport->oplock.handler = torture_oplock_handler;
 	tree->session->transport->oplock.private_data = tree;
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	ZERO_STRUCT(io);
 	smb2_lease_v2_create_share(&io, &ls, false, fname,
@@ -1770,7 +1650,7 @@ static bool test_lease_v2_epoch2(struct torture_context *tctx,
 	tree->session->transport->oplock.handler = torture_oplock_handler;
 	tree->session->transport->oplock.private_data = tree;
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	ZERO_STRUCT(io);
 	smb2_lease_v2_create_share(&io, &ls1v2, false, fname,
@@ -1875,7 +1755,7 @@ static bool test_lease_v2_epoch3(struct torture_context *tctx,
 	tree->session->transport->oplock.handler = torture_oplock_handler;
 	tree->session->transport->oplock.private_data = tree;
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	ZERO_STRUCT(io);
 	smb2_lease_create_share(&io, &ls1v1, false, fname,
@@ -1980,8 +1860,8 @@ static bool test_lease_breaking1(struct torture_context *tctx,
 	/*
 	 * we defer acking the lease break.
 	 */
-	ZERO_STRUCT(break_info);
-	break_info.lease_skip_ack = true;
+	ZERO_STRUCT(lease_break_info);
+	lease_break_info.lease_skip_ack = true;
 
 	smb2_lease_create_share(&io1, &ls1, false, fname,
 				smb2_util_share_access("RWD"),
@@ -2009,10 +1889,10 @@ static bool test_lease_breaking1(struct torture_context *tctx,
 	torture_assert(tctx, req2->state == SMB2_REQUEST_RECV, "req2 pending");
 
 	ack.in.lease.lease_key =
-		break_info.lease_break.current_lease.lease_key;
+		lease_break_info.lease_break.current_lease.lease_key;
 	ack.in.lease.lease_state =
-		break_info.lease_break.new_lease_state;
-	ZERO_STRUCT(break_info);
+		lease_break_info.lease_break.new_lease_state;
+	ZERO_STRUCT(lease_break_info);
 
 	/*
 	 * a open using the same lease key is still works,
@@ -2087,8 +1967,8 @@ static bool test_lease_breaking2(struct torture_context *tctx,
 	/*
 	 * we defer acking the lease break.
 	 */
-	ZERO_STRUCT(break_info);
-	break_info.lease_skip_ack = true;
+	ZERO_STRUCT(lease_break_info);
+	lease_break_info.lease_skip_ack = true;
 
 	smb2_lease_create_share(&io1, &ls1, false, fname,
 				smb2_util_share_access("RWD"),
@@ -2117,8 +1997,8 @@ static bool test_lease_breaking2(struct torture_context *tctx,
 	torture_assert(tctx, req2->state == SMB2_REQUEST_RECV, "req2 pending");
 
 	ack.in.lease.lease_key =
-		break_info.lease_break.current_lease.lease_key;
-	ZERO_STRUCT(break_info);
+		lease_break_info.lease_break.current_lease.lease_key;
+	ZERO_STRUCT(lease_break_info);
 
 	/*
 	 * a open using the same lease key is still works,
@@ -2220,7 +2100,7 @@ static bool test_lease_breaking3(struct torture_context *tctx,
 	struct smb2_handle h3 = {};
 	struct smb2_request *req2 = NULL;
 	struct smb2_request *req3 = NULL;
-	struct torture_lease_break break_info_tmp = {};
+	struct lease_break_info lease_break_info_tmp = {};
 	struct smb2_lease_break_ack ack = {};
 	const char *fname = "lease_breaking3.dat";
 	bool ret = true;
@@ -2242,8 +2122,8 @@ static bool test_lease_breaking3(struct torture_context *tctx,
 	/*
 	 * we defer acking the lease break.
 	 */
-	ZERO_STRUCT(break_info);
-	break_info.lease_skip_ack = true;
+	ZERO_STRUCT(lease_break_info);
+	lease_break_info.lease_skip_ack = true;
 
 	smb2_lease_create_share(&io1, &ls1, false, fname,
 				smb2_util_share_access("RWD"),
@@ -2285,22 +2165,22 @@ static bool test_lease_breaking3(struct torture_context *tctx,
 	 * a conflicting open with NTCREATEX_DISP_OVERWRITE
 	 * doesn't trigger an immediate lease break to none.
 	 */
-	break_info_tmp = break_info;
-	ZERO_STRUCT(break_info);
+	lease_break_info_tmp = lease_break_info;
+	ZERO_STRUCT(lease_break_info);
 	smb2_oplock_create(&io3, fname, SMB2_OPLOCK_LEVEL_NONE);
 	io3.in.create_disposition = NTCREATEX_DISP_OVERWRITE;
 	req3 = smb2_create_send(tree, &io3);
 	torture_assert(tctx, req3 != NULL, "smb2_create_send");
 	CHECK_NO_BREAK(tctx);
-	break_info = break_info_tmp;
+	lease_break_info = lease_break_info_tmp;
 
 	torture_assert(tctx, req3->state == SMB2_REQUEST_RECV, "req3 pending");
 
 	ack.in.lease.lease_key =
-		break_info.lease_break.current_lease.lease_key;
+		lease_break_info.lease_break.current_lease.lease_key;
 	ack.in.lease.lease_state =
-		break_info.lease_break.new_lease_state;
-	ZERO_STRUCT(break_info);
+		lease_break_info.lease_break.new_lease_state;
+	ZERO_STRUCT(lease_break_info);
 
 	/*
 	 * a open using the same lease key is still works,
@@ -2318,7 +2198,7 @@ static bool test_lease_breaking3(struct torture_context *tctx,
 	/*
 	 * We ack the lease break, but defer acking the next break (to "R")
 	 */
-	break_info.lease_skip_ack = true;
+	lease_break_info.lease_skip_ack = true;
 	status = smb2_lease_break_ack(tree, &ack);
 	CHECK_STATUS(status, NT_STATUS_OK);
 	CHECK_LEASE_BREAK_ACK(&ack, "RH", LEASE1);
@@ -2330,10 +2210,10 @@ static bool test_lease_breaking3(struct torture_context *tctx,
 	CHECK_BREAK_INFO("RH", "R", LEASE1);
 
 	ack.in.lease.lease_key =
-		break_info.lease_break.current_lease.lease_key;
+		lease_break_info.lease_break.current_lease.lease_key;
 	ack.in.lease.lease_state =
-		break_info.lease_break.new_lease_state;
-	ZERO_STRUCT(break_info);
+		lease_break_info.lease_break.new_lease_state;
+	ZERO_STRUCT(lease_break_info);
 
 	/*
 	 * a open using the same lease key is still works,
@@ -2368,7 +2248,7 @@ static bool test_lease_breaking3(struct torture_context *tctx,
 	torture_assert(tctx, req3->cancel.can_cancel,
 		       "req3 can_cancel");
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	status = smb2_create_recv(req2, tctx, &io2);
 	CHECK_STATUS(status, NT_STATUS_OK);
@@ -2408,7 +2288,7 @@ static bool test_lease_v2_breaking3(struct torture_context *tctx,
 	struct smb2_handle h3 = {};
 	struct smb2_request *req2 = NULL;
 	struct smb2_request *req3 = NULL;
-	struct torture_lease_break break_info_tmp = {};
+	struct lease_break_info lease_break_info_tmp = {};
 	struct smb2_lease_break_ack ack = {};
 	const char *fname = "v2_lease_breaking3.dat";
 	bool ret = true;
@@ -2436,8 +2316,8 @@ static bool test_lease_v2_breaking3(struct torture_context *tctx,
 	/*
 	 * we defer acking the lease break.
 	 */
-	ZERO_STRUCT(break_info);
-	break_info.lease_skip_ack = true;
+	ZERO_STRUCT(lease_break_info);
+	lease_break_info.lease_skip_ack = true;
 
 	smb2_lease_v2_create_share(&io1, &ls1, false, fname,
 				   smb2_util_share_access("RWD"),
@@ -2469,7 +2349,7 @@ static bool test_lease_v2_breaking3(struct torture_context *tctx,
 	torture_assert(tctx, req2->state == SMB2_REQUEST_RECV, "req2 pending");
 
 	/* On receiving a lease break, we must sync the new epoch. */
-	ls1.lease_epoch = break_info.lease_break.new_epoch;
+	ls1.lease_epoch = lease_break_info.lease_break.new_epoch;
 
 	/*
 	 * a open using the same lease key is still works,
@@ -2486,22 +2366,22 @@ static bool test_lease_v2_breaking3(struct torture_context *tctx,
 	 * a conflicting open with NTCREATEX_DISP_OVERWRITE
 	 * doesn't trigger an immediate lease break to none.
 	 */
-	break_info_tmp = break_info;
-	ZERO_STRUCT(break_info);
+	lease_break_info_tmp = lease_break_info;
+	ZERO_STRUCT(lease_break_info);
 	smb2_oplock_create(&io3, fname, SMB2_OPLOCK_LEVEL_NONE);
 	io3.in.create_disposition = NTCREATEX_DISP_OVERWRITE;
 	req3 = smb2_create_send(tree, &io3);
 	torture_assert(tctx, req3 != NULL, "smb2_create_send");
 	CHECK_NO_BREAK(tctx);
-	break_info = break_info_tmp;
+	lease_break_info = lease_break_info_tmp;
 
 	torture_assert(tctx, req3->state == SMB2_REQUEST_RECV, "req3 pending");
 
 	ack.in.lease.lease_key =
-		break_info.lease_break.current_lease.lease_key;
+		lease_break_info.lease_break.current_lease.lease_key;
 	ack.in.lease.lease_state =
-		break_info.lease_break.new_lease_state;
-	ZERO_STRUCT(break_info);
+		lease_break_info.lease_break.new_lease_state;
+	ZERO_STRUCT(lease_break_info);
 
 	/*
 	 * a open using the same lease key is still works,
@@ -2519,7 +2399,7 @@ static bool test_lease_v2_breaking3(struct torture_context *tctx,
 	/*
 	 * We ack the lease break, but defer acking the next break (to "R")
 	 */
-	break_info.lease_skip_ack = true;
+	lease_break_info.lease_skip_ack = true;
 	status = smb2_lease_break_ack(tree, &ack);
 	CHECK_STATUS(status, NT_STATUS_OK);
 	CHECK_LEASE_BREAK_ACK(&ack, "RH", LEASE1);
@@ -2531,13 +2411,13 @@ static bool test_lease_v2_breaking3(struct torture_context *tctx,
 	CHECK_BREAK_INFO_V2(tree->session->transport,
 			    "RH", "R", LEASE1, ls1.lease_epoch);
 	/* On receiving a lease break, we must sync the new epoch. */
-	ls1.lease_epoch = break_info.lease_break.new_epoch;
+	ls1.lease_epoch = lease_break_info.lease_break.new_epoch;
 
 	ack.in.lease.lease_key =
-		break_info.lease_break.current_lease.lease_key;
+		lease_break_info.lease_break.current_lease.lease_key;
 	ack.in.lease.lease_state =
-		break_info.lease_break.new_lease_state;
-	ZERO_STRUCT(break_info);
+		lease_break_info.lease_break.new_lease_state;
+	ZERO_STRUCT(lease_break_info);
 
 	/*
 	 * a open using the same lease key is still works,
@@ -2573,7 +2453,7 @@ static bool test_lease_v2_breaking3(struct torture_context *tctx,
 	torture_assert(tctx, req3->cancel.can_cancel,
 		       "req3 can_cancel");
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	status = smb2_create_recv(req2, tctx, &io2);
 	CHECK_STATUS(status, NT_STATUS_OK);
@@ -2613,7 +2493,7 @@ static bool test_lease_breaking4(struct torture_context *tctx,
 	struct smb2_handle h2 = {};
 	struct smb2_handle h3 = {};
 	struct smb2_request *req2 = NULL;
-	struct torture_lease_break break_info_tmp = {};
+	struct lease_break_info lease_break_info_tmp = {};
 	struct smb2_lease_break_ack ack = {};
 	const char *fname = "lease_breaking4.dat";
 	bool ret = true;
@@ -2635,8 +2515,8 @@ static bool test_lease_breaking4(struct torture_context *tctx,
 	/*
 	 * we defer acking the lease break.
 	 */
-	ZERO_STRUCT(break_info);
-	break_info.lease_skip_ack = true;
+	ZERO_STRUCT(lease_break_info);
+	lease_break_info.lease_skip_ack = true;
 
 	smb2_lease_create_share(&io1, &ls1, false, fname,
 				smb2_util_share_access("RWD"),
@@ -2665,8 +2545,8 @@ static bool test_lease_breaking4(struct torture_context *tctx,
 	 */
 	CHECK_BREAK_INFO("RH", "", LEASE1);
 
-	break_info_tmp = break_info;
-	ZERO_STRUCT(break_info);
+	lease_break_info_tmp = lease_break_info;
+	ZERO_STRUCT(lease_break_info);
 	CHECK_NO_BREAK(tctx);
 
 	torture_assert(tctx, req2->state == SMB2_REQUEST_DONE, "req2 done");
@@ -2721,13 +2601,13 @@ static bool test_lease_breaking4(struct torture_context *tctx,
 	 * We finally ack the lease break...
 	 */
 	CHECK_NO_BREAK(tctx);
-	break_info = break_info_tmp;
+	lease_break_info = lease_break_info_tmp;
 	ack.in.lease.lease_key =
-		break_info.lease_break.current_lease.lease_key;
+		lease_break_info.lease_break.current_lease.lease_key;
 	ack.in.lease.lease_state =
-		break_info.lease_break.new_lease_state;
-	ZERO_STRUCT(break_info);
-	break_info.lease_skip_ack = true;
+		lease_break_info.lease_break.new_lease_state;
+	ZERO_STRUCT(lease_break_info);
+	lease_break_info.lease_skip_ack = true;
 
 	status = smb2_lease_break_ack(tree, &ack);
 	CHECK_STATUS(status, NT_STATUS_OK);
@@ -2758,7 +2638,7 @@ static bool test_lease_breaking5(struct torture_context *tctx,
 	struct smb2_handle h2 = {};
 	struct smb2_handle h3 = {};
 	struct smb2_request *req2 = NULL;
-	struct torture_lease_break break_info_tmp = {};
+	struct lease_break_info lease_break_info_tmp = {};
 	struct smb2_lease_break_ack ack = {};
 	const char *fname = "lease_breaking5.dat";
 	bool ret = true;
@@ -2780,8 +2660,8 @@ static bool test_lease_breaking5(struct torture_context *tctx,
 	/*
 	 * we defer acking the lease break.
 	 */
-	ZERO_STRUCT(break_info);
-	break_info.lease_skip_ack = true;
+	ZERO_STRUCT(lease_break_info);
+	lease_break_info.lease_skip_ack = true;
 
 	smb2_lease_create_share(&io1, &ls1, false, fname,
 				smb2_util_share_access("RWD"),
@@ -2810,8 +2690,8 @@ static bool test_lease_breaking5(struct torture_context *tctx,
 	 */
 	CHECK_BREAK_INFO("R", "", LEASE1);
 
-	break_info_tmp = break_info;
-	ZERO_STRUCT(break_info);
+	lease_break_info_tmp = lease_break_info;
+	ZERO_STRUCT(lease_break_info);
 	CHECK_NO_BREAK(tctx);
 
 	torture_assert(tctx, req2->state == SMB2_REQUEST_DONE, "req2 done");
@@ -2843,12 +2723,12 @@ static bool test_lease_breaking5(struct torture_context *tctx,
 	 * We send an ack without without being asked.
 	 */
 	CHECK_NO_BREAK(tctx);
-	break_info = break_info_tmp;
+	lease_break_info = lease_break_info_tmp;
 	ack.in.lease.lease_key =
-		break_info.lease_break.current_lease.lease_key;
+		lease_break_info.lease_break.current_lease.lease_key;
 	ack.in.lease.lease_state =
-		break_info.lease_break.new_lease_state;
-	ZERO_STRUCT(break_info);
+		lease_break_info.lease_break.new_lease_state;
+	ZERO_STRUCT(lease_break_info);
 	status = smb2_lease_break_ack(tree, &ack);
 	CHECK_STATUS(status, NT_STATUS_UNSUCCESSFUL);
 
@@ -2896,8 +2776,8 @@ static bool test_lease_breaking6(struct torture_context *tctx,
 	/*
 	 * we defer acking the lease break.
 	 */
-	ZERO_STRUCT(break_info);
-	break_info.lease_skip_ack = true;
+	ZERO_STRUCT(lease_break_info);
+	lease_break_info.lease_skip_ack = true;
 
 	smb2_lease_create_share(&io1, &ls1, false, fname,
 				smb2_util_share_access("RWD"),
@@ -2925,8 +2805,8 @@ static bool test_lease_breaking6(struct torture_context *tctx,
 	torture_assert(tctx, req2->state == SMB2_REQUEST_RECV, "req2 pending");
 
 	ack.in.lease.lease_key =
-		break_info.lease_break.current_lease.lease_key;
-	ZERO_STRUCT(break_info);
+		lease_break_info.lease_break.current_lease.lease_key;
+	ZERO_STRUCT(lease_break_info);
 
 	/*
 	 * a open using the same lease key is still works,
@@ -3026,7 +2906,7 @@ static bool test_lease_lock1(struct torture_context *tctx,
 
 	smb2_util_unlink(tree1a, fname);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 	ZERO_STRUCT(lck);
 
 	/* Open a handle on tree1a. */
@@ -3052,7 +2932,7 @@ static bool test_lease_lock1(struct torture_context *tctx,
 	CHECK_LEASE(&io2, "RH", true, LEASE2, 0);
 	/* And LEASE1 got broken to RH. */
 	CHECK_BREAK_INFO("RWH", "RH", LEASE1);
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	/* Now open a lease on a different client guid. */
 	smb2_lease_create_share(&io3, &ls3, false, fname,
@@ -3089,8 +2969,8 @@ static bool test_lease_lock1(struct torture_context *tctx,
 	torture_wait_for_lease_break(tctx);
 	torture_wait_for_lease_break(tctx);
 
-	CHECK_VAL(break_info.failures, 0);                      \
-	CHECK_VAL(break_info.count, 2);                         \
+	CHECK_VAL(lease_break_info.failures, 0);                      \
+	CHECK_VAL(lease_break_info.count, 2);                         \
 
 	/* Get state of the H1 (LEASE1) */
 	smb2_lease_create(&io1, &ls1, false, fname, LEASE1, smb2_util_lease_state(""));
@@ -3114,7 +2994,7 @@ static bool test_lease_lock1(struct torture_context *tctx,
 	CHECK_LEASE(&io3, "", true, LEASE3, 0);
 	smb2_util_close(tree2, io3.out.file.handle);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	/*
 	 * Try and get get an exclusive byte
@@ -3131,7 +3011,7 @@ static bool test_lease_lock1(struct torture_context *tctx,
 	CHECK_STATUS(status, NT_STATUS_OK);
 	/* LEASE1 got broken to NONE. */
 	CHECK_BREAK_INFO("RH", "", LEASE1);
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 done:
 	smb2_util_close(tree1a, h1);
@@ -3188,7 +3068,7 @@ static bool test_lease_complex1(struct torture_context *tctx,
 
 	smb2_util_unlink(tree1a, fname);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	/* Grab R lease over connection 1a */
 	smb2_lease_create(&io1, &ls1, false, fname, LEASE1, smb2_util_lease_state("R"));
@@ -3233,7 +3113,7 @@ static bool test_lease_complex1(struct torture_context *tctx,
 	status = smb2_util_close(tree1b, h2);
 	CHECK_STATUS(status, NT_STATUS_OK);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	ZERO_STRUCT(w);
 	w.in.file.handle = h;
@@ -3246,7 +3126,7 @@ static bool test_lease_complex1(struct torture_context *tctx,
 	ls2.lease_epoch += 1;
 	CHECK_BREAK_INFO("R", "", LEASE2);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	ZERO_STRUCT(w);
 	w.in.file.handle = h3;
@@ -3322,7 +3202,7 @@ static bool test_lease_v2_complex1(struct torture_context *tctx,
 
 	smb2_util_unlink(tree1a, fname);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	/* Grab R lease over connection 1a */
 	smb2_lease_v2_create(&io1, &ls1, false, fname, LEASE1, NULL,
@@ -3378,7 +3258,7 @@ static bool test_lease_v2_complex1(struct torture_context *tctx,
 	status = smb2_util_close(tree1b, h2);
 	CHECK_STATUS(status, NT_STATUS_OK);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	ZERO_STRUCT(w);
 	w.in.file.handle = h;
@@ -3392,7 +3272,7 @@ static bool test_lease_v2_complex1(struct torture_context *tctx,
 	CHECK_BREAK_INFO_V2(tree1a->session->transport,
 			    "R", "", LEASE2, ls2.lease_epoch);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	ZERO_STRUCT(w);
 	w.in.file.handle = h3;
@@ -3469,7 +3349,7 @@ static bool test_lease_v2_complex2(struct torture_context *tctx,
 
 	smb2_util_unlink(tree1a, fname);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	/* Grab RWH lease over connection 1a */
 	smb2_lease_v2_create(&io1, &ls1, false, fname, LEASE1, NULL,
@@ -3485,8 +3365,8 @@ static bool test_lease_v2_complex2(struct torture_context *tctx,
 	/*
 	 * we defer acking the lease break.
 	 */
-	ZERO_STRUCT(break_info);
-	break_info.lease_skip_ack = true;
+	ZERO_STRUCT(lease_break_info);
+	lease_break_info.lease_skip_ack = true;
 
 	/* Ask for RWH on connection 1b, different lease. */
 	smb2_lease_v2_create(&io2, &ls2, false, fname, LEASE2, NULL,
@@ -3501,14 +3381,14 @@ static bool test_lease_v2_complex2(struct torture_context *tctx,
 
 	/* Send the break ACK on tree1b. */
 	ack.in.lease.lease_key =
-		break_info.lease_break.current_lease.lease_key;
+		lease_break_info.lease_break.current_lease.lease_key;
 	ack.in.lease.lease_state = SMB2_LEASE_HANDLE|SMB2_LEASE_READ;
 
 	status = smb2_lease_break_ack(tree1b, &ack);
 	CHECK_STATUS(status, NT_STATUS_OK);
 	CHECK_LEASE_BREAK_ACK(&ack, "RH", LEASE1);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	status = smb2_create_recv(req2, tctx, &io2);
 	CHECK_STATUS(status, NT_STATUS_OK);
@@ -3570,8 +3450,8 @@ static bool test_lease_timeout(struct torture_context *tctx,
 	/*
 	 * Just don't ack the lease break.
 	 */
-	ZERO_STRUCT(break_info);
-	break_info.lease_skip_ack = true;
+	ZERO_STRUCT(lease_break_info);
+	lease_break_info.lease_skip_ack = true;
 
 	/* Break with a RWH request. */
 	smb2_lease_create(&io, &ls2, false, fname, LEASE2, smb2_util_lease_state("RWH"));
@@ -3583,9 +3463,9 @@ static bool test_lease_timeout(struct torture_context *tctx,
 
 	/* Copy the break request. */
 	ack.in.lease.lease_key =
-		break_info.lease_break.current_lease.lease_key;
+		lease_break_info.lease_break.current_lease.lease_key;
 	ack.in.lease.lease_state =
-		break_info.lease_break.new_lease_state;
+		lease_break_info.lease_break.new_lease_state;
 
 	/* Now wait for the timeout and get the reply. */
 	status = smb2_create_recv(req2, tctx, &io);
@@ -3606,7 +3486,7 @@ static bool test_lease_timeout(struct torture_context *tctx,
 	smb2_util_close(tree, io.out.file.handle);
 
 	/* Write on the original handle and make sure it's still valid. */
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 	ZERO_STRUCT(w);
 	w.in.file.handle = h;
 	w.in.offset      = 0;
@@ -3619,7 +3499,7 @@ static bool test_lease_timeout(struct torture_context *tctx,
 	CHECK_BREAK_INFO("RH", "", LEASE2);
 
 	/* Write on the new handle. */
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 	ZERO_STRUCT(w);
 	w.in.file.handle = hnew;
 	w.in.offset      = 0;
@@ -3695,7 +3575,7 @@ static bool test_lease_v2_rename(struct torture_context *tctx,
 	tree->session->transport->oplock.handler = torture_oplock_handler;
 	tree->session->transport->oplock.private_data = tree;
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	ZERO_STRUCT(io);
 	smb2_lease_v2_create_share(&io, &ls1, false, fname,
@@ -3750,7 +3630,7 @@ static bool test_lease_v2_rename(struct torture_context *tctx,
 	CHECK_BREAK_INFO_V2(tree->session->transport,
 			    "RWH", "RH", LEASE1, ls1.lease_epoch + 1);
 	ls1.lease_epoch += 1;
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	/* Now rename back. */
 	ZERO_STRUCT(sinfo);
@@ -3876,7 +3756,7 @@ static bool test_lease_dynamic_share(struct torture_context *tctx,
 
 	smb2_util_unlink(tree_3_0, fname);
 
-	ZERO_STRUCT(break_info);
+	ZERO_STRUCT(lease_break_info);
 
 	/* Get RWH lease over connection 2_1 */
 	smb2_lease_create(&io, &ls1, false, fname, LEASE1, smb2_util_lease_state("RWH"));
@@ -3990,10 +3870,108 @@ static bool test_lease_dynamic_share(struct torture_context *tctx,
 	return ret;
 }
 
-struct torture_suite *torture_smb2_lease_init(void)
+/*
+ * Test identifies a bug where the Samba server will not trigger a lease break
+ * for a handle caching lease held by a client when the underlying file is
+ * deleted.
+ * Test:
+ * 	Connect session2.
+ * 	open file in session1
+ * 		session1 should have RWH lease.
+ * 	open file in session2
+ * 		lease break sent to session1 to downgrade lease to RH
+ * 	close file in session 2
+ * 	unlink file in session 2
+ * 		lease break sent to session1 to downgrade lease to R
+ * 	Cleanup
+ */
+static bool test_lease_unlink(struct torture_context *tctx,
+			      struct smb2_tree *tree1)
+{
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	NTSTATUS status;
+	bool ret = true;
+	struct smbcli_options transport2_options;
+	struct smb2_tree *tree2 = NULL;
+	struct smb2_transport *transport1 = tree1->session->transport;
+	struct smb2_transport *transport2;
+	struct smb2_handle h1 = {{ 0 }};
+	struct smb2_handle h2 = {{ 0 }};
+	const char *fname = "lease_unlink.dat";
+	uint32_t caps;
+	struct smb2_create io1;
+	struct smb2_create io2;
+	struct smb2_lease ls1;
+	struct smb2_lease ls2;
+
+	caps = smb2cli_conn_server_capabilities(
+			tree1->session->transport->conn);
+	if (!(caps & SMB2_CAP_LEASING)) {
+		torture_skip(tctx, "leases are not supported");
+	}
+
+	/* Connect 2nd connection */
+	transport2_options = transport1->options;
+	transport2_options.client_guid = GUID_random();
+	if (!torture_smb2_connection_ext(tctx, 0, &transport2_options, &tree2)) {
+		torture_warning(tctx, "couldn't reconnect, bailing\n");
+		return false;
+	}
+	transport2 = tree2->session->transport;
+
+	/* Set lease handlers */
+	transport1->lease.handler = torture_lease_handler;
+	transport1->lease.private_data = tree1;
+	transport2->lease.handler = torture_lease_handler;
+	transport2->lease.private_data = tree2;
+
+
+	smb2_lease_create(&io1, &ls1, false, fname, LEASE1,
+				smb2_util_lease_state("RHW"));
+	smb2_lease_create(&io2, &ls2, false, fname, LEASE2,
+				smb2_util_lease_state("RHW"));
+
+	smb2_util_unlink(tree1, fname);
+
+	torture_comment(tctx, "Client opens fname with session 1\n");
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+	status = smb2_create(tree1, mem_ctx, &io1);
+	CHECK_STATUS(status, NT_STATUS_OK);
+	h1 = io1.out.file.handle;
+	CHECK_CREATED(&io1, CREATED, FILE_ATTRIBUTE_ARCHIVE);
+	CHECK_LEASE(&io1, "RHW", true, LEASE1, 0);
+	CHECK_VAL(lease_break_info.count, 0);
+
+	torture_comment(tctx, "Client opens fname with session 2\n");
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+	status = smb2_create(tree2, mem_ctx, &io2);
+	CHECK_STATUS(status, NT_STATUS_OK);
+	h2 = io2.out.file.handle;
+	CHECK_CREATED(&io2, EXISTED, FILE_ATTRIBUTE_ARCHIVE);
+	CHECK_LEASE(&io2, "RH", true, LEASE2, 0);
+	CHECK_VAL(lease_break_info.count, 1);
+	CHECK_BREAK_INFO("RHW", "RH", LEASE1);
+
+	torture_comment(tctx,
+		"Client closes and then unlinks fname with session 2\n");
+	torture_reset_lease_break_info(tctx, &lease_break_info);
+	smb2_util_close(tree2, h2);
+	smb2_util_unlink(tree2, fname);
+	CHECK_VAL(lease_break_info.count, 1);
+	CHECK_BREAK_INFO("RH", "R", LEASE1);
+
+done:
+	smb2_util_close(tree1, h1);
+	smb2_util_close(tree2, h2);
+	smb2_util_unlink(tree1, fname);
+
+	return ret;
+}
+
+struct torture_suite *torture_smb2_lease_init(TALLOC_CTX *ctx)
 {
 	struct torture_suite *suite =
-	    torture_suite_create(talloc_autofree_context(), "lease");
+	    torture_suite_create(ctx, "lease");
 
 	torture_suite_add_1smb2_test(suite, "request", test_lease_request);
 	torture_suite_add_1smb2_test(suite, "break_twice",
@@ -4002,6 +3980,7 @@ struct torture_suite *torture_smb2_lease_init(void)
 				     test_lease_nobreakself);
 	torture_suite_add_1smb2_test(suite, "statopen", test_lease_statopen);
 	torture_suite_add_1smb2_test(suite, "statopen2", test_lease_statopen2);
+	torture_suite_add_1smb2_test(suite, "statopen3", test_lease_statopen3);
 	torture_suite_add_1smb2_test(suite, "upgrade", test_lease_upgrade);
 	torture_suite_add_1smb2_test(suite, "upgrade2", test_lease_upgrade2);
 	torture_suite_add_1smb2_test(suite, "upgrade3", test_lease_upgrade3);
@@ -4028,6 +4007,7 @@ struct torture_suite *torture_smb2_lease_init(void)
 	torture_suite_add_1smb2_test(suite, "v2_rename", test_lease_v2_rename);
 	torture_suite_add_1smb2_test(suite, "dynamic_share", test_lease_dynamic_share);
 	torture_suite_add_1smb2_test(suite, "timeout", test_lease_timeout);
+	torture_suite_add_1smb2_test(suite, "unlink", test_lease_unlink);
 
 	suite->description = talloc_strdup(suite, "SMB2-LEASE tests");
 

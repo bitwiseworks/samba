@@ -222,6 +222,7 @@ static ADS_STATUS ads_krb5_chg_password(const char *kdc_host,
     /* We have to obtain an INITIAL changepw ticket for changing password */
     if (asprintf(&chpw_princ, "kadmin/changepw@%s", realm) == -1) {
 	krb5_get_init_creds_opt_free(context, opts);
+	smb_krb5_free_addresses(context, addr);
 	krb5_free_context(context);
 	free(realm);
 	DEBUG(1,("ads_krb5_chg_password: asprintf fail\n"));
@@ -234,6 +235,7 @@ static ADS_STATUS ads_krb5_chg_password(const char *kdc_host,
 					   kerb_prompter, NULL, 
 					   0, chpw_princ, opts);
 	krb5_get_init_creds_opt_free(context, opts);
+	smb_krb5_free_addresses(context, addr);
     SAFE_FREE(chpw_princ);
     SAFE_FREE(password);
 

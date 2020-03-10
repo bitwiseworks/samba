@@ -336,7 +336,7 @@ static int smb_acl_to_posixacl_xattr(SMB_ACL_T theacl, char *buf, size_t len)
 }
 
 SMB_ACL_T posixacl_xattr_acl_get_file(vfs_handle_struct *handle,
-				      const char *path_p,
+				      const struct smb_filename *smb_fname,
 				      SMB_ACL_TYPE_T type,
 				      TALLOC_CTX *mem_ctx)
 {
@@ -360,16 +360,18 @@ SMB_ACL_T posixacl_xattr_acl_get_file(vfs_handle_struct *handle,
 		return NULL;
 	}
 
-	ret = SMB_VFS_GETXATTR(handle->conn, path_p, name, buf, size);
+	ret = SMB_VFS_GETXATTR(handle->conn, smb_fname,
+				name, buf, size);
 	if (ret < 0 && errno == ERANGE) {
-		size = SMB_VFS_GETXATTR(handle->conn, path_p, name,
-					NULL, 0);
+		size = SMB_VFS_GETXATTR(handle->conn, smb_fname,
+					name, NULL, 0);
 		if (size > 0) {
 			buf = alloca(size);
 			if (!buf) {
 				return NULL;
 			}
-			ret = SMB_VFS_GETXATTR(handle->conn, path_p, name,
+			ret = SMB_VFS_GETXATTR(handle->conn,
+						smb_fname, name,
 						buf, size);
 		}
 	}
@@ -380,15 +382,15 @@ SMB_ACL_T posixacl_xattr_acl_get_file(vfs_handle_struct *handle,
 	if (ret == 0 || errno == ENOATTR || errno == ENODATA) {
 		mode_t mode = 0;
 		TALLOC_CTX *frame = talloc_stackframe();
-		struct smb_filename *smb_fname =
-			synthetic_smb_fname(frame, path_p, NULL, NULL, 0);
-		if (smb_fname == NULL) {
+		struct smb_filename *smb_fname_tmp =
+			cp_smb_filename_nostream(frame, smb_fname);
+		if (smb_fname_tmp == NULL) {
 			errno = ENOMEM;
 			ret = -1;
 		} else {
-			ret = SMB_VFS_STAT(handle->conn, smb_fname);
+			ret = SMB_VFS_STAT(handle->conn, smb_fname_tmp);
 			if (ret == 0) {
-				mode = smb_fname->st.st_ex_mode;
+				mode = smb_fname_tmp->st.st_ex_mode;
 			}
 		}
 		TALLOC_FREE(frame);
@@ -442,7 +444,7 @@ SMB_ACL_T posixacl_xattr_acl_get_fd(vfs_handle_struct *handle,
 }
 
 int posixacl_xattr_acl_set_file(vfs_handle_struct *handle,
-				const char *path_p,
+				const struct smb_filename *smb_fname,
 				SMB_ACL_TYPE_T type,
 				SMB_ACL_T theacl)
 {
@@ -472,7 +474,8 @@ int posixacl_xattr_acl_set_file(vfs_handle_struct *handle,
 		return -1;
 	}
 
-	return SMB_VFS_SETXATTR(handle->conn, path_p, name, buf, size, 0);
+	return SMB_VFS_SETXATTR(handle->conn, smb_fname,
+			name, buf, size, 0);
 }
 
 int posixacl_xattr_acl_set_fd(vfs_handle_struct *handle,
@@ -498,7 +501,9 @@ int posixacl_xattr_acl_set_fd(vfs_handle_struct *handle,
 }
 
 int posixacl_xattr_acl_delete_def_file(vfs_handle_struct *handle,
-				       const char *path_p)
+				const struct smb_filename *smb_fname)
 {
-	return SMB_VFS_REMOVEXATTR(handle->conn, path_p, ACL_EA_DEFAULT);
+	return SMB_VFS_REMOVEXATTR(handle->conn,
+			smb_fname,
+			ACL_EA_DEFAULT);
 }

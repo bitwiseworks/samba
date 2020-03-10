@@ -4,16 +4,14 @@
 
 define_test "setup, known tunables in config"
 
-setup_ctdb
+setup
 
-setup_config <<EOF
-CTDB_SET_MonitorInterval=5
-CTDB_SET_TDBMutexEnabled=0
+setup_tunable_config <<EOF
+MonitorInterval=5
 EOF
 
 required_result 0 <<EOF
 Set MonitorInterval to 5
-Set TDBMutexEnabled to 0
 EOF
 
 simple_test

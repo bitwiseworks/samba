@@ -27,28 +27,6 @@
 
 #include "nameserv.h"
 
-struct nb_packet_server;
-struct nb_packet_reader;
-
-NTSTATUS nb_packet_server_create(TALLOC_CTX *mem_ctx,
-				 struct tevent_context *ev,
-				 int max_clients,
-				 struct nb_packet_server **presult);
-void nb_packet_dispatch(struct nb_packet_server *server,
-			struct packet_struct *p);
-struct tevent_req *nb_packet_reader_send(TALLOC_CTX *mem_ctx,
-					 struct tevent_context *ev,
-					 enum packet_type type,
-					 int trn_id,
-					 const char *mailslot_name);
-NTSTATUS nb_packet_reader_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
-			       struct nb_packet_reader **preader);
-struct tevent_req *nb_packet_read_send(TALLOC_CTX *mem_ctx,
-				       struct tevent_context *ev,
-				       struct nb_packet_reader *reader);
-NTSTATUS nb_packet_read_recv(struct tevent_req *req,
-			     struct packet_struct **ppacket);
-
 /* The following definitions come from libsmb/nmblib.c  */
 
 void debug_nmb_packet(struct packet_struct *p);
@@ -61,7 +39,11 @@ struct packet_struct *parse_packet(char *buf,int length,
 				   enum packet_type packet_type,
 				   struct in_addr ip,
 				   int port);
-struct packet_struct *read_packet(int fd,enum packet_type packet_type);
+struct packet_struct *parse_packet_talloc(TALLOC_CTX *mem_ctx,
+					  char *buf,int length,
+					  enum packet_type packet_type,
+					  struct in_addr ip,
+					  int port);
 void make_nmb_name( struct nmb_name *n, const char *name, int type);
 bool nmb_name_equal(struct nmb_name *n1, struct nmb_name *n2);
 int build_packet(char *buf, size_t buflen, struct packet_struct *p);

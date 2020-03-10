@@ -20,6 +20,7 @@
 
 #include "includes.h"
 #include "system/filesys.h"
+#include "lib/util/server_id.h"
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
 #include "dbwrap/dbwrap.h"
@@ -903,6 +904,25 @@ NTSTATUS smbXsrv_tcon_disconnect(struct smbXsrv_tcon *tcon, uint64_t vuid)
 	table = tcon->table;
 	tcon->table = NULL;
 
+	if (tcon->compat) {
+		bool ok;
+
+		ok = chdir_current_service(tcon->compat);
+		if (!ok) {
+			status = NT_STATUS_INTERNAL_ERROR;
+			DEBUG(0, ("smbXsrv_tcon_disconnect(0x%08x, '%s'): "
+				  "chdir_current_service() failed: %s\n",
+				  tcon->global->tcon_global_id,
+				  tcon->global->share_name,
+				  nt_errstr(status)));
+			tcon->compat = NULL;
+			return status;
+		}
+
+		close_cnum(tcon->compat, vuid);
+		tcon->compat = NULL;
+	}
+
 	tcon->status = NT_STATUS_NETWORK_NAME_DELETED;
 
 	global_rec = tcon->global->db_rec;
@@ -964,25 +984,6 @@ NTSTATUS smbXsrv_tcon_disconnect(struct smbXsrv_tcon *tcon, uint64_t vuid)
 		TALLOC_FREE(local_rec);
 	}
 	tcon->db_rec = NULL;
-
-	if (tcon->compat) {
-		bool ok;
-
-		ok = set_current_service(tcon->compat, 0, true);
-		if (!ok) {
-			status = NT_STATUS_INTERNAL_ERROR;
-			DEBUG(0, ("smbXsrv_tcon_disconnect(0x%08x, '%s'): "
-				  "set_current_service() failed: %s\n",
-				  tcon->global->tcon_global_id,
-				  tcon->global->share_name,
-				  nt_errstr(status)));
-			tcon->compat = NULL;
-			return status;
-		}
-
-		close_cnum(tcon->compat, vuid);
-		tcon->compat = NULL;
-	}
 
 	return error;
 }
@@ -1094,7 +1095,7 @@ NTSTATUS smb1srv_tcon_create(struct smbXsrv_connection *conn,
 			     NTTIME now,
 			     struct smbXsrv_tcon **_tcon)
 {
-	struct server_id id = messaging_server_id(conn->msg_ctx);
+	struct server_id id = messaging_server_id(conn->client->msg_ctx);
 
 	return smbXsrv_tcon_create(conn->client->tcon_table,
 				   conn->protocol,
@@ -1210,7 +1211,7 @@ static int smbXsrv_tcon_global_traverse_fn(struct db_record *rec, void *data)
 
 	if (global_blob.version != SMBXSRV_VERSION_0) {
 		DEBUG(1,("Invalid record in smbXsrv_tcon_global.tdb:"
-			 "key '%s' unsuported version - %d\n",
+			 "key '%s' unsupported version - %d\n",
 			 hex_encode_talloc(frame, key.dptr, key.dsize),
 			 (int)global_blob.version));
 		goto done;

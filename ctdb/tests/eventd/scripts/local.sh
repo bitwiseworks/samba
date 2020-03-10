@@ -4,19 +4,19 @@
 
 PATH="$PATH:$CTDB_SCRIPTS_TOOLS_HELPER_DIR"
 
-# Augment PATH with stubs/ directory.
-
 if "$TEST_VERBOSE" ; then
     debug () { echo "$@" ; }
 else
     debug () { : ; }
 fi
 
-eventd_socket="${TEST_VAR_DIR}/eventd.socket.$$"
-eventd_pidfile="${TEST_VAR_DIR}/eventd.pid.$$"
-eventd_logfile="${TEST_VAR_DIR}/eventd.log.$$"
-eventd_debug=$(mktemp --tmpdir="$TEST_VAR_DIR")
-eventd_scriptdir=$(mktemp -d --tmpdir="$TEST_VAR_DIR")
+setup_ctdb_base "${TEST_VAR_DIR}" "eventd"
+
+ctdb_config=$(ctdb-path config)
+eventd_socket=$(ctdb-path socket eventd)
+eventd_pidfile=$(ctdb-path pidfile eventd)
+eventd_scriptdir=$(ctdb-path etcdir append events)
+eventd_logfile="${CTDB_BASE}/eventd.log"
 
 define_test ()
 {
@@ -32,26 +32,14 @@ cleanup_eventd ()
 	pid=$(cat "$eventd_pidfile" 2>/dev/null || echo)
 	if [ -n "$pid" ] ; then
 		kill $pid || true
-		rm -f "$eventd_pidfile"
 	fi
-	rm -f "$eventd_socket"
-	rm -f "$eventd_logfile"
-	rm -f "$eventd_debug"
-	rm -rf "$eventd_scriptdir"
 }
 
 setup_eventd ()
 {
 	echo "Setting up eventd"
 
-	if [ -n "$1" ]; then
-		extra_args="-D $1"
-	fi
-
-	$VALGRIND ctdb_eventd -s "$eventd_socket" \
-		-p "$eventd_pidfile" \
-		-e "$eventd_scriptdir" \
-		-l "file:" -d "DEBUG" $extra_args 2>&1 | tee "$eventd_logfile" &
+	$VALGRIND ctdb-eventd 2>&1 | tee "$eventd_logfile" &
 	# Wait till eventd is running
 	wait_until 10 test -S "$eventd_socket" || \
 		die "ctdb_eventd failed to start"
@@ -61,13 +49,12 @@ setup_eventd ()
 
 simple_test_background ()
 {
-	background_log=$(mktemp --tmpdir="$TEST_VAR_DIR")
-	background_status=$(mktemp --tmpdir="$TEST_VAR_DIR")
+	background_log="${CTDB_BASE}/background.log"
+	background_status="${CTDB_BASE}/background.status"
 	background_running=1
 
 	(
-	(unit_test ctdb_event "$eventd_socket" "$@") \
-		> "$background_log" 2>&1
+	(unit_test ctdb-event "$@") > "$background_log" 2>&1
 	echo $? > "$background_status"
 	) &
 	background_pid=$!
@@ -110,7 +97,7 @@ background_output ()
 
 simple_test ()
 {
-	(unit_test ctdb_event "$eventd_socket" "$@")
+	(unit_test ctdb-event "$@")
 	status=$?
 
 	background_wait
@@ -122,9 +109,9 @@ simple_test ()
 result_filter ()
 {
 	_duration="\<[0-9][0-9]*\.[0-9][0-9][0-9]\>"
-	_day="\(Mon\|Tue\|Wed\|Thu\|Fri\|Sat\|Sun\)"
-	_month="\(Jan\|Feb\|Mar\|Apr\|May\|Jun\|Jul\|Aug\|Sep\|Oct\|Nov\|Dec\)"
-	_date="\( [0-9]\|[0-9][0-9]\)"
+	_day="[FMSTW][aehoru][deintu]"
+	_month="[ADFJMNOS][aceopu][bcglnprtvy]"
+	_date="[ 0-9][0-9]"
 	_time="[0-9][0-9]:[0-9][0-9]:[0-9][0-9]"
 	_year="[0-9][0-9][0-9][0-9]"
 	_datetime="${_day} ${_month} ${_date} ${_time} ${_year}"

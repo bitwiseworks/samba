@@ -48,13 +48,8 @@ bool snum_is_shared_printer(int snum)
  *
  * This function should normally only be called as a callback on a successful
  * pcap_cache_reload(), or on client enumeration.
- *
- * @param[in] ev        The event context.
- *
- * @param[in] msg_ctx   The messaging context.
  */
-void delete_and_reload_printers(struct tevent_context *ev,
-				struct messaging_context *msg_ctx)
+void delete_and_reload_printers(void)
 {
 	int n_services;
 	int pnum;
@@ -79,7 +74,7 @@ void delete_and_reload_printers(struct tevent_context *ev,
 	reload_last_pcap_time = pcap_last_update;
 
 	/* Get pcap printers updated */
-	load_printers(ev, msg_ctx);
+	load_printers();
 
 	n_services = lp_numservices();
 	pnum = lp_servicenumber(PRINTERS_NAME);
@@ -110,7 +105,7 @@ void delete_and_reload_printers(struct tevent_context *ev,
 	}
 
 	/* Make sure deleted printers are gone */
-	load_printers(ev, msg_ctx);
+	load_printers();
 
 	talloc_free(frame);
 }
@@ -164,9 +159,7 @@ bool reload_services(struct smbd_server_connection *sconn,
 
 	mangle_reset_cache();
 	reset_stat_cache();
-
-	/* this forces service parameters to be flushed */
-	set_current_service(NULL,0,True);
+	flush_dfree_cache();
 
 	return(ret);
 }

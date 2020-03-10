@@ -35,7 +35,54 @@
 
 #define SMBLDAP_IDLE_TIME 150		/* After 2.5 minutes disconnect */
 
+struct smbldap_state {
+	LDAP *ldap_struct;
+	pid_t pid;
+	time_t last_ping; /* monotonic */
+	/* retrieve-once info */
+	const char *uri;
 
+	/* credentials */
+	bool anonymous;
+	char *bind_dn;
+	char *bind_secret;
+	smbldap_bind_callback_fn bind_callback;
+	void *bind_callback_data;
+
+	bool paged_results;
+
+	unsigned int num_failures;
+
+	time_t last_use; /* monotonic */
+	struct tevent_context *tevent_context;
+	struct tevent_timer *idle_event;
+
+	struct timeval last_rebind; /* monotonic */
+};
+
+LDAP *smbldap_get_ldap(struct smbldap_state *state)
+{
+	return state->ldap_struct;
+}
+
+bool smbldap_get_paged_results(struct smbldap_state *state)
+{
+	return state->paged_results;
+}
+
+void smbldap_set_paged_results(struct smbldap_state *state,
+			       bool paged_results)
+{
+	state->paged_results = paged_results;
+}
+
+void smbldap_set_bind_callback(struct smbldap_state *state,
+			       smbldap_bind_callback_fn callback,
+			       void *callback_data)
+{
+	state->bind_callback = callback;
+	state->bind_callback_data = callback_data;
+}
 /*******************************************************************
  Search an attribute and return the first value found.
 ******************************************************************/
@@ -557,7 +604,7 @@ static void smbldap_store_state(LDAP *ld, struct smbldap_state *smbldap_state)
 int smbldap_start_tls(LDAP *ldap_struct, int version)
 { 
 #ifdef LDAP_OPT_X_TLS
-	int rc;
+	int rc,tls;
 #endif
 
 	if (lp_ldap_ssl() != LDAP_SSL_START_TLS) {
@@ -565,6 +612,12 @@ int smbldap_start_tls(LDAP *ldap_struct, int version)
 	}
 
 #ifdef LDAP_OPT_X_TLS
+	/* check if we use ldaps already */
+	ldap_get_option(ldap_struct, LDAP_OPT_X_TLS, &tls);
+	if (tls == LDAP_OPT_X_TLS_HARD) {
+		return LDAP_SUCCESS;
+	}
+
 	if (version != LDAP_VERSION3) {
 		DEBUG(0, ("Need LDAPv3 for Start TLS\n"));
 		return LDAP_OPERATIONS_ERROR;
@@ -943,12 +996,12 @@ static int rebindproc_connect (LDAP * ld, LDAP_CONST char *url, int request,
 ******************************************************************/
 static int smbldap_connect_system(struct smbldap_state *ldap_state)
 {
-	LDAP *ldap_struct = ldap_state->ldap_struct;
+	LDAP *ldap_struct = smbldap_get_ldap(ldap_state);
 	int rc;
 	int version;
 
 	/* removed the sasl_bind_s "EXTERNAL" stuff, as my testsuite 
-	   (OpenLDAP) doesnt' seem to support it */
+	   (OpenLDAP) doesn't seem to support it */
 
 	DEBUG(10,("ldap_connect_system: Binding to ldap server %s as \"%s\"\n",
 		  ldap_state->uri, ldap_state->bind_dn));
@@ -988,7 +1041,8 @@ static int smbldap_connect_system(struct smbldap_state *ldap_state)
 
 	if (rc != LDAP_SUCCESS) {
 		char *ld_error = NULL;
-		ldap_get_option(ldap_state->ldap_struct, LDAP_OPT_ERROR_STRING,
+		ldap_get_option(smbldap_get_ldap(ldap_state),
+				LDAP_OPT_ERROR_STRING,
 				&ld_error);
 		DEBUG(ldap_state->num_failures ? 2 : 0,
 		      ("failed to bind to server %s with dn=\"%s\" Error: %s\n\t%s\n",
@@ -1004,9 +1058,11 @@ static int smbldap_connect_system(struct smbldap_state *ldap_state)
 	ldap_state->num_failures = 0;
 	ldap_state->paged_results = False;
 
-	ldap_get_option(ldap_state->ldap_struct, LDAP_OPT_PROTOCOL_VERSION, &version);
+	ldap_get_option(smbldap_get_ldap(ldap_state),
+			LDAP_OPT_PROTOCOL_VERSION, &version);
 
-	if (smbldap_has_control(ldap_state->ldap_struct, ADS_PAGE_CTL_OID) && version == 3) {
+	if (smbldap_has_control(smbldap_get_ldap(ldap_state), ADS_PAGE_CTL_OID)
+	    && version == 3) {
 		ldap_state->paged_results = True;
 	}
 
@@ -1035,7 +1091,9 @@ static int smbldap_open(struct smbldap_state *ldap_state)
 	bool reopen = False;
 	SMB_ASSERT(ldap_state);
 
-	if ((ldap_state->ldap_struct != NULL) && ((ldap_state->last_ping + SMBLDAP_DONT_PING_TIME) < time_mono(NULL))) {
+	if ((smbldap_get_ldap(ldap_state) != NULL) &&
+	    ((ldap_state->last_ping + SMBLDAP_DONT_PING_TIME) <
+	     time_mono(NULL))) {
 
 #ifdef HAVE_UNIXSOCKET
 		struct sockaddr_un addr;
@@ -1045,7 +1103,8 @@ static int smbldap_open(struct smbldap_state *ldap_state)
 		socklen_t len = sizeof(addr);
 		int sd;
 
-		opt_rc = ldap_get_option(ldap_state->ldap_struct, LDAP_OPT_DESC, &sd);
+		opt_rc = ldap_get_option(smbldap_get_ldap(ldap_state),
+					 LDAP_OPT_DESC, &sd);
 		if (opt_rc == 0 && (getpeername(sd, (struct sockaddr *) &addr, &len)) < 0 )
 			reopen = True;
 
@@ -1055,15 +1114,15 @@ static int smbldap_open(struct smbldap_state *ldap_state)
 #endif
 		if (reopen) {
 		    	/* the other end has died. reopen. */
-		    	ldap_unbind(ldap_state->ldap_struct);
-		    	ldap_state->ldap_struct = NULL;
+			ldap_unbind(smbldap_get_ldap(ldap_state));
+			ldap_state->ldap_struct = NULL;
 		    	ldap_state->last_ping = (time_t)0;
 		} else {
 			ldap_state->last_ping = time_mono(NULL);
 		} 
     	}
 
-	if (ldap_state->ldap_struct != NULL) {
+	if (smbldap_get_ldap(ldap_state) != NULL) {
 		DEBUG(11,("smbldap_open: already connected to the LDAP server\n"));
 		return LDAP_SUCCESS;
 	}
@@ -1102,8 +1161,8 @@ static NTSTATUS smbldap_close(struct smbldap_state *ldap_state)
 	if (!ldap_state)
 		return NT_STATUS_INVALID_PARAMETER;
 
-	if (ldap_state->ldap_struct != NULL) {
-		ldap_unbind(ldap_state->ldap_struct);
+	if (smbldap_get_ldap(ldap_state) != NULL) {
+		ldap_unbind(smbldap_get_ldap(ldap_state));
 		ldap_state->ldap_struct = NULL;
 	}
 
@@ -1172,10 +1231,10 @@ static void setup_ldap_local_alarm(struct smbldap_state *ldap_state, time_t abso
 
 static void get_ldap_errs(struct smbldap_state *ldap_state, char **pp_ld_error, int *p_ld_errno)
 {
-	ldap_get_option(ldap_state->ldap_struct,
+	ldap_get_option(smbldap_get_ldap(ldap_state),
 			LDAP_OPT_ERROR_NUMBER, p_ld_errno);
 
-	ldap_get_option(ldap_state->ldap_struct,
+	ldap_get_option(smbldap_get_ldap(ldap_state),
 			LDAP_OPT_ERROR_STRING, pp_ld_error);
 }
 
@@ -1295,7 +1354,8 @@ static int smbldap_search_ext(struct smbldap_state *ldap_state,
 			break;
 		}
 
-		rc = ldap_search_ext_s(ldap_state->ldap_struct, base, scope, 
+		rc = ldap_search_ext_s(smbldap_get_ldap(ldap_state),
+				       base, scope,
 				       utf8_filter,
 				       discard_const_p(char *, attrs),
 				       attrsonly, sctrls, cctrls, timeout_ptr,
@@ -1315,7 +1375,7 @@ static int smbldap_search_ext(struct smbldap_state *ldap_state,
 		if (ld_errno != LDAP_SERVER_DOWN) {
 			break;
 		}
-		ldap_unbind(ldap_state->ldap_struct);
+		ldap_unbind(smbldap_get_ldap(ldap_state));
 		ldap_state->ldap_struct = NULL;
 	}
 
@@ -1390,7 +1450,7 @@ int smbldap_search_paged(struct smbldap_state *ldap_state,
 
 	DEBUG(3,("smbldap_search_paged: search was successful\n"));
 
-	rc = ldap_parse_result(ldap_state->ldap_struct, *res, NULL, NULL, 
+	rc = ldap_parse_result(smbldap_get_ldap(ldap_state), *res, NULL, NULL,
 			       NULL, NULL, &rcontrols,  0);
 	if (rc != 0) {
 		DEBUG(3,("smbldap_search_paged: ldap_parse_result failed " \
@@ -1449,7 +1509,8 @@ int smbldap_modify(struct smbldap_state *ldap_state, const char *dn, LDAPMod *at
 			break;
 		}
 
-		rc = ldap_modify_s(ldap_state->ldap_struct, utf8_dn, attrs);
+		rc = ldap_modify_s(smbldap_get_ldap(ldap_state), utf8_dn,
+				   attrs);
 		if (rc == LDAP_SUCCESS) {
 			break;
 		}
@@ -1465,7 +1526,7 @@ int smbldap_modify(struct smbldap_state *ldap_state, const char *dn, LDAPMod *at
 		if (ld_errno != LDAP_SERVER_DOWN) {
 			break;
 		}
-		ldap_unbind(ldap_state->ldap_struct);
+		ldap_unbind(smbldap_get_ldap(ldap_state));
 		ldap_state->ldap_struct = NULL;
 	}
 
@@ -1499,7 +1560,7 @@ int smbldap_add(struct smbldap_state *ldap_state, const char *dn, LDAPMod *attrs
 			break;
 		}
 
-		rc = ldap_add_s(ldap_state->ldap_struct, utf8_dn, attrs);
+		rc = ldap_add_s(smbldap_get_ldap(ldap_state), utf8_dn, attrs);
 		if (rc == LDAP_SUCCESS) {
 			break;
 		}
@@ -1515,7 +1576,7 @@ int smbldap_add(struct smbldap_state *ldap_state, const char *dn, LDAPMod *attrs
 		if (ld_errno != LDAP_SERVER_DOWN) {
 			break;
 		}
-		ldap_unbind(ldap_state->ldap_struct);
+		ldap_unbind(smbldap_get_ldap(ldap_state));
 		ldap_state->ldap_struct = NULL;
 	}
 
@@ -1549,7 +1610,7 @@ int smbldap_delete(struct smbldap_state *ldap_state, const char *dn)
 			break;
 		}
 
-		rc = ldap_delete_s(ldap_state->ldap_struct, utf8_dn);
+		rc = ldap_delete_s(smbldap_get_ldap(ldap_state), utf8_dn);
 		if (rc == LDAP_SUCCESS) {
 			break;
 		}
@@ -1565,7 +1626,7 @@ int smbldap_delete(struct smbldap_state *ldap_state, const char *dn)
 		if (ld_errno != LDAP_SERVER_DOWN) {
 			break;
 		}
-		ldap_unbind(ldap_state->ldap_struct);
+		ldap_unbind(smbldap_get_ldap(ldap_state));
 		ldap_state->ldap_struct = NULL;
 	}
 
@@ -1595,7 +1656,8 @@ int smbldap_extended_operation(struct smbldap_state *ldap_state,
 			break;
 		}
 
-		rc = ldap_extended_operation_s(ldap_state->ldap_struct, reqoid,
+		rc = ldap_extended_operation_s(smbldap_get_ldap(ldap_state),
+					       reqoid,
 					       reqdata, serverctrls,
 					       clientctrls, retoidp, retdatap);
 		if (rc == LDAP_SUCCESS) {
@@ -1613,7 +1675,7 @@ int smbldap_extended_operation(struct smbldap_state *ldap_state,
 		if (ld_errno != LDAP_SERVER_DOWN) {
 			break;
 		}
-		ldap_unbind(ldap_state->ldap_struct);
+		ldap_unbind(smbldap_get_ldap(ldap_state));
 		ldap_state->ldap_struct = NULL;
 	}
 
@@ -1641,7 +1703,7 @@ static void smbldap_idle_fn(struct tevent_context *tevent_ctx,
 
 	TALLOC_FREE(state->idle_event);
 
-	if (state->ldap_struct == NULL) {
+	if (smbldap_get_ldap(state) == NULL) {
 		DEBUG(10,("ldap connection not connected...\n"));
 		return;
 	}
@@ -1676,8 +1738,7 @@ void smbldap_free_struct(struct smbldap_state **ldap_state)
 
 	SAFE_FREE((*ldap_state)->bind_dn);
 	SAFE_FREE((*ldap_state)->bind_secret);
-	(*ldap_state)->bind_callback = NULL;
-	(*ldap_state)->bind_callback_data = NULL;
+	smbldap_set_bind_callback(*ldap_state, NULL, NULL);
 
 	TALLOC_FREE(*ldap_state);
 
@@ -1857,8 +1918,7 @@ bool smbldap_set_creds(struct smbldap_state *ldap_state, bool anon, const char *
 	/* free any previously set credential */
 
 	SAFE_FREE(ldap_state->bind_dn);
-	ldap_state->bind_callback = NULL;
-	ldap_state->bind_callback_data = NULL;
+	smbldap_set_bind_callback(ldap_state, NULL, NULL);
 
 	if (ldap_state->bind_secret) {
 		/* make sure secrets are zeroed out of memory */

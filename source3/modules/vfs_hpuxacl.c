@@ -139,13 +139,14 @@ static bool hpux_aclsort_call_present(void);
 /* public functions - the api */
 
 SMB_ACL_T hpuxacl_sys_acl_get_file(vfs_handle_struct *handle,
-				      const char *path_p,
-				   SMB_ACL_TYPE_T type,
-				   TALLOC_CTX *mem_ctx)
+				const struct smb_filename *smb_fname,
+				SMB_ACL_TYPE_T type,
+				TALLOC_CTX *mem_ctx)
 {
 	SMB_ACL_T result = NULL;
 	int count;
 	HPUX_ACL_T hpux_acl = NULL;
+	const char *path_p = smb_fname->base_name;
 
 	DEBUG(10, ("hpuxacl_sys_acl_get_file called for file '%s'.\n", 
 		   path_p));
@@ -208,7 +209,7 @@ SMB_ACL_T hpuxacl_sys_acl_get_fd(vfs_handle_struct *handle,
 
 
 int hpuxacl_sys_acl_set_file(vfs_handle_struct *handle,
-			     const char *name,
+			     const struct smb_filename *smb_fname_in,
 			     SMB_ACL_TYPE_T type,
 			     SMB_ACL_T theacl)
 {
@@ -221,7 +222,7 @@ int hpuxacl_sys_acl_set_file(vfs_handle_struct *handle,
 	DEBUG(10, ("hpuxacl_sys_acl_set_file called for file '%s'\n",
 		   name));
 
-	smb_fname = synthetic_smb_fname(talloc_tos(), name, NULL, NULL, 0);
+	smb_fname = cp_smb_filename(talloc_tos(), smb_fname_in);
 	if (smb_fname == NULL) {
 		status = NT_STATUS_NO_MEMORY;
 		goto done;
@@ -358,7 +359,7 @@ int hpuxacl_sys_acl_set_fd(vfs_handle_struct *handle,
  * check is considered unnecessary. --- Agreed? XXX
  */
 int hpuxacl_sys_acl_delete_def_file(vfs_handle_struct *handle,
-				    const char *path)
+				const struct smb_filename *smb_fname)
 {
 	SMB_ACL_T smb_acl;
 	int ret = -1;
@@ -367,7 +368,7 @@ int hpuxacl_sys_acl_delete_def_file(vfs_handle_struct *handle,
 
 	DEBUG(10, ("entering hpuxacl_sys_acl_delete_def_file.\n"));
 
-	smb_acl = hpuxacl_sys_acl_get_file(handle, path, 
+	smb_acl = hpuxacl_sys_acl_get_file(handle, smb_fname->base_name,
 					   SMB_ACL_TYPE_ACCESS);
 	if (smb_acl == NULL) {
 		DEBUG(10, ("getting file acl failed!\n"));
@@ -383,7 +384,8 @@ int hpuxacl_sys_acl_delete_def_file(vfs_handle_struct *handle,
 		DEBUG(10, ("resulting acl is not valid!\n"));
 		goto done;
 	}
-	ret = acl(discard_const_p(char, path), ACL_SET, count, hpux_acl);
+	ret = acl(discard_const_p(char, smb_fname->base_name),
+				ACL_SET, count, hpux_acl);
 	if (ret != 0) {
 		DEBUG(10, ("settinge file acl failed!\n"));
 	}
@@ -1165,7 +1167,8 @@ static struct vfs_fn_pointers hpuxacl_fns = {
 	.sys_acl_delete_def_file_fn = hpuxacl_sys_acl_delete_def_file,
 };
 
-NTSTATUS vfs_hpuxacl_init(void)
+static_decl_vfs;
+NTSTATUS vfs_hpuxacl_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "hpuxacl",
 				&hpuxacl_fns);

@@ -22,6 +22,8 @@
 /* We support only GSSAPI/KRB5 here */
 
 #include "includes.h"
+#include <tevent.h>
+#include "lib/util/tevent_ntstatus.h"
 #include "gse.h"
 #include "libads/kerberos_proto.h"
 #include "auth/common_auth.h"
@@ -334,7 +336,8 @@ static NTSTATUS gse_get_client_auth_token(TALLOC_CTX *mem_ctx,
 	struct gse_context *gse_ctx =
 		talloc_get_type_abort(gensec_security->private_data,
 				      struct gse_context);
-	OM_uint32 gss_maj, gss_min;
+	OM_uint32 gss_maj = 0;
+	OM_uint32 gss_min;
 	gss_buffer_desc in_data;
 	gss_buffer_desc out_data;
 	DATA_BLOB blob = data_blob_null;
@@ -349,6 +352,12 @@ static NTSTATUS gse_get_client_auth_token(TALLOC_CTX *mem_ctx,
 	char *server_principal = NULL;
 	char *server_realm = NULL;
 	bool fallback = false;
+	OM_uint32 time_req = 0;
+
+	time_req = gensec_setting_int(gensec_security->settings,
+				      "gensec_gssapi",
+				      "requested_life_time",
+				      time_req);
 
 	in_data.value = token_in->data;
 	in_data.length = token_in->length;
@@ -416,7 +425,7 @@ static NTSTATUS gse_get_client_auth_token(TALLOC_CTX *mem_ctx,
 					       gse_ctx->server_name,
 					       &gse_ctx->gss_mech,
 					       gse_ctx->gss_want_flags,
-					       0,
+					       time_req,
 					       GSS_C_NO_CHANNEL_BINDINGS,
 					       &in_data,
 					       NULL,
@@ -473,7 +482,7 @@ static NTSTATUS gse_get_client_auth_token(TALLOC_CTX *mem_ctx,
 					gse_ctx->server_name,
 					&gse_ctx->gss_mech,
 					gse_ctx->gss_want_flags,
-					0, GSS_C_NO_CHANNEL_BINDINGS,
+					time_req, GSS_C_NO_CHANNEL_BINDINGS,
 					&in_data, NULL, &out_data,
 					&gse_ctx->gss_got_flags, &time_rec);
 	goto init_sec_context_done;
@@ -522,6 +531,9 @@ init_sec_context_done:
 		case (OM_uint32)KRB5KRB_AP_ERR_MSG_TYPE:
 			/* Garbage input, possibly from the auto-mech detection */
 			status = NT_STATUS_INVALID_PARAMETER;
+			goto done;
+		case (OM_uint32)KRB5KDC_ERR_ETYPE_NOSUPP:
+			status = NT_STATUS_KDC_UNKNOWN_ETYPE;
 			goto done;
 		default:
 			DBG_ERR("gss_init_sec_context failed with [%s](%u)\n",
@@ -806,21 +818,51 @@ static NTSTATUS gensec_gse_server_start(struct gensec_security *gensec_security)
 	return NT_STATUS_OK;
 }
 
-/**
- * Next state function for the GSE GENSEC mechanism
- *
- * @param gensec_gse_state GSE State
- * @param mem_ctx The TALLOC_CTX for *out to be allocated on
- * @param in The request, as a DATA_BLOB
- * @param out The reply, as an talloc()ed DATA_BLOB, on *mem_ctx
- * @return Error, MORE_PROCESSING_REQUIRED if a reply is sent,
- *                or NT_STATUS_OK if the user is authenticated.
- */
+struct gensec_gse_update_state {
+	NTSTATUS status;
+	DATA_BLOB out;
+};
 
-static NTSTATUS gensec_gse_update(struct gensec_security *gensec_security,
-				  TALLOC_CTX *mem_ctx,
-				  struct tevent_context *ev,
-				  const DATA_BLOB in, DATA_BLOB *out)
+static NTSTATUS gensec_gse_update_internal(struct gensec_security *gensec_security,
+					   TALLOC_CTX *mem_ctx,
+					   const DATA_BLOB in,
+					   DATA_BLOB *out);
+
+static struct tevent_req *gensec_gse_update_send(TALLOC_CTX *mem_ctx,
+						 struct tevent_context *ev,
+						 struct gensec_security *gensec_security,
+						 const DATA_BLOB in)
+{
+	struct tevent_req *req = NULL;
+	struct gensec_gse_update_state *state = NULL;
+	NTSTATUS status;
+
+	req = tevent_req_create(mem_ctx, &state,
+				struct gensec_gse_update_state);
+	if (req == NULL) {
+		return NULL;
+	}
+
+	status = gensec_gse_update_internal(gensec_security,
+					    state, in,
+					    &state->out);
+	state->status = status;
+	if (NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
+		tevent_req_done(req);
+		return tevent_req_post(req, ev);
+	}
+	if (tevent_req_nterror(req, status)) {
+		return tevent_req_post(req, ev);
+	}
+
+	tevent_req_done(req);
+	return tevent_req_post(req, ev);
+}
+
+static NTSTATUS gensec_gse_update_internal(struct gensec_security *gensec_security,
+					   TALLOC_CTX *mem_ctx,
+					   const DATA_BLOB in,
+					   DATA_BLOB *out)
 {
 	NTSTATUS status;
 
@@ -841,6 +883,29 @@ static NTSTATUS gensec_gse_update(struct gensec_security *gensec_security,
 	}
 
 	return NT_STATUS_OK;
+}
+
+static NTSTATUS gensec_gse_update_recv(struct tevent_req *req,
+				       TALLOC_CTX *out_mem_ctx,
+				       DATA_BLOB *out)
+{
+	struct gensec_gse_update_state *state =
+		tevent_req_data(req,
+		struct gensec_gse_update_state);
+	NTSTATUS status;
+
+	*out = data_blob_null;
+
+	if (tevent_req_is_nterror(req, &status)) {
+		tevent_req_received(req);
+		return status;
+	}
+
+	*out = state->out;
+	talloc_steal(out_mem_ctx, state->out.data);
+	status = state->status;
+	tevent_req_received(req);
+	return status;
 }
 
 static NTSTATUS gensec_gse_wrap(struct gensec_security *gensec_security,
@@ -1105,15 +1170,7 @@ static bool gensec_gse_have_feature(struct gensec_security *gensec_security,
 		return true;
 	}
 	if (feature & GENSEC_FEATURE_SIGN_PKT_HEADER) {
-		if (gensec_security->want_features & GENSEC_FEATURE_SEAL) {
-			return true;
-		}
-
-		if (gensec_security->want_features & GENSEC_FEATURE_SIGN) {
-			return true;
-		}
-
-		return false;
+		return true;
 	}
 	return false;
 }
@@ -1274,6 +1331,21 @@ static size_t gensec_gse_sig_size(struct gensec_security *gensec_security,
 	return gse_ctx->sig_size;
 }
 
+static const char *gensec_gse_final_auth_type(struct gensec_security *gensec_security)
+{
+	struct gse_context *gse_ctx =
+		talloc_get_type_abort(gensec_security->private_data,
+		struct gse_context);
+
+	/* Only return the string for GSSAPI/Krb5 */
+	if (smb_gss_oid_equal(&gse_ctx->gss_mech,
+			      gss_mech_krb5)) {
+		return GENSEC_FINAL_AUTH_TYPE_KRB5;
+	} else {
+		return "gensec_gse: UNKNOWN MECH";
+	}
+}
+
 static const char *gensec_gse_krb5_oids[] = {
 	GENSEC_OID_KERBEROS5_OLD,
 	GENSEC_OID_KERBEROS5,
@@ -1287,7 +1359,8 @@ const struct gensec_security_ops gensec_gse_krb5_security_ops = {
 	.client_start   = gensec_gse_client_start,
 	.server_start   = gensec_gse_server_start,
 	.magic  	= gensec_magic_check_krb5_oid,
-	.update 	= gensec_gse_update,
+	.update_send	= gensec_gse_update_send,
+	.update_recv	= gensec_gse_update_recv,
 	.session_key	= gensec_gse_session_key,
 	.session_info	= gensec_gse_session_info,
 	.sig_size	= gensec_gse_sig_size,
@@ -1301,6 +1374,7 @@ const struct gensec_security_ops gensec_gse_krb5_security_ops = {
 	.unwrap         = gensec_gse_unwrap,
 	.have_feature   = gensec_gse_have_feature,
 	.expire_time    = gensec_gse_expire_time,
+	.final_auth_type  = gensec_gse_final_auth_type,
 	.enabled        = true,
 	.kerberos       = true,
 	.priority       = GENSEC_GSSAPI

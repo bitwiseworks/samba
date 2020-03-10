@@ -20,6 +20,7 @@
 
 #include "includes.h"
 #include "system/filesys.h"
+#include "lib/util/server_id.h"
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
 #include "dbwrap/dbwrap.h"
@@ -870,7 +871,7 @@ NTSTATUS smbXsrv_open_create(struct smbXsrv_connection *conn,
 	global->open_persistent_id = global->open_global_id;
 	global->open_volatile_id = op->local_id;
 
-	global->server_id = messaging_server_id(conn->msg_ctx);
+	global->server_id = messaging_server_id(conn->client->msg_ctx);
 	global->open_time = now;
 	global->open_owner = *current_sid;
 	if (conn->protocol >= PROTOCOL_SMB2_10) {
@@ -1415,7 +1416,7 @@ NTSTATUS smb2srv_open_recreate(struct smbXsrv_connection *conn,
 	op->status = NT_STATUS_FILE_CLOSED;
 
 	op->global->open_volatile_id = op->local_id;
-	op->global->server_id = messaging_server_id(conn->msg_ctx);
+	op->global->server_id = messaging_server_id(conn->client->msg_ctx);
 
 	ptr = op;
 	val = make_tdb_data((uint8_t const *)&ptr, sizeof(ptr));
@@ -1478,7 +1479,7 @@ static NTSTATUS smbXsrv_open_global_parse_record(TALLOC_CTX *mem_ctx,
 	if (global_blob.version != SMBXSRV_VERSION_0) {
 		status = NT_STATUS_INTERNAL_DB_CORRUPTION;
 		DEBUG(1,("Invalid record in smbXsrv_open_global.tdb:"
-			 "key '%s' unsuported version - %d - %s\n",
+			 "key '%s' unsupported version - %d - %s\n",
 			 hex_encode_talloc(frame, key.dptr, key.dsize),
 			 (int)global_blob.version,
 			 nt_errstr(status)));

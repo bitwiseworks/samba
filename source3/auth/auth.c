@@ -153,26 +153,37 @@ static bool check_domain_match(const char *user, const char *domain)
  *                  filled in, either at creation or by calling the challenge geneation 
  *                  function auth_get_challenge().  
  *
- * @param server_info If successful, contains information about the authentication, 
- *                    including a struct samu struct describing the user.
+ * @param pserver_info If successful, contains information about the authentication,
+ *                     including a struct samu struct describing the user.
+ *
+ * @param pauthoritative Indicates if the result should be treated as final
+ *                       result.
  *
  * @return An NTSTATUS with NT_STATUS_OK or an appropriate error.
  *
  **/
-
 NTSTATUS auth_check_ntlm_password(TALLOC_CTX *mem_ctx,
 				  const struct auth_context *auth_context,
 				  const struct auth_usersupplied_info *user_info,
-				  struct auth_serversupplied_info **pserver_info)
+				  struct auth_serversupplied_info **pserver_info,
+				  uint8_t *pauthoritative)
 {
+	TALLOC_CTX *frame;
+	const char *auth_method_name = "";
 	/* if all the modules say 'not for me' this is reasonable */
-	NTSTATUS nt_status = NT_STATUS_NO_SUCH_USER;
+	NTSTATUS nt_status = NT_STATUS_NOT_IMPLEMENTED;
 	const char *unix_username;
 	auth_methods *auth_method;
+	struct auth_serversupplied_info *server_info = NULL;
+	struct dom_sid sid = {0};
 
 	if (user_info == NULL || auth_context == NULL || pserver_info == NULL) {
 		return NT_STATUS_LOGON_FAILURE;
 	}
+
+	frame = talloc_stackframe();
+
+	*pauthoritative = 1;
 
 	DEBUG(3, ("check_ntlm_password:  Checking password for unmapped user [%s]\\[%s]@[%s] with the new password interface\n", 
 		  user_info->client.domain_name, user_info->client.account_name, user_info->workstation_name));
@@ -182,7 +193,8 @@ NTSTATUS auth_check_ntlm_password(TALLOC_CTX *mem_ctx,
 
 	if (auth_context->challenge.length != 8) {
 		DEBUG(0, ("check_ntlm_password:  Invalid challenge stored for this auth context - cannot continue\n"));
-		return NT_STATUS_LOGON_FAILURE;
+		nt_status = NT_STATUS_LOGON_FAILURE;
+		goto fail;
 	}
 
 	if (auth_context->challenge_set_by)
@@ -202,118 +214,138 @@ NTSTATUS auth_check_ntlm_password(TALLOC_CTX *mem_ctx,
 #endif
 
 	/* This needs to be sorted:  If it doesn't match, what should we do? */
-	if (!check_domain_match(user_info->client.account_name, user_info->mapped.domain_name))
-		return NT_STATUS_LOGON_FAILURE;
+	if (!check_domain_match(user_info->client.account_name,
+				user_info->mapped.domain_name)) {
+		nt_status = NT_STATUS_LOGON_FAILURE;
+		goto fail;
+	}
 
 	for (auth_method = auth_context->auth_method_list;auth_method; auth_method = auth_method->next) {
-		struct auth_serversupplied_info *server_info;
-		TALLOC_CTX *tmp_ctx;
-		NTSTATUS result;
 
-		if (user_info->flags & USER_INFO_LOCAL_SAM_ONLY
-		    && !(auth_method->flags & AUTH_METHOD_LOCAL_SAM)) {
-			continue;
-		}
+		auth_method_name = auth_method->name;
 
-		tmp_ctx = talloc_named(mem_ctx,
-				       0,
-				       "%s authentication for user %s\\%s",
-				       auth_method->name,
-				       user_info->mapped.domain_name,
-				       user_info->client.account_name);
+		nt_status = auth_method->auth(auth_context,
+					      auth_method->private_data,
+					      talloc_tos(),
+					      user_info,
+					      &server_info);
 
-		result = auth_method->auth(auth_context,
-					   auth_method->private_data,
-					   tmp_ctx,
-					   user_info,
-					   &server_info);
-
-		/* check if the module did anything */
-		if ( NT_STATUS_V(result) == NT_STATUS_V(NT_STATUS_NOT_IMPLEMENTED) ) {
-			DEBUG(10,("check_ntlm_password: %s had nothing to say\n", auth_method->name));
-			TALLOC_FREE(tmp_ctx);
-			if (user_info->flags & USER_INFO_LOCAL_SAM_ONLY) {
-				/* we don't expose the NT_STATUS_NOT_IMPLEMENTED
-				 * internals, except when the caller is only probing
-				 * one method, as they may do the fallback 
-				 */
-				nt_status = result;
-			}
-			continue;
-		}
-
-		nt_status = result;
-
-		if (NT_STATUS_IS_OK(nt_status)) {
-			DEBUG(3, ("check_ntlm_password: %s authentication for user [%s] succeeded\n", 
-				  auth_method->name, user_info->client.account_name));
-		} else {
-			DEBUG(5, ("check_ntlm_password: %s authentication for user [%s] FAILED with error %s\n", 
-				  auth_method->name, user_info->client.account_name, nt_errstr(nt_status)));
-		}
-
-		if (NT_STATUS_IS_OK(nt_status)) {
-			*pserver_info = talloc_steal(mem_ctx, server_info);
-			TALLOC_FREE(tmp_ctx);
+		if (!NT_STATUS_EQUAL(nt_status, NT_STATUS_NOT_IMPLEMENTED)) {
 			break;
 		}
 
-		TALLOC_FREE(tmp_ctx);
+		DBG_DEBUG("%s had nothing to say\n", auth_method->name);
 	}
 
-	/* successful authentication */
+	if (NT_STATUS_EQUAL(nt_status, NT_STATUS_NOT_IMPLEMENTED)) {
+		*pauthoritative = 0;
+		nt_status = NT_STATUS_NO_SUCH_USER;
+	}
 
-	if (NT_STATUS_IS_OK(nt_status)) {
-		unix_username = (*pserver_info)->unix_name;
+	if (!NT_STATUS_IS_OK(nt_status)) {
+		DBG_INFO("%s authentication for user [%s] FAILED with "
+			 "error %s, authoritative=%u\n",
+			 auth_method_name,
+			 user_info->client.account_name,
+			 nt_errstr(nt_status),
+			 *pauthoritative);
+		goto fail;
+	}
 
-		/* We skip doing this step if the caller asked us not to */
-		if (!(user_info->flags & USER_INFO_INFO3_AND_NO_AUTHZ)
-		    && !(*pserver_info)->guest) {
-			const char *rhost;
+	DBG_NOTICE("%s authentication for user [%s] succeeded\n",
+		   auth_method_name, user_info->client.account_name);
 
-			if (tsocket_address_is_inet(user_info->remote_host, "ip")) {
-				rhost = tsocket_address_inet_addr_string(user_info->remote_host,
-									 talloc_tos());
-				if (rhost == NULL) {
-					return NT_STATUS_NO_MEMORY;
-				}
-			} else {
-				rhost = "127.0.0.1";
+	unix_username = server_info->unix_name;
+
+	/* We skip doing this step if the caller asked us not to */
+	if (!(user_info->flags & USER_INFO_INFO3_AND_NO_AUTHZ)
+	    && !(server_info->guest)) {
+		const char *rhost;
+
+		if (tsocket_address_is_inet(user_info->remote_host, "ip")) {
+			rhost = tsocket_address_inet_addr_string(
+				user_info->remote_host, talloc_tos());
+			if (rhost == NULL) {
+				nt_status = NT_STATUS_NO_MEMORY;
+				goto fail;
 			}
-
-			/* We might not be root if we are an RPC call */
-			become_root();
-			nt_status = smb_pam_accountcheck(unix_username,
-							 rhost);
-			unbecome_root();
-
-			if (NT_STATUS_IS_OK(nt_status)) {
-				DEBUG(5, ("check_ntlm_password:  PAM Account for user [%s] succeeded\n", 
-					  unix_username));
-			} else {
-				DEBUG(3, ("check_ntlm_password:  PAM Account for user [%s] FAILED with error %s\n", 
-					  unix_username, nt_errstr(nt_status)));
-			} 
+		} else {
+			rhost = "127.0.0.1";
 		}
+
+		/* We might not be root if we are an RPC call */
+		become_root();
+		nt_status = smb_pam_accountcheck(unix_username, rhost);
+		unbecome_root();
 
 		if (NT_STATUS_IS_OK(nt_status)) {
-			DEBUG((*pserver_info)->guest ? 5 : 2,
-			      ("check_ntlm_password:  %sauthentication for user [%s] -> [%s] -> [%s] succeeded\n",
-			       (*pserver_info)->guest ? "guest " : "",
-			       user_info->client.account_name,
-			       user_info->mapped.account_name,
-			       unix_username));
+			DEBUG(5, ("check_ntlm_password:  PAM Account for user [%s] "
+				  "succeeded\n", unix_username));
+		} else {
+			DEBUG(3, ("check_ntlm_password:  PAM Account for user [%s] "
+				  "FAILED with error %s\n",
+				  unix_username, nt_errstr(nt_status)));
 		}
-
-		return nt_status;
 	}
+
+	if (!NT_STATUS_IS_OK(nt_status)) {
+		goto fail;
+	}
+
+	nt_status = get_user_sid_info3_and_extra(server_info->info3,
+						 &server_info->extra,
+						 &sid);
+	if (!NT_STATUS_IS_OK(nt_status)) {
+		sid = (struct dom_sid) {0};
+	}
+
+	log_authentication_event(NULL, NULL,
+				 &auth_context->start_time,
+				 user_info,
+				 nt_status,
+				 server_info->info3->base.logon_domain.string,
+				 server_info->info3->base.account_name.string,
+				 unix_username, &sid);
+
+	DEBUG(server_info->guest ? 5 : 2,
+	      ("check_ntlm_password:  %sauthentication for user "
+	       "[%s] -> [%s] -> [%s] succeeded\n",
+	       server_info->guest ? "guest " : "",
+	       user_info->client.account_name,
+	       user_info->mapped.account_name,
+	       unix_username));
+
+	*pserver_info = talloc_move(mem_ctx, &server_info);
+
+	TALLOC_FREE(frame);
+	return NT_STATUS_OK;
+
+fail:
 
 	/* failed authentication; check for guest lapping */
 
-	DEBUG(2, ("check_ntlm_password:  Authentication for user [%s] -> [%s] FAILED with error %s\n",
+	/*
+	 * Please try not to change this string, it is probably in use
+	 * in audit logging tools
+	 */
+	DEBUG(2, ("check_ntlm_password:  Authentication for user "
+		  "[%s] -> [%s] FAILED with error %s, authoritative=%u\n",
 		  user_info->client.account_name, user_info->mapped.account_name,
-		  nt_errstr(nt_status)));
+		  nt_errstr(nt_status), *pauthoritative));
+
+	log_authentication_event(NULL,
+				 NULL,
+				 &auth_context->start_time,
+				 user_info,
+				 nt_status,
+				 NULL,
+				 NULL,
+				 NULL,
+				 NULL);
+
 	ZERO_STRUCTP(pserver_info);
+
+	TALLOC_FREE(frame);
 
 	return nt_status;
 }
@@ -351,6 +383,8 @@ static NTSTATUS make_auth_context(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
+	ctx->start_time = timeval_current();
+
 	talloc_set_destructor((TALLOC_CTX *)ctx, auth_context_destructor);
 
 	*auth_context = ctx;
@@ -370,7 +404,7 @@ bool load_auth_module(struct auth_context *auth_context,
 
 	/* Initialise static modules if not done so yet */
 	if(!initialised_static_modules) {
-		static_init_auth;
+		static_init_auth(NULL);
 		initialised_static_modules = True;
 	}
 
@@ -454,90 +488,119 @@ static NTSTATUS make_auth_context_text_list(TALLOC_CTX *mem_ctx,
 	return NT_STATUS_OK;
 }
 
+static NTSTATUS make_auth_context_specific(TALLOC_CTX *mem_ctx,
+					   struct auth_context **auth_context,
+					   const char *methods)
+{
+	char **method_list;
+	NTSTATUS status;
+
+	method_list = str_list_make_v3(talloc_tos(), methods, NULL);
+	if (method_list == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	status = make_auth_context_text_list(
+		mem_ctx, auth_context, method_list);
+
+	TALLOC_FREE(method_list);
+
+	return status;
+}
+
 /***************************************************************************
  Make a auth_context struct for the auth subsystem
 ***************************************************************************/
 
-NTSTATUS make_auth_context_subsystem(TALLOC_CTX *mem_ctx,
+NTSTATUS make_auth3_context_for_ntlm(TALLOC_CTX *mem_ctx,
 				     struct auth_context **auth_context)
 {
-	char **auth_method_list = NULL; 
-	NTSTATUS nt_status;
+	const char *methods = NULL;
 
-	if (lp_auth_methods()
-	    && !(auth_method_list = str_list_copy(talloc_tos(), 
-			      lp_auth_methods()))) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	if (auth_method_list == NULL) {
-		switch (lp_server_role()) 
-		{
-		case ROLE_DOMAIN_MEMBER:
-			DEBUG(5,("Making default auth method list for server role = 'domain member'\n"));
-			auth_method_list = str_list_make_v3(
-				talloc_tos(), "guest sam winbind:ntdomain",
-				NULL);
-			break;
-		case ROLE_DOMAIN_BDC:
-		case ROLE_DOMAIN_PDC:
-			DEBUG(5,("Making default auth method list for DC\n"));
-			auth_method_list = str_list_make_v3(
-				talloc_tos(),
-				"guest sam winbind:trustdomain",
-				NULL);
-			break;
-		case ROLE_STANDALONE:
-			DEBUG(5,("Making default auth method list for server role = 'standalone server', encrypt passwords = yes\n"));
-			if (lp_encrypt_passwords()) {
-				auth_method_list = str_list_make_v3(
-						talloc_tos(), "guest sam",
-						NULL);
-			} else {
-				DEBUG(5,("Making default auth method list for server role = 'standalone server', encrypt passwords = no\n"));
-				auth_method_list = str_list_make_v3(
-					talloc_tos(), "guest unix", NULL);
-			}
-			break;
-		case ROLE_ACTIVE_DIRECTORY_DC:
-			DEBUG(5,("Making default auth method list for server role = 'active directory domain controller'\n"));
-			auth_method_list = str_list_make_v3(
-				talloc_tos(),
-				"samba4",
-				NULL);
-			break;
-		default:
-			DEBUG(5,("Unknown auth method!\n"));
-			return NT_STATUS_UNSUCCESSFUL;
+	switch (lp_server_role()) {
+	case ROLE_ACTIVE_DIRECTORY_DC:
+		DEBUG(5,("Making default auth method list for server role = "
+			 "'active directory domain controller'\n"));
+		methods = "samba4";
+		break;
+	case ROLE_DOMAIN_MEMBER:
+		DEBUG(5,("Making default auth method list for server role = 'domain member'\n"));
+		methods = "anonymous sam winbind sam_ignoredomain";
+		break;
+	case ROLE_DOMAIN_BDC:
+	case ROLE_DOMAIN_PDC:
+		DEBUG(5,("Making default auth method list for DC\n"));
+		methods = "anonymous sam winbind sam_ignoredomain";
+		break;
+	case ROLE_STANDALONE:
+		DEBUG(5,("Making default auth method list for server role = 'standalone server', encrypt passwords = yes\n"));
+		if (lp_encrypt_passwords()) {
+			methods = "anonymous sam_ignoredomain";
+		} else {
+			DEBUG(5,("Making default auth method list for server role = 'standalone server', encrypt passwords = no\n"));
+			methods = "anonymous unix";
 		}
-	} else {
-		DEBUG(5,("Using specified auth order\n"));
+		break;
+	default:
+		DEBUG(5,("Unknown auth method!\n"));
+		return NT_STATUS_UNSUCCESSFUL;
 	}
 
-	nt_status = make_auth_context_text_list(mem_ctx, auth_context,
-						auth_method_list);
-
-	TALLOC_FREE(auth_method_list);
-	return nt_status;
+	return make_auth_context_specific(mem_ctx, auth_context, methods);
 }
 
-/***************************************************************************
- Make a auth_info struct with a fixed challenge
-***************************************************************************/
-
-NTSTATUS make_auth_context_fixed(TALLOC_CTX *mem_ctx,
-				 struct auth_context **auth_context,
-				 uchar chal[8])
+NTSTATUS make_auth3_context_for_netlogon(TALLOC_CTX *mem_ctx,
+					 struct auth_context **auth_context)
 {
-	NTSTATUS nt_status;
-	nt_status = make_auth_context_subsystem(mem_ctx, auth_context);
-	if (!NT_STATUS_IS_OK(nt_status)) {
-		return nt_status;
+	const char *methods = NULL;
+
+	switch (lp_server_role()) {
+	case ROLE_DOMAIN_BDC:
+	case ROLE_DOMAIN_PDC:
+		methods = "sam_netlogon3 winbind:trustdomain";
+		break;
+
+	default:
+		DBG_ERR("Invalid server role!\n");
+		return NT_STATUS_INVALID_SERVER_STATE;
 	}
 
-	(*auth_context)->challenge = data_blob_talloc(*auth_context, chal, 8);
-	(*auth_context)->challenge_set_by = "fixed";
-	return nt_status;
+	return make_auth_context_specific(mem_ctx, auth_context, methods);
 }
 
+NTSTATUS make_auth3_context_for_winbind(TALLOC_CTX *mem_ctx,
+				        struct auth_context **auth_context)
+{
+	const char *methods = NULL;
 
+	switch (lp_server_role()) {
+	case ROLE_STANDALONE:
+	case ROLE_DOMAIN_MEMBER:
+	case ROLE_DOMAIN_BDC:
+	case ROLE_DOMAIN_PDC:
+		methods = "sam";
+		break;
+	case ROLE_ACTIVE_DIRECTORY_DC:
+		methods = "samba4:sam";
+		break;
+	default:
+		DEBUG(5,("Unknown auth method!\n"));
+		return NT_STATUS_UNSUCCESSFUL;
+	}
+
+	return make_auth_context_specific(mem_ctx, auth_context, methods);
+}
+
+bool auth3_context_set_challenge(struct auth_context *ctx, uint8_t chal[8],
+				 const char *challenge_set_by)
+{
+	ctx->challenge = data_blob_talloc(ctx, chal, 8);
+	if (ctx->challenge.data == NULL) {
+		return false;
+	}
+	ctx->challenge_set_by = talloc_strdup(ctx, challenge_set_by);
+	if (ctx->challenge_set_by == NULL) {
+		return false;
+	}
+	return true;
+}

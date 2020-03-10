@@ -25,6 +25,7 @@
 #include "lib/util/util_tdb.h"
 #include "system/filesys.h"
 #include "lib/param/param.h"
+#include "libcli/util/error.h"
 
 struct db_tdb_ctx {
 	struct tdb_wrap *wtdb;
@@ -35,7 +36,8 @@ struct db_tdb_ctx {
 	} id;
 };
 
-static NTSTATUS db_tdb_store(struct db_record *rec, TDB_DATA data, int flag);
+static NTSTATUS db_tdb_storev(struct db_record *rec,
+			      const TDB_DATA *dbufs, int num_dbufs, int flag);
 static NTSTATUS db_tdb_delete(struct db_record *rec);
 
 static void db_tdb_log_key(const char *prefix, TDB_DATA key)
@@ -56,7 +58,7 @@ static void db_tdb_log_key(const char *prefix, TDB_DATA key)
 	}
 	keystr = hex_encode_talloc(frame, (unsigned char *)(key.dptr),
 				   len);
-	DEBUG(10, ("%s key %s\n", prefix, keystr));
+	DBG_DEBUG("%s key %s\n", prefix, keystr);
 	TALLOC_FREE(frame);
 }
 
@@ -137,10 +139,10 @@ static struct db_record *db_tdb_fetch_locked_internal(
 	talloc_set_destructor(state.result, db_tdb_record_destr);
 
 	state.result->private_data = ctx;
-	state.result->store = db_tdb_store;
+	state.result->storev = db_tdb_storev;
 	state.result->delete_rec = db_tdb_delete;
 
-	DEBUG(10, ("Allocated locked data 0x%p\n", state.result));
+	DBG_DEBUG("Allocated locked data %p\n", state.result);
 
 	return state.result;
 }
@@ -173,6 +175,50 @@ static struct db_record *db_tdb_try_fetch_locked(
 	return db_tdb_fetch_locked_internal(db, mem_ctx, key);
 }
 
+static NTSTATUS db_tdb_do_locked(struct db_context *db, TDB_DATA key,
+				 void (*fn)(struct db_record *rec,
+					    void *private_data),
+				 void *private_data)
+{
+	struct db_tdb_ctx *ctx = talloc_get_type_abort(
+		db->private_data, struct db_tdb_ctx);
+	uint8_t *buf = NULL;
+	struct db_record rec;
+	int ret;
+
+	ret = tdb_chainlock(ctx->wtdb->tdb, key);
+	if (ret == -1) {
+		enum TDB_ERROR err = tdb_error(ctx->wtdb->tdb);
+		DBG_DEBUG("tdb_chainlock failed: %s\n",
+			  tdb_errorstr(ctx->wtdb->tdb));
+		return map_nt_error_from_tdb(err);
+	}
+
+	ret = tdb_fetch_talloc(ctx->wtdb->tdb, key, ctx, &buf);
+
+	if ((ret != 0) && (ret != ENOENT)) {
+		DBG_DEBUG("tdb_fetch_talloc failed: %s\n",
+			  strerror(errno));
+		tdb_chainunlock(ctx->wtdb->tdb, key);
+		return map_nt_error_from_unix_common(ret);
+	}
+
+	rec = (struct db_record) {
+		.db = db, .key = key,
+		.value = (struct TDB_DATA) { .dptr = buf,
+					     .dsize = talloc_get_size(buf) },
+		.storev = db_tdb_storev, .delete_rec = db_tdb_delete,
+		.private_data = ctx
+	};
+
+	fn(&rec, private_data);
+
+	talloc_free(buf);
+
+	tdb_chainunlock(ctx->wtdb->tdb, key);
+
+	return NT_STATUS_OK;
+}
 
 static int db_tdb_exists(struct db_context *db, TDB_DATA key)
 {
@@ -236,10 +282,12 @@ static NTSTATUS db_tdb_parse(struct db_context *db, TDB_DATA key,
 	return NT_STATUS_OK;
 }
 
-static NTSTATUS db_tdb_store(struct db_record *rec, TDB_DATA data, int flag)
+static NTSTATUS db_tdb_storev(struct db_record *rec,
+			      const TDB_DATA *dbufs, int num_dbufs, int flag)
 {
 	struct db_tdb_ctx *ctx = talloc_get_type_abort(rec->private_data,
 						       struct db_tdb_ctx);
+	int ret;
 
 	/*
 	 * This has a bug: We need to replace rec->value for correct
@@ -247,8 +295,8 @@ static NTSTATUS db_tdb_store(struct db_record *rec, TDB_DATA data, int flag)
 	 * anymore after it was stored.
 	 */
 
-	return (tdb_store(ctx->wtdb->tdb, rec->key, data, flag) == 0) ?
-		NT_STATUS_OK : NT_STATUS_UNSUCCESSFUL;
+	ret = tdb_storev(ctx->wtdb->tdb, rec->key, dbufs, num_dbufs, flag);
+	return (ret == 0) ? NT_STATUS_OK : NT_STATUS_UNSUCCESSFUL;
 }
 
 static NTSTATUS db_tdb_delete(struct db_record *rec)
@@ -282,7 +330,7 @@ static int db_tdb_traverse_func(TDB_CONTEXT *tdb, TDB_DATA kbuf, TDB_DATA dbuf,
 
 	rec.key = kbuf;
 	rec.value = dbuf;
-	rec.store = db_tdb_store;
+	rec.storev = db_tdb_storev;
 	rec.delete_rec = db_tdb_delete;
 	rec.private_data = ctx->db->private_data;
 	rec.db = ctx->db;
@@ -304,7 +352,9 @@ static int db_tdb_traverse(struct db_context *db,
 	return tdb_traverse(db_ctx->wtdb->tdb, db_tdb_traverse_func, &ctx);
 }
 
-static NTSTATUS db_tdb_store_deny(struct db_record *rec, TDB_DATA data, int flag)
+static NTSTATUS db_tdb_storev_deny(struct db_record *rec,
+				   const TDB_DATA *dbufs, int num_dbufs,
+				   int flag)
 {
 	return NT_STATUS_MEDIA_WRITE_PROTECTED;
 }
@@ -323,7 +373,7 @@ static int db_tdb_traverse_read_func(TDB_CONTEXT *tdb, TDB_DATA kbuf, TDB_DATA d
 
 	rec.key = kbuf;
 	rec.value = dbuf;
-	rec.store = db_tdb_store_deny;
+	rec.storev = db_tdb_storev_deny;
 	rec.delete_rec = db_tdb_delete_deny;
 	rec.private_data = ctx->db->private_data;
 	rec.db = ctx->db;
@@ -442,6 +492,7 @@ struct db_context *db_open_tdb(TALLOC_CTX *mem_ctx,
 
 	result->fetch_locked = db_tdb_fetch_locked;
 	result->try_fetch_locked = db_tdb_try_fetch_locked;
+	result->do_locked = db_tdb_do_locked;
 	result->traverse = db_tdb_traverse;
 	result->traverse_read = db_tdb_traverse_read;
 	result->parse_record = db_tdb_parse;

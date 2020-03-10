@@ -33,6 +33,7 @@ struct samba_kdc_policy {
 struct samba_kdc_base_context {
 	struct tevent_context *ev_ctx;
 	struct loadparm_context *lp_ctx;
+	struct imessaging_context *msg_ctx;
 };
 
 struct samba_kdc_seq;
@@ -40,6 +41,7 @@ struct samba_kdc_seq;
 struct samba_kdc_db_context {
 	struct tevent_context *ev_ctx;
 	struct loadparm_context *lp_ctx;
+	struct imessaging_context *msg_ctx;
 	struct ldb_context *samdb;
 	struct samba_kdc_seq *seq_ctx;
 	bool rodc;
@@ -52,6 +54,9 @@ struct samba_kdc_entry {
 	struct samba_kdc_db_context *kdc_db_ctx;
 	struct ldb_message *msg;
 	struct ldb_dn *realm_dn;
+	bool is_krbtgt;
+	bool is_rodc;
+	bool is_trust;
 	void *entry_ex;
 };
 

@@ -32,7 +32,6 @@ DatabaseMaxDead            = 5
 RerecoveryTimeout          = 10
 EnableBans                 = 1
 NoIPFailback               = 0
-DisableIPFailover          = 0
 VerboseMemoryNames         = 0
 RecdPingTimeout            = 60
 RecdFailCount              = 10
@@ -58,12 +57,11 @@ DBRecordCountWarn          = 100000
 DBRecordSizeWarn           = 10000000
 DBSizeWarn                 = 100000000
 PullDBPreallocation        = 10485760
-NoIPHostOnAllDisabled      = 0
-TDBMutexEnabled            = 0
 LockProcessesPerDB         = 200
 RecBufferSizeLimit         = 1000000
 QueueBufferSize            = 1024
 IPAllocAlgorithm           = 2
+AllowMixedVersions         = 0
 EOF
 
 simple_test

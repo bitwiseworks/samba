@@ -32,6 +32,7 @@
 #include "passdb.h"
 #include "auth.h"
 #include "messages.h"
+#include "lib/messages_ctdb.h"
 #include "smbprofile.h"
 #include "rpc_server/spoolss/srv_spoolss_nt.h"
 #include "libsmb/libsmb.h"
@@ -40,8 +41,9 @@
 #include "../libcli/security/security_token.h"
 #include "lib/id_cache.h"
 #include "lib/util/sys_rw_data.h"
-#include "serverid.h"
 #include "system/threads.h"
+#include "lib/pthreadpool/pthreadpool_tevent.h"
+#include "util_event.h"
 
 #ifdef __OS2__
 #define pipe(A) os2_pipe(A)
@@ -166,15 +168,9 @@ static bool smbd_unlock_socket_internal(struct smbXsrv_connection *xconn)
 
 #ifdef HAVE_ROBUST_MUTEXES
 	if (xconn->smb1.echo_handler.socket_mutex != NULL) {
-		int ret = EINTR;
-
-		while (ret == EINTR) {
-			ret = pthread_mutex_unlock(
-				xconn->smb1.echo_handler.socket_mutex);
-			if (ret == 0) {
-				break;
-			}
-		}
+		int ret;
+		ret = pthread_mutex_unlock(
+			xconn->smb1.echo_handler.socket_mutex);
 		if (ret != 0) {
 			DEBUG(1, ("pthread_mutex_unlock failed: %s\n",
 				  strerror(ret)));
@@ -282,10 +278,10 @@ out:
  Setup the word count and byte count for a smb message.
 ********************************************************************/
 
-int srv_set_message(char *buf,
-                        int num_words,
-                        int num_bytes,
-                        bool zero)
+size_t srv_set_message(char *buf,
+		       size_t num_words,
+		       size_t num_bytes,
+		       bool zero)
 {
 	if (zero && (num_words || num_bytes)) {
 		memset(buf + smb_size,'\0',num_words*2 + num_bytes);
@@ -830,7 +826,14 @@ bool schedule_deferred_open_message_smb(struct smbXsrv_connection *xconn,
 				"scheduling mid %llu\n",
 				(unsigned long long)mid ));
 
-			te = tevent_add_timer(pml->sconn->ev_ctx,
+			/*
+			 * smbd_deferred_open_timer() calls
+			 * process_smb() to redispatch the request
+			 * including the required impersonation.
+			 *
+			 * So we can just use the raw tevent_context.
+			 */
+			te = tevent_add_timer(xconn->client->raw_ev_ctx,
 					      pml,
 					      timeval_zero(),
 					      smbd_deferred_open_timer,
@@ -974,11 +977,11 @@ static void smbd_sig_term_handler(struct tevent_context *ev,
 	exit_server_cleanly("termination signal");
 }
 
-void smbd_setup_sig_term_handler(struct smbd_server_connection *sconn)
+static void smbd_setup_sig_term_handler(struct smbd_server_connection *sconn)
 {
 	struct tevent_signal *se;
 
-	se = tevent_add_signal(sconn->ev_ctx,
+	se = tevent_add_signal(sconn->root_ev_ctx,
 			       sconn,
 			       SIGTERM, 0,
 			       smbd_sig_term_handler,
@@ -1004,11 +1007,11 @@ static void smbd_sig_hup_handler(struct tevent_context *ev,
 	reload_services(sconn, conn_snum_used, false);
 }
 
-void smbd_setup_sig_hup_handler(struct smbd_server_connection *sconn)
+static void smbd_setup_sig_hup_handler(struct smbd_server_connection *sconn)
 {
 	struct tevent_signal *se;
 
-	se = tevent_add_signal(sconn->ev_ctx,
+	se = tevent_add_signal(sconn->root_ev_ctx,
 			       sconn,
 			       SIGHUP, 0,
 			       smbd_sig_hup_handler,
@@ -1512,6 +1515,8 @@ static connection_struct *switch_message(uint8_t type, struct smb_request *req)
 
 	errno = 0;
 
+	req->ev_ctx = NULL;
+
 	if (!xconn->smb1.negprot.done) {
 		switch (type) {
 			/*
@@ -1584,13 +1589,16 @@ static connection_struct *switch_message(uint8_t type, struct smb_request *req)
 		}
 	}
 
-	if (session_tag != xconn->client->last_session_id) {
-		struct user_struct *vuser = NULL;
+	if (session != NULL && !(flags & AS_USER)) {
+		struct user_struct *vuser = session->compat;
 
-		xconn->client->last_session_id = session_tag;
-		if (session) {
-			vuser = session->compat;
-		}
+		/*
+		 * change_to_user() implies set_current_user_info()
+		 * and chdir_connect_service().
+		 *
+		 * So we only call set_current_user_info if
+		 * we don't have AS_USER specified.
+		 */
 		if (vuser) {
 			set_current_user_info(
 				vuser->session_info->unix_info->sanitized_username,
@@ -1616,6 +1624,12 @@ static connection_struct *switch_message(uint8_t type, struct smb_request *req)
 			return NULL;
 		}
 
+		set_current_case_sensitive(conn, SVAL(req->inbuf,smb_flg));
+
+		/*
+		 * change_to_user() implies set_current_user_info()
+		 * and chdir_connect_service().
+		 */
 		if (!change_to_user(conn,session_tag)) {
 			DEBUG(0, ("Error: Could not change to user. Removing "
 				"deferred open, mid=%llu.\n",
@@ -1637,9 +1651,24 @@ static connection_struct *switch_message(uint8_t type, struct smb_request *req)
 			reply_nterror(req, NT_STATUS_ACCESS_DENIED);
 			return conn;
 		}
+
+		req->ev_ctx = conn->user_ev_ctx;
+	} else if (flags & AS_GUEST) {
+		/*
+		 * Does this protocol need to be run as guest? (Only archane
+		 * messenger service requests have this...)
+		 */
+		if (!change_to_guest()) {
+			reply_nterror(req, NT_STATUS_ACCESS_DENIED);
+			return conn;
+		}
+
+		req->ev_ctx = req->sconn->guest_ev_ctx;
 	} else {
 		/* This call needs to be run as root */
 		change_to_root_user();
+
+		req->ev_ctx = req->sconn->root_ev_ctx;
 	}
 
 	/* load service specific parameters */
@@ -1660,47 +1689,16 @@ static connection_struct *switch_message(uint8_t type, struct smb_request *req)
 			}
 		}
 
-		if (!set_current_service(conn,SVAL(req->inbuf,smb_flg),
-					 (flags & (AS_USER|DO_CHDIR)
-					  ?True:False))) {
-			reply_nterror(req, NT_STATUS_ACCESS_DENIED);
-			return conn;
+		if (flags & DO_CHDIR) {
+			bool ok;
+
+			ok = chdir_current_service(conn);
+			if (!ok) {
+				reply_nterror(req, NT_STATUS_ACCESS_DENIED);
+				return conn;
+			}
 		}
 		conn->num_smb_operations++;
-	}
-
-	/*
-	 * Does this protocol need to be run as guest? (Only archane
-	 * messenger service requests have this...)
-	 */
-	if (flags & AS_GUEST) {
-		char *raddr;
-		bool ok;
-
-		if (!change_to_guest()) {
-			reply_nterror(req, NT_STATUS_ACCESS_DENIED);
-			return conn;
-		}
-
-		raddr = tsocket_address_inet_addr_string(xconn->remote_address,
-							 talloc_tos());
-		if (raddr == NULL) {
-			reply_nterror(req, NT_STATUS_NO_MEMORY);
-			return conn;
-		}
-
-		/*
-		 * Haven't we checked this in smbd_process already???
-		 */
-
-		ok = allow_access(lp_hosts_deny(-1), lp_hosts_allow(-1),
-				  xconn->remote_hostname, raddr);
-		TALLOC_FREE(raddr);
-
-		if (!ok) {
-			reply_nterror(req, NT_STATUS_ACCESS_DENIED);
-			return conn;
-		}
 	}
 
 	/*
@@ -1982,7 +1980,8 @@ static void process_smb(struct smbXsrv_connection *xconn,
 			size_t pdulen = nread - NBT_HDR_SIZE;
 			smbd_smb2_process_negprot(xconn, 0, inpdu, pdulen);
 			return;
-		} else if (nread >= smb_size && valid_smb_header(inbuf)
+		}
+		if (nread >= smb_size && valid_smb_header(inbuf)
 				&& CVAL(inbuf, smb_com) != 0x72) {
 			/* This is a non-negprot SMB1 packet.
 			   Disable SMB2 from now on. */
@@ -2704,7 +2703,8 @@ static void smbd_release_ip_immediate(struct tevent_context *ctx,
 /****************************************************************************
 received when we should release a specific IP
 ****************************************************************************/
-static int release_ip(uint32_t src_vnn, uint32_t dst_vnn,
+static int release_ip(struct tevent_context *ev,
+		      uint32_t src_vnn, uint32_t dst_vnn,
 		      uint64_t dst_srvid,
 		      const uint8_t *msg, size_t msglen,
 		      void *private_data)
@@ -2762,8 +2762,10 @@ static int release_ip(uint32_t src_vnn, uint32_t dst_vnn,
 		 * as we might be called from within ctdbd_migrate(),
 		 * we need to defer our action to the next event loop
 		 */
-		tevent_schedule_immediate(state->im, xconn->ev_ctx,
-					  smbd_release_ip_immediate, state);
+		tevent_schedule_immediate(state->im,
+					  xconn->client->raw_ev_ctx,
+					  smbd_release_ip_immediate,
+					  state);
 
 		/*
 		 * Make sure we don't get any io on the connection.
@@ -2783,7 +2785,7 @@ static NTSTATUS smbd_register_ips(struct smbXsrv_connection *xconn,
 	struct ctdbd_connection *cconn;
 	int ret;
 
-	cconn = messaging_ctdbd_connection();
+	cconn = messaging_ctdb_connection();
 	if (cconn == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -3412,13 +3414,16 @@ bool fork_echo_handler(struct smbXsrv_connection *xconn)
 		close(listener_pipe[0]);
 		set_blocking(listener_pipe[1], false);
 
-		status = smbd_reinit_after_fork(xconn->msg_ctx, xconn->ev_ctx,
-						true, "smbd-echo");
+		status = smbd_reinit_after_fork(xconn->client->msg_ctx,
+						xconn->client->raw_ev_ctx,
+						true,
+						"smbd-echo");
 		if (!NT_STATUS_IS_OK(status)) {
 			DEBUG(1, ("reinit_after_fork failed: %s\n",
 				  nt_errstr(status)));
 			exit(1);
 		}
+		initialize_password_db(true, xconn->client->raw_ev_ctx);
 		smbd_echo_loop(xconn, listener_pipe[1]);
 		exit(0);
 	}
@@ -3432,7 +3437,8 @@ bool fork_echo_handler(struct smbXsrv_connection *xconn)
 	 * Without smb signing this is the same as the normal smbd
 	 * listener. This needs to change once signing comes in.
 	 */
-	xconn->smb1.echo_handler.trusted_fde = tevent_add_fd(xconn->ev_ctx,
+	xconn->smb1.echo_handler.trusted_fde = tevent_add_fd(
+					xconn->client->raw_ev_ctx,
 					xconn,
 					xconn->smb1.echo_handler.trusted_fd,
 					TEVENT_FD_READ,
@@ -3720,8 +3726,6 @@ NTSTATUS smbd_add_connection(struct smbXsrv_client *client, int sock_fd,
 	}
 	talloc_steal(frame, xconn);
 
-	xconn->ev_ctx = client->ev_ctx;
-	xconn->msg_ctx = client->msg_ctx;
 	xconn->transport.sock = sock_fd;
 	smbd_echo_init(xconn);
 	xconn->protocol = PROTOCOL_NONE;
@@ -3871,7 +3875,7 @@ NTSTATUS smbd_add_connection(struct smbXsrv_client *client, int sock_fd,
 	xconn->smb1.sessions.done_sesssetup = false;
 	xconn->smb1.sessions.max_send = SMB_BUFFER_SIZE_MAX;
 
-	xconn->transport.fde = tevent_add_fd(client->ev_ctx,
+	xconn->transport.fde = tevent_add_fd(client->raw_ev_ctx,
 					     xconn,
 					     sock_fd,
 					     TEVENT_FD_READ,
@@ -3936,8 +3940,16 @@ void smbd_process(struct tevent_context *ev_ctx,
 	client->sconn = sconn;
 	sconn->client = client;
 
-	sconn->ev_ctx = ev_ctx;
+	sconn->raw_ev_ctx = ev_ctx;
+	sconn->root_ev_ctx = ev_ctx;
+	sconn->guest_ev_ctx = ev_ctx;
 	sconn->msg_ctx = msg_ctx;
+
+	ret = pthreadpool_tevent_init(sconn, lp_aio_max_threads(),
+				      &sconn->pool);
+	if (ret != 0) {
+		exit_server("pthreadpool_tevent_init() failed.");
+	}
 
 	if (lp_server_max_protocol() >= PROTOCOL_SMB2_02) {
 		/*
@@ -3953,14 +3965,6 @@ void smbd_process(struct tevent_context *ev_ctx,
 	if (!interactive) {
 		smbd_setup_sig_term_handler(sconn);
 		smbd_setup_sig_hup_handler(sconn);
-
-		if (!serverid_register(messaging_server_id(msg_ctx),
-				       FLAG_MSG_GENERAL|FLAG_MSG_SMBD
-				       |FLAG_MSG_DBWRAP
-				       |FLAG_MSG_PRINT_GENERAL)) {
-			exit_server_cleanly("Could not register myself in "
-					    "serverid.tdb");
-		}
 	}
 
 	status = smbd_add_connection(client, sock_fd, &xconn);
@@ -4028,7 +4032,7 @@ void smbd_process(struct tevent_context *ev_ctx,
 			   locaddr);
 
 	if (lp_preload_modules()) {
-		smb_load_modules(lp_preload_modules());
+		smb_load_all_modules_absoute_path(lp_preload_modules());
 	}
 
 	smb_perfcount_init();
@@ -4077,7 +4081,7 @@ void smbd_process(struct tevent_context *ev_ctx,
 			   ID_CACHE_KILL, smbd_id_cache_kill);
 
 	messaging_deregister(sconn->msg_ctx,
-			     MSG_SMB_CONF_UPDATED, sconn->ev_ctx);
+			     MSG_SMB_CONF_UPDATED, sconn->raw_ev_ctx);
 	messaging_register(sconn->msg_ctx, sconn,
 			   MSG_SMB_CONF_UPDATED, smbd_conf_updated);
 

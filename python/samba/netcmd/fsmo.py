@@ -40,13 +40,14 @@ def get_fsmo_roleowner(samdb, roledn, role):
     try:
         res = samdb.search(roledn,
                            scope=ldb.SCOPE_BASE, attrs=["fSMORoleOwner"])
-    except LdbError, (num, msg):
+    except LdbError as e7:
+        (num, msg) = e7.args
         if num == ldb.ERR_NO_SUCH_OBJECT:
             raise CommandError("The '%s' role is not present in this domain" % role)
         raise
 
     if 'fSMORoleOwner' in res[0]:
-        master_owner = (ldb.Dn(samdb, res[0]["fSMORoleOwner"][0]))
+        master_owner = (ldb.Dn(samdb, res[0]["fSMORoleOwner"][0].decode('utf8')))
     else:
         master_owner = None
 
@@ -71,10 +72,11 @@ def transfer_dns_role(outf, sambaopts, credopts, role, samdb):
     if 'fSMORoleOwner' in res[0]:
         try:
             master_guid = str(misc.GUID(ldb.Dn(samdb,
-                              res[0]['fSMORoleOwner'][0])
+                              res[0]['fSMORoleOwner'][0].decode('utf8'))
                               .get_extended_component('GUID')))
-            master_owner = str(ldb.Dn(samdb, res[0]['fSMORoleOwner'][0]))
-        except LdbError, (num, msg):
+            master_owner = str(ldb.Dn(samdb, res[0]['fSMORoleOwner'][0].decode('utf8')))
+        except LdbError as e3:
+            (num, msg) = e3.args
             raise CommandError("No GUID found in naming master DN %s : %s \n" %
                                (res[0]['fSMORoleOwner'][0], msg))
     else:
@@ -109,7 +111,8 @@ def transfer_dns_role(outf, sambaopts, credopts, role, samdb):
 
         try:
             samdb.modify(m)
-        except LdbError, (num, msg):
+        except LdbError as e4:
+            (num, msg) = e4.args
             raise CommandError("Failed to delete role '%s': %s" %
                                (role, msg))
 
@@ -120,13 +123,14 @@ def transfer_dns_role(outf, sambaopts, credopts, role, samdb):
                                                "fSMORoleOwner")
         try:
             samdb.modify(m)
-        except LdbError, (num, msg):
+        except LdbError as e5:
+            (num, msg) = e5.args
             raise CommandError("Failed to add role '%s': %s" % (role, msg))
 
         try:
             connection = samba.drs_utils.drsuapi_connect(samdb.host_dns_name(),
                                                          lp, creds)
-        except samba.drs_utils.drsException, e:
+        except samba.drs_utils.drsException as e:
             raise CommandError("Drsuapi Connect failed", e)
 
         try:
@@ -138,7 +142,7 @@ def transfer_dns_role(outf, sambaopts, credopts, role, samdb):
                                               drsuapi_handle,
                                               master_guid,
                                               NC, req_options)
-        except samba.drs_utils.drsException, estr:
+        except samba.drs_utils.drsException as estr:
             raise CommandError("Replication failed", estr)
 
         outf.write("FSMO transfer of '%s' role successful\n" % role)
@@ -198,7 +202,8 @@ def transfer_role(outf, role, samdb):
     if master_owner != new_owner:
         try:
             samdb.modify(m)
-        except LdbError, (num, msg):
+        except LdbError as e6:
+            (num, msg) = e6.args
             raise CommandError("Transfer of '%s' role failed: %s" %
                                (role, msg))
 
@@ -303,7 +308,8 @@ You must provide an Admin user and password."""),
                     # We may need to allocate the initial RID Set
                     samdb.create_own_rid_set()
 
-            except LdbError, (num, msg):
+            except LdbError as e1:
+                (num, msg) = e1.args
                 if role == "rid" and num == ldb.ERR_ENTRY_ALREADY_EXISTS:
 
                     # Try again without the RID Set allocation
@@ -314,7 +320,8 @@ You must provide an Admin user and password."""),
                     samdb.transaction_start()
                     try:
                         samdb.modify(m)
-                    except LdbError, (num, msg):
+                    except LdbError as e:
+                        (num, msg) = e.args
                         samdb.transaction_cancel()
                         raise CommandError("Failed to seize '%s' role: %s" %
                                            (role, msg))
@@ -378,7 +385,8 @@ You must provide an Admin user and password."""),
                 "fSMORoleOwner")
             try:
                 samdb.modify(m)
-            except LdbError, (num, msg):
+            except LdbError as e2:
+                (num, msg) = e2.args
                 raise CommandError("Failed to seize '%s' role: %s" %
                                    (role, msg))
             self.outf.write("FSMO seize of '%s' role successful\n" % role)
@@ -463,7 +471,7 @@ class cmd_fsmo_show(Command):
                     self.message("%s owner: %s" % (long_name, str(master)))
                 else:
                     self.message("%s has no current owner" % (long_name))
-            except CommandError, e:
+            except CommandError as e:
                 self.message("%s: * %s" % (long_name, e.message))
 
 class cmd_fsmo_transfer(Command):

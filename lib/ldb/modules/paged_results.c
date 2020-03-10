@@ -35,6 +35,8 @@
 #include "replace.h"
 #include "system/filesys.h"
 #include "system/time.h"
+#include "dlinklist.h"
+#include <assert.h>
 #include "ldb_module.h"
 
 struct message_store {
@@ -48,13 +50,12 @@ struct message_store {
 struct private_data;
 
 struct results_store {
+	struct results_store *prev, *next;
 
 	struct private_data *priv;
 
 	char *cookie;
 	time_t timestamp;
-
-	struct results_store *next;
 
 	struct message_store *first;
 	struct message_store *last;
@@ -68,6 +69,7 @@ struct results_store {
 
 struct private_data {
 	uint32_t next_free_id;
+	size_t num_stores;
 	struct results_store *store;
 	
 };
@@ -75,22 +77,12 @@ struct private_data {
 static int store_destructor(struct results_store *del)
 {
 	struct private_data *priv = del->priv;
-	struct results_store *loop;
+	DLIST_REMOVE(priv->store, del);
 
-	if (priv->store == del) {
-		priv->store = del->next;
-		return 0;
-	}
+	assert(priv->num_stores > 0);
+	priv->num_stores -= 1;
 
-	for (loop = priv->store; loop; loop = loop->next) {
-		if (loop->next == del) {
-			loop->next = del->next;
-			return 0;
-		}
-	}
-
-	/* is not in list ? */
-	return -1;
+	return 0;
 }
 
 static struct results_store *new_store(struct private_data *priv)
@@ -120,10 +112,22 @@ static struct results_store *new_store(struct private_data *priv)
 	newr->first_ref = NULL;
 	newr->controls = NULL;
 
-	newr->next = priv->store;
-	priv->store = newr;
+	DLIST_ADD(priv->store, newr);
+
+	assert(priv->num_stores < SIZE_MAX);
+	priv->num_stores += 1;
 
 	talloc_set_destructor(newr, store_destructor);
+
+	if (priv->num_stores > 10) {
+		struct results_store *last;
+		/*
+		 * 10 is the default for MaxResultSetsPerConn --
+		 * possibly need to parameterize it.
+		 */
+		last = DLIST_TAIL(priv->store);
+		TALLOC_FREE(last);
+	}
 
 	return newr;
 }
@@ -381,6 +385,8 @@ static int paged_search(struct ldb_module *module, struct ldb_request *req)
 			return LDB_ERR_UNWILLING_TO_PERFORM;
 		}
 
+		DLIST_PROMOTE(private_data->store, current);
+
 		ac->store = current;
 
 		/* check if it is an abandon */
@@ -412,6 +418,7 @@ static int paged_request_init(struct ldb_module *module)
 	}
 
 	data->next_free_id = 1;
+	data->num_stores = 0;
 	data->store = NULL;
 	ldb_module_set_private(module, data);
 

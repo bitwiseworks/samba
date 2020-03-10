@@ -89,6 +89,9 @@ extern uint16_t fnf_handle;
 struct conn_ctx {
 	connection_struct *conn;
 	uint64_t vuid;
+	bool need_chdir;
+	bool done_chdir;
+	userdom_struct user_info;
 };
 /* A stack of current_user connection contexts. */
 extern struct conn_ctx conn_ctx_stack[MAX_SEC_CTX_DEPTH];
@@ -206,7 +209,8 @@ NTSTATUS smbd_dirptr_lanman2_entry(TALLOC_CTX *ctx,
 			       int space_remaining,
 			       bool *got_exact_match,
 			       int *_last_entry_off,
-			       struct ea_list *name_list);
+			       struct ea_list *name_list,
+			       struct file_id *file_id);
 
 NTSTATUS smbd_calculate_access_mask(connection_struct *conn,
 				    const struct smb_filename *smb_fname,
@@ -275,6 +279,9 @@ NTSTATUS smbd_smb2_request_verify_creditcharge(struct smbd_smb2_request *req,
 
 NTSTATUS smbd_smb2_request_verify_sizes(struct smbd_smb2_request *req,
 					size_t expected_body_size);
+
+void smb2_request_set_async_internal(struct smbd_smb2_request *req,
+				     bool async_internal);
 
 enum protocol_types smbd_smb2_protocol_dialect_match(const uint8_t *indyn,
 		                                     const int dialect_count,
@@ -357,13 +364,9 @@ struct smbXsrv_connection {
 
 	struct smbXsrv_client *client;
 
-
 	const struct tsocket_address *local_address;
 	const struct tsocket_address *remote_address;
 	const char *remote_hostname;
-
-	struct tevent_context *ev_ctx;
-	struct messaging_context *msg_ctx;
 
 	enum protocol_types protocol;
 
@@ -698,6 +701,9 @@ struct smbd_smb2_request {
 	struct smbXsrv_tcon *tcon;
 	uint32_t last_tid;
 
+	/* the tevent_context (wrapper) the request operates on */
+	struct tevent_context *ev_ctx;
+
 	int current_idx;
 	bool do_signing;
 	/* Was the request encrypted? */
@@ -706,6 +712,13 @@ struct smbd_smb2_request {
 	bool do_encryption;
 	struct tevent_timer *async_te;
 	bool compound_related;
+
+	/*
+	 * Give the implementation of an SMB2 req a way to tell the SMB2 request
+	 * processing engine that the internal request is going async, while
+	 * preserving synchronous SMB2 behaviour.
+	 */
+	bool async_internal;
 
 	/*
 	 * the encryption key for the whole
@@ -862,7 +875,9 @@ struct smbd_server_connection {
 	const struct tsocket_address *local_address;
 	const struct tsocket_address *remote_address;
 	const char *remote_hostname;
-	struct tevent_context *ev_ctx;
+	struct tevent_context *raw_ev_ctx;
+	struct tevent_context *root_ev_ctx;
+	struct tevent_context *guest_ev_ctx;
 	struct messaging_context *msg_ctx;
 	struct notify_context *notify_ctx;
 	bool using_smb2;

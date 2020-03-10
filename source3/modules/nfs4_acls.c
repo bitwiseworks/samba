@@ -180,12 +180,11 @@ struct SMB4ACE_T *smb_add_ace4(struct SMB4ACL_T *acl, SMB_ACE4PROP_T *prop)
 	ace = talloc_zero(acl, struct SMB4ACE_T);
 	if (ace==NULL)
 	{
-		DEBUG(0, ("TALLOC_SIZE failed\n"));
+		DBG_ERR("talloc_zero failed\n");
 		errno = ENOMEM;
 		return NULL;
 	}
-	/* ace->next = NULL not needed */
-	memcpy(&ace->prop, prop, sizeof(SMB_ACE4PROP_T));
+	ace->prop = *prop;
 
 	if (acl->first==NULL)
 	{

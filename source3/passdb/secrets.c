@@ -335,6 +335,13 @@ bool fetch_ldap_pw(char **dn, char** pw)
 	*pw=(char *)secrets_fetch(key, &size);
 	SAFE_FREE(key);
 
+	if ((size != 0) && ((*pw)[size-1] != '\0')) {
+		DBG_ERR("Non 0-terminated password for dn %s\n", *dn);
+		SAFE_FREE(*pw);
+		SAFE_FREE(*dn);
+		return false;
+	}
+
 	if (!size) {
 		/* Upgrade 2.2 style entry */
 		char *p;
@@ -344,6 +351,8 @@ bool fetch_ldap_pw(char **dn, char** pw)
 
 		if (!old_style_key) {
 			DEBUG(0, ("fetch_ldap_pw: strdup failed!\n"));
+			SAFE_FREE(*pw);
+			SAFE_FREE(*dn);
 			return False;
 		}
 
@@ -354,6 +363,7 @@ bool fetch_ldap_pw(char **dn, char** pw)
 		if ((data == NULL) || (size < sizeof(old_style_pw))) {
 			DEBUG(0,("fetch_ldap_pw: neither ldap secret retrieved!\n"));
 			SAFE_FREE(old_style_key);
+			SAFE_FREE(*pw);
 			SAFE_FREE(*dn);
 			SAFE_FREE(data);
 			return False;
@@ -368,6 +378,7 @@ bool fetch_ldap_pw(char **dn, char** pw)
 		if (!secrets_store_ldap_pw(*dn, old_style_pw)) {
 			DEBUG(0,("fetch_ldap_pw: ldap secret could not be upgraded!\n"));
 			SAFE_FREE(old_style_key);
+			SAFE_FREE(*pw);
 			SAFE_FREE(*dn);
 			return False;
 		}

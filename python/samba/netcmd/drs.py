@@ -1,6 +1,7 @@
 # implement samba_tool drs commands
 #
 # Copyright Andrew Tridgell 2010
+# Copyright Andrew Bartlett 2017
 #
 # based on C implementation by Kamen Mazdrashki <kamen.mazdrashki@postpath.com>
 #
@@ -17,10 +18,11 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
-
 import samba.getopt as options
 import ldb
 import logging
+import common
+import json
 
 from samba.auth import system_session
 from samba.netcmd import (
@@ -32,14 +34,18 @@ from samba.netcmd import (
 from samba.samdb import SamDB
 from samba import drs_utils, nttime2string, dsdb
 from samba.dcerpc import drsuapi, misc
-import common
 from samba.join import join_clone
+from samba.ndr import ndr_unpack
+from samba.dcerpc import drsblobs
+from samba import colour
+import logging
+
 
 def drsuapi_connect(ctx):
     '''make a DRSUAPI connection to the server'''
     try:
         (ctx.drsuapi, ctx.drsuapi_handle, ctx.bind_supported_extensions) = drs_utils.drsuapi_connect(ctx.server, ctx.lp, ctx.creds)
-    except Exception, e:
+    except Exception as e:
         raise CommandError("DRS connection to %s failed" % ctx.server, e)
 
 def samdb_connect(ctx):
@@ -48,7 +54,7 @@ def samdb_connect(ctx):
         ctx.samdb = SamDB(url="ldap://%s" % ctx.server,
                           session_info=system_session(),
                           credentials=ctx.creds, lp=ctx.lp)
-    except Exception, e:
+    except Exception as e:
         raise CommandError("LDAP connection to %s failed" % ctx.server, e)
 
 def drs_errmsg(werr):
@@ -78,8 +84,7 @@ def drs_parse_ntds_dn(ntds_dn):
     return (site, server)
 
 
-
-
+DEFAULT_SHOWREPL_FORMAT = 'classic'
 
 class cmd_drs_showrepl(Command):
     """Show replication status."""
@@ -92,71 +97,248 @@ class cmd_drs_showrepl(Command):
         "credopts": options.CredentialsOptions,
     }
 
+    takes_options = [
+        Option("--json", help="replication details in JSON format",
+               dest='format', action='store_const', const='json'),
+        Option("--summary", help=("summarize overall DRS health as seen "
+                                  "from this server"),
+               dest='format', action='store_const', const='summary'),
+        Option("--pull-summary", help=("Have we successfully replicated "
+                                       "from all relevent servers?"),
+               dest='format', action='store_const', const='pull_summary'),
+        Option("--notify-summary", action='store_const',
+               const='notify_summary', dest='format',
+               help=("Have we successfully notified all relevent servers of "
+                     "local changes, and did they say they successfully "
+                     "replicated?")),
+        Option("--classic", help="print local replication details",
+               dest='format', action='store_const', const='classic',
+               default=DEFAULT_SHOWREPL_FORMAT),
+        Option("-v", "--verbose", help="Be verbose", action="store_true"),
+        Option("--color", help="Use colour output (yes|no|auto)",
+               default='no'),
+    ]
+
     takes_args = ["DC?"]
 
-    def print_neighbour(self, n):
-        '''print one set of neighbour information'''
-        self.message("%s" % n.naming_context_dn)
+    def parse_neighbour(self, n):
+        """Convert an ldb neighbour object into a python dictionary"""
+        dsa_objectguid = str(n.source_dsa_obj_guid)
+        d = {
+            'NC dn': n.naming_context_dn,
+            "DSA objectGUID": dsa_objectguid,
+            "last attempt time": nttime2string(n.last_attempt),
+            "last attempt message": drs_errmsg(n.result_last_attempt),
+            "consecutive failures": n.consecutive_sync_failures,
+            "last success": nttime2string(n.last_success),
+            "NTDS DN": str(n.source_dsa_obj_dn),
+            'is deleted': False
+        }
+
+        try:
+            self.samdb.search(base="<GUID=%s>" % dsa_objectguid,
+                              scope=ldb.SCOPE_BASE,
+                              attrs=[])
+        except ldb.LdbError as e:
+            (errno, _) = e.args
+            if errno == ldb.ERR_NO_SUCH_OBJECT:
+                d['is deleted'] = True
+            else:
+                raise
         try:
             (site, server) = drs_parse_ntds_dn(n.source_dsa_obj_dn)
-            self.message("\t%s\%s via RPC" % (site, server))
+            d["DSA"] = "%s\%s" % (site, server)
         except RuntimeError:
-            self.message("\tNTDS DN: %s" % n.source_dsa_obj_dn)
-        self.message("\t\tDSA object GUID: %s" % n.source_dsa_obj_guid)
-        self.message("\t\tLast attempt @ %s %s" % (nttime2string(n.last_attempt),
-                                                   drs_errmsg(n.result_last_attempt)))
-        self.message("\t\t%u consecutive failure(s)." % n.consecutive_sync_failures)
-        self.message("\t\tLast success @ %s" % nttime2string(n.last_success))
+            pass
+        return d
+
+    def print_neighbour(self, d):
+        '''print one set of neighbour information'''
+        self.message("%s" % d['NC dn'])
+        if 'DSA' in d:
+            self.message("\t%s via RPC" % d['DSA'])
+        else:
+            self.message("\tNTDS DN: %s" % d['NTDS DN'])
+        self.message("\t\tDSA object GUID: %s" % d['DSA objectGUID'])
+        self.message("\t\tLast attempt @ %s %s" % (d['last attempt time'],
+                                                   d['last attempt message']))
+        self.message("\t\t%u consecutive failure(s)." %
+                     d['consecutive failures'])
+        self.message("\t\tLast success @ %s" % d['last success'])
         self.message("")
 
-    def drsuapi_ReplicaInfo(ctx, info_type):
-        '''call a DsReplicaInfo'''
-
+    def get_neighbours(self, info_type):
         req1 = drsuapi.DsReplicaGetInfoRequest1()
         req1.info_type = info_type
         try:
-            (info_type, info) = ctx.drsuapi.DsReplicaGetInfo(ctx.drsuapi_handle, 1, req1)
-        except Exception, e:
+            (info_type, info) = self.drsuapi.DsReplicaGetInfo(
+                self.drsuapi_handle, 1, req1)
+        except Exception as e:
             raise CommandError("DsReplicaGetInfo of type %u failed" % info_type, e)
-        return (info_type, info)
+
+        reps = [self.parse_neighbour(n) for n in info.array]
+        return reps
 
     def run(self, DC=None, sambaopts=None,
-            credopts=None, versionopts=None, server=None):
-
+            credopts=None, versionopts=None,
+            format=DEFAULT_SHOWREPL_FORMAT,
+            verbose=False, color='no'):
+        self.apply_colour_choice(color)
         self.lp = sambaopts.get_loadparm()
         if DC is None:
             DC = common.netcmd_dnsname(self.lp)
         self.server = DC
         self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
+        self.verbose = verbose
 
+        output_function = {
+            'summary': self.summary_output,
+            'notify_summary': self.notify_summary_output,
+            'pull_summary': self.pull_summary_output,
+            'json': self.json_output,
+            'classic': self.classic_output,
+        }.get(format)
+        if output_function is None:
+            raise CommandError("unknown showrepl format %s" % format)
+
+        return output_function()
+
+    def json_output(self):
+        data = self.get_local_repl_data()
+        del data['site']
+        del data['server']
+        json.dump(data, self.outf, indent=2)
+
+    def summary_output_handler(self, typeof_output):
+        """Print a short message if every seems fine, but print details of any
+        links that seem broken."""
+        failing_repsto = []
+        failing_repsfrom = []
+
+        local_data = self.get_local_repl_data()
+
+        if typeof_output != "pull_summary":
+            for rep in local_data['repsTo']:
+                if rep['is deleted']:
+                    continue
+                if rep["consecutive failures"] != 0 or rep["last success"] == 0:
+                    failing_repsto.append(rep)
+
+        if typeof_output != "notify_summary":
+            for rep in local_data['repsFrom']:
+                if rep['is deleted']:
+                    continue
+                if rep["consecutive failures"] != 0 or rep["last success"] == 0:
+                    failing_repsfrom.append(rep)
+
+        if failing_repsto or failing_repsfrom:
+            self.message(colour.c_RED("There are failing connections"))
+            if failing_repsto:
+                self.message(colour.c_RED("Failing outbound connections:"))
+                for rep in failing_repsto:
+                    self.print_neighbour(rep)
+            if failing_repsfrom:
+                self.message(colour.c_RED("Failing inbound connection:"))
+                for rep in failing_repsfrom:
+                    self.print_neighbour(rep)
+
+            return 1
+
+        self.message(colour.c_GREEN("[ALL GOOD]"))
+
+
+    def summary_output(self):
+        return self.summary_output_handler("summary")
+
+    def notify_summary_output(self):
+        return self.summary_output_handler("notify_summary")
+
+    def pull_summary_output(self):
+        return self.summary_output_handler("pull_summary")
+
+    def get_local_repl_data(self):
         drsuapi_connect(self)
         samdb_connect(self)
 
         # show domain information
         ntds_dn = self.samdb.get_dsServiceName()
-        server_dns = self.samdb.search(base="", scope=ldb.SCOPE_BASE, attrs=["dnsHostName"])[0]['dnsHostName'][0]
 
         (site, server) = drs_parse_ntds_dn(ntds_dn)
         try:
             ntds = self.samdb.search(base=ntds_dn, scope=ldb.SCOPE_BASE, attrs=['options', 'objectGUID', 'invocationId'])
-        except Exception, e:
+        except Exception as e:
             raise CommandError("Failed to search NTDS DN %s" % ntds_dn)
+
+        dsa_details = {
+            "options": int(attr_default(ntds[0], "options", 0)),
+            "objectGUID": self.samdb.schema_format_value(
+                "objectGUID", ntds[0]["objectGUID"][0]),
+            "invocationId": self.samdb.schema_format_value(
+                "objectGUID", ntds[0]["invocationId"][0])
+        }
+
         conn = self.samdb.search(base=ntds_dn, expression="(objectClass=nTDSConnection)")
+        repsfrom = self.get_neighbours(drsuapi.DRSUAPI_DS_REPLICA_INFO_NEIGHBORS)
+        repsto = self.get_neighbours(drsuapi.DRSUAPI_DS_REPLICA_INFO_REPSTO)
+
+        conn_details = []
+        for c in conn:
+            c_rdn, sep, c_server_dn = c['fromServer'][0].partition(',')
+            d = {
+                'name': str(c['name']),
+                'remote DN': c['fromServer'][0],
+                'options': int(attr_default(c, 'options', 0)),
+                'enabled': (attr_default(c, 'enabledConnection',
+                                         'TRUE').upper() == 'TRUE')
+            }
+
+            conn_details.append(d)
+            try:
+                c_server_res = self.samdb.search(base=c_server_dn,
+                                                 scope=ldb.SCOPE_BASE,
+                                                 attrs=["dnsHostName"])
+                d['dns name'] = c_server_res[0]["dnsHostName"][0]
+            except ldb.LdbError as e:
+                (errno, _) = e.args
+                if errno == ldb.ERR_NO_SUCH_OBJECT:
+                    d['is deleted'] = True
+            except KeyError:
+                pass
+
+            d['replicates NC'] = []
+            for r in c.get('mS-DS-ReplicatesNCReason', []):
+                a = str(r).split(':')
+                d['replicates NC'].append((a[3], int(a[2])))
+
+        return {
+            'dsa': dsa_details,
+            'repsFrom': repsfrom,
+            'repsTo': repsto,
+            'NTDSConnections': conn_details,
+            'site': site,
+            'server': server
+        }
+
+    def classic_output(self):
+        data = self.get_local_repl_data()
+        dsa_details = data['dsa']
+        repsfrom = data['repsFrom']
+        repsto = data['repsTo']
+        conn_details = data['NTDSConnections']
+        site = data['site']
+        server = data['server']
 
         self.message("%s\\%s" % (site, server))
-        self.message("DSA Options: 0x%08x" % int(attr_default(ntds[0], "options", 0)))
-        self.message("DSA object GUID: %s" % self.samdb.schema_format_value("objectGUID", ntds[0]["objectGUID"][0]))
-        self.message("DSA invocationId: %s\n" % self.samdb.schema_format_value("objectGUID", ntds[0]["invocationId"][0]))
+        self.message("DSA Options: 0x%08x" % dsa_details["options"])
+        self.message("DSA object GUID: %s" % dsa_details["objectGUID"])
+        self.message("DSA invocationId: %s\n" % dsa_details["invocationId"])
 
         self.message("==== INBOUND NEIGHBORS ====\n")
-        (info_type, info) = self.drsuapi_ReplicaInfo(drsuapi.DRSUAPI_DS_REPLICA_INFO_NEIGHBORS)
-        for n in info.array:
+        for n in repsfrom:
             self.print_neighbour(n)
 
-
         self.message("==== OUTBOUND NEIGHBORS ====\n")
-        (info_type, info) = self.drsuapi_ReplicaInfo(drsuapi.DRSUAPI_DS_REPLICA_INFO_REPSTO)
-        for n in info.array:
+        for n in repsto:
             self.print_neighbour(n)
 
         reasons = ['NTDSCONN_KCC_GC_TOPOLOGY',
@@ -171,37 +353,27 @@ class cmd_drs_showrepl(Command):
                    'NTDSCONN_KCC_REDUNDANT_SERVER_TOPOLOGY']
 
         self.message("==== KCC CONNECTION OBJECTS ====\n")
-        for c in conn:
+        for d in conn_details:
             self.message("Connection --")
+            if d.get('is deleted'):
+                self.message("\tWARNING: Connection to DELETED server!")
 
-            c_rdn, sep, c_server_dn = c['fromServer'][0].partition(',')
-            try:
-                c_server_res = self.samdb.search(base=c_server_dn, scope=ldb.SCOPE_BASE, attrs=["dnsHostName"])
-                c_server_dns = c_server_res[0]["dnsHostName"][0]
-            except ldb.LdbError, (errno, _):
-                if errno == ldb.ERR_NO_SUCH_OBJECT:
-                    self.message("\tWARNING: Connection to DELETED server!")
-                c_server_dns = ""
-            except KeyError:
-                c_server_dns = ""
-
-            self.message("\tConnection name: %s" % c['name'][0])
-            self.message("\tEnabled        : %s" % attr_default(c, 'enabledConnection', 'TRUE'))
-            self.message("\tServer DNS name : %s" % c_server_dns)
-            self.message("\tServer DN name  : %s" % c['fromServer'][0])
+            self.message("\tConnection name: %s" % d['name'])
+            self.message("\tEnabled        : %s" % str(d['enabled']).upper())
+            self.message("\tServer DNS name : %s" % d['dns name'])
+            self.message("\tServer DN name  : %s" % d['remote DN'])
             self.message("\t\tTransportType: RPC")
-            self.message("\t\toptions: 0x%08X" % int(attr_default(c, 'options', 0)))
-            if not 'mS-DS-ReplicatesNCReason' in c:
-                self.message("Warning: No NC replicated for Connection!")
-                continue
-            for r in c['mS-DS-ReplicatesNCReason']:
-                a = str(r).split(':')
-                self.message("\t\tReplicatesNC: %s" % a[3])
-                self.message("\t\tReason: 0x%08x" % int(a[2]))
-                for s in reasons:
-                    if getattr(dsdb, s, 0) & int(a[2]):
-                        self.message("\t\t\t%s" % s)
+            self.message("\t\toptions: 0x%08X" % d['options'])
 
+            if d['replicates NC']:
+                for nc, reason in d['replicates NC']:
+                    self.message("\t\tReplicatesNC: %s" % nc)
+                    self.message("\t\tReason: 0x%08x" % reason)
+                    for s in reasons:
+                        if getattr(dsdb, s, 0) & reason:
+                            self.message("\t\t\t%s" % s)
+            else:
+                self.message("Warning: No NC replicated for Connection!")
 
 
 class cmd_drs_kcc(Command):
@@ -218,7 +390,7 @@ class cmd_drs_kcc(Command):
     takes_args = ["DC?"]
 
     def run(self, DC=None, sambaopts=None,
-            credopts=None, versionopts=None, server=None):
+            credopts=None, versionopts=None):
 
         self.lp = sambaopts.get_loadparm()
         if DC is None:
@@ -232,52 +404,9 @@ class cmd_drs_kcc(Command):
         req1 = drsuapi.DsExecuteKCC1()
         try:
             self.drsuapi.DsExecuteKCC(self.drsuapi_handle, 1, req1)
-        except Exception, e:
+        except Exception as e:
             raise CommandError("DsExecuteKCC failed", e)
         self.message("Consistency check on %s successful." % DC)
-
-
-
-def drs_local_replicate(self, SOURCE_DC, NC):
-    '''replicate from a source DC to the local SAM'''
-
-    self.server = SOURCE_DC
-    drsuapi_connect(self)
-
-    self.local_samdb = SamDB(session_info=system_session(), url=None,
-                             credentials=self.creds, lp=self.lp)
-
-    self.samdb = SamDB(url="ldap://%s" % self.server,
-                       session_info=system_session(),
-                       credentials=self.creds, lp=self.lp)
-
-    # work out the source and destination GUIDs
-    res = self.local_samdb.search(base="", scope=ldb.SCOPE_BASE, attrs=["dsServiceName"])
-    self.ntds_dn = res[0]["dsServiceName"][0]
-
-    res = self.local_samdb.search(base=self.ntds_dn, scope=ldb.SCOPE_BASE, attrs=["objectGUID"])
-    self.ntds_guid = misc.GUID(self.samdb.schema_format_value("objectGUID", res[0]["objectGUID"][0]))
-
-
-    source_dsa_invocation_id = misc.GUID(self.samdb.get_invocation_id())
-    dest_dsa_invocation_id = misc.GUID(self.local_samdb.get_invocation_id())
-    destination_dsa_guid = self.ntds_guid
-
-    self.samdb.transaction_start()
-    repl = drs_utils.drs_Replicate("ncacn_ip_tcp:%s[seal]" % self.server, self.lp,
-                                   self.creds, self.local_samdb, dest_dsa_invocation_id)
-
-    # Work out if we are an RODC, so that a forced local replicate
-    # with the admin pw does not sync passwords
-    rodc = self.local_samdb.am_rodc()
-    try:
-        repl.replicate(NC, source_dsa_invocation_id, destination_dsa_guid, rodc=rodc)
-    except Exception, e:
-        raise CommandError("Error replicating DN %s" % NC, e)
-    self.samdb.transaction_commit()
-
-    self.message("Replicate from %s to %s was successful." % (SOURCE_DC, self.local_samdb.url))
-
 
 
 class cmd_drs_replicate(Command):
@@ -301,12 +430,81 @@ class cmd_drs_replicate(Command):
         Option("--local", help="pull changes directly into the local database (destination DC is ignored)", action="store_true"),
         Option("--local-online", help="pull changes into the local database (destination DC is ignored) as a normal online replication", action="store_true"),
         Option("--async-op", help="use ASYNC_OP for the replication", action="store_true"),
+        Option("--single-object", help="Replicate only the object specified, instead of the whole Naming Context (only with --local)", action="store_true"),
         ]
+
+    def drs_local_replicate(self, SOURCE_DC, NC, full_sync=False,
+                            single_object=False,
+                            sync_forced=False):
+        '''replicate from a source DC to the local SAM'''
+
+        self.server = SOURCE_DC
+        drsuapi_connect(self)
+
+        self.local_samdb = SamDB(session_info=system_session(), url=None,
+                                 credentials=self.creds, lp=self.lp)
+
+        self.samdb = SamDB(url="ldap://%s" % self.server,
+                           session_info=system_session(),
+                           credentials=self.creds, lp=self.lp)
+
+        # work out the source and destination GUIDs
+        res = self.local_samdb.search(base="", scope=ldb.SCOPE_BASE,
+                                      attrs=["dsServiceName"])
+        self.ntds_dn = res[0]["dsServiceName"][0]
+
+        res = self.local_samdb.search(base=self.ntds_dn, scope=ldb.SCOPE_BASE,
+                                      attrs=["objectGUID"])
+        self.ntds_guid = misc.GUID(
+            self.samdb.schema_format_value("objectGUID",
+                                           res[0]["objectGUID"][0]))
+
+        source_dsa_invocation_id = misc.GUID(self.samdb.get_invocation_id())
+        dest_dsa_invocation_id = misc.GUID(self.local_samdb.get_invocation_id())
+        destination_dsa_guid = self.ntds_guid
+
+        exop = drsuapi.DRSUAPI_EXOP_NONE
+
+        if single_object:
+            exop = drsuapi.DRSUAPI_EXOP_REPL_OBJ
+            full_sync = True
+
+        self.samdb.transaction_start()
+        repl = drs_utils.drs_Replicate("ncacn_ip_tcp:%s[seal]" % self.server,
+                                       self.lp,
+                                       self.creds, self.local_samdb,
+                                       dest_dsa_invocation_id)
+
+        # Work out if we are an RODC, so that a forced local replicate
+        # with the admin pw does not sync passwords
+        rodc = self.local_samdb.am_rodc()
+        try:
+            (num_objects, num_links) = repl.replicate(NC,
+                                                      source_dsa_invocation_id,
+                                                      destination_dsa_guid,
+                                                      rodc=rodc,
+                                                      full_sync=full_sync,
+                                                      exop=exop,
+                                                      sync_forced=sync_forced)
+        except Exception as e:
+            raise CommandError("Error replicating DN %s" % NC, e)
+        self.samdb.transaction_commit()
+
+        if full_sync:
+            self.message("Full Replication of all %d objects and %d links "
+                         "from %s to %s was successful." %
+                         (num_objects, num_links, SOURCE_DC,
+                          self.local_samdb.url))
+        else:
+            self.message("Incremental replication of %d objects and %d links "
+                         "from %s to %s was successful." %
+                         (num_objects, num_links, SOURCE_DC,
+                          self.local_samdb.url))
 
     def run(self, DEST_DC, SOURCE_DC, NC,
             add_ref=False, sync_forced=False, sync_all=False, full_sync=False,
-            local=False, local_online=False, async_op=False,
-            sambaopts=None, credopts=None, versionopts=None, server=None):
+            local=False, local_online=False, async_op=False, single_object=False,
+            sambaopts=None, credopts=None, versionopts=None):
 
         self.server = DEST_DC
         self.lp = sambaopts.get_loadparm()
@@ -314,7 +512,9 @@ class cmd_drs_replicate(Command):
         self.creds = credopts.get_credentials(self.lp, fallback_machine=True)
 
         if local:
-            drs_local_replicate(self, SOURCE_DC, NC)
+            self.drs_local_replicate(SOURCE_DC, NC, full_sync=full_sync,
+                                     single_object=single_object,
+                                     sync_forced=sync_forced)
             return
 
         if local_online:
@@ -366,7 +566,7 @@ class cmd_drs_replicate(Command):
 
         try:
             drs_utils.sendDsReplicaSync(server_bind, server_bind_handle, source_dsa_guid, NC, req_options)
-        except drs_utils.drsException, estr:
+        except drs_utils.drsException as estr:
             raise CommandError("DsReplicaSync failed", estr)
         if async_op:
             self.message("Replicate from %s to %s was started." % (SOURCE_DC, DEST_DC))
@@ -389,7 +589,7 @@ class cmd_drs_bind(Command):
     takes_args = ["DC?"]
 
     def run(self, DC=None, sambaopts=None,
-            credopts=None, versionopts=None, server=None):
+            credopts=None, versionopts=None):
 
         self.lp = sambaopts.get_loadparm()
         if DC is None:
@@ -550,9 +750,9 @@ class cmd_drs_clone_dc_database(Command):
     takes_options = [
         Option("--server", help="DC to join", type=str),
         Option("--targetdir", help="where to store provision (required)", type=str),
-        Option("--quiet", help="Be quiet", action="store_true"),
+        Option("-q", "--quiet", help="Be quiet", action="store_true"),
         Option("--include-secrets", help="Also replicate secret values", action="store_true"),
-        Option("--verbose", help="Be verbose", action="store_true")
+        Option("-v", "--verbose", help="Be verbose", action="store_true")
        ]
 
     takes_args = ["domain"]

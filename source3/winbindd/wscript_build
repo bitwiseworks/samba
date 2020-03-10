@@ -312,7 +312,6 @@ if sys.platform != 'os2knix':
                  winbindd_idmap.c
                  winbindd_locator.c
                  winbindd_ndr.c
-                 wb_ping.c
                  wb_lookupsid.c
                  wb_lookupsids.c
                  wb_lookupname.c
@@ -364,11 +363,13 @@ if sys.platform != 'os2knix':
                  winbindd_change_machine_acct.c
                  winbindd_irpc.c
                  winbindd_ping_dc.c
+                 winbindd_domain_info.c
                  winbindd_pam_auth.c
                  winbindd_pam_logoff.c
                  winbindd_pam_chauthtok.c
                  winbindd_pam_auth_crap.c
-                 winbindd_pam_chng_pswd_auth_crap.c''',
+                 winbindd_pam_chng_pswd_auth_crap.c
+                 winbindd_gpupdate.c''',
                  deps='''
                  talloc
                  tevent

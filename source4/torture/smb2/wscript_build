@@ -6,6 +6,7 @@ bld.SAMBA_MODULE('TORTURE_SMB2',
         compound.c
         connect.c
         create.c
+        credits.c
         delete-on-close.c
         dir.c
         dosmode.c
@@ -14,6 +15,7 @@ bld.SAMBA_MODULE('TORTURE_SMB2',
         getinfo.c
         ioctl.c
         lease.c
+        lease_break_handler.c
         lock.c
         maxfid.c
         maxwrite.c
@@ -26,6 +28,7 @@ bld.SAMBA_MODULE('TORTURE_SMB2',
         scan.c
         session.c
         setinfo.c
+        sharemode.c
         smb2.c
         streams.c
         util.c

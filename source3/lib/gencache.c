@@ -55,11 +55,14 @@ static bool gencache_init(void)
 {
 	char* cache_fname = NULL;
 	int open_flags = O_RDWR|O_CREAT;
+	int hash_size;
 
 	/* skip file open if it's already opened */
 	if (cache) {
 		return true;
 	}
+
+	hash_size = lp_parm_int(-1, "gencache", "hash_size", 10000);
 
 	cache_fname = cache_path("gencache.tdb");
 	if (cache_fname == NULL) {
@@ -68,36 +71,13 @@ static bool gencache_init(void)
 
 	DEBUG(5, ("Opening cache file at %s\n", cache_fname));
 
-	cache = tdb_wrap_open(NULL, cache_fname, 0,
+	cache = tdb_wrap_open(NULL, cache_fname, hash_size,
 			      TDB_DEFAULT|TDB_INCOMPATIBLE_HASH,
 			      open_flags, 0644);
-	if (cache) {
-		int ret;
-		ret = tdb_check(cache->tdb, NULL, NULL);
-		if (ret != 0) {
-			TALLOC_FREE(cache);
-
-			/*
-			 * Retry with CLEAR_IF_FIRST.
-			 *
-			 * Warning: Converting this to dbwrap won't work
-			 * directly. gencache.c does transactions on this tdb,
-			 * and dbwrap forbids this for CLEAR_IF_FIRST
-			 * databases. tdb does allow transactions on
-			 * CLEAR_IF_FIRST databases, so lets use it here to
-			 * clean up a broken database.
-			 */
-			cache = tdb_wrap_open(NULL, cache_fname, 0,
-					      TDB_DEFAULT|
-					      TDB_INCOMPATIBLE_HASH|
-					      TDB_CLEAR_IF_FIRST,
-					      open_flags, 0644);
-		}
-	}
 
 	if (!cache && (errno == EACCES)) {
 		open_flags = O_RDONLY;
-		cache = tdb_wrap_open(NULL, cache_fname, 0,
+		cache = tdb_wrap_open(NULL, cache_fname, hash_size,
 				      TDB_DEFAULT|TDB_INCOMPATIBLE_HASH,
 				      open_flags, 0644);
 		if (cache) {
@@ -119,7 +99,7 @@ static bool gencache_init(void)
 
 	DEBUG(5, ("Opening cache file at %s\n", cache_fname));
 
-	cache_notrans = tdb_wrap_open(NULL, cache_fname, 0,
+	cache_notrans = tdb_wrap_open(NULL, cache_fname, hash_size,
 				      TDB_CLEAR_IF_FIRST|
 				      TDB_INCOMPATIBLE_HASH|
 				      TDB_NOSYNC|
@@ -272,7 +252,7 @@ static int last_stabilize_parser(TDB_DATA key, TDB_DATA data,
  * @retval false on failure
  **/
 
-bool gencache_set_data_blob(const char *keystr, const DATA_BLOB *blob,
+bool gencache_set_data_blob(const char *keystr, DATA_BLOB blob,
 			    time_t timeout)
 {
 	int ret;
@@ -288,7 +268,7 @@ bool gencache_set_data_blob(const char *keystr, const DATA_BLOB *blob,
 		return false;
 	}
 
-	if ((keystr == NULL) || (blob == NULL)) {
+	if ((keystr == NULL) || (blob.data == NULL)) {
 		return false;
 	}
 
@@ -296,7 +276,7 @@ bool gencache_set_data_blob(const char *keystr, const DATA_BLOB *blob,
 		return false;
 	}
 
-	if ((timeout != 0) && gencache_have_val(keystr, blob, timeout)) {
+	if ((timeout != 0) && gencache_have_val(keystr, &blob, timeout)) {
 		DEBUG(10, ("Did not store value for %s, we already got it\n",
 			   keystr));
 		return true;
@@ -307,12 +287,12 @@ bool gencache_set_data_blob(const char *keystr, const DATA_BLOB *blob,
 	if (hdr_len == -1) {
 		return false;
 	}
-	if ((blob->length + (size_t)hdr_len) < blob->length) {
+	if ((blob.length + (size_t)hdr_len) < blob.length) {
 		return false;
 	}
 
 	dbufs[0] = (TDB_DATA) { .dptr = (uint8_t *)hdr, .dsize = hdr_len };
-	dbufs[1] = (TDB_DATA) { .dptr = blob->data, .dsize = blob->length };
+	dbufs[1] = (TDB_DATA) { .dptr = blob.data, .dsize = blob.length };
 
 	DEBUG(10, ("Adding cache entry with key=[%s] and timeout="
 	           "[%s] (%d seconds %s)\n", keystr,
@@ -565,7 +545,7 @@ static void gencache_get_data_blob_parser(time_t timeout, DATA_BLOB blob,
  * @param timeout pointer to a time_t that is filled with entry's
  *        timeout
  *
- * @retval true when entry is successfuly fetched
+ * @retval true when entry is successfully fetched
  * @retval false for failure
  **/
 
@@ -618,9 +598,6 @@ struct stabilize_state {
 };
 static int stabilize_fn(struct tdb_context *tdb, TDB_DATA key, TDB_DATA val,
 			void *priv);
-
-static int wipe_fn(struct tdb_context *tdb, TDB_DATA key, TDB_DATA val,
-		   void *priv);
 
 /**
  * Stabilize gencache
@@ -687,20 +664,10 @@ bool gencache_stabilize(void)
 		return false;
 	}
 
-	res = tdb_traverse(cache_notrans->tdb, wipe_fn, NULL);
+	res = tdb_wipe_all(cache_notrans->tdb);
 	if (res < 0) {
-		DEBUG(10, ("tdb_traverse with wipe_fn on gencache_notrans.tdb "
-			  "failed: %s\n",
-			   tdb_errorstr(cache_notrans->tdb)));
-		tdb_unlockall(cache_notrans->tdb);
-		return false;
-	}
-
-	res = tdb_unlockall(cache_notrans->tdb);
-	if (res != 0) {
-		DEBUG(10, ("tdb_unlockall on gencache.tdb failed: "
-			   "%s\n", tdb_errorstr(cache->tdb)));
-		return false;
+		DBG_DEBUG("tdb_wipe_all on gencache_notrans.tdb failed: %s\n",
+			  tdb_errorstr(cache_notrans->tdb));
 	}
 
 	now = talloc_asprintf(talloc_tos(), "%d", (int)time(NULL));
@@ -708,6 +675,13 @@ bool gencache_stabilize(void)
 		tdb_store(cache_notrans->tdb, last_stabilize_key(),
 			  string_term_tdb_data(now), 0);
 		TALLOC_FREE(now);
+	}
+
+	res = tdb_unlockall(cache_notrans->tdb);
+	if (res != 0) {
+		DEBUG(10, ("tdb_unlockall on gencache.tdb failed: "
+			   "%s\n", tdb_errorstr(cache->tdb)));
+		return false;
 	}
 
 	return true;
@@ -750,35 +724,6 @@ static int stabilize_fn(struct tdb_context *tdb, TDB_DATA key, TDB_DATA val,
 
 	return 0;
 }
-
-static int wipe_fn(struct tdb_context *tdb, TDB_DATA key, TDB_DATA val,
-		   void *priv)
-{
-	int res;
-	bool ok;
-	time_t timeout;
-
-	res = tdb_data_cmp(key, last_stabilize_key());
-	if (res == 0) {
-		return 0;
-	}
-
-	ok = gencache_pull_timeout(val.dptr, &timeout, NULL);
-	if (!ok) {
-		DEBUG(10, ("Ignoring invalid entry\n"));
-		return 0;
-	}
-
-	res = tdb_delete(tdb, key);
-	if (res != 0) {
-		DEBUG(10, ("tdb_delete from gencache_notrans.tdb failed: "
-			   "%s\n", tdb_errorstr(cache_notrans->tdb)));
-		return -1;
-	}
-
-	return 0;
-}
-
 
 /**
  * Get existing entry from the cache file.
@@ -832,14 +777,14 @@ bool gencache_get(const char *keystr, TALLOC_CTX *mem_ctx, char **value,
  * @param value text representation value being cached
  * @param timeout time when the value is expired
  *
- * @retval true when entry is successfuly stored
+ * @retval true when entry is successfully stored
  * @retval false on failure
  **/
 
 bool gencache_set(const char *keystr, const char *value, time_t timeout)
 {
 	DATA_BLOB blob = data_blob_const(value, strlen(value)+1);
-	return gencache_set_data_blob(keystr, &blob, timeout);
+	return gencache_set_data_blob(keystr, blob, timeout);
 }
 
 struct gencache_iterate_blobs_state {

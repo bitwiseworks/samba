@@ -29,29 +29,57 @@
 static char *capencode(TALLOC_CTX *ctx, const char *from);
 static char *capdecode(TALLOC_CTX *ctx, const char *from);
 
-static uint64_t cap_disk_free(vfs_handle_struct *handle, const char *path,
-			      uint64_t *bsize, uint64_t *dfree, uint64_t *dsize)
+static uint64_t cap_disk_free(vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			uint64_t *bsize,
+			uint64_t *dfree,
+			uint64_t *dsize)
 {
-	char *cappath = capencode(talloc_tos(), path);
+	char *capname = capencode(talloc_tos(), smb_fname->base_name);
+	struct smb_filename *cap_smb_fname = NULL;
 
-	if (!cappath) {
+	if (!capname) {
 		errno = ENOMEM;
 		return (uint64_t)-1;
 	}
-	return SMB_VFS_NEXT_DISK_FREE(handle, cappath, bsize, dfree, dsize);
+	cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					capname,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (cap_smb_fname == NULL) {
+		TALLOC_FREE(capname);
+		errno = ENOMEM;
+		return (uint64_t)-1;
+	}
+	return SMB_VFS_NEXT_DISK_FREE(handle, cap_smb_fname,
+			bsize, dfree, dsize);
 }
 
-static int cap_get_quota(vfs_handle_struct *handle, const char *path,
-			 enum SMB_QUOTA_TYPE qtype, unid_t id,
-			 SMB_DISK_QUOTA *dq)
+static int cap_get_quota(vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			enum SMB_QUOTA_TYPE qtype,
+			unid_t id,
+			SMB_DISK_QUOTA *dq)
 {
-	char *cappath = capencode(talloc_tos(), path);
+	char *cappath = capencode(talloc_tos(), smb_fname->base_name);
+	struct smb_filename *cap_smb_fname = NULL;
 
 	if (!cappath) {
 		errno = ENOMEM;
 		return -1;
 	}
-	return SMB_VFS_NEXT_GET_QUOTA(handle, cappath, qtype, id, dq);
+	cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					cappath,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (cap_smb_fname == NULL) {
+		TALLOC_FREE(cappath);
+		errno = ENOMEM;
+		return -1;
+	}
+	return SMB_VFS_NEXT_GET_QUOTA(handle, cap_smb_fname, qtype, id, dq);
 }
 
 static DIR *cap_opendir(vfs_handle_struct *handle,
@@ -408,16 +436,40 @@ static int cap_lchown(vfs_handle_struct *handle,
 	return ret;
 }
 
-static int cap_chdir(vfs_handle_struct *handle, const char *path)
+static int cap_chdir(vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname)
 {
-	char *cappath = capencode(talloc_tos(), path);
+	struct smb_filename *cap_smb_fname = NULL;
+	char *cappath = capencode(talloc_tos(), smb_fname->base_name);
+	int ret;
+	int saved_errno = 0;
 
 	if (!cappath) {
 		errno = ENOMEM;
 		return -1;
 	}
-	DEBUG(3,("cap: cap_chdir for %s\n", path));
-	return SMB_VFS_NEXT_CHDIR(handle, cappath);
+	DEBUG(3,("cap: cap_chdir for %s\n", smb_fname->base_name));
+
+	cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					cappath,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (cap_smb_fname == NULL) {
+		TALLOC_FREE(cappath);
+		errno = ENOMEM;
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_CHDIR(handle, cap_smb_fname);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(cappath);
+	TALLOC_FREE(cap_smb_fname);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
 }
 
 static int cap_ntimes(vfs_handle_struct *handle,
@@ -451,76 +503,56 @@ static int cap_ntimes(vfs_handle_struct *handle,
 }
 
 
-static int cap_symlink(vfs_handle_struct *handle, const char *oldpath,
-		       const char *newpath)
+static int cap_symlink(vfs_handle_struct *handle,
+			const char *link_contents,
+			const struct smb_filename *new_smb_fname)
 {
-	char *capold = capencode(talloc_tos(), oldpath);
-	char *capnew = capencode(talloc_tos(), newpath);
-
-	if (!capold || !capnew) {
-		errno = ENOMEM;
-		return -1;
-	}
-	return SMB_VFS_NEXT_SYMLINK(handle, capold, capnew);
-}
-
-static int cap_readlink(vfs_handle_struct *handle, const char *path,
-			char *buf, size_t bufsiz)
-{
-	char *cappath = capencode(talloc_tos(), path);
-
-	if (!cappath) {
-		errno = ENOMEM;
-		return -1;
-	}
-	return SMB_VFS_NEXT_READLINK(handle, cappath, buf, bufsiz);
-}
-
-static int cap_link(vfs_handle_struct *handle, const char *oldpath, const char *newpath)
-{
-	char *capold = capencode(talloc_tos(), oldpath);
-	char *capnew = capencode(talloc_tos(), newpath);
-
-	if (!capold || !capnew) {
-		errno = ENOMEM;
-		return -1;
-	}
-	return SMB_VFS_NEXT_LINK(handle, capold, capnew);
-}
-
-static int cap_mknod(vfs_handle_struct *handle, const char *path, mode_t mode, SMB_DEV_T dev)
-{
-	char *cappath = capencode(talloc_tos(), path);
-
-	if (!cappath) {
-		errno = ENOMEM;
-		return -1;
-	}
-	return SMB_VFS_NEXT_MKNOD(handle, cappath, mode, dev);
-}
-
-static char *cap_realpath(vfs_handle_struct *handle, const char *path)
-{
-        /* monyo need capencode'ed and capdecode'ed? */
-	char *cappath = capencode(talloc_tos(), path);
-
-	if (!cappath) {
-		errno = ENOMEM;
-		return NULL;
-	}
-	return SMB_VFS_NEXT_REALPATH(handle, cappath);
-}
-
-static int cap_chmod_acl(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			mode_t mode)
-{
-	struct smb_filename *cap_smb_fname = NULL;
-	char *cappath = capencode(talloc_tos(), smb_fname->base_name);
+	char *capold = capencode(talloc_tos(), link_contents);
+	char *capnew = capencode(talloc_tos(), new_smb_fname->base_name);
+	struct smb_filename *new_cap_smb_fname = NULL;
+	int saved_errno = 0;
 	int ret;
-	int saved_errno;
 
-	/* If the underlying VFS doesn't have ACL support... */
+	if (!capold || !capnew) {
+		errno = ENOMEM;
+		return -1;
+	}
+	new_cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					capnew,
+					NULL,
+					NULL,
+					new_smb_fname->flags);
+	if (new_cap_smb_fname == NULL) {
+		TALLOC_FREE(capold);
+		TALLOC_FREE(capnew);
+		errno = ENOMEM;
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_SYMLINK(handle,
+			capold,
+			new_cap_smb_fname);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(capold);
+	TALLOC_FREE(capnew);
+	TALLOC_FREE(new_cap_smb_fname);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
+}
+
+static int cap_readlink(vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			char *buf,
+			size_t bufsiz)
+{
+	char *cappath = capencode(talloc_tos(), smb_fname->base_name);
+	struct smb_filename *cap_smb_fname = NULL;
+	int saved_errno = 0;
+	int ret;
+
 	if (!cappath) {
 		errno = ENOMEM;
 		return -1;
@@ -535,60 +567,289 @@ static int cap_chmod_acl(vfs_handle_struct *handle,
 		errno = ENOMEM;
 		return -1;
 	}
-
-	ret = SMB_VFS_NEXT_CHMOD_ACL(handle, cap_smb_fname, mode);
-	saved_errno = errno;
+	ret = SMB_VFS_NEXT_READLINK(handle, cap_smb_fname, buf, bufsiz);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
 	TALLOC_FREE(cappath);
 	TALLOC_FREE(cap_smb_fname);
-	errno = saved_errno;
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
 	return ret;
 }
 
-static SMB_ACL_T cap_sys_acl_get_file(vfs_handle_struct *handle,
-				      const char *path, SMB_ACL_TYPE_T type,
-				      TALLOC_CTX *mem_ctx)
+static int cap_link(vfs_handle_struct *handle,
+			const struct smb_filename *old_smb_fname,
+			const struct smb_filename *new_smb_fname)
 {
-	char *cappath = capencode(talloc_tos(), path);
+	char *capold = capencode(talloc_tos(), old_smb_fname->base_name);
+	char *capnew = capencode(talloc_tos(), new_smb_fname->base_name);
+	struct smb_filename *old_cap_smb_fname = NULL;
+	struct smb_filename *new_cap_smb_fname = NULL;
+	int saved_errno = 0;
+	int ret;
+
+	if (!capold || !capnew) {
+		errno = ENOMEM;
+		return -1;
+	}
+	old_cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					capold,
+					NULL,
+					NULL,
+					old_smb_fname->flags);
+	if (old_cap_smb_fname == NULL) {
+		TALLOC_FREE(capold);
+		TALLOC_FREE(capnew);
+		errno = ENOMEM;
+		return -1;
+	}
+	new_cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					capnew,
+					NULL,
+					NULL,
+					new_smb_fname->flags);
+	if (new_cap_smb_fname == NULL) {
+		TALLOC_FREE(capold);
+		TALLOC_FREE(capnew);
+		TALLOC_FREE(old_cap_smb_fname);
+		errno = ENOMEM;
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_LINK(handle, old_cap_smb_fname, new_cap_smb_fname);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(capold);
+	TALLOC_FREE(capnew);
+	TALLOC_FREE(old_cap_smb_fname);
+	TALLOC_FREE(new_cap_smb_fname);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
+}
+
+static int cap_mknod(vfs_handle_struct *handle,
+		const struct smb_filename *smb_fname,
+		mode_t mode,
+		SMB_DEV_T dev)
+{
+	struct smb_filename *cap_smb_fname = NULL;
+	char *cappath = capencode(talloc_tos(), smb_fname->base_name);
+	int ret;
+	int saved_errno = 0;
+
+	if (!cappath) {
+		errno = ENOMEM;
+		return -1;
+	}
+	cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					cappath,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (cap_smb_fname == NULL) {
+		TALLOC_FREE(cappath);
+		errno = ENOMEM;
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_MKNOD(handle, cap_smb_fname, mode, dev);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(cappath);
+	TALLOC_FREE(cap_smb_fname);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
+}
+
+static struct smb_filename *cap_realpath(vfs_handle_struct *handle,
+			TALLOC_CTX *ctx,
+			const struct smb_filename *smb_fname)
+{
+        /* monyo need capencode'ed and capdecode'ed? */
+	struct smb_filename *cap_smb_fname = NULL;
+	struct smb_filename *return_fname = NULL;
+	char *cappath = capencode(talloc_tos(), smb_fname->base_name);
+	int saved_errno = 0;
+
+	if (!cappath) {
+		errno = ENOMEM;
+		return NULL;
+	}
+	cap_smb_fname = synthetic_smb_fname(ctx,
+					cappath,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (cap_smb_fname == NULL) {
+		TALLOC_FREE(cappath);
+		errno = ENOMEM;
+		return NULL;
+	}
+	return_fname = SMB_VFS_NEXT_REALPATH(handle, ctx, cap_smb_fname);
+	if (return_fname == NULL) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(cappath);
+	TALLOC_FREE(cap_smb_fname);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return return_fname;
+}
+
+static SMB_ACL_T cap_sys_acl_get_file(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				SMB_ACL_TYPE_T type,
+				TALLOC_CTX *mem_ctx)
+{
+	struct smb_filename *cap_smb_fname = NULL;
+	char *cappath = capencode(talloc_tos(), smb_fname->base_name);
+	SMB_ACL_T ret;
+	int saved_errno = 0;
 
 	if (!cappath) {
 		errno = ENOMEM;
 		return (SMB_ACL_T)NULL;
 	}
-	return SMB_VFS_NEXT_SYS_ACL_GET_FILE(handle, cappath, type, mem_ctx);
+	cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					cappath,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (cap_smb_fname == NULL) {
+		TALLOC_FREE(cappath);
+		errno = ENOMEM;
+		return (SMB_ACL_T)NULL;
+	}
+	ret = SMB_VFS_NEXT_SYS_ACL_GET_FILE(handle, cap_smb_fname,
+				type, mem_ctx);
+	if (ret == NULL) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(cappath);
+	TALLOC_FREE(cap_smb_fname);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
 }
 
-static int cap_sys_acl_set_file(vfs_handle_struct *handle, const char *path, SMB_ACL_TYPE_T acltype, SMB_ACL_T theacl)
+static int cap_sys_acl_set_file(vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			SMB_ACL_TYPE_T acltype,
+			SMB_ACL_T theacl)
 {
-	char *cappath = capencode(talloc_tos(), path);
+	struct smb_filename *cap_smb_fname = NULL;
+	char *cappath = capencode(talloc_tos(), smb_fname->base_name);
+	int ret;
+	int saved_errno = 0;
 
 	if (!cappath) {
 		errno = ENOMEM;
 		return -1;
 	}
-	return SMB_VFS_NEXT_SYS_ACL_SET_FILE(handle, cappath, acltype, theacl);
+	cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					cappath,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (cap_smb_fname == NULL) {
+		TALLOC_FREE(cappath);
+		errno = ENOMEM;
+		return -1;
+	}
+	ret =  SMB_VFS_NEXT_SYS_ACL_SET_FILE(handle, cap_smb_fname,
+				acltype, theacl);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(cappath);
+	TALLOC_FREE(cap_smb_fname);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
 }
 
-static int cap_sys_acl_delete_def_file(vfs_handle_struct *handle, const char *path)
+static int cap_sys_acl_delete_def_file(vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname)
 {
-	char *cappath = capencode(talloc_tos(), path);
+	struct smb_filename *cap_smb_fname = NULL;
+	char *cappath = capencode(talloc_tos(), smb_fname->base_name);
+	int ret;
+	int saved_errno = 0;
 
 	if (!cappath) {
 		errno = ENOMEM;
 		return -1;
 	}
-	return SMB_VFS_NEXT_SYS_ACL_DELETE_DEF_FILE(handle, cappath);
+	cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					cappath,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (cap_smb_fname == NULL) {
+		TALLOC_FREE(cappath);
+		errno = ENOMEM;
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_SYS_ACL_DELETE_DEF_FILE(handle, cap_smb_fname);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(cappath);
+	TALLOC_FREE(cap_smb_fname);
+	if (saved_errno) {
+		errno = saved_errno;
+	}
+	return ret;
 }
 
-static ssize_t cap_getxattr(vfs_handle_struct *handle, const char *path, const char *name, void *value, size_t size)
+static ssize_t cap_getxattr(vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			const char *name,
+			void *value,
+			size_t size)
 {
-	char *cappath = capencode(talloc_tos(), path);
+	struct smb_filename *cap_smb_fname = NULL;
+	char *cappath = capencode(talloc_tos(), smb_fname->base_name);
 	char *capname = capencode(talloc_tos(), name);
+	ssize_t ret;
+	int saved_errno = 0;
 
 	if (!cappath || !capname) {
 		errno = ENOMEM;
 		return -1;
 	}
-        return SMB_VFS_NEXT_GETXATTR(handle, cappath, capname, value, size);
+	cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					cappath,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (cap_smb_fname == NULL) {
+		TALLOC_FREE(cappath);
+		TALLOC_FREE(capname);
+		errno = ENOMEM;
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_GETXATTR(handle, cap_smb_fname,
+			capname, value, size);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(cappath);
+	TALLOC_FREE(capname);
+	TALLOC_FREE(cap_smb_fname);
+	if (saved_errno) {
+		errno = saved_errno;
+	}
+	return ret;
 }
 
 static ssize_t cap_fgetxattr(vfs_handle_struct *handle, struct files_struct *fsp, const char *path, void *value, size_t size)
@@ -602,27 +863,78 @@ static ssize_t cap_fgetxattr(vfs_handle_struct *handle, struct files_struct *fsp
         return SMB_VFS_NEXT_FGETXATTR(handle, fsp, cappath, value, size);
 }
 
-static ssize_t cap_listxattr(vfs_handle_struct *handle, const char *path, char *list, size_t size)
+static ssize_t cap_listxattr(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				char *list,
+				size_t size)
 {
-	char *cappath = capencode(talloc_tos(), path);
+	struct smb_filename *cap_smb_fname = NULL;
+	char *cappath = capencode(talloc_tos(), smb_fname->base_name);
+	ssize_t ret;
+	int saved_errno = 0;
 
 	if (!cappath) {
 		errno = ENOMEM;
 		return -1;
 	}
-        return SMB_VFS_NEXT_LISTXATTR(handle, cappath, list, size);
+	cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					cappath,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (cap_smb_fname == NULL) {
+		TALLOC_FREE(cappath);
+		errno = ENOMEM;
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_LISTXATTR(handle, cap_smb_fname, list, size);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(cappath);
+	TALLOC_FREE(cap_smb_fname);
+	if (saved_errno) {
+		errno = saved_errno;
+	}
+	return ret;
 }
 
-static int cap_removexattr(vfs_handle_struct *handle, const char *path, const char *name)
+static int cap_removexattr(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				const char *name)
 {
-	char *cappath = capencode(talloc_tos(), path);
+	struct smb_filename *cap_smb_fname = NULL;
+	char *cappath = capencode(talloc_tos(), smb_fname->base_name);
 	char *capname = capencode(talloc_tos(), name);
+	int ret;
+	int saved_errno = 0;
 
 	if (!cappath || !capname) {
 		errno = ENOMEM;
 		return -1;
 	}
-        return SMB_VFS_NEXT_REMOVEXATTR(handle, cappath, capname);
+	cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					cappath,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (cap_smb_fname == NULL) {
+		TALLOC_FREE(cappath);
+		TALLOC_FREE(capname);
+		errno = ENOMEM;
+		return -1;
+	}
+        ret = SMB_VFS_NEXT_REMOVEXATTR(handle, cap_smb_fname, capname);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(cappath);
+	TALLOC_FREE(capname);
+	TALLOC_FREE(cap_smb_fname);
+	if (saved_errno) {
+		errno = saved_errno;
+	}
+	return ret;
 }
 
 static int cap_fremovexattr(vfs_handle_struct *handle, struct files_struct *fsp, const char *path)
@@ -636,16 +948,46 @@ static int cap_fremovexattr(vfs_handle_struct *handle, struct files_struct *fsp,
         return SMB_VFS_NEXT_FREMOVEXATTR(handle, fsp, cappath);
 }
 
-static int cap_setxattr(vfs_handle_struct *handle, const char *path, const char *name, const void *value, size_t size, int flags)
+static int cap_setxattr(vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			const char *name,
+			const void *value,
+			size_t size,
+			int flags)
 {
-	char *cappath = capencode(talloc_tos(), path);
+	struct smb_filename *cap_smb_fname = NULL;
+	char *cappath = capencode(talloc_tos(), smb_fname->base_name);
 	char *capname = capencode(talloc_tos(), name);
+	int ret;
+	int saved_errno = 0;
 
 	if (!cappath || !capname) {
 		errno = ENOMEM;
 		return -1;
 	}
-        return SMB_VFS_NEXT_SETXATTR(handle, cappath, capname, value, size, flags);
+	cap_smb_fname = synthetic_smb_fname(talloc_tos(),
+					cappath,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (cap_smb_fname == NULL) {
+		TALLOC_FREE(cappath);
+		TALLOC_FREE(capname);
+		errno = ENOMEM;
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_SETXATTR(handle, cap_smb_fname,
+				capname, value, size, flags);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(cappath);
+	TALLOC_FREE(capname);
+	TALLOC_FREE(cap_smb_fname);
+	if (saved_errno) {
+		errno = saved_errno;
+	}
+	return ret;
 }
 
 static int cap_fsetxattr(vfs_handle_struct *handle, struct files_struct *fsp, const char *path, const void *value, size_t size, int flags)
@@ -681,7 +1023,6 @@ static struct vfs_fn_pointers vfs_cap_fns = {
 	.link_fn = cap_link,
 	.mknod_fn = cap_mknod,
 	.realpath_fn = cap_realpath,
-	.chmod_acl_fn = cap_chmod_acl,
 	.sys_acl_get_file_fn = cap_sys_acl_get_file,
 	.sys_acl_set_file_fn = cap_sys_acl_set_file,
 	.sys_acl_delete_def_file_fn = cap_sys_acl_delete_def_file,
@@ -694,8 +1035,8 @@ static struct vfs_fn_pointers vfs_cap_fns = {
 	.fsetxattr_fn = cap_fsetxattr
 };
 
-NTSTATUS vfs_cap_init(void);
-NTSTATUS vfs_cap_init(void)
+static_decl_vfs;
+NTSTATUS vfs_cap_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "cap",
 				&vfs_cap_fns);

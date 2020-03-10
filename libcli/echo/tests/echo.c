@@ -26,7 +26,7 @@
 #include "libcli/util/ntstatus.h"
 #include "libcli/echo/libecho.h"
 
-NTSTATUS torture_libcli_echo_init(void);
+NTSTATUS torture_libcli_echo_init(TALLOC_CTX *);
 
 /* Basic test function that sends an echo request and checks the reply */
 static bool echo_udp_basic(struct torture_context *tctx, const char *address)
@@ -81,17 +81,17 @@ static bool torture_echo_udp(struct torture_context *tctx)
 }
 
 /* Test suite that bundles all the libecho tests */
-NTSTATUS torture_libcli_echo_init(void)
+NTSTATUS torture_libcli_echo_init(TALLOC_CTX *ctx)
 {
 	struct torture_suite *suite;
 
-	suite = torture_suite_create(talloc_autofree_context(), "echo");
+	suite = torture_suite_create(ctx, "echo");
 	NT_STATUS_HAVE_NO_MEMORY(suite);
 
 	torture_suite_add_simple_test(suite, "udp", torture_echo_udp);
 
 	suite->description = talloc_strdup(suite, "libcli/echo interface tests");
-	torture_register_suite(suite);
+	torture_register_suite(ctx, suite);
 
 	return NT_STATUS_OK;
 }

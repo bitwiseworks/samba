@@ -176,11 +176,11 @@ static bool handle_name_ptrs(unsigned char *ubuf,int *offset,int length,
 
 static int parse_nmb_name(char *inbuf,int ofs,int length, struct nmb_name *name)
 {
-	int m,n=0;
+	size_t m,n=0;
 	unsigned char *ubuf = (unsigned char *)inbuf;
 	int ret = 0;
 	bool got_pointer=False;
-	int loop_count=0;
+	size_t loop_count=0;
 	int offset = ofs;
 
 	if (length - offset < 2)
@@ -483,7 +483,7 @@ static int put_compressed_name_ptr(unsigned char *buf,
 
 static bool parse_dgram(char *inbuf,int length,struct dgram_packet *dgram)
 {
-	int offset;
+	size_t offset;
 	int flags;
 
 	memset((char *)dgram,'\0',sizeof(*dgram));
@@ -803,39 +803,75 @@ struct packet_struct *parse_packet(char *buf,int length,
 	return p;
 }
 
-/*******************************************************************
- Read a packet from a socket and parse it, returning a packet ready
- to be used or put on the queue. This assumes a UDP socket.
-******************************************************************/
-
-struct packet_struct *read_packet(int fd,enum packet_type packet_type)
+static struct packet_struct *copy_packet_talloc(
+	TALLOC_CTX *mem_ctx, const struct packet_struct *src)
 {
-	struct packet_struct *packet;
-	struct sockaddr_storage sa;
-	struct sockaddr_in *si = (struct sockaddr_in *)&sa;
-	char buf[MAX_DGRAM_SIZE];
-	int length;
+	struct packet_struct *pkt;
 
-	length = read_udp_v4_socket(fd,buf,sizeof(buf),&sa);
-	if (length < MIN_DGRAM_SIZE || sa.ss_family != AF_INET) {
+	pkt = talloc_memdup(mem_ctx, src, sizeof(struct packet_struct));
+	if (pkt == NULL) {
 		return NULL;
 	}
+	pkt->locked = false;
+	pkt->recv_fd = -1;
+	pkt->send_fd = -1;
 
-	packet = parse_packet(buf,
-			length,
-			packet_type,
-			si->sin_addr,
-			ntohs(si->sin_port));
-	if (!packet)
+	if (src->packet_type == NMB_PACKET) {
+		const struct nmb_packet *nsrc = &src->packet.nmb;
+		struct nmb_packet *ndst = &pkt->packet.nmb;
+
+		if (nsrc->answers != NULL) {
+			ndst->answers = talloc_memdup(
+				pkt, nsrc->answers,
+				sizeof(struct res_rec) * nsrc->header.ancount);
+			if (ndst->answers == NULL) {
+				goto fail;
+			}
+		}
+		if (nsrc->nsrecs != NULL) {
+			ndst->nsrecs = talloc_memdup(
+				pkt, nsrc->nsrecs,
+				sizeof(struct res_rec) * nsrc->header.nscount);
+			if (ndst->nsrecs == NULL) {
+				goto fail;
+			}
+		}
+		if (nsrc->additional != NULL) {
+			ndst->additional = talloc_memdup(
+				pkt, nsrc->additional,
+				sizeof(struct res_rec) * nsrc->header.arcount);
+			if (ndst->additional == NULL) {
+				goto fail;
+			}
+		}
+	}
+
+	return pkt;
+
+	/*
+	 * DGRAM packets have no substructures
+	 */
+
+fail:
+	TALLOC_FREE(pkt);
+	return NULL;
+}
+
+struct packet_struct *parse_packet_talloc(TALLOC_CTX *mem_ctx,
+					  char *buf,int length,
+					  enum packet_type packet_type,
+					  struct in_addr ip,
+					  int port)
+{
+	struct packet_struct *pkt, *result;
+
+	pkt = parse_packet(buf, length, packet_type, ip, port);
+	if (pkt == NULL) {
 		return NULL;
-
-	packet->recv_fd = fd;
-	packet->send_fd = -1;
-
-	DEBUG(5,("Received a packet of len %d from (%s) port %d\n",
-		 length, inet_ntoa(packet->ip), packet->port ) );
-
-	return(packet);
+	}
+	result = copy_packet_talloc(mem_ctx, pkt);
+	free_packet(pkt);
+	return result;
 }
 
 /*******************************************************************

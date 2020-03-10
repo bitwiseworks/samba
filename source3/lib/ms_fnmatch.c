@@ -150,7 +150,8 @@ int ms_fnmatch(const char *pattern, const char *string, bool translate_pattern,
 {
 	smb_ucs2_t *p = NULL;
 	smb_ucs2_t *s = NULL;
-	int ret, count, i;
+	int ret;
+	size_t count, i;
 	struct max_n *max_n = NULL;
 	struct max_n *max_n_free = NULL;
 	struct max_n one_max_n;
@@ -161,7 +162,7 @@ int ms_fnmatch(const char *pattern, const char *string, bool translate_pattern,
 	}
 
 	if (strpbrk(pattern, "<>*?\"") == NULL) {
-		/* this is not just an optmisation - it is essential
+		/* this is not just an optimisation - it is essential
 		   for LANMAN1 correctness */
 		if (is_case_sensitive) {
 			return strcmp(pattern, string);

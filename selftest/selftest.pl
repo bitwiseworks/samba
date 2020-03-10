@@ -28,6 +28,7 @@ use lib "$RealBin";
 use Subunit;
 use SocketWrapper;
 use target::Samba;
+use Time::HiRes qw(time);
 
 eval {
 require Time::HiRes;
@@ -47,8 +48,11 @@ my $opt_random_order = 0;
 my $opt_one = 0;
 my @opt_exclude = ();
 my @opt_include = ();
+my @opt_exclude_env = ();
+my @opt_include_env = ();
 my $opt_testenv = 0;
 my $opt_list = 0;
+my $opt_mitkrb5 = 0;
 my $ldap = undef;
 my $opt_resetup_env = undef;
 my $opt_load_list = undef;
@@ -56,6 +60,7 @@ my $opt_libnss_wrapper_so_path = "";
 my $opt_libresolv_wrapper_so_path = "";
 my $opt_libsocket_wrapper_so_path = "";
 my $opt_libuid_wrapper_so_path = "";
+my $opt_libasan_so_path = "";
 my $opt_use_dns_faking = 0;
 my @testlists = ();
 
@@ -80,9 +85,20 @@ sub find_in_list($$)
 	return undef;
 }
 
-sub skip($)
+sub skip
 {
-	my ($name) = @_;
+	my ($name, $envname) = @_;
+	my ($env_basename, $env_localpart) = split(/:/, $envname);
+
+	if ($opt_target eq "samba3" && $Samba::ENV_NEEDS_AD_DC{$env_basename}) {
+		return "environment $envname is disabled as this build does not include an AD DC";
+	}
+
+	if (@opt_include_env && !(grep {$_ eq $env_basename} @opt_include_env)) {
+		return "environment $envname is disabled (via --include-env command line option) in this test run - skipping";
+	} elsif (@opt_exclude_env && grep {$_ eq $env_basename} @opt_exclude_env) {
+		return "environment $envname is disabled (via --exclude-env command line option) in this test run - skipping";
+	}
 
 	return find_in_list(\@excludes, $name);
 }
@@ -136,16 +152,19 @@ sub run_testsuite($$$$$)
 
 	Subunit::start_testsuite($name);
 	Subunit::progress_push();
-	Subunit::report_time(time());
+	Subunit::report_time();
 	system($cmd);
-	Subunit::report_time(time());
+	Subunit::report_time();
 	Subunit::progress_pop();
 
 	if ($? == -1) {
-		Subunit::progress_pop();
+		print "command: $cmd\n";
+		printf "expanded command: %s\n", expand_environment_strings($cmd);
 		Subunit::end_testsuite($name, "error", "Unable to run $cmd: $!");
 		exit(1);
 	} elsif ($? & 127) {
+		print "command: $cmd\n";
+		printf "expanded command: %s\n", expand_environment_strings($cmd);
 		Subunit::end_testsuite($name, "error",
 			sprintf("%s died with signal %d, %s coredump\n", $cmd, ($? & 127),  ($? & 128) ? 'with' : 'without'));
 		exit(1);
@@ -186,7 +205,7 @@ sub ShowHelp()
 Copyright (C) Jelmer Vernooij <jelmer\@samba.org>
 Copyright (C) Stefan Metzmacher <metze\@samba.org>
 
-Usage: $Script [OPTIONS] TESTNAME-REGEX
+Usage: $Script [OPTIONS] TESTNAME-REGEX [TESTNAME-REGEX...]
 
 Generic options:
  --help                     this help page
@@ -194,6 +213,8 @@ Generic options:
  --testlist=FILE            file to read available tests from
  --exclude=FILE             Exclude tests listed in the file
  --include=FILE             Include tests listed in the file
+ --exclude-env=ENV          Exclude tests for the specified environment
+ --include-env=ENV          Include tests for the specified environment
 
 Paths:
  --prefix=DIR               prefix to run tests in [st]
@@ -205,6 +226,7 @@ Preload cwrap:
  --resolv_wrapper_so_path=FILE the resolv_wrapper library to preload
  --socket_wrapper_so_path=FILE the socket_wrapper library to preload
  --uid_wrapper_so_path=FILE the uid_wrapper library to preload
+ --asan_so_path=FILE the asan library to preload
 
 DNS:
   --use-dns-faking          Fake DNS entries rather than talking to our
@@ -239,10 +261,13 @@ my $result = GetOptions (
 		'one' => \$opt_one,
 		'exclude=s' => \@opt_exclude,
 		'include=s' => \@opt_include,
+		'exclude-env=s' => \@opt_exclude_env,
+		'include-env=s' => \@opt_include_env,
 		'srcdir=s' => \$srcdir,
 		'bindir=s' => \$bindir,
 		'testenv' => \$opt_testenv,
 		'list' => \$opt_list,
+		'mitkrb5' => \$opt_mitkrb5,
 		'ldap:s' => \$ldap,
 		'resetup-environment' => \$opt_resetup_env,
 		'testlist=s' => \@testlists,
@@ -252,6 +277,7 @@ my $result = GetOptions (
 		'resolv_wrapper_so_path=s' => \$opt_libresolv_wrapper_so_path,
 		'socket_wrapper_so_path=s' => \$opt_libsocket_wrapper_so_path,
 		'uid_wrapper_so_path=s' => \$opt_libuid_wrapper_so_path,
+		'asan_so_path=s' => \$opt_libasan_so_path,
 		'use-dns-faking' => \$opt_use_dns_faking
 	    );
 
@@ -304,8 +330,11 @@ die("using an empty prefix isn't allowed") unless $prefix ne "";
 # permissions on this as some subdirectories in this tree will have
 # wider permissions (ie 0777) and this would allow other users on the
 # host to subvert the test process.
+umask 0077;
 mkdir($prefix, 0700) unless -d $prefix;
 chmod 0700, $prefix;
+# We need to have no umask limitations for the tests.
+umask 0000;
 
 my $prefix_abs = abs_path($prefix);
 my $tmpdir_abs = abs_path("$prefix/tmp");
@@ -315,6 +344,8 @@ my $srcdir_abs = abs_path($srcdir);
 
 die("using an empty absolute prefix isn't allowed") unless $prefix_abs ne "";
 die("using '/' as absolute prefix isn't allowed") unless $prefix_abs ne "/";
+
+$ENV{SAMBA_SELFTEST} = "1";
 
 $ENV{PREFIX} = $prefix;
 $ENV{PREFIX_ABS} = $prefix_abs;
@@ -349,6 +380,14 @@ if ($opt_socket_wrapper_pcap) {
 }
 
 my $ld_preload = $ENV{LD_PRELOAD};
+
+if ($opt_libasan_so_path) {
+	if ($ld_preload) {
+		$ld_preload = "$ld_preload:$opt_libasan_so_path";
+	} else {
+		$ld_preload = "$opt_libasan_so_path";
+	}
+}
 
 if ($opt_libnss_wrapper_so_path) {
 	if ($ld_preload) {
@@ -412,6 +451,10 @@ if ($opt_use_dns_faking) {
 my $target;
 my $testenv_default = "none";
 
+if ($opt_mitkrb5 == 1) {
+	$ENV{MITKRB5} = $opt_mitkrb5;
+}
+
 # After this many seconds, the server will self-terminate.  All tests
 # must terminate in this time, and testenv will only stay alive this
 # long
@@ -421,23 +464,20 @@ if ($opt_testenv) {
     # 1 year should be enough :-)
     $server_maxtime = 365 * 24 * 60 * 60;
 } else {
-    # make test should run under 4 hours
-    $server_maxtime = 4 * 60 * 60;
+    # make test should run under 5 hours
+    $server_maxtime = 5 * 60 * 60;
 }
 
 if (defined($ENV{SMBD_MAXTIME}) and $ENV{SMBD_MAXTIME} ne "") {
     $server_maxtime = $ENV{SMBD_MAXTIME};
 }
 
+$target = new Samba($bindir, $ldap, $srcdir, $server_maxtime);
 unless ($opt_list) {
 	if ($opt_target eq "samba") {
-		$testenv_default = "ad_dc_ntvfs";
-		require target::Samba;
-		$target = new Samba($bindir, $ldap, $srcdir, $server_maxtime);
+		$testenv_default = "ad_dc";
 	} elsif ($opt_target eq "samba3") {
 		$testenv_default = "nt4_member";
-		require target::Samba3;
-		$target = new Samba3($bindir, $srcdir_abs, $server_maxtime);
 	}
 }
 
@@ -490,6 +530,12 @@ sub write_clientconf($$$)
 	        unlink <$clientdir/private/*>;
 	} else {
 	        mkdir("$clientdir/private", 0777);
+	}
+
+	if ( -d "$clientdir/bind-dns" ) {
+	        unlink <$clientdir/bind-dns/*>;
+	} else {
+	        mkdir("$clientdir/bind-dns", 0777);
 	}
 
 	if ( -d "$clientdir/lockdir" ) {
@@ -575,6 +621,7 @@ sub write_clientconf($$$)
 	}
 	print CF "
 	private dir = $clientdir/private
+	binddns dir = $clientdir/bind-dns
 	lock dir = $clientdir/lockdir
 	state directory = $clientdir/statedir
 	cache directory = $clientdir/cachedir
@@ -698,7 +745,7 @@ $individual_tests = {};
 
 foreach my $testsuite (@available) {
 	my $name = $$testsuite[0];
-	my $skipreason = skip($name);
+	my $skipreason = skip(@$testsuite);
 	if (defined($restricted)) {
 		# Find the testsuite for this test
 		my $match = undef;
@@ -746,7 +793,7 @@ my $suitestotal = $#todo + 1;
 
 unless ($opt_list) {
 	Subunit::progress($suitestotal);
-	Subunit::report_time(time());
+	Subunit::report_time();
 }
 
 my $i = 0;
@@ -769,6 +816,7 @@ my @exported_envvars = (
 	# domain stuff
 	"DOMAIN",
 	"REALM",
+	"DOMSID",
 
 	# stuff related to a trusted domain
 	"TRUST_SERVER",
@@ -779,6 +827,7 @@ my @exported_envvars = (
 	"TRUST_PASSWORD",
 	"TRUST_DOMAIN",
 	"TRUST_REALM",
+	"TRUST_DOMSID",
 
 	# domain controller stuff
 	"DC_SERVER",
@@ -808,6 +857,19 @@ my @exported_envvars = (
 	"VAMPIRE_DC_NETBIOSNAME",
 	"VAMPIRE_DC_NETBIOSALIAS",
 
+	# domain controller stuff for RODC
+	"RODC_DC_SERVER",
+	"RODC_DC_SERVER_IP",
+	"RODC_DC_SERVER_IPV6",
+	"RODC_DC_NETBIOSNAME",
+
+	# domain controller stuff for FL 2000 Vampired DC
+	"VAMPIRE_2000_DC_SERVER",
+	"VAMPIRE_2000_DC_SERVER_IP",
+	"VAMPIRE_2000_DC_SERVER_IPV6",
+	"VAMPIRE_2000_DC_NETBIOSNAME",
+	"VAMPIRE_2000_DC_NETBIOSALIAS",
+
 	"PROMOTED_DC_SERVER",
 	"PROMOTED_DC_SERVER_IP",
 	"PROMOTED_DC_SERVER_IPV6",
@@ -820,6 +882,7 @@ my @exported_envvars = (
 	"SERVER_IPV6",
 	"NETBIOSNAME",
 	"NETBIOSALIAS",
+	"SAMSID",
 
 	# user stuff
 	"USERNAME",
@@ -836,19 +899,20 @@ my @exported_envvars = (
 	"KRB5_CONFIG",
 	"KRB5CCNAME",
 	"SELFTEST_WINBINDD_SOCKET_DIR",
-	"WINBINDD_PRIV_PIPE_DIR",
 	"NMBD_SOCKET_DIR",
 	"LOCAL_PATH",
 	"DNS_FORWARDER1",
 	"DNS_FORWARDER2",
 	"RESOLV_CONF",
 	"UNACCEPTABLE_PASSWORD",
+	"LOCK_DIR",
 	"SMBD_TEST_LOG",
 
 	# nss_wrapper
 	"NSS_WRAPPER_PASSWD",
 	"NSS_WRAPPER_GROUP",
 	"NSS_WRAPPER_HOSTS",
+	"NSS_WRAPPER_HOSTNAME",
 	"NSS_WRAPPER_MODULE_SO_PATH",
 	"NSS_WRAPPER_MODULE_FN_PREFIX",
 
@@ -889,6 +953,19 @@ sub setup_env($$)
 	$option =~ s/^://;
 
 	$option = "client" if $option eq "";
+
+	# Initially clear out the environment for the provision, so previous envs'
+	# variables don't leak in. Provisioning steps must explicitly set their
+	# necessary variables when calling out to other executables
+	foreach (@exported_envvars) {
+		unless ($_ == "NSS_WRAPPER_HOSTS" ||
+		        $_ == "RESOLV_WRAPPER_HOSTS")
+		{
+			delete $ENV{$_};
+		}
+	}
+	delete $ENV{SOCKET_WRAPPER_DEFAULT_IFACE};
+	delete $ENV{SMB_CONF_PATH};
 
 	$ENV{KRB5CCNAME} = "FILE:${selftest_krbt_ccache_path}.${envname}/ignore";
 
@@ -1059,8 +1136,8 @@ $envvarstr
 		my $cmd = $$_[2];
 		my $name = $$_[0];
 		my $envname = $$_[1];
-
 		my $envvars = setup_env($envname, $prefix);
+
 		if (not defined($envvars)) {
 			Subunit::start_testsuite($name);
 			Subunit::end_testsuite($name, "error",
@@ -1068,8 +1145,8 @@ $envvarstr
 			next;
 		} elsif ($envvars eq "UNKNOWN") {
 			Subunit::start_testsuite($name);
-			Subunit::end_testsuite($name, "skip",
-				"environment $envname is unknown in this test backend - skipping");
+			Subunit::end_testsuite($name, "error",
+				"environment $envname is unknown - exiting");
 			next;
 		}
 

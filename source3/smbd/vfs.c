@@ -133,7 +133,7 @@ bool vfs_init_custom(connection_struct *conn, const char *vfs_object)
 	}
 
 	if(!backends) {
-		static_init_vfs;
+		static_init_vfs(NULL);
 	}
 
 	DEBUG(3, ("Initialising custom vfs hooks from [%s]\n", vfs_object));
@@ -396,78 +396,6 @@ NTSTATUS vfs_file_exist(connection_struct *conn, struct smb_filename *smb_fname)
 	}
 
 	return NT_STATUS_OBJECT_NAME_NOT_FOUND;
-}
-
-/****************************************************************************
- Read data from fsp on the vfs. (note: EINTR re-read differs from vfs_write_data)
-****************************************************************************/
-
-ssize_t vfs_read_data(files_struct *fsp, char *buf, size_t byte_count)
-{
-	size_t total=0;
-
-	while (total < byte_count)
-	{
-		ssize_t ret = SMB_VFS_READ(fsp, buf + total,
-					   byte_count - total);
-
-		if (ret == 0) return total;
-		if (ret == -1) {
-			if (errno == EINTR)
-				continue;
-			else
-				return -1;
-		}
-		total += ret;
-	}
-	return (ssize_t)total;
-}
-
-/****************************************************************************
- Write data to a fd on the vfs.
-****************************************************************************/
-
-ssize_t vfs_write_data(struct smb_request *req,
-			files_struct *fsp,
-			const char *buffer,
-			size_t N)
-{
-	size_t total=0;
-	ssize_t ret;
-
-	if (req && req->unread_bytes) {
-		int sockfd = req->xconn->transport.sock;
-		int old_flags;
-		SMB_ASSERT(req->unread_bytes == N);
-		/* VFS_RECVFILE must drain the socket
-		 * before returning. */
-		req->unread_bytes = 0;
-		/* Ensure the socket is blocking. */
-		old_flags = fcntl(sockfd, F_GETFL, 0);
-		if (set_blocking(sockfd, true) == -1) {
-			return (ssize_t)-1;
-		}
-		ret = SMB_VFS_RECVFILE(sockfd,
-					fsp,
-					(off_t)-1,
-					N);
-		if (fcntl(sockfd, F_SETFL, old_flags) == -1) {
-			return (ssize_t)-1;
-		}
-		return ret;
-	}
-
-	while (total < N) {
-		ret = SMB_VFS_WRITE(fsp, buffer + total, N - total);
-
-		if (ret == -1)
-			return -1;
-		if (ret == 0)
-			return total;
-
-		total += ret;
-	}
-	return (ssize_t)total;
 }
 
 ssize_t vfs_pwrite_data(struct smb_request *req,
@@ -855,34 +783,84 @@ const char *vfs_readdirname(connection_struct *conn, void *p,
  A wrapper for vfs_chdir().
 ********************************************************************/
 
-int vfs_ChDir(connection_struct *conn, const char *path)
+int vfs_ChDir(connection_struct *conn, const struct smb_filename *smb_fname)
 {
 	int ret;
+	int saved_errno = 0;
+	struct smb_filename *old_cwd = conn->cwd_fname;
 
 	if (!LastDir) {
 		LastDir = SMB_STRDUP("");
 	}
 
-	if (ISDOT(path)) {
+	if (ISDOT(smb_fname->base_name)) {
 		return 0;
 	}
 
-	if (*path == '/' && strcsequal(LastDir,path)) {
+	if (*smb_fname->base_name == '/' &&
+			strcsequal(LastDir,smb_fname->base_name)) {
 		return 0;
 	}
 
-	DEBUG(4,("vfs_ChDir to %s\n",path));
+	DEBUG(4,("vfs_ChDir to %s\n", smb_fname->base_name));
 
-	ret = SMB_VFS_CHDIR(conn,path);
-	if (ret == 0) {
-		/* Global cache. */
-		SAFE_FREE(LastDir);
-		LastDir = SMB_STRDUP(path);
+	ret = SMB_VFS_CHDIR(conn, smb_fname);
+	if (ret != 0) {
+		return -1;
+	}
 
-		/* conn cache. */
-		TALLOC_FREE(conn->cwd);
-		conn->cwd = vfs_GetWd(conn, conn);
-		DEBUG(4,("vfs_ChDir got %s\n",conn->cwd));
+	/*
+	 * Always replace conn->cwd_fname. We
+	 * don't know if it's been modified by
+	 * VFS modules in the stack.
+	 */
+
+	/* conn cache. */
+	conn->cwd_fname = vfs_GetWd(conn, conn);
+	if (conn->cwd_fname == NULL) {
+		/*
+		 * vfs_GetWd() failed.
+		 * We must be able to read cwd.
+		 * Return to original directory
+		 * and return -1.
+		 */
+		saved_errno = errno;
+
+		if (old_cwd == NULL) {
+			/*
+			 * Failed on the very first chdir()+getwd()
+			 * for this connection. We can't
+			 * continue.
+			 */
+			smb_panic("conn->cwd getwd failed\n");
+			/* NOTREACHED */
+			return -1;
+		}
+		/* Restore original conn->cwd_fname. */
+		conn->cwd_fname = old_cwd;
+
+		/* Return to the previous $cwd. */
+		ret = SMB_VFS_CHDIR(conn, conn->cwd_fname);
+		if (ret != 0) {
+			smb_panic("conn->cwd getwd failed\n");
+			/* NOTREACHED */
+			return -1;
+		}
+		errno = saved_errno;
+		/* And fail the chdir(). */
+		return -1;
+	}
+
+	/* vfs_GetWd() succeeded. */
+	/* Replace global cache. */
+	SAFE_FREE(LastDir);
+	LastDir = SMB_STRDUP(smb_fname->base_name);
+
+	DEBUG(4,("vfs_ChDir got %s\n", conn->cwd_fname->base_name));
+
+	TALLOC_FREE(old_cwd);
+	if (saved_errno != 0) {
+		errno = saved_errno;
 	}
 	return ret;
 }
@@ -893,14 +871,13 @@ int vfs_ChDir(connection_struct *conn, const char *path)
  format. Note this can be called with conn == NULL.
 ********************************************************************/
 
-char *vfs_GetWd(TALLOC_CTX *ctx, connection_struct *conn)
+struct smb_filename *vfs_GetWd(TALLOC_CTX *ctx, connection_struct *conn)
 {
-        char *current_dir = NULL;
-	char *result = NULL;
-	DATA_BLOB cache_value;
+        struct smb_filename *current_dir_fname = NULL;
 	struct file_id key;
 	struct smb_filename *smb_fname_dot = NULL;
 	struct smb_filename *smb_fname_full = NULL;
+	struct smb_filename *result = NULL;
 
 	if (!lp_getwd_cache()) {
 		goto nocache;
@@ -924,20 +901,13 @@ char *vfs_GetWd(TALLOC_CTX *ctx, connection_struct *conn)
 
 	key = vfs_file_id_from_sbuf(conn, &smb_fname_dot->st);
 
-	if (!memcache_lookup(smbd_memcache(), GETWD_CACHE,
-			     data_blob_const(&key, sizeof(key)),
-			     &cache_value)) {
-		goto nocache;
-	}
+	smb_fname_full = (struct smb_filename *)memcache_lookup_talloc(
+					smbd_memcache(),
+					GETWD_CACHE,
+					data_blob_const(&key, sizeof(key)));
 
-	SMB_ASSERT((cache_value.length > 0)
-		   && (cache_value.data[cache_value.length-1] == '\0'));
-
-	smb_fname_full = synthetic_smb_fname(ctx, (char *)cache_value.data,
-					     NULL, NULL, 0);
 	if (smb_fname_full == NULL) {
-		errno = ENOMEM;
-		goto out;
+		goto nocache;
 	}
 
 	if ((SMB_VFS_STAT(conn, smb_fname_full) == 0) &&
@@ -946,8 +916,10 @@ char *vfs_GetWd(TALLOC_CTX *ctx, connection_struct *conn)
 	    (S_ISDIR(smb_fname_dot->st.st_ex_mode))) {
 		/*
 		 * Ok, we're done
+		 * Note: smb_fname_full is owned by smbd_memcache()
+		 * so we must make a copy to return.
 		 */
-		result = talloc_strdup(ctx, smb_fname_full->base_name);
+		result = cp_smb_filename(ctx, smb_fname_full);
 		if (result == NULL) {
 			errno = ENOMEM;
 		}
@@ -962,8 +934,8 @@ char *vfs_GetWd(TALLOC_CTX *ctx, connection_struct *conn)
 	 * systems, or the not quite so bad getwd.
 	 */
 
-	current_dir = SMB_VFS_GETWD(conn);
-	if (current_dir == NULL) {
+	current_dir_fname = SMB_VFS_GETWD(conn, ctx);
+	if (current_dir_fname == NULL) {
 		DEBUG(0, ("vfs_GetWd: SMB_VFS_GETWD call failed: %s\n",
 			  strerror(errno)));
 		goto out;
@@ -972,21 +944,39 @@ char *vfs_GetWd(TALLOC_CTX *ctx, connection_struct *conn)
 	if (lp_getwd_cache() && VALID_STAT(smb_fname_dot->st)) {
 		key = vfs_file_id_from_sbuf(conn, &smb_fname_dot->st);
 
-		memcache_add(smbd_memcache(), GETWD_CACHE,
-			     data_blob_const(&key, sizeof(key)),
-			     data_blob_const(current_dir,
-						strlen(current_dir)+1));
-	}
+		/*
+		 * smbd_memcache() will own current_dir_fname after the
+		 * memcache_add_talloc call, so we must make
+		 * a copy on ctx to return.
+		 */
+		result = cp_smb_filename(ctx, current_dir_fname);
+		if (result == NULL) {
+			errno = ENOMEM;
+		}
 
-	result = talloc_strdup(ctx, current_dir);
-	if (result == NULL) {
-		errno = ENOMEM;
+		/*
+		 * Ensure the memory going into the cache
+		 * doesn't have a destructor so it can be
+		 * cleanly freed.
+		 */
+		talloc_set_destructor(current_dir_fname, NULL);
+
+		memcache_add_talloc(smbd_memcache(),
+				GETWD_CACHE,
+				data_blob_const(&key, sizeof(key)),
+				&current_dir_fname);
+		/* current_dir_fname is now == NULL here. */
+	} else {
+		/* current_dir_fname is already allocated on ctx. */
+		result = current_dir_fname;
 	}
 
  out:
 	TALLOC_FREE(smb_fname_dot);
-	TALLOC_FREE(smb_fname_full);
-	SAFE_FREE(current_dir);
+	/*
+	 * Don't free current_dir_fname here. It's either been moved
+	 * to the memcache or is being returned in result.
+	 */
 	return result;
 }
 
@@ -998,7 +988,7 @@ char *vfs_GetWd(TALLOC_CTX *ctx, connection_struct *conn)
 ********************************************************************/
 
 NTSTATUS check_reduced_name_with_privilege(connection_struct *conn,
-			const char *fname,
+			const struct smb_filename *smb_fname,
 			struct smb_request *smbreq)
 {
 	NTSTATUS status;
@@ -1006,15 +996,16 @@ NTSTATUS check_reduced_name_with_privilege(connection_struct *conn,
 	const char *conn_rootdir;
 	size_t rootdir_len;
 	char *dir_name = NULL;
-	const char *last_component = NULL;
 	char *resolved_name = NULL;
-	char *saved_dir = NULL;
+	const char *last_component = NULL;
+	struct smb_filename *resolved_fname = NULL;
+	struct smb_filename *saved_dir_fname = NULL;
 	struct smb_filename *smb_fname_cwd = NULL;
 	struct privilege_paths *priv_paths = NULL;
 	int ret;
 
 	DEBUG(3,("check_reduced_name_with_privilege [%s] [%s]\n",
-			fname,
+			smb_fname->base_name,
 			conn->connectpath));
 
 
@@ -1024,7 +1015,8 @@ NTSTATUS check_reduced_name_with_privilege(connection_struct *conn,
 		goto err;
 	}
 
-	if (!parent_dirname(ctx, fname, &dir_name, &last_component)) {
+	if (!parent_dirname(ctx, smb_fname->base_name,
+			&dir_name, &last_component)) {
 		status = NT_STATUS_NO_MEMORY;
 		goto err;
 	}
@@ -1043,24 +1035,30 @@ NTSTATUS check_reduced_name_with_privilege(connection_struct *conn,
 		goto err;
 	}
 	/* Remember where we were. */
-	saved_dir = vfs_GetWd(ctx, conn);
-	if (!saved_dir) {
+	saved_dir_fname = vfs_GetWd(ctx, conn);
+	if (!saved_dir_fname) {
 		status = map_nt_error_from_unix(errno);
 		goto err;
 	}
 
-	/* Go to the parent directory to lock in memory. */
-	if (vfs_ChDir(conn, priv_paths->parent_name.base_name) == -1) {
+	if (vfs_ChDir(conn, &priv_paths->parent_name) == -1) {
 		status = map_nt_error_from_unix(errno);
+		goto err;
+	}
+
+	smb_fname_cwd = synthetic_smb_fname(talloc_tos(), ".", NULL, NULL, 0);
+	if (smb_fname_cwd == NULL) {
+		status = NT_STATUS_NO_MEMORY;
 		goto err;
 	}
 
 	/* Get the absolute path of the parent directory. */
-	resolved_name = SMB_VFS_REALPATH(conn,".");
-	if (!resolved_name) {
+	resolved_fname = SMB_VFS_REALPATH(conn, ctx, smb_fname_cwd);
+	if (resolved_fname == NULL) {
 		status = map_nt_error_from_unix(errno);
 		goto err;
 	}
+	resolved_name = resolved_fname->base_name;
 
 	if (*resolved_name != '/') {
 		DEBUG(0,("check_reduced_name_with_privilege: realpath "
@@ -1074,12 +1072,6 @@ NTSTATUS check_reduced_name_with_privilege(connection_struct *conn,
 		resolved_name));
 
 	/* Now check the stat value is the same. */
-	smb_fname_cwd = synthetic_smb_fname(talloc_tos(), ".", NULL, NULL, 0);
-	if (smb_fname_cwd == NULL) {
-		status = NT_STATUS_NO_MEMORY;
-		goto err;
-	}
-
 	if (SMB_VFS_LSTAT(conn, smb_fname_cwd) != 0) {
 		status = map_nt_error_from_unix(errno);
 		goto err;
@@ -1097,7 +1089,7 @@ NTSTATUS check_reduced_name_with_privilege(connection_struct *conn,
 
 	/* Ensure we're below the connect path. */
 
-	conn_rootdir = SMB_VFS_CONNECTPATH(conn, fname);
+	conn_rootdir = SMB_VFS_CONNECTPATH(conn, smb_fname);
 	if (conn_rootdir == NULL) {
 		DEBUG(2, ("check_reduced_name_with_privilege: Could not get "
 			"conn_rootdir\n"));
@@ -1165,10 +1157,11 @@ NTSTATUS check_reduced_name_with_privilege(connection_struct *conn,
 
   err:
 
-	if (saved_dir) {
-		vfs_ChDir(conn, saved_dir);
+	if (saved_dir_fname != NULL) {
+		vfs_ChDir(conn, saved_dir_fname);
+		TALLOC_FREE(saved_dir_fname);
 	}
-	SAFE_FREE(resolved_name);
+	TALLOC_FREE(resolved_fname);
 	if (!NT_STATUS_IS_OK(status)) {
 		TALLOC_FREE(priv_paths);
 	}
@@ -1188,9 +1181,13 @@ NTSTATUS check_reduced_name_with_privilege(connection_struct *conn,
 ********************************************************************/
 
 NTSTATUS check_reduced_name(connection_struct *conn,
-				const char *cwd_name,
-				const char *fname)
+				const struct smb_filename *cwd_fname,
+				const struct smb_filename *smb_fname)
 {
+	TALLOC_CTX *ctx = talloc_tos();
+	const char *cwd_name = cwd_fname ? cwd_fname->base_name : NULL;
+	const char *fname = smb_fname->base_name;
+	struct smb_filename *resolved_fname;
 	char *resolved_name = NULL;
 	char *new_fname = NULL;
 	bool allow_symlinks = true;
@@ -1198,9 +1195,9 @@ NTSTATUS check_reduced_name(connection_struct *conn,
 
 	DBG_DEBUG("check_reduced_name [%s] [%s]\n", fname, conn->connectpath);
 
-	resolved_name = SMB_VFS_REALPATH(conn,fname);
+	resolved_fname = SMB_VFS_REALPATH(conn, ctx, smb_fname);
 
-	if (!resolved_name) {
+	if (resolved_fname == NULL) {
 		switch (errno) {
 			case ENOTDIR:
 				DEBUG(3,("check_reduced_name: Component not a "
@@ -1209,11 +1206,9 @@ NTSTATUS check_reduced_name(connection_struct *conn,
 				return NT_STATUS_OBJECT_PATH_NOT_FOUND;
 			case ENOENT:
 			{
-				TALLOC_CTX *ctx = talloc_tos();
 				char *dir_name = NULL;
+				struct smb_filename dir_fname = {0};
 				const char *last_component = NULL;
-				char *new_name = NULL;
-				int ret;
 
 				/* Last component didn't exist.
 				   Remove it and try and canonicalise
@@ -1224,8 +1219,12 @@ NTSTATUS check_reduced_name(connection_struct *conn,
 					return NT_STATUS_NO_MEMORY;
 				}
 
-				resolved_name = SMB_VFS_REALPATH(conn,dir_name);
-				if (!resolved_name) {
+				dir_fname = (struct smb_filename)
+					{ .base_name = dir_name };
+				resolved_fname = SMB_VFS_REALPATH(conn,
+							ctx,
+							&dir_fname);
+				if (resolved_fname == NULL) {
 					NTSTATUS status = map_nt_error_from_unix(errno);
 
 					if (errno == ENOENT || errno == ENOTDIR) {
@@ -1239,13 +1238,13 @@ NTSTATUS check_reduced_name(connection_struct *conn,
 						nt_errstr(status)));
 					return status;
 				}
-				ret = asprintf(&new_name, "%s/%s",
-					       resolved_name, last_component);
-				SAFE_FREE(resolved_name);
-				if (ret == -1) {
+				resolved_name = talloc_asprintf(ctx,
+						"%s/%s",
+						resolved_fname->base_name,
+						last_component);
+				if (resolved_name == NULL) {
 					return NT_STATUS_NO_MEMORY;
 				}
-				resolved_name = new_name;
 				break;
 			}
 			default:
@@ -1253,6 +1252,8 @@ NTSTATUS check_reduced_name(connection_struct *conn,
 					 "realpath for %s\n", fname));
 				return map_nt_error_from_unix(errno);
 		}
+	} else {
+		resolved_name = resolved_fname->base_name;
 	}
 
 	DEBUG(10,("check_reduced_name realpath [%s] -> [%s]\n", fname,
@@ -1261,7 +1262,7 @@ NTSTATUS check_reduced_name(connection_struct *conn,
 	if (*resolved_name != '/') {
 		DEBUG(0,("check_reduced_name: realpath doesn't return "
 			 "absolute paths !\n"));
-		SAFE_FREE(resolved_name);
+		TALLOC_FREE(resolved_fname);
 		return NT_STATUS_OBJECT_NAME_INVALID;
 	}
 
@@ -1273,11 +1274,11 @@ NTSTATUS check_reduced_name(connection_struct *conn,
 		const char *conn_rootdir;
 		size_t rootdir_len;
 
-		conn_rootdir = SMB_VFS_CONNECTPATH(conn, fname);
+		conn_rootdir = SMB_VFS_CONNECTPATH(conn, smb_fname);
 		if (conn_rootdir == NULL) {
 			DEBUG(2, ("check_reduced_name: Could not get "
 				"conn_rootdir\n"));
-			SAFE_FREE(resolved_name);
+			TALLOC_FREE(resolved_fname);
 			return NT_STATUS_ACCESS_DENIED;
 		}
 
@@ -1306,7 +1307,7 @@ NTSTATUS check_reduced_name(connection_struct *conn,
 					     conn_rootdir));
 				DEBUGADD(2, ("resolved_name=%s\n",
 					     resolved_name));
-				SAFE_FREE(resolved_name);
+				TALLOC_FREE(resolved_fname);
 				return NT_STATUS_ACCESS_DENIED;
 			}
 		}
@@ -1329,7 +1330,7 @@ NTSTATUS check_reduced_name(connection_struct *conn,
 					"in resolved_name: %s\n",
 					*p,
 					fname));
-				SAFE_FREE(resolved_name);
+				TALLOC_FREE(resolved_fname);
 				return NT_STATUS_ACCESS_DENIED;
 			}
 
@@ -1343,12 +1344,12 @@ NTSTATUS check_reduced_name(connection_struct *conn,
 			 * sent (cwd_name+fname).
 			 */
 			if (cwd_name != NULL && !ISDOT(cwd_name)) {
-				new_fname = talloc_asprintf(talloc_tos(),
+				new_fname = talloc_asprintf(ctx,
 							"%s/%s",
 							cwd_name,
 							fname);
 				if (new_fname == NULL) {
-					SAFE_FREE(resolved_name);
+					TALLOC_FREE(resolved_fname);
 					return NT_STATUS_NO_MEMORY;
 				}
 				fname = new_fname;
@@ -1358,7 +1359,7 @@ NTSTATUS check_reduced_name(connection_struct *conn,
 				DEBUG(2, ("check_reduced_name: Bad access "
 					"attempt: %s is a symlink to %s\n",
 					  fname, p));
-				SAFE_FREE(resolved_name);
+				TALLOC_FREE(resolved_fname);
 				TALLOC_FREE(new_fname);
 				return NT_STATUS_ACCESS_DENIED;
 			}
@@ -1368,7 +1369,7 @@ NTSTATUS check_reduced_name(connection_struct *conn,
   out:
 
 	DBG_INFO("%s reduced to %s\n", fname, resolved_name);
-	SAFE_FREE(resolved_name);
+	TALLOC_FREE(resolved_fname);
 	TALLOC_FREE(new_fname);
 	return NT_STATUS_OK;
 }
@@ -1468,19 +1469,24 @@ void smb_vfs_call_disconnect(struct vfs_handle_struct *handle)
 }
 
 uint64_t smb_vfs_call_disk_free(struct vfs_handle_struct *handle,
-				const char *path, uint64_t *bsize,
-				uint64_t *dfree, uint64_t *dsize)
+				const struct smb_filename *smb_fname,
+				uint64_t *bsize,
+				uint64_t *dfree,
+				uint64_t *dsize)
 {
 	VFS_FIND(disk_free);
-	return handle->fns->disk_free_fn(handle, path, bsize, dfree, dsize);
+	return handle->fns->disk_free_fn(handle, smb_fname,
+			bsize, dfree, dsize);
 }
 
-int smb_vfs_call_get_quota(struct vfs_handle_struct *handle, const char *path,
-			   enum SMB_QUOTA_TYPE qtype, unid_t id,
-			   SMB_DISK_QUOTA *qt)
+int smb_vfs_call_get_quota(struct vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				enum SMB_QUOTA_TYPE qtype,
+				unid_t id,
+				SMB_DISK_QUOTA *qt)
 {
 	VFS_FIND(get_quota);
-	return handle->fns->get_quota_fn(handle, path, qtype, id, qt);
+	return handle->fns->get_quota_fn(handle, smb_fname, qtype, id, qt);
 }
 
 int smb_vfs_call_set_quota(struct vfs_handle_struct *handle,
@@ -1501,11 +1507,12 @@ int smb_vfs_call_get_shadow_copy_data(struct vfs_handle_struct *handle,
 						    shadow_copy_data,
 						    labels);
 }
-int smb_vfs_call_statvfs(struct vfs_handle_struct *handle, const char *path,
-			 struct vfs_statvfs_struct *statbuf)
+int smb_vfs_call_statvfs(struct vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			struct vfs_statvfs_struct *statbuf)
 {
 	VFS_FIND(statvfs);
-	return handle->fns->statvfs_fn(handle, path, statbuf);
+	return handle->fns->statvfs_fn(handle, smb_fname, statbuf);
 }
 
 uint32_t smb_vfs_call_fs_capabilities(struct vfs_handle_struct *handle,
@@ -1591,13 +1598,6 @@ int smb_vfs_call_closedir(struct vfs_handle_struct *handle,
 	return handle->fns->closedir_fn(handle, dir);
 }
 
-void smb_vfs_call_init_search_op(struct vfs_handle_struct *handle,
-				 DIR *dirp)
-{
-	VFS_FIND(init_search_op);
-	handle->fns->init_search_op_fn(handle, dirp);
-}
-
 int smb_vfs_call_open(struct vfs_handle_struct *handle,
 		      struct smb_filename *smb_fname, struct files_struct *fsp,
 		      int flags, mode_t mode)
@@ -1640,13 +1640,6 @@ int smb_vfs_call_close(struct vfs_handle_struct *handle,
 {
 	VFS_FIND(close);
 	return handle->fns->close_fn(handle, fsp);
-}
-
-ssize_t smb_vfs_call_read(struct vfs_handle_struct *handle,
-			  struct files_struct *fsp, void *data, size_t n)
-{
-	VFS_FIND(read);
-	return handle->fns->read_fn(handle, fsp, data, n);
 }
 
 ssize_t smb_vfs_call_pread(struct vfs_handle_struct *handle,
@@ -1719,14 +1712,6 @@ ssize_t SMB_VFS_PREAD_RECV(struct tevent_req *req,
 	}
 	*vfs_aio_state = state->vfs_aio_state;
 	return state->retval;
-}
-
-ssize_t smb_vfs_call_write(struct vfs_handle_struct *handle,
-			   struct files_struct *fsp, const void *data,
-			   size_t n)
-{
-	VFS_FIND(write);
-	return handle->fns->write_fn(handle, fsp, data, n);
 }
 
 ssize_t smb_vfs_call_pwrite(struct vfs_handle_struct *handle,
@@ -1834,13 +1819,6 @@ int smb_vfs_call_rename(struct vfs_handle_struct *handle,
 	return handle->fns->rename_fn(handle, smb_fname_src, smb_fname_dst);
 }
 
-int smb_vfs_call_fsync(struct vfs_handle_struct *handle,
-		       struct files_struct *fsp)
-{
-	VFS_FIND(fsync);
-	return handle->fns->fsync_fn(handle, fsp);
-}
-
 struct smb_vfs_call_fsync_state {
 	int (*recv_fn)(struct tevent_req *req, struct vfs_aio_state *vfs_aio_state);
 	int retval;
@@ -1901,6 +1879,45 @@ int SMB_VFS_FSYNC_RECV(struct tevent_req *req, struct vfs_aio_state *vfs_aio_sta
 	return state->retval;
 }
 
+/*
+ * Synchronous version of fsync, built from backend
+ * async VFS primitives. Uses a temporary sub-event
+ * context (NOT NESTED).
+ */
+
+int smb_vfs_fsync_sync(files_struct *fsp)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct tevent_req *req = NULL;
+	struct vfs_aio_state aio_state = { 0 };
+	int ret = -1;
+	bool ok;
+	struct tevent_context *ev = samba_tevent_context_init(frame);
+
+	if (ev == NULL) {
+		goto out;
+	}
+
+	req = SMB_VFS_FSYNC_SEND(talloc_tos(), ev, fsp);
+	if (req == NULL) {
+		goto out;
+	}
+
+	ok = tevent_req_poll(req, ev);
+	if (!ok) {
+		goto out;
+	}
+
+	ret = SMB_VFS_FSYNC_RECV(req, &aio_state);
+
+  out:
+
+	TALLOC_FREE(frame);
+	if (aio_state.error != 0) {
+		errno = aio_state.error;
+	}
+	return ret;
+}
 
 int smb_vfs_call_stat(struct vfs_handle_struct *handle,
 		      struct smb_filename *smb_fname)
@@ -2004,13 +2021,14 @@ NTSTATUS vfs_chown_fsp(files_struct *fsp, uid_t uid, gid_t gid)
 		 * and always act using lchown to ensure we
 		 * don't deref any symbolic links.
 		 */
-		char *saved_dir = NULL;
 		char *parent_dir = NULL;
 		const char *final_component = NULL;
 		struct smb_filename *local_smb_fname = NULL;
+		struct smb_filename parent_dir_fname = {0};
+		struct smb_filename *saved_dir_fname = NULL;
 
-		saved_dir = vfs_GetWd(talloc_tos(),fsp->conn);
-		if (!saved_dir) {
+		saved_dir_fname = vfs_GetWd(talloc_tos(),fsp->conn);
+		if (!saved_dir_fname) {
 			status = map_nt_error_from_unix(errno);
 			DEBUG(0,("vfs_chown_fsp: failed to get "
 				"current working directory. Error was %s\n",
@@ -2025,8 +2043,13 @@ NTSTATUS vfs_chown_fsp(files_struct *fsp, uid_t uid, gid_t gid)
 			return NT_STATUS_NO_MEMORY;
 		}
 
+		parent_dir_fname = (struct smb_filename) {
+			.base_name = parent_dir,
+			.flags = fsp->fsp_name->flags
+		};
+
 		/* cd into the parent dir to pin it. */
-		ret = vfs_ChDir(fsp->conn, parent_dir);
+		ret = vfs_ChDir(fsp->conn, &parent_dir_fname);
 		if (ret == -1) {
 			return map_nt_error_from_unix(errno);
 		}
@@ -2067,9 +2090,9 @@ NTSTATUS vfs_chown_fsp(files_struct *fsp, uid_t uid, gid_t gid)
 
   out:
 
-		vfs_ChDir(fsp->conn,saved_dir);
+		vfs_ChDir(fsp->conn, saved_dir_fname);
 		TALLOC_FREE(local_smb_fname);
-		TALLOC_FREE(saved_dir);
+		TALLOC_FREE(saved_dir_fname);
 		TALLOC_FREE(parent_dir);
 
 		return status;
@@ -2093,16 +2116,18 @@ NTSTATUS vfs_chown_fsp(files_struct *fsp, uid_t uid, gid_t gid)
 	return status;
 }
 
-int smb_vfs_call_chdir(struct vfs_handle_struct *handle, const char *path)
+int smb_vfs_call_chdir(struct vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname)
 {
 	VFS_FIND(chdir);
-	return handle->fns->chdir_fn(handle, path);
+	return handle->fns->chdir_fn(handle, smb_fname);
 }
 
-char *smb_vfs_call_getwd(struct vfs_handle_struct *handle)
+struct smb_filename *smb_vfs_call_getwd(struct vfs_handle_struct *handle,
+				TALLOC_CTX *ctx)
 {
 	VFS_FIND(getwd);
-	return handle->fns->getwd_fn(handle);
+	return handle->fns->getwd_fn(handle, ctx);
 }
 
 int smb_vfs_call_ntimes(struct vfs_handle_struct *handle,
@@ -2146,45 +2171,54 @@ int smb_vfs_call_linux_setlease(struct vfs_handle_struct *handle,
 	return handle->fns->linux_setlease_fn(handle, fsp, leasetype);
 }
 
-int smb_vfs_call_symlink(struct vfs_handle_struct *handle, const char *oldpath,
-			 const char *newpath)
+int smb_vfs_call_symlink(struct vfs_handle_struct *handle,
+			const char *link_target,
+			const struct smb_filename *new_smb_fname)
 {
 	VFS_FIND(symlink);
-	return handle->fns->symlink_fn(handle, oldpath, newpath);
+	return handle->fns->symlink_fn(handle, link_target, new_smb_fname);
 }
 
 int smb_vfs_call_readlink(struct vfs_handle_struct *handle,
-			      const char *path, char *buf, size_t bufsiz)
+			const struct smb_filename *smb_fname,
+			char *buf,
+			size_t bufsiz)
 {
 	VFS_FIND(readlink);
-	return handle->fns->readlink_fn(handle, path, buf, bufsiz);
+	return handle->fns->readlink_fn(handle, smb_fname, buf, bufsiz);
 }
 
-int smb_vfs_call_link(struct vfs_handle_struct *handle, const char *oldpath,
-		      const char *newpath)
+int smb_vfs_call_link(struct vfs_handle_struct *handle,
+			const struct smb_filename *old_smb_fname,
+			const struct smb_filename *new_smb_fname)
 {
 	VFS_FIND(link);
-	return handle->fns->link_fn(handle, oldpath, newpath);
+	return handle->fns->link_fn(handle, old_smb_fname, new_smb_fname);
 }
 
-int smb_vfs_call_mknod(struct vfs_handle_struct *handle, const char *path,
-		       mode_t mode, SMB_DEV_T dev)
+int smb_vfs_call_mknod(struct vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			mode_t mode,
+			SMB_DEV_T dev)
 {
 	VFS_FIND(mknod);
-	return handle->fns->mknod_fn(handle, path, mode, dev);
+	return handle->fns->mknod_fn(handle, smb_fname, mode, dev);
 }
 
-char *smb_vfs_call_realpath(struct vfs_handle_struct *handle, const char *path)
+struct smb_filename *smb_vfs_call_realpath(struct vfs_handle_struct *handle,
+			TALLOC_CTX *ctx,
+			const struct smb_filename *smb_fname)
 {
 	VFS_FIND(realpath);
-	return handle->fns->realpath_fn(handle, path);
+	return handle->fns->realpath_fn(handle, ctx, smb_fname);
 }
 
-int smb_vfs_call_chflags(struct vfs_handle_struct *handle, const char *path,
-			 unsigned int flags)
+int smb_vfs_call_chflags(struct vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			unsigned int flags)
 {
 	VFS_FIND(chflags);
-	return handle->fns->chflags_fn(handle, path, flags);
+	return handle->fns->chflags_fn(handle, smb_fname, flags);
 }
 
 struct file_id smb_vfs_call_file_id_create(struct vfs_handle_struct *handle,
@@ -2216,26 +2250,18 @@ int smb_vfs_call_get_real_filename(struct vfs_handle_struct *handle,
 }
 
 const char *smb_vfs_call_connectpath(struct vfs_handle_struct *handle,
-				     const char *filename)
+				 const struct smb_filename *smb_fname)
 {
 	VFS_FIND(connectpath);
-	return handle->fns->connectpath_fn(handle, filename);
+	return handle->fns->connectpath_fn(handle, smb_fname);
 }
 
-bool smb_vfs_call_strict_lock(struct vfs_handle_struct *handle,
-			      struct files_struct *fsp,
-			      struct lock_struct *plock)
+bool smb_vfs_call_strict_lock_check(struct vfs_handle_struct *handle,
+				    struct files_struct *fsp,
+				    struct lock_struct *plock)
 {
-	VFS_FIND(strict_lock);
-	return handle->fns->strict_lock_fn(handle, fsp, plock);
-}
-
-void smb_vfs_call_strict_unlock(struct vfs_handle_struct *handle,
-				struct files_struct *fsp,
-				struct lock_struct *plock)
-{
-	VFS_FIND(strict_unlock);
-	handle->fns->strict_unlock_fn(handle, fsp, plock);
+	VFS_FIND(strict_lock_check);
+	return handle->fns->strict_lock_check_fn(handle, fsp, plock);
 }
 
 NTSTATUS smb_vfs_call_translate_name(struct vfs_handle_struct *handle,
@@ -2298,26 +2324,52 @@ NTSTATUS smb_vfs_call_fset_dos_attributes(struct vfs_handle_struct *handle,
 	return handle->fns->fset_dos_attributes_fn(handle, fsp, dosmode);
 }
 
-struct tevent_req *smb_vfs_call_copy_chunk_send(struct vfs_handle_struct *handle,
-						TALLOC_CTX *mem_ctx,
-						struct tevent_context *ev,
-						struct files_struct *src_fsp,
-						off_t src_off,
-						struct files_struct *dest_fsp,
-						off_t dest_off,
-						off_t num)
+struct tevent_req *smb_vfs_call_offload_read_send(TALLOC_CTX *mem_ctx,
+						  struct tevent_context *ev,
+						  struct vfs_handle_struct *handle,
+						  struct files_struct *fsp,
+						  uint32_t fsctl,
+						  uint32_t ttl,
+						  off_t offset,
+						  size_t to_copy)
 {
-	VFS_FIND(copy_chunk_send);
-	return handle->fns->copy_chunk_send_fn(handle, mem_ctx, ev, src_fsp,
-					       src_off, dest_fsp, dest_off, num);
+	VFS_FIND(offload_read_send);
+	return handle->fns->offload_read_send_fn(mem_ctx, ev, handle,
+						 fsp, fsctl,
+						 ttl, offset, to_copy);
 }
 
-NTSTATUS smb_vfs_call_copy_chunk_recv(struct vfs_handle_struct *handle,
-				      struct tevent_req *req,
-				      off_t *copied)
+NTSTATUS smb_vfs_call_offload_read_recv(struct tevent_req *req,
+					struct vfs_handle_struct *handle,
+					TALLOC_CTX *mem_ctx,
+					DATA_BLOB *token_blob)
 {
-	VFS_FIND(copy_chunk_recv);
-	return handle->fns->copy_chunk_recv_fn(handle, req, copied);
+	VFS_FIND(offload_read_recv);
+	return handle->fns->offload_read_recv_fn(req, handle, mem_ctx, token_blob);
+}
+
+struct tevent_req *smb_vfs_call_offload_write_send(struct vfs_handle_struct *handle,
+						   TALLOC_CTX *mem_ctx,
+						   struct tevent_context *ev,
+						   uint32_t fsctl,
+						   DATA_BLOB *token,
+						   off_t transfer_offset,
+						   struct files_struct *dest_fsp,
+						   off_t dest_off,
+						   off_t num)
+{
+	VFS_FIND(offload_write_send);
+	return handle->fns->offload_write_send_fn(handle, mem_ctx, ev, fsctl,
+					       token, transfer_offset,
+					       dest_fsp, dest_off, num);
+}
+
+NTSTATUS smb_vfs_call_offload_write_recv(struct vfs_handle_struct *handle,
+					 struct tevent_req *req,
+					 off_t *copied)
+{
+	VFS_FIND(offload_write_recv);
+	return handle->fns->offload_write_recv_fn(handle, req, copied);
 }
 
 NTSTATUS smb_vfs_call_get_compression(vfs_handle_struct *handle,
@@ -2423,28 +2475,13 @@ NTSTATUS smb_vfs_call_audit_file(struct vfs_handle_struct *handle,
 					  access_denied);
 }
 
-int smb_vfs_call_chmod_acl(struct vfs_handle_struct *handle,
-		const struct smb_filename *smb_fname,
-		mode_t mode)
-{
-	VFS_FIND(chmod_acl);
-	return handle->fns->chmod_acl_fn(handle, smb_fname, mode);
-}
-
-int smb_vfs_call_fchmod_acl(struct vfs_handle_struct *handle,
-			    struct files_struct *fsp, mode_t mode)
-{
-	VFS_FIND(fchmod_acl);
-	return handle->fns->fchmod_acl_fn(handle, fsp, mode);
-}
-
 SMB_ACL_T smb_vfs_call_sys_acl_get_file(struct vfs_handle_struct *handle,
-					const char *path_p,
+					const struct smb_filename *smb_fname,
 					SMB_ACL_TYPE_T type,
 					TALLOC_CTX *mem_ctx)
 {
 	VFS_FIND(sys_acl_get_file);
-	return handle->fns->sys_acl_get_file_fn(handle, path_p, type, mem_ctx);
+	return handle->fns->sys_acl_get_file_fn(handle, smb_fname, type, mem_ctx);
 }
 
 SMB_ACL_T smb_vfs_call_sys_acl_get_fd(struct vfs_handle_struct *handle,
@@ -2456,13 +2493,14 @@ SMB_ACL_T smb_vfs_call_sys_acl_get_fd(struct vfs_handle_struct *handle,
 }
 
 int smb_vfs_call_sys_acl_blob_get_file(struct vfs_handle_struct *handle,
-				       const char *path_p,
-				       TALLOC_CTX *mem_ctx, 
-				       char **blob_description,
-				       DATA_BLOB *blob)
+				const struct smb_filename *smb_fname,
+				TALLOC_CTX *mem_ctx,
+				char **blob_description,
+				DATA_BLOB *blob)
 {
 	VFS_FIND(sys_acl_blob_get_file);
-	return handle->fns->sys_acl_blob_get_file_fn(handle, path_p, mem_ctx, blob_description, blob);
+	return handle->fns->sys_acl_blob_get_file_fn(handle, smb_fname,
+			mem_ctx, blob_description, blob);
 }
 
 int smb_vfs_call_sys_acl_blob_get_fd(struct vfs_handle_struct *handle,
@@ -2476,11 +2514,13 @@ int smb_vfs_call_sys_acl_blob_get_fd(struct vfs_handle_struct *handle,
 }
 
 int smb_vfs_call_sys_acl_set_file(struct vfs_handle_struct *handle,
-				  const char *name, SMB_ACL_TYPE_T acltype,
-				  SMB_ACL_T theacl)
+				const struct smb_filename *smb_fname,
+				SMB_ACL_TYPE_T acltype,
+				SMB_ACL_T theacl)
 {
 	VFS_FIND(sys_acl_set_file);
-	return handle->fns->sys_acl_set_file_fn(handle, name, acltype, theacl);
+	return handle->fns->sys_acl_set_file_fn(handle, smb_fname,
+				acltype, theacl);
 }
 
 int smb_vfs_call_sys_acl_set_fd(struct vfs_handle_struct *handle,
@@ -2491,18 +2531,20 @@ int smb_vfs_call_sys_acl_set_fd(struct vfs_handle_struct *handle,
 }
 
 int smb_vfs_call_sys_acl_delete_def_file(struct vfs_handle_struct *handle,
-					 const char *path)
+				const struct smb_filename *smb_fname)
 {
 	VFS_FIND(sys_acl_delete_def_file);
-	return handle->fns->sys_acl_delete_def_file_fn(handle, path);
+	return handle->fns->sys_acl_delete_def_file_fn(handle, smb_fname);
 }
 
 ssize_t smb_vfs_call_getxattr(struct vfs_handle_struct *handle,
-			      const char *path, const char *name, void *value,
-			      size_t size)
+				const struct smb_filename *smb_fname,
+				const char *name,
+				void *value,
+				size_t size)
 {
 	VFS_FIND(getxattr);
-	return handle->fns->getxattr_fn(handle, path, name, value, size);
+	return handle->fns->getxattr_fn(handle, smb_fname, name, value, size);
 }
 
 ssize_t smb_vfs_call_fgetxattr(struct vfs_handle_struct *handle,
@@ -2514,10 +2556,12 @@ ssize_t smb_vfs_call_fgetxattr(struct vfs_handle_struct *handle,
 }
 
 ssize_t smb_vfs_call_listxattr(struct vfs_handle_struct *handle,
-			       const char *path, char *list, size_t size)
+				const struct smb_filename *smb_fname,
+				char *list,
+				size_t size)
 {
 	VFS_FIND(listxattr);
-	return handle->fns->listxattr_fn(handle, path, list, size);
+	return handle->fns->listxattr_fn(handle, smb_fname, list, size);
 }
 
 ssize_t smb_vfs_call_flistxattr(struct vfs_handle_struct *handle,
@@ -2529,10 +2573,11 @@ ssize_t smb_vfs_call_flistxattr(struct vfs_handle_struct *handle,
 }
 
 int smb_vfs_call_removexattr(struct vfs_handle_struct *handle,
-			     const char *path, const char *name)
+				const struct smb_filename *smb_fname,
+				const char *name)
 {
 	VFS_FIND(removexattr);
-	return handle->fns->removexattr_fn(handle, path, name);
+	return handle->fns->removexattr_fn(handle, smb_fname, name);
 }
 
 int smb_vfs_call_fremovexattr(struct vfs_handle_struct *handle,
@@ -2542,12 +2587,16 @@ int smb_vfs_call_fremovexattr(struct vfs_handle_struct *handle,
 	return handle->fns->fremovexattr_fn(handle, fsp, name);
 }
 
-int smb_vfs_call_setxattr(struct vfs_handle_struct *handle, const char *path,
-			  const char *name, const void *value, size_t size,
-			  int flags)
+int smb_vfs_call_setxattr(struct vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			const char *name,
+			const void *value,
+			size_t size,
+			int flags)
 {
 	VFS_FIND(setxattr);
-	return handle->fns->setxattr_fn(handle, path, name, value, size, flags);
+	return handle->fns->setxattr_fn(handle, smb_fname,
+			name, value, size, flags);
 }
 
 int smb_vfs_call_fsetxattr(struct vfs_handle_struct *handle,

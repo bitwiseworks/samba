@@ -26,7 +26,7 @@ struct winbindd_getgrent_state {
 	int max_groups;
 	int num_groups;
 	struct winbindd_gr *groups;
-	struct talloc_dict **members;
+	struct db_context **members;
 };
 
 static void winbindd_getgrent_done(struct tevent_req *subreq);
@@ -50,11 +50,6 @@ struct tevent_req *winbindd_getgrent_send(TALLOC_CTX *mem_ctx,
 
 	DEBUG(3, ("[%5lu]: getgrent\n", (unsigned long)cli->pid));
 
-	if (!lp_winbind_enum_groups()) {
-		tevent_req_nterror(req, NT_STATUS_NO_MORE_ENTRIES);
-		return tevent_req_post(req, ev);
-	}
-
 	if (cli->grent_state == NULL) {
 		tevent_req_nterror(req, NT_STATUS_NO_MORE_ENTRIES);
 		return tevent_req_post(req, ev);
@@ -72,7 +67,7 @@ struct tevent_req *winbindd_getgrent_send(TALLOC_CTX *mem_ctx,
 		return tevent_req_post(req, ev);
 	}
 
-	state->members = talloc_array(state, struct talloc_dict *,
+	state->members = talloc_array(state, struct db_context *,
 				      state->max_groups);
 	if (tevent_req_nomem(state->members, req)) {
 		TALLOC_FREE(state->groups);
@@ -146,6 +141,7 @@ NTSTATUS winbindd_getgrent_recv(struct tevent_req *req,
 	int i;
 
 	if (tevent_req_is_nterror(req, &status)) {
+		TALLOC_FREE(state->cli->grent_state);
 		DEBUG(5, ("getgrent failed: %s\n", nt_errstr(status)));
 		return status;
 	}
@@ -156,6 +152,7 @@ NTSTATUS winbindd_getgrent_recv(struct tevent_req *req,
 
 	memberstrings = talloc_array(talloc_tos(), char *, state->num_groups);
 	if (memberstrings == NULL) {
+		TALLOC_FREE(state->cli->grent_state);
 		return NT_STATUS_NO_MEMORY;
 	}
 
@@ -170,6 +167,7 @@ NTSTATUS winbindd_getgrent_recv(struct tevent_req *req,
 
 		if (!NT_STATUS_IS_OK(status)) {
 			TALLOC_FREE(memberstrings);
+			TALLOC_FREE(state->cli->grent_state);
 			return status;
 		}
 		TALLOC_FREE(state->members[i]);
@@ -185,6 +183,7 @@ NTSTATUS winbindd_getgrent_recv(struct tevent_req *req,
 	result = talloc_realloc(state, state->groups, char,
 				base_memberofs + total_memberlen);
 	if (result == NULL) {
+		TALLOC_FREE(state->cli->grent_state);
 		return NT_STATUS_NO_MEMORY;
 	}
 	state->groups = (struct winbindd_gr *)result;

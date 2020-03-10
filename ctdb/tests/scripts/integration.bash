@@ -42,12 +42,17 @@ ctdb_test_exit ()
     unset ctdb_test_exit_hook
 
     if $ctdb_test_restart_scheduled || ! cluster_is_healthy ; then
+	echo "Restarting CTDB (scheduled)..."
+	ctdb_stop_all || true  # Might be restarting some daemons were shutdown
 
-	restart_ctdb
+	echo "Reconfiguring cluster..."
+	setup_ctdb
+
+	ctdb_start_all
     else
 	# This could be made unconditional but then we might get
-	# duplication from the recovery in restart_ctdb.  We want to
-	# leave the recovery in restart_ctdb so that future tests that
+	# duplication from the recovery in ctdb_start_all().  We want to
+	# leave the recovery in ctdb_start_all() so that future tests that
 	# might do a manual restart mid-test will benefit.
 	echo "Forcing a recovery..."
 	onnode 0 $CTDB recover
@@ -335,9 +340,8 @@ node_has_status ()
 	(notstopped)   bits="?|?|?|?|0|*" ;;
 	(frozen)       fpat='^[[:space:]]+frozen[[:space:]]+1$' ;;
 	(unfrozen)     fpat='^[[:space:]]+frozen[[:space:]]+0$' ;;
-	(monon)        mpat='^Monitoring mode:ACTIVE \(0\)$' ;;
-	(monoff)       mpat='^Monitoring mode:DISABLED \(1\)$' ;;
 	(recovered)    rpat='^Recovery mode:RECOVERY \(1\)$' ;;
+	(notlmaster)   rpat="^hash:.* lmaster:${pnn}\$" ;;
 	*)
 	    echo "node_has_status: unknown status \"$status\""
 	    return 1
@@ -360,8 +364,6 @@ node_has_status ()
 	} <<<"$out" # Yay bash!
     elif [ -n "$fpat" ] ; then
 	$CTDB statistics -n "$pnn" | egrep -q "$fpat"
-    elif [ -n "$mpat" ] ; then
-	$CTDB getmonmode -n "$pnn" | egrep -q "$mpat"
     elif [ -n "$rpat" ] ; then
         ! $CTDB status -n "$pnn" | egrep -q "$rpat"
     else
@@ -480,19 +482,25 @@ wait_until_node_has_some_ips ()
 
 #######################################
 
-restart_ctdb_1 ()
+_service_ctdb ()
 {
+    cmd="$1"
+
     if [ -e /etc/redhat-release ] ; then
-	service ctdb restart
+	service ctdb "$cmd"
     else
-	/etc/init.d/ctdb restart
+	/etc/init.d/ctdb "$cmd"
     fi
 }
 
-# Restart CTDB on all nodes.  Override for local daemons.
-_restart_ctdb_all ()
+# Stop/start CTDB on all nodes.  Override for local daemons.
+ctdb_stop_all ()
 {
-    onnode -p all $CTDB_TEST_WRAPPER restart_ctdb_1
+	onnode -p all $CTDB_TEST_WRAPPER _service_ctdb stop
+}
+_ctdb_start_all ()
+{
+	onnode -p all $CTDB_TEST_WRAPPER _service_ctdb start
 }
 
 # Nothing needed for a cluster.  Override for local daemons.
@@ -501,18 +509,27 @@ setup_ctdb ()
     :
 }
 
-restart_ctdb ()
+start_ctdb_1 ()
 {
-    echo -n "Restarting CTDB"
-    if $ctdb_test_restart_scheduled ; then
-	echo -n " (scheduled)"
-    fi
-    echo "..."
+    onnode "$1" $CTDB_TEST_WRAPPER _service_ctdb start
+}
 
+stop_ctdb_1 ()
+{
+    onnode "$1" $CTDB_TEST_WRAPPER _service_ctdb stop
+}
+
+restart_ctdb_1 ()
+{
+    onnode "$1" $CTDB_TEST_WRAPPER _service_ctdb restart
+}
+
+ctdb_start_all ()
+{
     local i
     for i in $(seq 1 5) ; do
-	_restart_ctdb_all || {
-	    echo "Restart failed.  Trying again in a few seconds..."
+	_ctdb_start_all || {
+	    echo "Start failed.  Trying again in a few seconds..."
 	    sleep_for 5
 	    continue
 	}
@@ -574,25 +591,9 @@ ctdb_restart_when_done ()
     ctdb_test_restart_scheduled=true
 }
 
-get_ctdbd_command_line_option ()
+ctdb_base_show ()
 {
-    local pnn="$1"
-    local option="$2"
-
-    try_command_on_node "$pnn" "$CTDB getpid" || \
-	die "Unable to get PID of ctdbd on node $pnn"
-
-    local pid="${out#*:}"
-    try_command_on_node "$pnn" "ps -p $pid -o args hww" || \
-	die "Unable to get command-line of PID $pid"
-
-    # Strip everything up to and including --option
-    local t="${out#*--${option}}"
-    # Strip leading '=' or space if present
-    t="${t#=}"
-    t="${t# }"
-    # Strip any following options and print
-    echo "${t%% -*}"
+	echo "${CTDB_BASE:-${CTDB_SCRIPTS_BASE}}"
 }
 
 #######################################
@@ -632,7 +633,7 @@ nfs_test_setup ()
     nfs_first_export=$(showmount -e $test_ip | sed -n -e '2s/ .*//p')
 
     echo "Creating test subdirectory..."
-    try_command_on_node $test_node "mktemp -d --tmpdir=$nfs_first_export"
+    try_command_on_node $test_node "TMPDIR=$nfs_first_export mktemp -d"
     nfs_test_dir="$out"
     try_command_on_node $test_node "chmod 777 $nfs_test_dir"
 
@@ -733,6 +734,26 @@ db_ctdb_tstore_dbseqnum ()
 }
 
 #######################################
+
+# Enables all of the event scripts used in cluster tests, except for
+# the mandatory scripts
+ctdb_enable_cluster_test_event_scripts ()
+{
+	local scripts="
+		       06.nfs
+		       10.interface
+		       49.winbind
+		       50.samba
+		       60.nfs
+		      "
+
+	local s
+	for s in $scripts ; do
+		try_command_on_node all ctdb event script enable legacy "$s"
+	done
+}
+
+########################################
 
 # Make sure that $CTDB is set.
 : ${CTDB:=ctdb}

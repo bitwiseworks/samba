@@ -25,7 +25,11 @@ __docformat__ = "restructuredText"
 import os
 import sys
 import time
+import ldb
 import samba.param
+from samba import _glue
+from samba._ldb import Ldb as _Ldb
+from samba.compat import string_types
 
 
 def source_tree_topdir():
@@ -45,10 +49,6 @@ def in_source_tree():
     except RuntimeError:
         return False
     return True
-
-
-import ldb
-from samba._ldb import Ldb as _Ldb
 
 
 class Ldb(_Ldb):
@@ -98,18 +98,18 @@ class Ldb(_Ldb):
 
         # TODO set debug
         def msg(l, text):
-            print text
+            print(text)
         #self.set_debug(msg)
 
         self.set_utf8_casefold()
 
         # Allow admins to force non-sync ldb for all databases
         if lp is not None:
-            nosync_p = lp.get("nosync", "ldb")
+            nosync_p = lp.get("ldb:nosync")
             if nosync_p is not None and nosync_p:
                 flags |= ldb.FLG_NOSYNC
 
-        self.set_create_perms(0600)
+        self.set_create_perms(0o600)
 
         if url is not None:
             self.connect(url, flags, options)
@@ -141,7 +141,8 @@ class Ldb(_Ldb):
         try:
             res = self.search(base=dn, scope=ldb.SCOPE_SUBTREE, attrs=[],
                       expression="(|(objectclass=user)(objectclass=computer))")
-        except ldb.LdbError, (errno, _):
+        except ldb.LdbError as error:
+            (errno, estr) = error.args
             if errno == ldb.ERR_NO_SUCH_OBJECT:
                 # Ignore no such object errors
                 return
@@ -151,7 +152,8 @@ class Ldb(_Ldb):
         try:
             for msg in res:
                 self.delete(msg.dn, ["relax:0"])
-        except ldb.LdbError, (errno, _):
+        except ldb.LdbError as error:
+            (errno, estr) = error.args
             if errno != ldb.ERR_NO_SUCH_OBJECT:
                 # Ignore no such object errors
                 raise
@@ -175,7 +177,8 @@ class Ldb(_Ldb):
                        [], controls=["show_deleted:0", "show_recycled:0"]):
             try:
                 self.delete(msg.dn, ["relax:0"])
-            except ldb.LdbError, (errno, _):
+            except ldb.LdbError as error:
+                (errno, estr) = error.args
                 if errno != ldb.ERR_NO_SUCH_OBJECT:
                     # Ignore no such object errors
                     raise
@@ -190,7 +193,8 @@ class Ldb(_Ldb):
                      "@OPTIONS", "@PARTITION", "@KLUDGEACL"]:
             try:
                 self.delete(attr, ["relax:0"])
-            except ldb.LdbError, (errno, _):
+            except ldb.LdbError as error:
+                (errno, estr) = error.args
                 if errno != ldb.ERR_NO_SUCH_OBJECT:
                     # Ignore missing dn errors
                     raise
@@ -203,7 +207,8 @@ class Ldb(_Ldb):
         for attr in ["@INDEXLIST", "@ATTRIBUTES"]:
             try:
                 self.delete(attr, ["relax:0"])
-            except ldb.LdbError, (errno, _):
+            except ldb.LdbError as error:
+                (errno, estr) = error.args
                 if errno != ldb.ERR_NO_SUCH_OBJECT:
                     # Ignore missing dn errors
                     raise
@@ -245,8 +250,8 @@ def substitute_var(text, values):
     """
 
     for (name, value) in values.items():
-        assert isinstance(name, str), "%r is not a string" % name
-        assert isinstance(value, str), "Value %r for %s is not a string" % (value, name)
+        assert isinstance(name, string_types), "%r is not a string" % name
+        assert isinstance(value, string_types), "Value %r for %s is not a string" % (value, name)
         text = text.replace("${%s}" % name, value)
 
     return text
@@ -374,9 +379,9 @@ def arcfour_encrypt(key, data):
     from samba.crypto import arcfour_crypt_blob
     return arcfour_crypt_blob(data, key)
 
-import _glue
 version = _glue.version
 interface_ips = _glue.interface_ips
+fault_setup = _glue.fault_setup
 set_debug_level = _glue.set_debug_level
 get_debug_level = _glue.get_debug_level
 unix2nttime = _glue.unix2nttime
@@ -385,9 +390,12 @@ nttime2unix = _glue.nttime2unix
 unix2nttime = _glue.unix2nttime
 generate_random_password = _glue.generate_random_password
 generate_random_machine_password = _glue.generate_random_machine_password
+check_password_quality = _glue.check_password_quality
+generate_random_bytes = _glue.generate_random_bytes
 strcasecmp_m = _glue.strcasecmp_m
 strstr_m = _glue.strstr_m
 is_ntvfs_fileserver_built = _glue.is_ntvfs_fileserver_built
+is_heimdal_built = _glue.is_heimdal_built
 
 NTSTATUSError = _glue.NTSTATUSError
 HRESULTError = _glue.HRESULTError

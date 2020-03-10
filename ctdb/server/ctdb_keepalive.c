@@ -31,10 +31,53 @@
 #include "lib/util/samba_util.h"
 
 #include "ctdb_private.h"
+#include "version.h"
 
 #include "common/common.h"
 #include "common/logging.h"
 
+
+static uint32_t keepalive_version(void)
+{
+	return (SAMBA_VERSION_MAJOR << 16) | SAMBA_VERSION_MINOR;
+}
+
+static uint32_t keepalive_uptime(struct ctdb_context *ctdb)
+{
+	struct timeval current = tevent_timeval_current();
+
+	return current.tv_sec - ctdb->ctdbd_start_time.tv_sec;
+}
+
+/*
+   send a keepalive packet to the other node
+*/
+static void ctdb_send_keepalive(struct ctdb_context *ctdb, uint32_t destnode)
+{
+	struct ctdb_req_keepalive_old *r;
+
+	if (ctdb->methods == NULL) {
+		DEBUG(DEBUG_INFO,
+		      ("Failed to send keepalive. Transport is DOWN\n"));
+		return;
+	}
+
+	r = ctdb_transport_allocate(ctdb, ctdb, CTDB_REQ_KEEPALIVE,
+				    sizeof(struct ctdb_req_keepalive_old),
+				    struct ctdb_req_keepalive_old);
+	CTDB_NO_MEMORY_FATAL(ctdb, r);
+	r->hdr.destnode  = destnode;
+	r->hdr.reqid     = 0;
+
+	r->version = keepalive_version();
+	r->uptime = keepalive_uptime(ctdb);
+
+	CTDB_INCREMENT_STAT(ctdb, keepalive_packets_sent);
+
+	ctdb_queue_packet(ctdb, &r->hdr);
+
+	talloc_free(r);
+}
 
 /*
   see if any nodes are dead
@@ -110,6 +153,11 @@ void ctdb_start_keepalive(struct ctdb_context *ctdb)
 	CTDB_NO_MEMORY_FATAL(ctdb, te);
 
 	DEBUG(DEBUG_NOTICE,("Keepalive monitoring has been started\n"));
+
+	if (ctdb->tunable.allow_mixed_versions == 1) {
+		DEBUG(DEBUG_WARNING,
+		      ("CTDB cluster with mixed versions configured\n"));
+	}
 }
 
 void ctdb_stop_keepalive(struct ctdb_context *ctdb)
@@ -118,3 +166,49 @@ void ctdb_stop_keepalive(struct ctdb_context *ctdb)
 	ctdb->keepalive_ctx = NULL;
 }
 
+void ctdb_request_keepalive(struct ctdb_context *ctdb,
+			    struct ctdb_req_header *hdr)
+{
+	struct ctdb_req_keepalive_old *c =
+		(struct ctdb_req_keepalive_old *)hdr;
+	uint32_t my_version = keepalive_version();
+	uint32_t my_uptime = keepalive_uptime(ctdb);
+
+	/* Don't check anything if mixed versions are allowed */
+	if (ctdb->tunable.allow_mixed_versions == 1) {
+		return;
+	}
+
+	if (hdr->length == sizeof(struct ctdb_req_header)) {
+		/* Old keepalive */
+		goto fail1;
+	}
+
+	if (c->version != my_version) {
+		if (c->uptime > my_uptime) {
+			goto fail2;
+		} else if (c->uptime == my_uptime) {
+			if (c->version > my_version) {
+				goto fail2;
+			}
+		}
+	}
+
+	return;
+
+fail1:
+	DEBUG(DEBUG_ERR,
+	      ("Keepalive version missing from node %u\n", hdr->srcnode));
+	goto shutdown;
+
+fail2:
+	DEBUG(DEBUG_ERR,
+	      ("Keepalive version mismatch 0x%08x != 0x%08x from node %u\n",
+	       my_version, c->version, hdr->srcnode));
+	goto shutdown;
+
+shutdown:
+	DEBUG(DEBUG_ERR,
+	      ("CTDB Cluster with mixed versions, cannot continue\n"));
+	ctdb_shutdown_sequence(ctdb, 0);
+}

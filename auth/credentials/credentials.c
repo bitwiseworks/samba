@@ -194,7 +194,7 @@ _PUBLIC_ const char *cli_credentials_get_bind_dn(struct cli_credentials *cred)
  * @retval The username set on this context.
  * @note Return value will never be NULL except by programmer error.
  */
-_PUBLIC_ const char *cli_credentials_get_principal_and_obtained(struct cli_credentials *cred, TALLOC_CTX *mem_ctx, enum credentials_obtained *obtained)
+_PUBLIC_ char *cli_credentials_get_principal_and_obtained(struct cli_credentials *cred, TALLOC_CTX *mem_ctx, enum credentials_obtained *obtained)
 {
 	if (cred->machine_account_pending) {
 		cli_credentials_set_machine_account(cred,
@@ -257,7 +257,7 @@ _PUBLIC_ const char *cli_credentials_get_principal_and_obtained(struct cli_crede
  * @retval The username set on this context.
  * @note Return value will never be NULL except by programmer error.
  */
-_PUBLIC_ const char *cli_credentials_get_principal(struct cli_credentials *cred, TALLOC_CTX *mem_ctx)
+_PUBLIC_ char *cli_credentials_get_principal(struct cli_credentials *cred, TALLOC_CTX *mem_ctx)
 {
 	enum credentials_obtained obtained;
 	return cli_credentials_get_principal_and_obtained(cred, mem_ctx, &obtained);
@@ -550,7 +550,7 @@ _PUBLIC_ struct samr_Password *cli_credentials_get_nt_hash(struct cli_credential
 					  password, password_len);
 		if (converted != sizeof(nt_hash->hash)) {
 			TALLOC_FREE(nt_hash);
-			return false;
+			return NULL;
 		}
 	} else {
 		E_md4hash(password, nt_hash->hash);
@@ -700,7 +700,7 @@ _PUBLIC_ const char *cli_credentials_get_realm(struct cli_credentials *cred)
 
 /**
  * Set the realm for this credentials context, and force it to
- * uppercase for the sainity of our local kerberos libraries 
+ * uppercase for the sanity of our local kerberos libraries
  */
 _PUBLIC_ bool cli_credentials_set_realm(struct cli_credentials *cred, 
 			       const char *val, 
@@ -864,12 +864,12 @@ _PUBLIC_ void cli_credentials_parse_string(struct cli_credentials *credentials, 
  * @param mem_ctx The memory context to place the result on
  */
 
-_PUBLIC_ const char *cli_credentials_get_unparsed_name(struct cli_credentials *credentials, TALLOC_CTX *mem_ctx)
+_PUBLIC_ char *cli_credentials_get_unparsed_name(struct cli_credentials *credentials, TALLOC_CTX *mem_ctx)
 {
 	const char *bind_dn = cli_credentials_get_bind_dn(credentials);
-	const char *domain;
-	const char *username;
-	const char *name;
+	const char *domain = NULL;
+	const char *username = NULL;
+	char *name = NULL;
 
 	if (bind_dn) {
 		name = talloc_strdup(mem_ctx, bind_dn);
@@ -975,8 +975,9 @@ _PUBLIC_ void cli_credentials_guess(struct cli_credentials *cred,
  * Attach NETLOGON credentials for use with SCHANNEL
  */
 
-_PUBLIC_ void cli_credentials_set_netlogon_creds(struct cli_credentials *cred, 
-						 struct netlogon_creds_CredentialState *netlogon_creds)
+_PUBLIC_ void cli_credentials_set_netlogon_creds(
+	struct cli_credentials *cred,
+	const struct netlogon_creds_CredentialState *netlogon_creds)
 {
 	TALLOC_FREE(cred->netlogon_creds);
 	if (netlogon_creds == NULL) {
@@ -1276,16 +1277,20 @@ _PUBLIC_ bool cli_credentials_parse_password_fd(struct cli_credentials *credenti
 				*++p = '\0'; /* advance p, and null-terminate pass */
 				break;
 			}
-			/* fall through */
+
+			FALL_THROUGH;
 		case 0:
 			if (p - pass) {
 				*p = '\0'; /* null-terminate it, just in case... */
 				p = NULL; /* then force the loop condition to become false */
 				break;
-			} else {
-				fprintf(stderr, "Error reading password from file descriptor %d: %s\n", fd, "empty password\n");
-				return false;
 			}
+
+			fprintf(stderr,
+				"Error reading password from file descriptor "
+				"%d: empty password\n",
+				fd);
+			return false;
 
 		default:
 			fprintf(stderr, "Error reading password from file descriptor %d: %s\n",
@@ -1298,4 +1303,44 @@ _PUBLIC_ bool cli_credentials_parse_password_fd(struct cli_credentials *credenti
 	return true;
 }
 
+
+/**
+ * Encrypt a data blob using the session key and the negotiated encryption
+ * algorithm
+ *
+ * @param state Credential state, contains the session key and algorithm
+ * @param data Data blob containing the data to be encrypted.
+ *
+ */
+_PUBLIC_ NTSTATUS netlogon_creds_session_encrypt(
+	struct netlogon_creds_CredentialState *state,
+	DATA_BLOB data)
+{
+	if (data.data == NULL || data.length == 0) {
+		DBG_ERR("Nothing to encrypt "
+			"data.data == NULL or data.length == 0");
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+	/*
+	 * Don't crypt an all-zero password it will give away the
+	 * NETLOGON pipe session key .
+	 */
+	if (all_zero(data.data, data.length)) {
+		DBG_ERR("Supplied data all zeros, could leak session key");
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+	if (state->negotiate_flags & NETLOGON_NEG_SUPPORTS_AES) {
+		netlogon_creds_aes_encrypt(state,
+					   data.data,
+					   data.length);
+	} else if (state->negotiate_flags & NETLOGON_NEG_ARCFOUR) {
+		netlogon_creds_arcfour_crypt(state,
+					     data.data,
+					     data.length);
+	} else {
+		DBG_ERR("Unsupported encryption option negotiated");
+		return NT_STATUS_NOT_SUPPORTED;
+	}
+	return NT_STATUS_OK;
+}
 

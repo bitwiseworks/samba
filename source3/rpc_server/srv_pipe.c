@@ -50,6 +50,7 @@
 #include "../librpc/gen_ndr/ndr_netlogon.h"
 #include "../librpc/gen_ndr/ndr_epmapper.h"
 #include "../librpc/gen_ndr/ndr_echo.h"
+#include "../librpc/gen_ndr/ndr_winspool.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_RPC_SRV
@@ -469,6 +470,11 @@ static bool check_bind_req(struct pipes_struct *p,
 		"allow dcerpc auth level connect",
 		interface_name, context_fns->allow_connect);
 
+	ok = ndr_syntax_id_equal(abstract, &ndr_table_iremotewinspool.syntax_id);
+	if (ok) {
+		context_fns->min_auth_level = DCERPC_AUTH_LEVEL_PACKET;
+	}
+
 	/* add to the list of open contexts */
 
 	DLIST_ADD( p->contexts, context_fns );
@@ -526,6 +532,7 @@ bool is_known_pipename(const char *pipename, struct ndr_syntax_id *syntax)
 static bool pipe_auth_generic_bind(struct pipes_struct *p,
 				   struct ncacn_packet *pkt,
 				   struct dcerpc_auth *auth_info,
+				   const char *service_description,
 				   DATA_BLOB *response)
 {
 	TALLOC_CTX *mem_ctx = pkt;
@@ -535,20 +542,15 @@ static bool pipe_auth_generic_bind(struct pipes_struct *p,
 	status = auth_generic_server_authtype_start(p,
 						    auth_info->auth_type,
 						    auth_info->auth_level,
-						    &auth_info->credentials,
-						    response,
 						    p->remote_address,
+						    p->local_address,
+						    service_description,
 						    &gensec_security);
-	if (!NT_STATUS_IS_OK(status) &&
-	    !NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED))
-	{
+	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0, (__location__ ": auth_generic_server_authtype_start[%u/%u] failed: %s\n",
 			  auth_info->auth_type, auth_info->auth_level, nt_errstr(status)));
 		return false;
 	}
-
-	/* Make sure data is bound to the memctx, to be freed the caller */
-	talloc_steal(mem_ctx, response->data);
 
 	p->auth.auth_ctx = gensec_security;
 	p->auth.auth_type = auth_info->auth_type;
@@ -564,6 +566,19 @@ static bool pipe_auth_generic_bind(struct pipes_struct *p,
 	if (p->auth.hdr_signing) {
 		gensec_want_feature(gensec_security,
 				    GENSEC_FEATURE_SIGN_PKT_HEADER);
+	}
+
+	status = auth_generic_server_step(gensec_security, mem_ctx,
+					  &auth_info->credentials,
+					  response);
+	if (!NT_STATUS_IS_OK(status) &&
+	    !NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED))
+	{
+		DEBUG(2, (__location__ ": "
+			  "auth_generic_server_step[%u/%u] failed: %s\n",
+			  auth_info->auth_type, auth_info->auth_level,
+			  nt_errstr(status)));
+		return false;
 	}
 
 	if (NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
@@ -688,6 +703,7 @@ static bool api_pipe_bind_req(struct pipes_struct *p,
 	DATA_BLOB auth_resp = data_blob_null;
 	DATA_BLOB auth_blob = data_blob_null;
 	const struct ndr_interface_table *table;
+	const char *secondary_address = NULL;
 
 	if (!p->allow_bind) {
 		DEBUG(2,("Pipe not in allow bind state\n"));
@@ -732,7 +748,10 @@ static bool api_pipe_bind_req(struct pipes_struct *p,
 
 	table = ndr_table_by_uuid(&id.uuid);
 	if (table == NULL) {
-		DEBUG(0,("unknown interface\n"));
+		char *iface = ndr_syntax_id_to_string(talloc_tos(), &id);
+		DBG_NOTICE("unknown interface %s\n",
+			   iface ? iface : "<null>");
+		TALLOC_FREE(iface);
 		return false;
 	}
 
@@ -821,13 +840,46 @@ static bool api_pipe_bind_req(struct pipes_struct *p,
 		}
 
 		if (!pipe_auth_generic_bind(p, pkt,
-					    &auth_info, &auth_resp)) {
+					    &auth_info,
+					    table->name,
+					    &auth_resp)) {
 			goto err_exit;
 		}
 	} else {
+		TALLOC_CTX *frame = talloc_stackframe();
+		struct auth4_context *auth4_context;
+		const char *transport_protection = AUTHZ_TRANSPORT_PROTECTION_NONE;
+		if (p->transport == NCACN_NP) {
+			transport_protection = AUTHZ_TRANSPORT_PROTECTION_SMB;
+		}
+
 		p->auth.auth_type = DCERPC_AUTH_TYPE_NONE;
 		p->auth.auth_level = DCERPC_AUTH_LEVEL_NONE;
 		p->auth.auth_context_id = 0;
+
+		become_root();
+		status = make_auth4_context(frame, &auth4_context);
+		unbecome_root();
+		if (!NT_STATUS_IS_OK(status)) {
+			DEBUG(0, ("Unable to make auth context for authz log.\n"));
+			TALLOC_FREE(frame);
+			goto err_exit;
+		}
+
+		/*
+		 * Log the authorization to this RPC interface.  This
+		 * covered ncacn_np pass-through auth, and anonymous
+		 * DCE/RPC (eg epmapper, netlogon etc)
+		 */
+		log_successful_authz_event(auth4_context->msg_ctx,
+					   auth4_context->lp_ctx,
+					   p->remote_address,
+					   p->local_address,
+					   table->name,
+					   derpc_transport_string_by_transport(p->transport),
+					   transport_protection,
+					   p->session_info);
+		TALLOC_FREE(frame);
 	}
 
 	ZERO_STRUCT(u.bind_ack);
@@ -835,14 +887,26 @@ static bool api_pipe_bind_req(struct pipes_struct *p,
 	u.bind_ack.max_recv_frag = RPC_MAX_PDU_FRAG_LEN;
 	u.bind_ack.assoc_group_id = assoc_gid;
 
-	/* name has to be \PIPE\xxxxx */
-	u.bind_ack.secondary_address =
-			talloc_asprintf(pkt, "\\PIPE\\%s",
-					rpc_srv_get_pipe_srv_name(&id));
-	if (!u.bind_ack.secondary_address) {
+	switch (p->transport) {
+	case NCACN_IP_TCP:
+		secondary_address = talloc_asprintf(pkt, "%d",
+			tsocket_address_inet_port(p->local_address));
+		break;
+	case NCACN_NP:
+	default:
+		/* name has to be \PIPE\xxxxx */
+		secondary_address =
+				talloc_asprintf(pkt, "\\PIPE\\%s",
+						rpc_srv_get_pipe_srv_name(&id));
+		break;
+	}
+
+	if (secondary_address == NULL) {
 		DEBUG(0, ("Out of memory!\n"));
 		goto err_exit;
 	}
+
+	u.bind_ack.secondary_address = secondary_address;
 	u.bind_ack.secondary_address_size =
 				strlen(u.bind_ack.secondary_address) + 1;
 
@@ -1371,6 +1435,18 @@ static bool api_pipe_request(struct pipes_struct *p,
 	interface_name = ndr_interface_name(&pipe_fns->syntax.uuid,
 					    pipe_fns->syntax.if_version);
 	SMB_ASSERT(interface_name != NULL);
+
+	if (p->auth.auth_level < pipe_fns->min_auth_level) {
+
+		DEBUG(1, ("%s: auth level required for %s: 0x%x, got: 0x%0x\n",
+			  __func__, interface_name,
+			  pipe_fns->min_auth_level,
+			  p->auth.auth_level));
+
+		setup_fault_pdu(p, NT_STATUS(DCERPC_FAULT_ACCESS_DENIED));
+		TALLOC_FREE(frame);
+		return true;
+	}
 
 	switch (p->auth.auth_level) {
 	case DCERPC_AUTH_LEVEL_NONE:

@@ -4,121 +4,40 @@
 
 define_test "timeouts with multiple scripts"
 
-cat > "$eventd_scriptdir/01.test" <<EOF
-#!/bin/sh
-
-case "\$1" in
-startup)
-	sleep 10
-	;;
-monitor|ipreallocated)
-	exit 0
-	;;
-esac
-
-EOF
-chmod +x "$eventd_scriptdir/01.test"
-
-cat > "$eventd_scriptdir/02.test" <<EOF
-#!/bin/sh
-
-case "\$1" in
-monitor)
-	sleep 10
-	;;
-startup|ipreallocated)
-	exit 0
-	;;
-esac
-
-EOF
-chmod +x "$eventd_scriptdir/02.test"
-
-cat > "$eventd_scriptdir/03.test" <<EOF
-#!/bin/sh
-
-case "\$1" in
-ipreallocated)
-	sleep 10
-	;;
-startup|monitor)
-	exit 0
-	;;
-esac
-
-EOF
-chmod +x "$eventd_scriptdir/03.test"
-
 setup_eventd
 
-required_result 62 <<EOF
-Event startup timed out
+required_error ETIMEDOUT <<EOF
+Event timeout1 in multi timed out
 EOF
-simple_test run startup 5
+simple_test run 5 multi timeout1
 
-required_result 62 <<EOF
+required_error ETIMEDOUT <<EOF
 01.test              TIMEDOUT   DATETIME
   OUTPUT: 
 EOF
-simple_test status startup lastrun
+simple_test status multi timeout1
 
-required_result 0 <<EOF
-Event startup has never passed
+required_error ETIMEDOUT <<EOF
+Event timeout2 in multi timed out
 EOF
-simple_test status startup lastpass
+simple_test run 5 multi timeout2
 
-required_result 62 <<EOF
-01.test              TIMEDOUT   DATETIME
-  OUTPUT: 
-EOF
-simple_test status startup lastfail
-
-required_result 62 <<EOF
-Event monitor timed out
-EOF
-simple_test run monitor 5
-
-required_result 62 <<EOF
+required_error ETIMEDOUT <<EOF
 01.test              OK         DURATION DATETIME
 02.test              TIMEDOUT   DATETIME
   OUTPUT: 
 EOF
-simple_test status monitor lastrun
+simple_test status multi timeout2
 
-required_result 0 <<EOF
-Event monitor has never passed
+required_error ETIMEDOUT <<EOF
+Event timeout3 in multi timed out
 EOF
-simple_test status monitor lastpass
+simple_test run 5 multi timeout3
 
-required_result 62 <<EOF
-01.test              OK         DURATION DATETIME
-02.test              TIMEDOUT   DATETIME
-  OUTPUT: 
-EOF
-simple_test status monitor lastfail
-
-required_result 62 <<EOF
-Event ipreallocated timed out
-EOF
-simple_test run ipreallocated 5
-
-required_result 62 <<EOF
+required_error ETIMEDOUT <<EOF
 01.test              OK         DURATION DATETIME
 02.test              OK         DURATION DATETIME
 03.test              TIMEDOUT   DATETIME
   OUTPUT: 
 EOF
-simple_test status ipreallocated lastrun
-
-required_result 0 <<EOF
-Event ipreallocated has never passed
-EOF
-simple_test status ipreallocated lastpass
-
-required_result 62 <<EOF
-01.test              OK         DURATION DATETIME
-02.test              OK         DURATION DATETIME
-03.test              TIMEDOUT   DATETIME
-  OUTPUT: 
-EOF
-simple_test status ipreallocated lastfail
+simple_test status multi timeout3

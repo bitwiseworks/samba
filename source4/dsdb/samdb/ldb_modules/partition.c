@@ -372,7 +372,7 @@ static int partition_call_first(struct partition_context *ac)
 }
 
 /**
- * Send a request down to all the partitions
+ * Send a request down to all the partitions (but not the sam.ldb file)
  */
 static int partition_send_all(struct ldb_module *module, 
 			      struct partition_context *ac, 
@@ -381,10 +381,8 @@ static int partition_send_all(struct ldb_module *module,
 	unsigned int i;
 	struct partition_private_data *data = talloc_get_type(ldb_module_get_private(module),
 							      struct partition_private_data);
-	int ret = partition_prep_request(ac, NULL);
-	if (ret != LDB_SUCCESS) {
-		return ret;
-	}
+	int ret;
+
 	for (i=0; data && data->partitions && data->partitions[i]; i++) {
 		ret = partition_prep_request(ac, data->partitions[i]);
 		if (ret != LDB_SUCCESS) {
@@ -396,32 +394,36 @@ static int partition_send_all(struct ldb_module *module,
 	return partition_call_first(ac);
 }
 
+struct partition_copy_context {
+	struct ldb_module *module;
+	struct partition_context *partition_context;
+	struct ldb_request *request;
+	struct ldb_dn *dn;
+};
 
-/**
- * send an operation to the top partition, then copy the resulting
- * object to all other partitions
+/*
+ * A special DN has been updated in the primary partition. Now propagate those
+ * changes to the remaining partitions.
+ *
+ * Note: that the operations are asynchronous and this function is called
+ *       from partition_copy_all_callback_handler in response to an async
+ *       callback.
  */
-static int partition_copy_all(struct ldb_module *module,
-			      struct partition_context *ac,
-			      struct ldb_request *req,
-			      struct ldb_dn *dn)
+static int partition_copy_all_callback_action(
+	struct ldb_module *module,
+	struct partition_context *ac,
+	struct ldb_request *req,
+	struct ldb_dn *dn)
+
 {
+
 	unsigned int i;
-	struct partition_private_data *data = talloc_get_type(ldb_module_get_private(module),
-							      struct partition_private_data);
-	int ret, search_ret;
+	struct partition_private_data *data =
+		talloc_get_type(
+			ldb_module_get_private(module),
+			struct partition_private_data);
+	int search_ret;
 	struct ldb_result *res;
-
-	/* do the request on the top level sam.ldb synchronously */
-	ret = ldb_next_request(module, req);
-	if (ret != LDB_SUCCESS) {
-		return ret;
-	}
-	ret = ldb_wait(req->handle, LDB_WAIT_ALL);
-	if (ret != LDB_SUCCESS) {
-		return ret;
-	}
-
 	/* now fetch the resulting object, and then copy it to all the
 	 * other partitions. We need this approach to cope with the
 	 * partitions getting out of sync. If for example the
@@ -430,39 +432,258 @@ static int partition_copy_all(struct ldb_module *module,
 	 * lead to an error
 	 */
 	search_ret = dsdb_module_search_dn(module, ac, &res, dn, NULL, DSDB_FLAG_NEXT_MODULE, req);
-	if (search_ret != LDB_SUCCESS && ret != LDB_ERR_NO_SUCH_OBJECT) {
+	if (search_ret != LDB_SUCCESS) {
 		return search_ret;
 	}
 
-	/* now delete the object in the other partitions. Once that is
-	   done we will re-add the object, if search_ret was not
-	   LDB_ERR_NO_SUCH_OBJECT
+	/* now delete the object in the other partitions, if requried
 	*/
-	for (i=0; data->partitions && data->partitions[i]; i++) {
-		int pret;
-		pret = dsdb_module_del(data->partitions[i]->module, dn, DSDB_FLAG_NEXT_MODULE, req);
-		if (pret != LDB_SUCCESS && pret != LDB_ERR_NO_SUCH_OBJECT) {
-			/* we should only get success or no
-			   such object from the other partitions */
-			return pret;
-		}
-	}
-
-
-	if (search_ret != LDB_ERR_NO_SUCH_OBJECT) {
-		/* now re-add in the other partitions */
+	if (search_ret == LDB_ERR_NO_SUCH_OBJECT) {
 		for (i=0; data->partitions && data->partitions[i]; i++) {
 			int pret;
-			pret = dsdb_module_add(data->partitions[i]->module, res->msgs[0], DSDB_FLAG_NEXT_MODULE, req);
-			if (pret != LDB_SUCCESS) {
+			pret = dsdb_module_del(data->partitions[i]->module,
+					       dn,
+					       DSDB_FLAG_NEXT_MODULE,
+					       req);
+			if (pret != LDB_SUCCESS && pret != LDB_ERR_NO_SUCH_OBJECT) {
+				/* we should only get success or no
+				   such object from the other partitions */
 				return pret;
 			}
+		}
+
+		return ldb_module_done(req, NULL, NULL, LDB_SUCCESS);
+	}
+
+	/* now add/modify in the other partitions */
+	for (i=0; data->partitions && data->partitions[i]; i++) {
+		struct ldb_message *modify_msg = NULL;
+		int pret;
+		unsigned int el_idx;
+
+		pret = dsdb_module_add(data->partitions[i]->module,
+				       res->msgs[0],
+				       DSDB_FLAG_NEXT_MODULE,
+				       req);
+		if (pret == LDB_SUCCESS) {
+			continue;
+		}
+
+		if (pret != LDB_ERR_ENTRY_ALREADY_EXISTS) {
+			return pret;
+		}
+
+		modify_msg = ldb_msg_copy(req, res->msgs[0]);
+		if (modify_msg == NULL) {
+			return ldb_module_oom(module);
+		}
+
+		/*
+		 * mark all the message elements as
+		 * LDB_FLAG_MOD_REPLACE
+		 */
+		for (el_idx=0;
+		     el_idx < modify_msg->num_elements;
+		     el_idx++) {
+			modify_msg->elements[el_idx].flags
+				= LDB_FLAG_MOD_REPLACE;
+		}
+
+		if (req->operation == LDB_MODIFY) {
+			const struct ldb_message *req_msg = req->op.mod.message;
+			/*
+			 * mark elements to be removed, if there were
+			 * deleted entirely above we need to delete
+			 * them here too
+			 */
+			for (el_idx=0; el_idx < req_msg->num_elements; el_idx++) {
+				if (req_msg->elements[el_idx].flags & LDB_FLAG_MOD_DELETE
+				    || ((req_msg->elements[el_idx].flags & LDB_FLAG_MOD_REPLACE) &&
+					req_msg->elements[el_idx].num_values == 0)) {
+					if (ldb_msg_find_element(modify_msg,
+								 req_msg->elements[el_idx].name) != NULL) {
+						continue;
+					}
+					pret = ldb_msg_add_empty(
+						modify_msg,
+						req_msg->elements[el_idx].name,
+						LDB_FLAG_MOD_REPLACE,
+						NULL);
+					if (pret != LDB_SUCCESS) {
+						return pret;
+					}
+				}
+			}
+		}
+
+		pret = dsdb_module_modify(data->partitions[i]->module,
+					  modify_msg,
+					  DSDB_FLAG_NEXT_MODULE,
+					  req);
+
+		if (pret != LDB_SUCCESS) {
+			return pret;
 		}
 	}
 
 	return ldb_module_done(req, NULL, NULL, LDB_SUCCESS);
 }
 
+
+/*
+ * @brief call back function for the ldb operations on special DN's.
+ *
+ * As the LDB operations are async, and we wish to use the result
+ * the operations, a callback needs to be registered to process the results
+ * of the LDB operations.
+ *
+ * @param req the ldb request
+ * @param res the result of the operation
+ *
+ * @return the LDB_STATUS
+ */
+static int partition_copy_all_callback_handler(
+	struct ldb_request *req,
+	struct ldb_reply *ares)
+{
+	struct partition_copy_context *ac = NULL;
+
+	ac = talloc_get_type(
+		req->context,
+		struct partition_copy_context);
+
+	if (!ares) {
+		return ldb_module_done(
+			ac->request,
+			NULL,
+			NULL,
+			LDB_ERR_OPERATIONS_ERROR);
+	}
+
+	/* pass on to the callback */
+	switch (ares->type) {
+	case LDB_REPLY_ENTRY:
+		return ldb_module_send_entry(
+			ac->request,
+			ares->message,
+			ares->controls);
+
+	case LDB_REPLY_REFERRAL:
+		return ldb_module_send_referral(
+			ac->request,
+			ares->referral);
+
+	case LDB_REPLY_DONE: {
+		int error = ares->error;
+		if (error == LDB_SUCCESS) {
+			error = partition_copy_all_callback_action(
+				ac->module,
+				ac->partition_context,
+				ac->request,
+				ac->dn);
+		}
+		return ldb_module_done(
+			ac->request,
+			ares->controls,
+			ares->response,
+			error);
+	}
+
+	default:
+		/* Can't happen */
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+}
+
+/**
+ * send an operation to the top partition, then copy the resulting
+ * object to all other partitions.
+ */
+static int partition_copy_all(
+	struct ldb_module *module,
+	struct partition_context *partition_context,
+	struct ldb_request *req,
+	struct ldb_dn *dn)
+{
+	struct ldb_request *new_req = NULL;
+	struct ldb_context *ldb = NULL;
+	struct partition_copy_context *context = NULL;
+
+	int ret;
+
+	ldb = ldb_module_get_ctx(module);
+
+	context = talloc_zero(req, struct partition_copy_context);
+	if (context == NULL) {
+		return ldb_oom(ldb);
+	}
+	context->module = module;
+	context->request = req;
+	context->dn = dn;
+	context->partition_context = partition_context;
+
+	switch (req->operation) {
+	case LDB_ADD:
+		ret = ldb_build_add_req(
+			&new_req,
+			ldb,
+			req,
+			req->op.add.message,
+			req->controls,
+			context,
+			partition_copy_all_callback_handler,
+			req);
+		break;
+	case LDB_MODIFY:
+		ret = ldb_build_mod_req(
+			&new_req,
+			ldb,
+			req,
+			req->op.mod.message,
+			req->controls,
+			context,
+			partition_copy_all_callback_handler,
+			req);
+		break;
+	case LDB_DELETE:
+		ret = ldb_build_del_req(
+			&new_req,
+			ldb,
+			req,
+			req->op.del.dn,
+			req->controls,
+			context,
+			partition_copy_all_callback_handler,
+			req);
+		break;
+	case LDB_RENAME:
+		ret = ldb_build_rename_req(
+			&new_req,
+			ldb,
+			req,
+			req->op.rename.olddn,
+			req->op.rename.newdn,
+			req->controls,
+			context,
+			partition_copy_all_callback_handler,
+			req);
+		break;
+	default:
+		/*
+		 * Shouldn't happen.
+		 */
+		ldb_debug(
+			ldb,
+			LDB_DEBUG_ERROR,
+			"Unexpected operation type (%d)\n", req->operation);
+		ret = LDB_ERR_OPERATIONS_ERROR;
+		break;
+	}
+	if (ret != LDB_SUCCESS) {
+		return ret;
+	}
+	return ldb_next_request(module, new_req);
+}
 /**
  * Figure out which backend a request needs to be aimed at.  Some
  * requests must be replicated to all backends
@@ -803,7 +1024,7 @@ static int partition_rename(struct ldb_module *module, struct ldb_request *req)
 }
 
 /* start a transaction */
-static int partition_start_trans(struct ldb_module *module)
+int partition_start_trans(struct ldb_module *module)
 {
 	int i;
 	int ret;
@@ -815,18 +1036,14 @@ static int partition_start_trans(struct ldb_module *module)
 	if (ldb_module_flags(ldb_module_get_ctx(module)) & LDB_FLG_ENABLE_TRACING) {
 		ldb_debug(ldb_module_get_ctx(module), LDB_DEBUG_TRACE, "partition_start_trans() -> (metadata partition)");
 	}
+
+	/* This order must match that in prepare_commit() and read_lock() */
 	ret = ldb_next_start_trans(module);
 	if (ret != LDB_SUCCESS) {
 		return ret;
 	}
 
 	ret = partition_reload_if_required(module, data, NULL);
-	if (ret != LDB_SUCCESS) {
-		ldb_next_del_trans(module);
-		return ret;
-	}
-
-	ret = partition_metadata_start_trans(module);
 	if (ret != LDB_SUCCESS) {
 		ldb_next_del_trans(module);
 		return ret;
@@ -849,18 +1066,37 @@ static int partition_start_trans(struct ldb_module *module)
 		}
 	}
 
+	/*
+	 * Because in prepare_commit this must come last, to ensure
+	 * lock ordering we have to do this last here also 
+	 */
+	ret = partition_metadata_start_trans(module);
+	if (ret != LDB_SUCCESS) {
+		/* Back it out, if it fails on one */
+		for (i--; i >= 0; i--) {
+			ldb_next_del_trans(data->partitions[i]->module);
+		}
+		ldb_next_del_trans(module);
+		return ret;
+	}
+
 	data->in_transaction++;
 
 	return LDB_SUCCESS;
 }
 
 /* prepare for a commit */
-static int partition_prepare_commit(struct ldb_module *module)
+int partition_prepare_commit(struct ldb_module *module)
 {
 	unsigned int i;
 	struct partition_private_data *data = talloc_get_type(ldb_module_get_private(module),
 							      struct partition_private_data);
 	int ret;
+
+	ret = ldb_next_prepare_commit(module);
+	if (ret != LDB_SUCCESS) {
+		return ret;
+	}
 
 	for (i=0; data && data->partitions && data->partitions[i]; i++) {
 		if ((module && ldb_module_flags(ldb_module_get_ctx(module)) & LDB_FLG_ENABLE_TRACING)) {
@@ -880,11 +1116,6 @@ static int partition_prepare_commit(struct ldb_module *module)
 		ldb_debug(ldb_module_get_ctx(module), LDB_DEBUG_TRACE, "partition_prepare_commit() -> (metadata partition)");
 	}
 
-	ret = ldb_next_prepare_commit(module);
-	if (ret != LDB_SUCCESS) {
-		return ret;
-	}
-
 	/* metadata prepare commit must come last, as other partitions could modify
 	 * the database inside the prepare commit method of a module */
 	return partition_metadata_prepare_commit(module);
@@ -892,7 +1123,7 @@ static int partition_prepare_commit(struct ldb_module *module)
 
 
 /* end a transaction */
-static int partition_end_trans(struct ldb_module *module)
+int partition_end_trans(struct ldb_module *module)
 {
 	int ret, ret2;
 	unsigned int i;
@@ -908,10 +1139,6 @@ static int partition_end_trans(struct ldb_module *module)
 		data->in_transaction--;
 	}
 
-	ret2 = partition_metadata_end_trans(module);
-	if (ret2 != LDB_SUCCESS) {
-		ret = ret2;
-	}
 
 	for (i=0; data && data->partitions && data->partitions[i]; i++) {
 		if ((module && ldb_module_flags(ldb_module_get_ctx(module)) & LDB_FLG_ENABLE_TRACING)) {
@@ -934,23 +1161,26 @@ static int partition_end_trans(struct ldb_module *module)
 	if (ret2 != LDB_SUCCESS) {
 		ret = ret2;
 	}
+
+	ret2 = partition_metadata_end_trans(module);
+	if (ret2 != LDB_SUCCESS) {
+		ret = ret2;
+	}
+
 	return ret;
 }
 
 /* delete a transaction */
-static int partition_del_trans(struct ldb_module *module)
+int partition_del_trans(struct ldb_module *module)
 {
 	int ret, final_ret = LDB_SUCCESS;
 	unsigned int i;
 	struct partition_private_data *data = talloc_get_type(ldb_module_get_private(module),
 							      struct partition_private_data);
-	ret = partition_metadata_del_trans(module);
-	if (ret != LDB_SUCCESS) {
-		final_ret = ret;
-	}
 
 	for (i=0; data && data->partitions && data->partitions[i]; i++) {
-		if ((module && ldb_module_flags(ldb_module_get_ctx(module)) & LDB_FLG_ENABLE_TRACING)) {
+		if (ldb_module_flags(ldb_module_get_ctx(module)) &
+		    LDB_FLG_ENABLE_TRACING) {
 			ldb_debug(ldb_module_get_ctx(module), LDB_DEBUG_TRACE, "partition_del_trans() -> %s",
 				  ldb_dn_get_linearized(data->partitions[i]->ctrl->dn));
 		}
@@ -969,13 +1199,20 @@ static int partition_del_trans(struct ldb_module *module)
 	}
 	data->in_transaction--;
 
-	if ((module && ldb_module_flags(ldb_module_get_ctx(module)) & LDB_FLG_ENABLE_TRACING)) {
+	if (ldb_module_flags(ldb_module_get_ctx(module)) &
+	    LDB_FLG_ENABLE_TRACING) {
 		ldb_debug(ldb_module_get_ctx(module), LDB_DEBUG_TRACE, "partition_del_trans() -> (metadata partition)");
 	}
 	ret = ldb_next_del_trans(module);
 	if (ret != LDB_SUCCESS) {
 		final_ret = ret;
 	}
+
+	ret = partition_metadata_del_trans(module);
+	if (ret != LDB_SUCCESS) {
+		final_ret = ret;
+	}
+
 	return final_ret;
 }
 
@@ -1136,6 +1373,202 @@ static int partition_sequence_number(struct ldb_module *module, struct ldb_reque
 	return ldb_module_done(req, NULL, ext, LDB_SUCCESS);
 }
 
+/* lock all the backends */
+int partition_read_lock(struct ldb_module *module)
+{
+	int i;
+	int ret;
+	int ret2;
+	struct ldb_context *ldb = ldb_module_get_ctx(module);
+	struct partition_private_data *data = \
+		talloc_get_type(ldb_module_get_private(module),
+				struct partition_private_data);
+
+	if (ldb_module_flags(ldb) & LDB_FLG_ENABLE_TRACING) {
+		ldb_debug(ldb, LDB_DEBUG_TRACE,
+			  "partition_read_lock() -> (metadata partition)");
+	}
+
+	/*
+	 * It is important to only do this for LOCK because:
+	 * - we don't want to unlock what we did not lock
+	 *
+	 * - we don't want to make a new lock on the sam.ldb
+	 *   (triggered inside this routine due to the seq num check)
+	 *   during an unlock phase as that will violate the lock
+	 *   ordering
+	 */
+
+	if (data == NULL) {
+		TALLOC_CTX *mem_ctx = talloc_new(module);
+
+		data = talloc_zero(mem_ctx, struct partition_private_data);
+		if (data == NULL) {
+			talloc_free(mem_ctx);
+			return ldb_operr(ldb);
+		}
+
+		/*
+		 * When used from Samba4, this message is set by the
+		 * samba4 module, as a fixed value not read from the
+		 * DB.  This avoids listing modules in the DB
+		 */
+		data->forced_module_msg = talloc_get_type(
+			ldb_get_opaque(ldb,
+				       DSDB_OPAQUE_PARTITION_MODULE_MSG_OPAQUE_NAME),
+			struct ldb_message);
+
+		ldb_module_set_private(module, talloc_steal(module,
+							    data));
+		talloc_free(mem_ctx);
+	}
+
+	/*
+	 * This will lock the metadata partition (sam.ldb) and
+	 * will also call event loops, so we do it before we
+	 * get the whole db lock.
+	 */
+	ret = partition_reload_if_required(module, data, NULL);
+	if (ret != LDB_SUCCESS) {
+		return ret;
+	}
+
+	/*
+	 * This order must match that in prepare_commit(), start with
+	 * the metadata partition (sam.ldb) lock
+	 */
+	ret = ldb_next_read_lock(module);
+	if (ret != LDB_SUCCESS) {
+		ldb_debug_set(ldb,
+			      LDB_DEBUG_FATAL,
+			      "Failed to lock db: %s / %s for metadata partition",
+			      ldb_errstring(ldb),
+			      ldb_strerror(ret));
+
+		return ret;
+	}
+
+	/*
+	 * The metadata partition (sam.ldb) lock is not
+	 * enough to block another process in prepare_commit(),
+	 * because prepare_commit() is a no-op, if nothing
+	 * was changed in the specific backend.
+	 *
+	 * That means the following per partition locks are required.
+	 */
+	for (i=0; data && data->partitions && data->partitions[i]; i++) {
+		if ((module && ldb_module_flags(ldb) & LDB_FLG_ENABLE_TRACING)) {
+			ldb_debug(ldb, LDB_DEBUG_TRACE,
+				  "partition_read_lock() -> %s",
+				  ldb_dn_get_linearized(
+					  data->partitions[i]->ctrl->dn));
+		}
+		ret = ldb_next_read_lock(data->partitions[i]->module);
+		if (ret == LDB_SUCCESS) {
+			continue;
+		}
+
+		ldb_debug_set(ldb,
+			      LDB_DEBUG_FATAL,
+			      "Failed to lock db: %s / %s for %s",
+			      ldb_errstring(ldb),
+			      ldb_strerror(ret),
+			      ldb_dn_get_linearized(
+				      data->partitions[i]->ctrl->dn));
+
+		/* Back it out, if it fails on one */
+		for (i--; i >= 0; i--) {
+			ret2 = ldb_next_read_unlock(data->partitions[i]->module);
+			if (ret2 != LDB_SUCCESS) {
+				ldb_debug(ldb,
+					  LDB_DEBUG_FATAL,
+					  "Failed to unlock db: %s / %s",
+					  ldb_errstring(ldb),
+					  ldb_strerror(ret2));
+			}
+		}
+		ret2 = ldb_next_read_unlock(module);
+		if (ret2 != LDB_SUCCESS) {
+			ldb_debug(ldb,
+				  LDB_DEBUG_FATAL,
+				  "Failed to unlock db: %s / %s",
+				  ldb_errstring(ldb),
+				  ldb_strerror(ret2));
+		}
+		return ret;
+	}
+
+	return LDB_SUCCESS;
+}
+
+/* unlock all the backends */
+int partition_read_unlock(struct ldb_module *module)
+{
+	int i;
+	int ret = LDB_SUCCESS;
+	int ret2;
+	struct ldb_context *ldb = ldb_module_get_ctx(module);
+	struct partition_private_data *data = \
+		talloc_get_type(ldb_module_get_private(module),
+				struct partition_private_data);
+
+	/*
+	 * This order must be similar to partition_{end,del}_trans()
+	 * the metadata partition (sam.ldb) unlock must be at the end.
+	 */
+
+	for (i=0; data && data->partitions && data->partitions[i]; i++) {
+		if ((module && ldb_module_flags(ldb) & LDB_FLG_ENABLE_TRACING)) {
+			ldb_debug(ldb, LDB_DEBUG_TRACE,
+				  "partition_read_unlock() -> %s",
+				  ldb_dn_get_linearized(
+					  data->partitions[i]->ctrl->dn));
+		}
+		ret2 = ldb_next_read_unlock(data->partitions[i]->module);
+		if (ret2 != LDB_SUCCESS) {
+			ldb_debug_set(ldb,
+				      LDB_DEBUG_FATAL,
+				      "Failed to lock db: %s / %s for %s",
+				      ldb_errstring(ldb),
+				      ldb_strerror(ret),
+				      ldb_dn_get_linearized(
+					      data->partitions[i]->ctrl->dn));
+
+			/*
+			 * Don't overwrite the original failure code
+			 * if there was one
+			 */
+			if (ret == LDB_SUCCESS) {
+				ret = ret2;
+			}
+		}
+	}
+
+	if (ldb_module_flags(ldb) & LDB_FLG_ENABLE_TRACING) {
+		ldb_debug(ldb, LDB_DEBUG_TRACE,
+			  "partition_read_unlock() -> (metadata partition)");
+	}
+
+	ret2 = ldb_next_read_unlock(module);
+	if (ret2 != LDB_SUCCESS) {
+		ldb_debug_set(ldb,
+			      LDB_DEBUG_FATAL,
+			      "Failed to unlock db: %s / %s for metadata partition",
+			      ldb_errstring(ldb),
+			      ldb_strerror(ret2));
+
+		/*
+		 * Don't overwrite the original failure code
+		 * if there was one
+		 */
+		if (ret == LDB_SUCCESS) {
+			ret = ret2;
+		}
+	}
+
+	return ret;
+}
+
 /* extended */
 static int partition_extended(struct ldb_module *module, struct ldb_request *req)
 {
@@ -1190,6 +1623,8 @@ static const struct ldb_module_ops ldb_partition_module_ops = {
 	.prepare_commit    = partition_prepare_commit,
 	.end_transaction   = partition_end_trans,
 	.del_transaction   = partition_del_trans,
+	.read_lock         = partition_read_lock,
+	.read_unlock       = partition_read_unlock
 };
 
 int ldb_partition_module_init(const char *version)

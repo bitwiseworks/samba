@@ -41,6 +41,8 @@
 #include "common/common.h"
 #include "common/logging.h"
 
+#include "server/ctdb_config.h"
+
 #define PERSISTENT_HEALTH_TDB "persistent_health.tdb"
 
 /**
@@ -104,8 +106,6 @@ static int ctdb_ltdb_store_server(struct ctdb_db_context *ctdb_db,
 		keep = true;
 	} else if (header->flags & CTDB_REC_RO_FLAGS) {
 		keep = true;
-	} else if (ctdb_db->persistent) {
-		keep = true;
 	} else if (header->flags & CTDB_REC_FLAG_AUTOMATIC) {
 		/*
 		 * The record is not created by the client but
@@ -145,7 +145,7 @@ static int ctdb_ltdb_store_server(struct ctdb_db_context *ctdb_db,
 	}
 
 	if (keep) {
-		if (!ctdb_db->persistent &&
+		if (ctdb_db_volatile(ctdb_db) &&
 		    (ctdb_db->ctdb->pnn == header->dmaster) &&
 		    !(header->flags & CTDB_REC_RO_FLAGS))
 		{
@@ -609,7 +609,7 @@ int ctdb_recheck_persistent_health(struct ctdb_context *ctdb)
 	int fail = 0;
 
 	for (ctdb_db = ctdb->db_list; ctdb_db; ctdb_db = ctdb_db->next) {
-		if (!ctdb_db->persistent) {
+		if (!ctdb_db_persistent(ctdb_db)) {
 			continue;
 		}
 
@@ -720,12 +720,13 @@ int ctdb_set_db_readonly(struct ctdb_context *ctdb, struct ctdb_db_context *ctdb
 {
 	char *ropath;
 
-	if (ctdb_db->readonly) {
+	if (ctdb_db_readonly(ctdb_db)) {
 		return 0;
 	}
 
-	if (ctdb_db->persistent) {
-		DEBUG(DEBUG_ERR,("Persistent databases do not support readonly property\n"));
+	if (! ctdb_db_volatile(ctdb_db)) {
+		DEBUG(DEBUG_ERR,
+		      ("Non-volatile databases do not support readonly flag\n"));
 		return -1;
 	}
 
@@ -746,7 +747,7 @@ int ctdb_set_db_readonly(struct ctdb_context *ctdb, struct ctdb_db_context *ctdb
 
 	DEBUG(DEBUG_NOTICE,("OPENED tracking database : '%s'\n", ropath));
 
-	ctdb_db->readonly = true;
+	ctdb_db_set_readonly(ctdb_db);
 
 	DEBUG(DEBUG_NOTICE, ("Readonly property set on DB %s\n", ctdb_db->db_name));
 
@@ -759,13 +760,12 @@ int ctdb_set_db_readonly(struct ctdb_context *ctdb, struct ctdb_db_context *ctdb
   return 0 on success, -1 on failure
  */
 static int ctdb_local_attach(struct ctdb_context *ctdb, const char *db_name,
-			     bool persistent, const char *unhealthy_reason,
-			     bool jenkinshash, bool mutexes)
+			     uint8_t db_flags, const char *unhealthy_reason)
 {
 	struct ctdb_db_context *ctdb_db, *tmp_db;
 	int ret;
 	struct TDB_DATA key;
-	unsigned tdb_flags;
+	int tdb_flags;
 	int mode = 0600;
 	int remaining_tries = 0;
 
@@ -779,9 +779,9 @@ static int ctdb_local_attach(struct ctdb_context *ctdb, const char *db_name,
 	key.dsize = strlen(db_name)+1;
 	key.dptr  = discard_const(db_name);
 	ctdb_db->db_id = ctdb_hash(&key);
-	ctdb_db->persistent = persistent;
+	ctdb_db->db_flags = db_flags;
 
-	if (!ctdb_db->persistent) {
+	if (ctdb_db_volatile(ctdb_db)) {
 		ctdb_db->delete_queue = trbt_create(ctdb_db, 0);
 		if (ctdb_db->delete_queue == NULL) {
 			CTDB_NO_MEMORY(ctdb, ctdb_db->delete_queue);
@@ -800,7 +800,7 @@ static int ctdb_local_attach(struct ctdb_context *ctdb, const char *db_name,
 		}
 	}
 
-	if (persistent) {
+	if (ctdb_db_persistent(ctdb_db)) {
 		if (unhealthy_reason) {
 			ret = ctdb_update_persistent_health(ctdb, ctdb_db,
 							    unhealthy_reason, 0);
@@ -842,24 +842,15 @@ static int ctdb_local_attach(struct ctdb_context *ctdb, const char *db_name,
 	}
 
 	/* open the database */
-	ctdb_db->db_path = talloc_asprintf(ctdb_db, "%s/%s.%u", 
-					   persistent?ctdb->db_directory_persistent:ctdb->db_directory, 
+	ctdb_db->db_path = talloc_asprintf(ctdb_db, "%s/%s.%u",
+					   ctdb_db_persistent(ctdb_db) ?
+						ctdb->db_directory_persistent :
+						ctdb->db_directory,
 					   db_name, ctdb->pnn);
 
-	tdb_flags = persistent? TDB_DEFAULT : TDB_CLEAR_IF_FIRST | TDB_NOSYNC;
-	if (ctdb->valgrinding) {
-		tdb_flags |= TDB_NOMMAP;
-	}
-	tdb_flags |= TDB_DISALLOW_NESTING;
-	if (jenkinshash) {
-		tdb_flags |= TDB_INCOMPATIBLE_HASH;
-	}
-#ifdef TDB_MUTEX_LOCKING
-	if (ctdb->tunable.mutex_enabled && mutexes &&
-	    tdb_runtime_check_for_robust_mutexes()) {
-		tdb_flags |= (TDB_MUTEX_LOCKING | TDB_CLEAR_IF_FIRST);
-	}
-#endif
+	tdb_flags = ctdb_db_tdb_flags(db_flags,
+				      ctdb->valgrinding,
+				      ctdb_config.tdb_mutexes);
 
 again:
 	ctdb_db->ltdb = tdb_wrap_open(ctdb_db, ctdb_db->db_path,
@@ -870,7 +861,7 @@ again:
 		struct stat st;
 		int saved_errno = errno;
 
-		if (!persistent) {
+		if (! ctdb_db_persistent(ctdb_db)) {
 			DEBUG(DEBUG_CRIT,("Failed to open tdb '%s': %d - %s\n",
 					  ctdb_db->db_path,
 					  saved_errno,
@@ -916,7 +907,7 @@ again:
 		goto again;
 	}
 
-	if (!persistent) {
+	if (!ctdb_db_persistent(ctdb_db)) {
 		ctdb_check_db_empty(ctdb_db);
 	} else {
 		ret = tdb_check(ctdb_db->ltdb->tdb, NULL, NULL);
@@ -961,6 +952,10 @@ again:
 			goto again;
 		}
 	}
+
+	/* remember the flags the client has specified */
+	tdb_add_flags(ctdb_db->ltdb->tdb, tdb_flags);
+
 
 	/* set up a rb tree we can use to track which records we have a 
 	   fetch-lock in-flight for so we can defer any additional calls
@@ -1023,6 +1018,25 @@ again:
 	if (ret != 0) {
 		DEBUG(DEBUG_CRIT,("Failed to setup vacuuming for "
 				  "database '%s'\n", ctdb_db->db_name));
+		talloc_free(ctdb_db);
+		return -1;
+	}
+
+	ret = ctdb_migration_init(ctdb_db);
+	if (ret != 0) {
+		DEBUG(DEBUG_ERR,
+		      ("Failed to setup migration tracking for db '%s'\n",
+		       ctdb_db->db_name));
+		talloc_free(ctdb_db);
+		return -1;
+	}
+
+	ret = db_hash_init(ctdb_db, "lock_log", 2048, DB_HASH_COMPLEX,
+			   &ctdb_db->lock_log);
+	if (ret != 0) {
+		DEBUG(DEBUG_ERR,
+		      ("Failed to setup lock logging for db '%s'\n",
+		       ctdb_db->db_name));
 		talloc_free(ctdb_db);
 		return -1;
 	}
@@ -1094,9 +1108,12 @@ int ctdb_process_deferred_attach(struct ctdb_context *ctdb)
 /*
   a client has asked to attach a new database
  */
-int32_t ctdb_control_db_attach(struct ctdb_context *ctdb, TDB_DATA indata,
-			       TDB_DATA *outdata, uint64_t tdb_flags, 
-			       bool persistent, uint32_t client_id,
+int32_t ctdb_control_db_attach(struct ctdb_context *ctdb,
+			       TDB_DATA indata,
+			       TDB_DATA *outdata,
+			       uint8_t db_flags,
+			       uint32_t srcnode,
+			       uint32_t client_id,
 			       struct ctdb_req_control_old *c,
 			       bool *async_reply)
 {
@@ -1104,7 +1121,7 @@ int32_t ctdb_control_db_attach(struct ctdb_context *ctdb, TDB_DATA indata,
 	struct ctdb_db_context *db;
 	struct ctdb_node *node = ctdb->nodes[ctdb->pnn];
 	struct ctdb_client *client = NULL;
-	bool with_jenkinshash, with_mutexes;
+	uint32_t opcode;
 
 	if (ctdb->tunable.allow_client_db_attach == 0) {
 		DEBUG(DEBUG_ERR, ("DB Attach to database %s denied by tunable "
@@ -1117,7 +1134,7 @@ int32_t ctdb_control_db_attach(struct ctdb_context *ctdb, TDB_DATA indata,
 	 * allow all attach from the network since these are always from remote
 	 * recovery daemons.
 	 */
-	if (client_id != 0) {
+	if (srcnode == ctdb->pnn && client_id != 0) {
 		client = reqid_find(ctdb->idr, client_id, struct ctdb_client);
 	}
 	if (client != NULL) {
@@ -1155,40 +1172,22 @@ int32_t ctdb_control_db_attach(struct ctdb_context *ctdb, TDB_DATA indata,
 		}
 	}
 
-	/* the client can optionally pass additional tdb flags, but we
-	   only allow a subset of those on the database in ctdb. Note
-	   that tdb_flags is passed in via the (otherwise unused)
-	   srvid to the attach control */
-#ifdef TDB_MUTEX_LOCKING
-	tdb_flags &= (TDB_NOSYNC|TDB_INCOMPATIBLE_HASH|TDB_MUTEX_LOCKING|TDB_CLEAR_IF_FIRST);
-#else
-	tdb_flags &= (TDB_NOSYNC|TDB_INCOMPATIBLE_HASH);
-#endif
-
 	/* see if we already have this name */
 	db = ctdb_db_handle(ctdb, db_name);
 	if (db) {
-		if (db->persistent != persistent) {
-			DEBUG(DEBUG_ERR, ("ERROR: DB Attach %spersistent to %spersistent "
-					  "database %s\n", persistent ? "" : "non-",
-					  db-> persistent ? "" : "non-", db_name));
+		if ((db->db_flags & db_flags) != db_flags) {
+			DEBUG(DEBUG_ERR,
+			      ("Error: Failed to re-attach with 0x%x flags,"
+			       " database has 0x%x flags\n", db_flags,
+			       db->db_flags));
 			return -1;
 		}
 		outdata->dptr  = (uint8_t *)&db->db_id;
 		outdata->dsize = sizeof(db->db_id);
-		tdb_add_flags(db->ltdb->tdb, tdb_flags);
 		return 0;
 	}
 
-	with_jenkinshash = (tdb_flags & TDB_INCOMPATIBLE_HASH) ? true : false;
-#ifdef TDB_MUTEX_LOCKING
-	with_mutexes = (tdb_flags & TDB_MUTEX_LOCKING) ? true : false;
-#else
-	with_mutexes = false;
-#endif
-
-	if (ctdb_local_attach(ctdb, db_name, persistent, NULL,
-			      with_jenkinshash, with_mutexes) != 0) {
+	if (ctdb_local_attach(ctdb, db_name, db_flags, NULL) != 0) {
 		return -1;
 	}
 
@@ -1198,19 +1197,22 @@ int32_t ctdb_control_db_attach(struct ctdb_context *ctdb, TDB_DATA indata,
 		return -1;
 	}
 
-	/* remember the flags the client has specified */
-	tdb_add_flags(db->ltdb->tdb, tdb_flags);
-
 	outdata->dptr  = (uint8_t *)&db->db_id;
 	outdata->dsize = sizeof(db->db_id);
 
 	/* Try to ensure it's locked in mem */
 	lockdown_memory(ctdb->valgrinding);
 
+	if (ctdb_db_persistent(db)) {
+		opcode = CTDB_CONTROL_DB_ATTACH_PERSISTENT;
+	} else if (ctdb_db_replicated(db)) {
+		opcode = CTDB_CONTROL_DB_ATTACH_REPLICATED;
+	} else {
+		opcode = CTDB_CONTROL_DB_ATTACH;
+	}
+
 	/* tell all the other nodes about this database */
-	ctdb_daemon_send_control(ctdb, CTDB_BROADCAST_CONNECTED, tdb_flags,
-				 persistent?CTDB_CONTROL_DB_ATTACH_PERSISTENT:
-						CTDB_CONTROL_DB_ATTACH,
+	ctdb_daemon_send_control(ctdb, CTDB_BROADCAST_CONNECTED, 0, opcode,
 				 0, CTDB_CTRL_FLAG_NOREPLY,
 				 indata, NULL, NULL);
 
@@ -1244,9 +1246,10 @@ int32_t ctdb_control_db_detach(struct ctdb_context *ctdb, TDB_DATA indata,
 		return -1;
 	}
 
-	if (ctdb_db->persistent) {
-		DEBUG(DEBUG_ERR, ("DB detach from persistent database %s "
-				  "denied\n", ctdb_db->db_name));
+	if (! ctdb_db_volatile(ctdb_db)) {
+		DEBUG(DEBUG_ERR,
+		      ("Detaching non-volatile database %s denied\n",
+		       ctdb_db->db_name));
 		return -1;
 	}
 
@@ -1301,7 +1304,7 @@ int32_t ctdb_control_db_detach(struct ctdb_context *ctdb, TDB_DATA indata,
 	}
 
 	/* Free readonly tracking database */
-	if (ctdb_db->readonly) {
+	if (ctdb_db_readonly(ctdb_db)) {
 		talloc_free(ctdb_db->rottdb);
 	}
 
@@ -1362,7 +1365,7 @@ static int ctdb_attach_persistent(struct ctdb_context *ctdb,
 		}
 		p[4] = 0;
 
-		if (ctdb_local_attach(ctdb, s, true, unhealthy_reason, false, false) != 0) {
+		if (ctdb_local_attach(ctdb, s, CTDB_DB_FLAGS_PERSISTENT, unhealthy_reason) != 0) {
 			DEBUG(DEBUG_ERR,("Failed to attach to persistent database '%s'\n", de->d_name));
 			closedir(d);
 			talloc_free(s);
@@ -1524,7 +1527,7 @@ int32_t ctdb_ltdb_update_seqnum(struct ctdb_context *ctdb, uint32_t db_id, uint3
 }
 
 /*
-  timer to check for seqnum changes in a ltdb and propogate them
+  timer to check for seqnum changes in a ltdb and propagate them
  */
 static void ctdb_ltdb_seqnum_check(struct tevent_context *ev,
 				   struct tevent_timer *te,
@@ -1534,13 +1537,19 @@ static void ctdb_ltdb_seqnum_check(struct tevent_context *ev,
 	struct ctdb_context *ctdb = ctdb_db->ctdb;
 	uint32_t new_seqnum = tdb_get_seqnum(ctdb_db->ltdb->tdb);
 	if (new_seqnum != ctdb_db->seqnum) {
-		/* something has changed - propogate it */
+		/* something has changed - propagate it */
 		TDB_DATA data;
 		data.dptr = (uint8_t *)&ctdb_db->db_id;
 		data.dsize = sizeof(uint32_t);
-		ctdb_daemon_send_control(ctdb, CTDB_BROADCAST_VNNMAP, 0,
-					 CTDB_CONTROL_UPDATE_SEQNUM, 0, CTDB_CTRL_FLAG_NOREPLY,
-					 data, NULL, NULL);		
+		ctdb_daemon_send_control(ctdb,
+					 CTDB_BROADCAST_ACTIVE,
+					 0,
+					 CTDB_CONTROL_UPDATE_SEQNUM,
+					 0,
+					 CTDB_CTRL_FLAG_NOREPLY,
+					 data,
+					 NULL,
+					 NULL);
 	}
 	ctdb_db->seqnum = new_seqnum;
 
@@ -1579,18 +1588,19 @@ int32_t ctdb_ltdb_enable_seqnum(struct ctdb_context *ctdb, uint32_t db_id)
 
 int ctdb_set_db_sticky(struct ctdb_context *ctdb, struct ctdb_db_context *ctdb_db)
 {
-	if (ctdb_db->sticky) {
+	if (ctdb_db_sticky(ctdb_db)) {
 		return 0;
 	}
 
-	if (ctdb_db->persistent) {
-		DEBUG(DEBUG_ERR,("Trying to set persistent database with sticky property\n"));
+	if (! ctdb_db_volatile(ctdb_db)) {
+		DEBUG(DEBUG_ERR,
+		      ("Non-volatile databases do not support sticky flag\n"));
 		return -1;
 	}
 
 	ctdb_db->sticky_records = trbt_create(ctdb_db, 0);
 
-	ctdb_db->sticky = true;
+	ctdb_db_set_sticky(ctdb_db);
 
 	DEBUG(DEBUG_NOTICE,("set db sticky %s\n", ctdb_db->db_name));
 

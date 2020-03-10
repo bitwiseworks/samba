@@ -27,7 +27,6 @@ from samba.credentials import (
     DONT_USE_KERBEROS,
     MUST_USE_KERBEROS,
     )
-from samba.hostconfig import Hostconfig
 import sys
 
 
@@ -35,13 +34,15 @@ class SambaOptions(optparse.OptionGroup):
     """General Samba-related command line options."""
 
     def __init__(self, parser):
+        from samba import fault_setup
+        fault_setup()
         from samba.param import LoadParm
         optparse.OptionGroup.__init__(self, parser, "Samba Common Options")
         self.add_option("-s", "--configfile", action="callback",
                         type=str, metavar="FILE", help="Configuration file",
                         callback=self._load_configfile)
         self.add_option("-d", "--debuglevel", action="callback",
-                        type=int, metavar="DEBUGLEVEL", help="debug level",
+                        type=str, metavar="DEBUGLEVEL", help="debug level",
                         callback=self._set_debuglevel)
         self.add_option("--option", action="callback",
                         type=str, metavar="OPTION",
@@ -65,7 +66,8 @@ class SambaOptions(optparse.OptionGroup):
         if arg < 0:
             raise optparse.OptionValueError("invalid %s option value: %s" %
                                             (opt_str, arg))
-        self._lp.set('debug level', str(arg))
+        self._lp.set('debug level', arg)
+        parser.values.debuglevel = arg
 
     def _set_realm(self, option, opt_str, arg, parser):
         self._lp.set('realm', arg)
@@ -78,7 +80,7 @@ class SambaOptions(optparse.OptionGroup):
         a = arg.split('=')
         try:
             self._lp.set(a[0], a[1])
-        except Exception, e:
+        except Exception as e:
             raise optparse.OptionValueError(
                 "invalid --option option value %r: %s" % (arg, e))
 
@@ -92,9 +94,6 @@ class SambaOptions(optparse.OptionGroup):
             self._lp.load_default()
         return self._lp
 
-    def get_hostconfig(self):
-        return Hostconfig(self.get_loadparm())
-
 
 class VersionOptions(optparse.OptionGroup):
     """Command line option for printing Samba version."""
@@ -106,7 +105,7 @@ class VersionOptions(optparse.OptionGroup):
 
     def _display_version(self, option, opt_str, arg, parser):
         import samba
-        print samba.version
+        print(samba.version)
         sys.exit(0)
 
 
@@ -161,6 +160,10 @@ class CredentialsOptions(optparse.OptionGroup):
                         action="callback",
                         help="Use stored machine account password",
                         callback=self._set_machine_pass)
+        self._add_option("--krb5-ccache", metavar="KRB5CCNAME",
+                         action="callback", type=str,
+                         help="Kerberos Credentials cache",
+                         callback=self._set_krb5_ccache)
         self.creds = Credentials()
 
     def _add_option(self, *args1, **kwargs):
@@ -200,6 +203,9 @@ class CredentialsOptions(optparse.OptionGroup):
 
     def _set_simple_bind_dn(self, option, opt_str, arg, parser):
         self.creds.set_bind_dn(arg)
+
+    def _set_krb5_ccache(self, option, opt_str, arg, parser):
+        self.creds.set_named_ccache(arg)
 
     def get_credentials(self, lp, fallback_machine=False):
         """Obtain the credentials set on the command-line.

@@ -34,9 +34,9 @@ static acl_t smb_acl_to_posix(const struct smb_acl_t *acl);
 /* public functions - the api */
 
 SMB_ACL_T posixacl_sys_acl_get_file(vfs_handle_struct *handle,
-				    const char *path_p,
-				    SMB_ACL_TYPE_T type,
-				    TALLOC_CTX *mem_ctx)
+				const struct smb_filename *smb_fname,
+				SMB_ACL_TYPE_T type,
+				TALLOC_CTX *mem_ctx)
 {
 	struct smb_acl_t *result;
 	acl_type_t acl_type;
@@ -54,7 +54,7 @@ SMB_ACL_T posixacl_sys_acl_get_file(vfs_handle_struct *handle,
 		return NULL;
 	}
 
-	acl = acl_get_file(path_p, acl_type);
+	acl = acl_get_file(smb_fname->base_name, acl_type);
 
 	if (acl == NULL) {
 		return NULL;
@@ -81,7 +81,7 @@ SMB_ACL_T posixacl_sys_acl_get_fd(vfs_handle_struct *handle,
 }
 
 int posixacl_sys_acl_set_file(vfs_handle_struct *handle,
-			      const char *name,
+			      const struct smb_filename *smb_fname,
 			      SMB_ACL_TYPE_T type,
 			      SMB_ACL_T theacl)
 {
@@ -89,7 +89,9 @@ int posixacl_sys_acl_set_file(vfs_handle_struct *handle,
 	acl_type_t acl_type;
 	acl_t acl;
 
-	DEBUG(10, ("Calling acl_set_file: %s, %d\n", name, type));
+	DEBUG(10, ("Calling acl_set_file: %s, %d\n",
+			smb_fname->base_name,
+			type));
 
 	switch(type) {
 	case SMB_ACL_TYPE_ACCESS:
@@ -106,7 +108,7 @@ int posixacl_sys_acl_set_file(vfs_handle_struct *handle,
 	if ((acl = smb_acl_to_posix(theacl)) == NULL) {
 		return -1;
 	}
-	res = acl_set_file(name, acl_type, acl);
+	res = acl_set_file(smb_fname->base_name, acl_type, acl);
 	if (res != 0) {
 		DEBUG(10, ("acl_set_file failed: %s\n", strerror(errno)));
 	}
@@ -129,9 +131,9 @@ int posixacl_sys_acl_set_fd(vfs_handle_struct *handle,
 }
 
 int posixacl_sys_acl_delete_def_file(vfs_handle_struct *handle,
-				     const char *path)
+				const struct smb_filename *smb_fname)
 {
-	return acl_delete_def_file(path);
+	return acl_delete_def_file(smb_fname->base_name);
 }
 
 
@@ -187,7 +189,7 @@ static bool smb_ace_to_internal(acl_entry_t posix_ace,
 		acl_free(puid);
 		break;
 	}
-		
+
 	case SMB_ACL_GROUP: {
 		gid_t *pgid = (uid_t *)acl_get_qualifier(posix_ace);
 		if (pgid == NULL) {
@@ -230,7 +232,7 @@ static struct smb_acl_t *smb_acl_to_internal(acl_t acl, TALLOC_CTX *mem_ctx)
 
 		entry_id = ACL_NEXT_ENTRY;
 
-		result->acl = talloc_realloc(result, result->acl, 
+		result->acl = talloc_realloc(result, result->acl,
 					     struct smb_acl_entry, result->count+1);
 		if (result->acl == NULL) {
 			TALLOC_FREE(result);
@@ -380,8 +382,8 @@ static struct vfs_fn_pointers posixacl_fns = {
 	.sys_acl_delete_def_file_fn = posixacl_sys_acl_delete_def_file,
 };
 
-NTSTATUS vfs_posixacl_init(void);
-NTSTATUS vfs_posixacl_init(void)
+static_decl_vfs;
+NTSTATUS vfs_posixacl_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "posixacl",
 				&posixacl_fns);

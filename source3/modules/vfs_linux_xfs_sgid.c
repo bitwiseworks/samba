@@ -95,21 +95,12 @@ static int linux_xfs_sgid_mkdir(vfs_handle_struct *handle,
 	return mkdir_res;
 }
 
-static int linux_xfs_sgid_chmod_acl(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			mode_t mode)
-{
-	errno = ENOSYS;
-	return -1;
-}
-
 static struct vfs_fn_pointers linux_xfs_sgid_fns = {
 	.mkdir_fn = linux_xfs_sgid_mkdir,
-	.chmod_acl_fn = linux_xfs_sgid_chmod_acl,
 };
 
-NTSTATUS vfs_linux_xfs_sgid_init(void);
-NTSTATUS vfs_linux_xfs_sgid_init(void)
+static_decl_vfs;
+NTSTATUS vfs_linux_xfs_sgid_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION,
 				"linux_xfs_sgid", &linux_xfs_sgid_fns);

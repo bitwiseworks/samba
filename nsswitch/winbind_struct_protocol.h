@@ -58,8 +58,10 @@ typedef char fstring[FSTRING_LEN];
  *     removed WINBINDD_SID_TO_GID
  *     removed WINBINDD_GID_TO_SID
  *     removed WINBINDD_UID_TO_SID
+ * 29: added "authoritative" to response.data.auth
+ * 30: added "validation_level" and "info6" to response.data.auth
  */
-#define WINBIND_INTERFACE_VERSION 28
+#define WINBIND_INTERFACE_VERSION 30
 
 /* Have to deal with time_t being 4 or 8 bytes due to structure alignment.
    On a 64bit Linux box, we have to support a constant structure size
@@ -257,7 +259,7 @@ struct winbindd_request {
 		gid_t gid;           /* getgrgid, gid_to_sid */
 		uint32_t ndrcmd;
 		struct {
-			/* We deliberatedly don't split into domain/user to
+			/* We deliberately don't split into domain/user to
                            avoid having the client know what the separator
                            character is. */
 			fstring user;
@@ -432,7 +434,9 @@ struct winbindd_response {
 			char first_8_lm_hash[8];
 			fstring krb5ccname;
 			uint32_t reject_reason;
-			uint32_t padding;
+			uint8_t authoritative;
+			uint8_t padding[1];
+			uint16_t validation_level;
 			struct policy_settings {
 				uint32_t min_length_password;
 				uint32_t password_history;
@@ -466,6 +470,10 @@ struct winbindd_response {
 				fstring logon_srv;
 				fstring logon_dom;
 			} info3;
+			struct info6_text {
+				fstring dns_domainname;
+				fstring principal_name;
+			} info6;
 			fstring unix_username;
 		} auth;
 		struct {

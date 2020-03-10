@@ -7,7 +7,7 @@
 	<manvolnum>8</manvolnum>
 	<refmiscinfo class="source">Samba</refmiscinfo>
 	<refmiscinfo class="manual">System Administration tools</refmiscinfo>
-	<refmiscinfo class="version">4.6</refmiscinfo>
+	<refmiscinfo class="version">&doc.version;</refmiscinfo>
 </refmeta>
 
 
@@ -41,7 +41,6 @@
         <member>chdir</member>
         <member>chflags</member>
         <member>chmod</member>
-        <member>chmod_acl</member>
         <member>chown</member>
         <member>close</member>
         <member>closedir</member>
@@ -51,7 +50,6 @@
         <member>disconnect</member>
         <member>disk_free</member>
         <member>fchmod</member>
-        <member>fchmod_acl</member>
         <member>fchown</member>
         <member>fget_nt_acl</member>
         <member>fgetxattr</member>
@@ -164,7 +162,7 @@
 		<para>LIST is a list of VFS operations that should be
 		recorded if they succeed. Operations are specified using
 		the names listed above. Operations can be unset by prefixing
-		the names with "!". The default is all operations.
+		the names with "!". The default is none operations.
 		</para>
 
 		</listitem>
@@ -176,7 +174,7 @@
 		<para>LIST is a list of VFS operations that should be
 		recorded if they failed. Operations are specified using
 		the names listed above. Operations can be unset by prefixing
-		the names with "!". The default is all operations.
+		the names with "!". The default is none operations.
 		</para>
 
 		</listitem>
@@ -249,7 +247,7 @@
 
 <refsect1>
 	<title>VERSION</title>
-	<para>This man page is correct for version 3.0.25 of the Samba suite.
+	<para>This man page is part of version &doc.version; of the Samba suite.
 	</para>
 </refsect1>
 

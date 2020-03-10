@@ -49,11 +49,6 @@ struct tevent_req *winbindd_getpwent_send(TALLOC_CTX *mem_ctx,
 
 	DEBUG(3, ("[%5lu]: getpwent\n", (unsigned long)cli->pid));
 
-	if (!lp_winbind_enum_users()) {
-		tevent_req_nterror(req, NT_STATUS_NO_MORE_ENTRIES);
-		return tevent_req_post(req, ev);
-	}
-
 	if (cli->pwent_state == NULL) {
 		tevent_req_nterror(req, NT_STATUS_NO_MORE_ENTRIES);
 		return tevent_req_post(req, ev);
@@ -129,6 +124,7 @@ NTSTATUS winbindd_getpwent_recv(struct tevent_req *req,
 	NTSTATUS status;
 
 	if (tevent_req_is_nterror(req, &status)) {
+		TALLOC_FREE(state->cli->pwent_state);
 		DEBUG(5, ("getpwent failed: %s\n", nt_errstr(status)));
 		return status;
 	}

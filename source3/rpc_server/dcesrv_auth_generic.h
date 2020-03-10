@@ -24,9 +24,9 @@ struct gensec_security;
 
 NTSTATUS auth_generic_server_authtype_start(TALLOC_CTX *mem_ctx,
 					    uint8_t auth_type, uint8_t auth_level,
-					    DATA_BLOB *token_in,
-					    DATA_BLOB *token_out,
 					    const struct tsocket_address *remote_address,
+					    const struct tsocket_address *local_address,
+					    const char *service_description,
 					    struct gensec_security **ctx);
 
 NTSTATUS auth_generic_server_step(struct gensec_security *ctx,

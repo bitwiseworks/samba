@@ -11,7 +11,7 @@ bld.SAMBA3_SUBSYSTEM('RPC_CONFIG',
 
 bld.SAMBA3_SUBSYSTEM('RPC_NCACN_NP',
                     source='rpc_ncacn_np.c rpc_handles.c rpc_contexts.c',
-                    deps='RPC_CONFIG auth auth_sam_reply RPC_PIPE_REGISTER npa_tstream')
+                    deps='RPC_CONFIG auth common_auth RPC_PIPE_REGISTER npa_tstream')
 
 bld.SAMBA3_SUBSYSTEM('RPC_SERVER_LOOP',
                     source='rpc_server.c',
@@ -107,9 +107,15 @@ bld.SAMBA3_SUBSYSTEM('RPC_SAMR',
 
 bld.SAMBA3_SUBSYSTEM('RPC_SPOOLSS',
                     source='''spoolss/srv_spoolss_nt.c
-                    ../../librpc/gen_ndr/srv_spoolss.c
                     spoolss/srv_spoolss_util.c''',
                     deps='PRINTING PRINTBACKEND LIBCLI_WINREG_INTERNAL')
+
+bld.SAMBA3_SUBSYSTEM('RPC_IREMOTEWINSPOOL',
+                    source='''
+                    spoolss/srv_iremotewinspool_nt.c
+                    spoolss/srv_iremotewinspool.c
+                    ''',
+                    deps='RPC_SPOOLSS')
 
 bld.SAMBA3_SUBSYSTEM('RPC_SRVSVC',
                     source='''srvsvc/srv_srvsvc_nt.c
@@ -139,8 +145,8 @@ bld.SAMBA3_MODULE('rpc_mdssvc_module',
                   mdssvc/dalloc.c
                   mdssvc/marshalling.c
                   mdssvc/sparql_mapping.c
-                  mdssvc/sparql_parser.c
-                  mdssvc/sparql_lexer.c
+                  mdssvc/sparql_parser.y
+                  mdssvc/sparql_lexer.l
                   mdssvc/srv_mdssvc_nt.c
                   ../../librpc/gen_ndr/srv_mdssvc.c''',
                   init_function='',
@@ -172,6 +178,7 @@ bld.SAMBA3_SUBSYSTEM('RPC_SERVICE',
                     RPC_NETDFS
                     RPC_SRVSVC
                     RPC_SPOOLSS
+                    RPC_IREMOTEWINSPOOL
                     RPC_EVENTLOG
                     RPC_RPCECHO
                     RPC_SERVER

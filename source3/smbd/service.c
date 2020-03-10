@@ -36,12 +36,14 @@
 static bool canonicalize_connect_path(connection_struct *conn)
 {
 	bool ret;
-	char *resolved_name = SMB_VFS_REALPATH(conn,conn->connectpath);
-	if (!resolved_name) {
+	struct smb_filename con_fname = { .base_name = conn->connectpath };
+	struct smb_filename *resolved_fname = SMB_VFS_REALPATH(conn, talloc_tos(),
+						&con_fname);
+	if (resolved_fname == NULL) {
 		return false;
 	}
-	ret = set_conn_connectpath(conn,resolved_name);
-	SAFE_FREE(resolved_name);
+	ret = set_conn_connectpath(conn,resolved_fname->base_name);
+	TALLOC_FREE(resolved_fname);
 	return ret;
 }
 
@@ -63,15 +65,22 @@ bool set_conn_connectpath(connection_struct *conn, const char *connectpath)
 		return false;
 	}
 
-	DEBUG(10,("set_conn_connectpath: service %s, connectpath = %s\n",
-		lp_servicename(talloc_tos(), SNUM(conn)), destname ));
+	DBG_DEBUG("service %s, connectpath = %s\n",
+		  lp_const_servicename(SNUM(conn)), destname);
 
 	talloc_free(conn->connectpath);
 	conn->connectpath = destname;
-	/* Ensure conn->cwd is initialized - start as conn->connectpath. */
-	TALLOC_FREE(conn->cwd);
-	conn->cwd = talloc_strdup(conn, conn->connectpath);
-	if (!conn->cwd) {
+	/*
+	 * Ensure conn->cwd_fname is initialized.
+	 * start as conn->connectpath.
+	 */
+	TALLOC_FREE(conn->cwd_fname);
+	conn->cwd_fname = synthetic_smb_fname(conn,
+				conn->connectpath,
+				NULL,
+				NULL,
+				0);
+	if (conn->cwd_fname == NULL) {
 		return false;
 	}
 	return true;
@@ -81,30 +90,17 @@ bool set_conn_connectpath(connection_struct *conn, const char *connectpath)
  Load parameters specific to a connection/service.
 ****************************************************************************/
 
-bool set_current_service(connection_struct *conn, uint16_t flags, bool do_chdir)
+void set_current_case_sensitive(connection_struct *conn, uint16_t flags)
 {
 	int snum;
 	enum remote_arch_types ra_type;
 
-	if (!conn)  {
-		last_conn = NULL;
-		return(False);
-	}
-
-	conn->lastused_count++;
+	SMB_ASSERT(conn != NULL);
 
 	snum = SNUM(conn);
 
-	if (do_chdir &&
-	    vfs_ChDir(conn,conn->connectpath) != 0 &&
-	    vfs_ChDir(conn,conn->origpath) != 0) {
-                DEBUG(((errno!=EACCES)?0:3),("chdir (%s) failed, reason: %s\n",
-                         conn->connectpath, strerror(errno)));
-		return(False);
-	}
-
 	if ((conn == last_conn) && (last_flags == flags)) {
-		return(True);
+		return;
 	}
 
 	last_conn = conn;
@@ -138,6 +134,37 @@ bool set_current_service(connection_struct *conn, uint16_t flags, bool do_chdir)
 		conn->case_sensitive = false;
 		break;
 	}
+	return;
+}
+
+bool chdir_current_service(connection_struct *conn)
+{
+	const struct smb_filename connectpath_fname = {
+		.base_name = conn->connectpath,
+	};
+	const struct smb_filename origpath_fname = {
+		.base_name = conn->origpath,
+	};
+	int ret;
+
+	conn->lastused_count++;
+
+	ret = vfs_ChDir(conn, &connectpath_fname);
+	if (ret != 0) {
+		DEBUG(((errno!=EACCES)?0:3),
+		      ("chdir (%s) failed, reason: %s\n",
+		       conn->connectpath, strerror(errno)));
+		return false;
+	}
+
+	ret = vfs_ChDir(conn, &origpath_fname);
+	if (ret != 0) {
+		DEBUG(((errno!=EACCES)?0:3),
+			("chdir (%s) failed, reason: %s\n",
+			conn->origpath, strerror(errno)));
+		return false;
+	}
+
 	return true;
 }
 
@@ -233,7 +260,7 @@ static NTSTATUS find_forced_group(bool force_user,
 	}
 
 	groupname = talloc_string_sub(talloc_tos(), groupname,
-				      "%S", lp_servicename(talloc_tos(), snum));
+				      "%S", lp_const_servicename(snum));
 	if (groupname == NULL) {
 		DEBUG(1, ("talloc_string_sub failed\n"));
 		result = NT_STATUS_NO_MEMORY;
@@ -314,20 +341,20 @@ static NTSTATUS create_connection_session_info(struct smbd_server_connection *sc
 
 	if (security_session_user_level(session_info, NULL) < SECURITY_USER) {
 		if (!lp_guest_ok(snum)) {
-			DEBUG(2, ("guest user (from session setup) "
+			DBG_WARNING("guest user (from session setup) "
 				  "not permitted to access this share "
-				  "(%s)\n", lp_servicename(talloc_tos(), snum)));
+				  "(%s)\n", lp_const_servicename(snum));
 			return NT_STATUS_ACCESS_DENIED;
 		}
 	} else {
 		if (!user_ok_token(session_info->unix_info->unix_name,
 				   session_info->info->domain_name,
 				   session_info->security_token, snum)) {
-			DEBUG(2, ("user '%s' (from session setup) not "
+			DBG_WARNING("user '%s' (from session setup) not "
 				  "permitted to access this share "
 				  "(%s)\n",
 				  session_info->unix_info->unix_name,
-				  lp_servicename(talloc_tos(), snum)));
+				  lp_const_servicename(snum));
 			return NT_STATUS_ACCESS_DENIED;
 		}
 	}
@@ -431,7 +458,7 @@ static NTSTATUS notify_init_sconn(struct smbd_server_connection *sconn)
 		return NT_STATUS_OK;
 	}
 
-	sconn->notify_ctx = notify_init(sconn, sconn->msg_ctx, sconn->ev_ctx,
+	sconn->notify_ctx = notify_init(sconn, sconn->msg_ctx,
 					sconn, notify_callback);
 	if (sconn->notify_ctx == NULL) {
 		return NT_STATUS_NO_MEMORY;
@@ -531,7 +558,7 @@ static NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 			if (conn->encrypt_level == SMB_SIGNING_REQUIRED) {
 				DBG_ERR("Service [%s] requires encryption, but "
 					"it is disabled globally!\n",
-					lp_servicename(talloc_tos(), snum));
+					lp_const_servicename(snum));
 				status = NT_STATUS_ACCESS_DENIED;
 				goto err_root_exit;
 			}
@@ -555,7 +582,7 @@ static NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 
 	{
 		char *s = talloc_sub_advanced(talloc_tos(),
-					lp_servicename(talloc_tos(), SNUM(conn)),
+					lp_const_servicename(SNUM(conn)),
 					conn->session_info->unix_info->unix_name,
 					conn->connectpath,
 					conn->session_info->unix_token->gid,
@@ -572,8 +599,8 @@ static NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 			status = NT_STATUS_NO_MEMORY;
 			goto err_root_exit;
 		}
-		DEBUG(3,("Connect path is '%s' for service [%s]\n",s,
-			 lp_servicename(talloc_tos(), snum)));
+		DBG_NOTICE("Connect path is '%s' for service [%s]\n", s,
+			   lp_const_servicename(snum));
 		TALLOC_FREE(s);
 	}
 
@@ -600,8 +627,8 @@ static NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 	/* Initialise VFS function pointers */
 
 	if (!smbd_vfs_init(conn)) {
-		DEBUG(0, ("vfs_init failed for service %s\n",
-			  lp_servicename(talloc_tos(), snum)));
+		DBG_ERR("vfs_init failed for service %s\n",
+			lp_const_servicename(snum));
 		status = NT_STATUS_BAD_NETWORK_NAME;
 		goto err_root_exit;
 	}
@@ -616,12 +643,12 @@ static NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 	 */
 
 	if ((lp_max_connections(snum) > 0)
-	    && (count_current_connections(lp_servicename(talloc_tos(), SNUM(conn)), True) >=
+	    && (count_current_connections(lp_const_servicename(SNUM(conn)), true) >=
 		lp_max_connections(snum))) {
 
-		DEBUG(1, ("Max connections (%d) exceeded for %s\n",
+		DBG_WARNING("Max connections (%d) exceeded for %s\n",
 			  lp_max_connections(snum),
-			  lp_servicename(talloc_tos(), snum)));
+			  lp_const_servicename(snum));
 		status = NT_STATUS_INSUFFICIENT_RESOURCES;
 		goto err_root_exit;
 	}
@@ -629,10 +656,10 @@ static NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 	/* Invoke VFS make connection hook - this must be the first
 	   filesystem operation that we do. */
 
-	if (SMB_VFS_CONNECT(conn, lp_servicename(talloc_tos(), snum),
+	if (SMB_VFS_CONNECT(conn, lp_const_servicename(snum),
 			    conn->session_info->unix_info->unix_name) < 0) {
 		DBG_WARNING("SMB_VFS_CONNECT for service '%s' at '%s' failed: %s\n",
-			    lp_servicename(talloc_tos(), snum), conn->connectpath,
+			    lp_const_servicename(snum), conn->connectpath,
 			    strerror(errno));
 		status = NT_STATUS_UNSUCCESSFUL;
 		goto err_root_exit;
@@ -671,7 +698,7 @@ static NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 	/* execute any "root preexec = " line */
 	if (*lp_root_preexec(talloc_tos(), snum)) {
 		char *cmd = talloc_sub_advanced(talloc_tos(),
-					lp_servicename(talloc_tos(), SNUM(conn)),
+					lp_const_servicename(SNUM(conn)),
 					conn->session_info->unix_info->unix_name,
 					conn->connectpath,
 					conn->session_info->unix_token->gid,
@@ -709,7 +736,7 @@ static NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 	/* execute any "preexec = " line */
 	if (*lp_preexec(talloc_tos(), snum)) {
 		char *cmd = talloc_sub_advanced(talloc_tos(),
-					lp_servicename(talloc_tos(), SNUM(conn)),
+					lp_const_servicename(SNUM(conn)),
 					conn->session_info->unix_info->unix_name,
 					conn->connectpath,
 					conn->session_info->unix_token->gid,
@@ -749,10 +776,10 @@ static NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 	 */
 	if (!lp_widelinks(snum)) {
 		if (!canonicalize_connect_path(conn)) {
-			DEBUG(0, ("canonicalize_connect_path failed "
+			DBG_ERR("canonicalize_connect_path failed "
 			"for service %s, path %s\n",
-				lp_servicename(talloc_tos(), snum),
-				conn->connectpath));
+				lp_const_servicename(snum),
+				conn->connectpath);
 			status = NT_STATUS_BAD_NETWORK_NAME;
 			goto err_root_exit;
 		}
@@ -788,15 +815,15 @@ static NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 	if ((ret = SMB_VFS_STAT(conn, smb_fname_cpath)) != 0 ||
 	    !S_ISDIR(smb_fname_cpath->st.st_ex_mode)) {
 		if (ret == 0 && !S_ISDIR(smb_fname_cpath->st.st_ex_mode)) {
-			DEBUG(0,("'%s' is not a directory, when connecting to "
+			DBG_ERR("'%s' is not a directory, when connecting to "
 				 "[%s]\n", conn->connectpath,
-				 lp_servicename(talloc_tos(), snum)));
+				 lp_const_servicename(snum));
 		} else {
-			DEBUG(0,("'%s' does not exist or permission denied "
+			DBG_ERR("'%s' does not exist or permission denied "
 				 "when connecting to [%s] Error was %s\n",
 				 conn->connectpath,
-				 lp_servicename(talloc_tos(), snum),
-				 strerror(errno) ));
+				 lp_const_servicename(snum),
+				 strerror(errno));
 		}
 		status = NT_STATUS_BAD_NETWORK_NAME;
 		goto err_root_exit;
@@ -825,14 +852,15 @@ static NTSTATUS make_connection_snum(struct smbXsrv_connection *xconn,
 						talloc_tos()) );
 		dbgtext( "%s", srv_is_signing_active(xconn) ? "signed " : "");
 		dbgtext( "connect to service %s ",
-			 lp_servicename(talloc_tos(), snum) );
+			 lp_const_servicename(snum) );
 		dbgtext( "initially as user %s ",
 			 conn->session_info->unix_info->unix_name );
 		dbgtext( "(uid=%d, gid=%d) ", (int)effuid, (int)effgid );
 		dbgtext( "(pid %d)\n", (int)getpid() );
 	}
 
-	return status;
+	conn->tcon_done = true;
+	return NT_STATUS_OK;
 
   err_root_exit:
 
@@ -1018,7 +1046,7 @@ connection_struct *make_connection(struct smb_request *req,
 					    dev, status);
 	} else if ((vuser->homes_snum != -1)
 		   && strequal(service_in,
-			       lp_servicename(talloc_tos(), vuser->homes_snum))) {
+			       lp_const_servicename(vuser->homes_snum))) {
 		DEBUG(5, ("making a connection to 'homes' service [%s] "
 			  "created at session setup time\n", service_in));
 		return make_connection_smb1(req, now,
@@ -1083,6 +1111,9 @@ connection_struct *make_connection(struct smb_request *req,
 
 void close_cnum(connection_struct *conn, uint64_t vuid)
 {
+	char rootpath[2] = { '/', '\0'};
+	struct smb_filename root_fname = { .base_name = rootpath };
+
 	file_close_conn(conn);
 
 	if (!IS_IPC(conn)) {
@@ -1095,10 +1126,10 @@ void close_cnum(connection_struct *conn, uint64_t vuid)
 				 get_remote_machine_name(),
 				 tsocket_address_string(conn->sconn->remote_address,
 							talloc_tos()),
-				 lp_servicename(talloc_tos(), SNUM(conn))));
+				 lp_const_servicename(SNUM(conn))));
 
 	/* make sure we leave the directory available for unmount */
-	vfs_ChDir(conn, "/");
+	vfs_ChDir(conn, &root_fname);
 
 	/* Call VFS disconnect hook */
 	SMB_VFS_DISCONNECT(conn);
@@ -1107,7 +1138,7 @@ void close_cnum(connection_struct *conn, uint64_t vuid)
 	if (*lp_postexec(talloc_tos(), SNUM(conn)) &&
 	    change_to_user(conn, vuid))  {
 		char *cmd = talloc_sub_advanced(talloc_tos(),
-					lp_servicename(talloc_tos(), SNUM(conn)),
+					lp_const_servicename(SNUM(conn)),
 					conn->session_info->unix_info->unix_name,
 					conn->connectpath,
 					conn->session_info->unix_token->gid,
@@ -1123,7 +1154,7 @@ void close_cnum(connection_struct *conn, uint64_t vuid)
 	/* execute any "root postexec = " line */
 	if (*lp_root_postexec(talloc_tos(), SNUM(conn)))  {
 		char *cmd = talloc_sub_advanced(talloc_tos(),
-					lp_servicename(talloc_tos(), SNUM(conn)),
+					lp_const_servicename(SNUM(conn)),
 					conn->session_info->unix_info->unix_name,
 					conn->connectpath,
 					conn->session_info->unix_token->gid,

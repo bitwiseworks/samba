@@ -368,36 +368,44 @@ static int process_root(int local_flags)
 
 	if (local_flags & LOCAL_TRUST_ACCOUNT) {
 		/* add the $ automatically */
-		static fstring buf;
+		size_t user_name_len = strlen(user_name);
 
-		/*
-		 * Remove any trailing '$' before we
-		 * generate the initial machine password.
-		 */
-
-		if (user_name[strlen(user_name)-1] == '$') {
-			user_name[strlen(user_name)-1] = 0;
+		if (user_name[user_name_len - 1] == '$') {
+			user_name_len--;
+		} else {
+			if (user_name_len + 2 > sizeof(user_name)) {
+				fprintf(stderr, "machine name too long\n");
+				exit(1);
+			}
+			user_name[user_name_len] = '$';
+			user_name[user_name_len + 1] = '\0';
 		}
 
 		if (local_flags & LOCAL_ADD_USER) {
 		        SAFE_FREE(new_passwd);
-			new_passwd = smb_xstrdup(user_name);
+
+			/*
+			 * Remove any trailing '$' before we
+			 * generate the initial machine password.
+			 */
+			new_passwd = smb_xstrndup(user_name, user_name_len);
 			if (!strlower_m(new_passwd)) {
 				fprintf(stderr, "strlower_m %s failed\n",
 					new_passwd);
 				exit(1);
 			}
 		}
-
-		/*
-		 * Now ensure the username ends in '$' for
-		 * the machine add.
-		 */
-
-		slprintf(buf, sizeof(buf)-1, "%s$", user_name);
-		strlcpy(user_name, buf, sizeof(user_name));
 	} else if (local_flags & LOCAL_INTERDOM_ACCOUNT) {
-		static fstring buf;
+		size_t user_name_len = strlen(user_name);
+
+		if (user_name[user_name_len - 1] != '$') {
+			if (user_name_len + 2 > sizeof(user_name)) {
+				fprintf(stderr, "machine name too long\n");
+				exit(1);
+			}
+			user_name[user_name_len] = '$';
+			user_name[user_name_len + 1] = '\0';
+		}
 
 		if ((local_flags & LOCAL_ADD_USER) && (new_passwd == NULL)) {
 			/*
@@ -409,11 +417,6 @@ static int process_root(int local_flags)
 				exit(1);
 			}
 		}
-
-		/* prepare uppercased and '$' terminated username */
-		slprintf(buf, sizeof(buf) - 1, "%s$", user_name);
-		strlcpy(user_name, buf, sizeof(user_name));
-
 	} else {
 
 		if (remote_machine != NULL) {
@@ -611,6 +614,7 @@ static int process_nonroot(int local_flags)
 int main(int argc, char **argv)
 {	
 	TALLOC_CTX *frame = talloc_stackframe();
+	struct messaging_context *msg_ctx = NULL;
 	int local_flags = 0;
 	int ret;
 
@@ -627,6 +631,19 @@ int main(int argc, char **argv)
 	local_flags = process_options(argc, argv, local_flags);
 
 	setup_logging("smbpasswd", DEBUG_STDERR);
+
+	msg_ctx = server_messaging_context();
+	if (msg_ctx == NULL) {
+		if (geteuid() != 0) {
+			DBG_NOTICE("Unable to initialize messaging context. "
+				   "Must be root to do that.\n");
+		} else {
+			fprintf(stderr,
+				"smbpasswd is not able to initialize the "
+				"messaging context!\n");
+			return 1;
+		}
+	}
 
 	/*
 	 * Set the machine NETBIOS name if not already

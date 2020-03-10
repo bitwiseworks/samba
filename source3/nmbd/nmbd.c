@@ -70,7 +70,6 @@ static void terminate(struct messaging_context *msg)
 	kill_async_dns_child();
 
 	gencache_stabilize();
-	serverid_deregister(messaging_server_id(msg));
 
 	pidfile_unlink(lp_pid_directory(), "nmbd");
 
@@ -339,7 +338,7 @@ static void reload_interfaces(time_t t)
 			}
 		}
 		if (n == -1) {
-			/* oops, an interface has disapeared. This is
+			/* oops, an interface has disappeared. This is
 			 tricky, we don't dare actually free the
 			 interface as it could be being used, so
 			 instead we just wear the memory leak and
@@ -532,7 +531,7 @@ static void process(struct messaging_context *msg)
 		 * Process all incoming packets
 		 * read above. This calls the success and
 		 * failure functions registered when response
-		 * packets arrrive, and also deals with request
+		 * packets arrive, and also deals with request
 		 * packets from other sources.
 		 * (nmbd_packets.c)
 		 */
@@ -1016,15 +1015,6 @@ static bool open_sockets(bool isdaemon, int port)
 
 	if (!messaging_parent_dgm_cleanup_init(msg)) {
 		exit(1);
-	}
-
-	/* get broadcast messages */
-
-	if (!serverid_register(messaging_server_id(msg),
-				FLAG_MSG_GENERAL |
-				FLAG_MSG_NMBD |
-				FLAG_MSG_DBWRAP)) {
-		exit_daemon("Could not register NMBD process in serverid.tdb", EACCES);
 	}
 
 	messaging_register(msg, NULL, MSG_FORCE_ELECTION,

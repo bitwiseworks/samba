@@ -12,12 +12,21 @@
 
 . "${CTDB_BASE}/functions"
 
-# Default fallback location for database directories.
-# These can be overwritten from CTDB configuration
-CTDB_DBDIR="${CTDB_VARDIR}"
-CTDB_DBDIR_PERSISTENT="${CTDB_VARDIR}/persistent"
+# type is at least mentioned in POSIX and more is portable than which(1)
+# shellcheck disable=SC2039
+if ! type gstack >/dev/null 2>&1 ; then
+	gstack ()
+	{
+		_pid="$1"
 
-loadconfig ctdb
+		gdb -batch --quiet -nx "/proc/${_pid}/exe" "$_pid" \
+		    -ex "thread apply all bt" 2>/dev/null |
+			grep '^\(#\|Thread \)'
+	}
+fi
+
+# Load/cache database options from configuration file
+ctdb_get_db_options
 
 (
     flock -n 9 || exit 1
@@ -39,7 +48,7 @@ loadconfig ctdb
     while read pid rest ; do
 	pname=$(readlink "/proc/${pid}/exe")
 	echo "$pid $pname $rest"
-    done | sed -e "$sed_cmd" | grep "\.tdb" )
+    done | sed -e "$sed_cmd" | grep '\.tdb' )
 
     if [ -n "$out" ]; then
 	# Log information about locks
@@ -54,7 +63,7 @@ loadconfig ctdb
 	done
 	# Use word splitting to squash whitespace
 	# shellcheck disable=SC2086
-	pids=$(echo $all_pids | tr " " "\n" | sort -u)
+	pids=$(echo $all_pids | tr ' ' '\n' | sort -u)
 
 	# For each process waiting, log stack trace
 	for pid in $pids ; do
@@ -76,7 +85,6 @@ loadconfig ctdb
 		cat "/proc/${pid}/stack"
 	    else
 		gstack "$pid"
-		# gcore -o /var/log/core-deadlock-ctdb $pid
 	    fi
 	done
     fi

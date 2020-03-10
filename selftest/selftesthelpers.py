@@ -17,6 +17,7 @@
 # by the name of the test, the environment it needs and the command to run, all
 # three separated by newlines. All other lines in the output are considered
 # comments.
+from __future__ import print_function
 
 import os
 import subprocess
@@ -46,7 +47,7 @@ else:
     has_perl_test_more = False
 
 python = os.getenv("PYTHON", "python")
-extra_python = os.getenv("EXTRA_PYTHON", "python3")
+extra_python = os.getenv("EXTRA_PYTHON", None)
 
 tap2subunit = python + " " + os.path.join(srcdir(), "selftest", "tap2subunit")
 
@@ -66,14 +67,18 @@ def plantestsuite(name, env, cmdline):
     :param env: Environment to run the testsuite in
     :param cmdline: Command line to run
     """
-    print "-- TEST --"
-    print name
-    print env
+    print("-- TEST --")
+    if env == "none":
+        fullname = name
+    else:
+        fullname = "%s(%s)" % (name, env)
+    print(fullname)
+    print(env)
     if isinstance(cmdline, list):
         cmdline = " ".join(cmdline)
     if "$LISTOPT" in cmdline:
         raise AssertionError("test %s supports --list, but not --load-list" % name)
-    print cmdline + " 2>&1 " + " | " + add_prefix(name, env)
+    print(cmdline + " 2>&1 " + " | " + add_prefix(name, env))
 
 
 def add_prefix(prefix, env, support_list=False):
@@ -85,13 +90,13 @@ def add_prefix(prefix, env, support_list=False):
 
 
 def plantestsuite_loadlist(name, env, cmdline):
-    print "-- TEST-LOADLIST --"
+    print("-- TEST-LOADLIST --")
     if env == "none":
         fullname = name
     else:
         fullname = "%s(%s)" % (name, env)
-    print fullname
-    print env
+    print(fullname)
+    print(env)
     if isinstance(cmdline, list):
         cmdline = " ".join(cmdline)
     support_list = ("$LISTOPT" in cmdline)
@@ -99,8 +104,8 @@ def plantestsuite_loadlist(name, env, cmdline):
         raise AssertionError("loadlist test %s does not support not --list" % name)
     if not "$LOADLIST" in cmdline:
         raise AssertionError("loadlist test %s does not support --load-list" % name)
-    print ("%s | %s" % (cmdline.replace("$LOADLIST", ""), add_prefix(name, env, support_list))).replace("$LISTOPT", "--list")
-    print cmdline.replace("$LISTOPT", "") + " 2>&1 " + " | " + add_prefix(name, env, False)
+    print(("%s | %s" % (cmdline.replace("$LOADLIST", ""), add_prefix(name, env, support_list))).replace("$LISTOPT", "--list"))
+    print(cmdline.replace("$LISTOPT", "") + " 2>&1 " + " | " + add_prefix(name, env, False))
 
 
 def skiptestsuite(name, reason):
@@ -110,7 +115,7 @@ def skiptestsuite(name, reason):
     :param reason: Reason the test suite was skipped
     """
     # FIXME: Report this using subunit, but re-adjust the testsuite count somehow
-    print >>sys.stderr, "skipping %s (%s)" % (name, reason)
+    print("skipping %s (%s)" % (name, reason), file=sys.stderr)
 
 
 def planperltestsuite(name, path):
@@ -133,10 +138,10 @@ def planpythontestsuite(env, module, name=None, extra_path=[], py3_compatible=Fa
     if pypath:
         args.insert(0, "PYTHONPATH=%s" % ":".join(["$PYTHONPATH"] + pypath))
     plantestsuite_loadlist(name, env, args)
-    if py3_compatible:
+    if py3_compatible and extra_python is not None:
         # Plan one more test for Python 3 compatible module
         args[0] = extra_python
-        plantestsuite_loadlist(name, env, args)
+        plantestsuite_loadlist(name + ".python3", env, args)
 
 
 def get_env_torture_options():

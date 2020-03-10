@@ -103,10 +103,11 @@ _PUBLIC_ struct sys_lease_context *sys_lease_context_create(struct share_config 
 /*
   register a lease backend
 */
-_PUBLIC_ NTSTATUS sys_lease_register(const struct sys_lease_ops *backend)
+_PUBLIC_ NTSTATUS sys_lease_register(TALLOC_CTX *ctx,
+			const struct sys_lease_ops *backend)
 {
 	struct sys_lease_ops *b;
-	b = talloc_realloc(talloc_autofree_context(), backends,
+	b = talloc_realloc(ctx, backends,
 			   struct sys_lease_ops, num_backends+1);
 	NT_STATUS_HAVE_NO_MEMORY(b);
 	backends = b;
@@ -118,14 +119,14 @@ _PUBLIC_ NTSTATUS sys_lease_register(const struct sys_lease_ops *backend)
 _PUBLIC_ NTSTATUS sys_lease_init(void)
 {
 	static bool initialized = false;
-#define _MODULE_PROTO(init) extern NTSTATUS init(void);
+#define _MODULE_PROTO(init) extern NTSTATUS init(TALLOC_CTX *);
 	STATIC_sys_lease_MODULES_PROTO;
 	init_module_fn static_init[] = { STATIC_sys_lease_MODULES };
 
 	if (initialized) return NT_STATUS_OK;
 	initialized = true;
 
-	run_init_functions(static_init);
+	run_init_functions(NULL, static_init);
 
 	return NT_STATUS_OK;
 }

@@ -4171,7 +4171,7 @@ static bool cab_file_plain_check(struct torture_context *tctx,
 	blob = data_blob(NULL, r->cfdata[0].cbUncomp);
 	memset(blob.data, 'A', blob.length);
 
-	torture_assert_mem_equal(tctx, r->cfdata[0].ab, blob.data, blob.length, "ab");
+	torture_assert_data_blob_equal(tctx, r->cfdata[0].ab, blob, "ab");
 
 	return true;
 }
@@ -4233,10 +4233,9 @@ static bool cab_file_MSZIP_check(struct torture_context *tctx,
 
 	blob = data_blob(NULL, r->cfdata[0].cbUncomp);
 	memset(blob.data, 'A', blob.length);
-#if 0
-	/* once we have MSZIP compression working we can enable this test */
-	torture_assert_data_blob_equal(tctx, r->cfdata[0].mszip_data.ab, blob, "ab");
-#endif
+
+	torture_assert_data_blob_equal(tctx, r->cfdata[0].ab, blob, "ab");
+
 	return true;
 }
 
@@ -4304,7 +4303,7 @@ static bool cab_file_LZX_check(struct torture_context *tctx,
 	memset(blob.data, 'A', blob.length);
 #if 0
 	/* once we have LZX compression support we can enable this test */
-	torture_assert_data_blob_equal(tctx, r->cfdata[0].mszip_data.ab, blob, "ab");
+	torture_assert_data_blob_equal(tctx, r->cfdata[0].ab, blob, "ab");
 #endif
 	return true;
 }
@@ -4318,6 +4317,13 @@ struct torture_suite *ndr_cabinet_suite(TALLOC_CTX *ctx)
 	torture_suite_add_ndr_pull_test(suite, cab_file, cab_file_LZX_data, cab_file_LZX_check);
 
 	torture_suite_add_ndr_pull_validate_test(suite, cab_file, cab_file_plain_data, cab_file_plain_check);
+
+	/*
+	 * we cannot validate, as libz' compression routines currently create a
+	 * slightly different result
+	 */
+
+	/* torture_suite_add_ndr_pull_validate_test(suite, cab_file, cab_file_MSZIP_data, cab_file_MSZIP_check); */
 
 	return suite;
 }

@@ -21,6 +21,7 @@
 
 #include "includes.h"
 #include "system/filesys.h"
+#include "lib/util/server_id.h"
 #include "printing.h"
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
@@ -254,10 +255,7 @@ static NTSTATUS close_remove_share_mode(files_struct *fsp,
 
 	/* Ensure any pending write time updates are done. */
 	if (fsp->update_write_time_event) {
-		update_write_time_handler(fsp->conn->sconn->ev_ctx,
-					fsp->update_write_time_event,
-					timeval_current(),
-					(void *)fsp);
+		fsp_flush_write_time_update(fsp);
 	}
 
 	/*
@@ -443,6 +441,22 @@ static NTSTATUS close_remove_share_mode(files_struct *fsp,
 				  nt_errstr(status)));
 			goto done;
 		}
+	}
+
+	if (fsp->kernel_share_modes_taken) {
+		int ret_flock;
+
+		/*
+		 * A file system sharemode could block the unlink;
+		 * remove filesystem sharemodes first.
+		 */
+		ret_flock = SMB_VFS_KERNEL_FLOCK(fsp, 0, 0);
+		if (ret_flock == -1) {
+			DBG_INFO("removing kernel flock for %s failed: %s\n",
+				  fsp_str_dbg(fsp), strerror(errno));
+		}
+
+		fsp->kernel_share_modes_taken = false;
 	}
 
 
@@ -1263,15 +1277,16 @@ void msg_close_file(struct messaging_context *msg_ctx,
 			DATA_BLOB *data)
 {
 	files_struct *fsp = NULL;
+	struct file_id id;
 	struct share_mode_entry e;
 	struct smbd_server_connection *sconn =
 		talloc_get_type_abort(private_data,
 		struct smbd_server_connection);
 
-	message_to_share_mode_entry(&e, (char *)data->data);
+	message_to_share_mode_entry(&id, &e, (char *)data->data);
 
 	if(DEBUGLVL(10)) {
-		char *sm_str = share_mode_str(NULL, 0, &e);
+		char *sm_str = share_mode_str(NULL, 0, &id, &e);
 		if (!sm_str) {
 			smb_panic("talloc failed");
 		}
@@ -1280,7 +1295,7 @@ void msg_close_file(struct messaging_context *msg_ctx,
 		TALLOC_FREE(sm_str);
 	}
 
-	fsp = file_find_dif(sconn, e.id, e.share_file_id);
+	fsp = file_find_dif(sconn, id, e.share_file_id);
 	if (!fsp) {
 		DEBUG(10,("msg_close_file: failed to find file.\n"));
 		return;

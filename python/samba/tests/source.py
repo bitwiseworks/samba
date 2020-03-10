@@ -19,6 +19,7 @@
 
 """Source level Python tests."""
 
+import io
 import errno
 import os
 import re
@@ -60,8 +61,8 @@ def get_source_file_contents():
     """Iterate over the contents of all python files."""
     for fname in get_python_source_files():
         try:
-            f = open(fname, 'rb')
-        except IOError, e:
+            f = io.open(fname, mode='r', encoding='utf-8')
+        except IOError as e:
             if e.errno == errno.ENOENT:
                 warnings.warn("source file %s broken link?" % fname)
                 continue
@@ -199,7 +200,7 @@ class TestSource(TestCase):
         for fname, line_no, line in self._iter_source_files_lines():
             if line_no >= 1:
                 continue
-            executable = (os.stat(fname).st_mode & 0111)
+            executable = (os.stat(fname).st_mode & 0o111)
             has_shebang = line.startswith("#!")
             if has_shebang and not executable:
                 self._push_file(files_with_shebang, fname, line_no)

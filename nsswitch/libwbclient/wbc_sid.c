@@ -812,7 +812,7 @@ wbcErr wbcCtxGetSidAliases(struct wbcContext *ctx,
 
 	rids = (uint32_t *)wbcAllocateMemory(response.data.num_entries,
 					     sizeof(uint32_t), NULL);
-	BAIL_ON_PTR_ERROR(sids, wbc_status);
+	BAIL_ON_PTR_ERROR(rids, wbc_status);
 
 	s = (const char *)response.extra_data.data;
 	for (i = 0; i < response.data.num_entries; i++) {
@@ -1081,6 +1081,7 @@ const char* wbcSidTypeString(enum wbcSidType type)
 	case WBC_SID_NAME_INVALID:  return "SID_INVALID";
 	case WBC_SID_NAME_UNKNOWN:  return "SID_UNKNOWN";
 	case WBC_SID_NAME_COMPUTER: return "SID_COMPUTER";
+	case WBC_SID_NAME_LABEL:    return "SID_LABEL";
 	default:                    return "Unknown type";
 	}
 }

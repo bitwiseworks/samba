@@ -25,6 +25,7 @@
 
 #include "includes.h"
 #include "system/passwd.h"
+#include "lib/util/server_id.h"
 #include "ntdomain.h"
 #include "../librpc/gen_ndr/srv_srvsvc.h"
 #include "../libcli/security/security.h"
@@ -81,6 +82,7 @@ struct share_conn_stat {
 ********************************************************************/
 
 static int enum_file_fn(const struct share_mode_entry *e,
+			const struct file_id *id,
 			const char *sharepath,
 			const char *fname,
 			const char *sname,
@@ -122,7 +124,7 @@ static int enum_file_fn(const struct share_mode_entry *e,
 	/* need to count the number of locks on a file */
 
 	ZERO_STRUCT( fsp );
-	fsp.file_id = e->id;
+	fsp.file_id = *id;
 
 	if ( (brl = brl_get_locks(talloc_tos(), &fsp)) != NULL ) {
 		num_locks = brl_num_locks(brl);
@@ -172,7 +174,7 @@ static WERROR net_enum_files(TALLOC_CTX *ctx,
 	f_enum_cnt.username = username;
 	f_enum_cnt.ctr3 = *ctr3;
 
-	share_entry_forall( enum_file_fn, (void *)&f_enum_cnt );
+	share_entry_forall(enum_file_fn, (void *)&f_enum_cnt );
 
 	*ctr3 = f_enum_cnt.ctr3;
 
@@ -546,13 +548,13 @@ static WERROR init_srv_share_info_ctr(struct pipes_struct *p,
 				      uint32_t *total_entries,
 				      bool all_shares)
 {
-	int num_entries = 0;
-	int alloc_entries = 0;
+	uint32_t num_entries = 0;
+	uint32_t alloc_entries = 0;
 	int num_services = 0;
 	int snum;
 	TALLOC_CTX *ctx = p->mem_ctx;
-	int i = 0;
-	int valid_share_count = 0;
+	uint32_t i = 0;
+	uint32_t valid_share_count = 0;
 	bool *allowed = 0;
 	union srvsvc_NetShareCtr ctr;
 	uint32_t resume_handle = resume_handle_p ? *resume_handle_p : 0;
@@ -561,7 +563,7 @@ static WERROR init_srv_share_info_ctr(struct pipes_struct *p,
 
 	/* Ensure all the usershares are loaded. */
 	become_root();
-	delete_and_reload_printers(server_event_context(), p->msg_ctx);
+	delete_and_reload_printers();
 	load_usershare_shares(NULL, connections_snum_used);
 	load_registry_shares();
 	num_services = lp_numservices();
@@ -840,6 +842,7 @@ static WERROR init_srv_sess_info_0(struct pipes_struct *p,
  **********************************************************************/
 
 static int count_sess_files_fn(const struct share_mode_entry *e,
+			       const struct file_id *id,
 			       const char *sharepath,
 			       const char *fname,
 			       const char *sname,
@@ -967,6 +970,7 @@ static WERROR init_srv_sess_info_1(struct pipes_struct *p,
  ********************************************************************/
 
 static int share_file_fn(const struct share_mode_entry *e,
+			 const struct file_id *id,
 			 const char *sharepath,
 			 const char *fname,
 			 const char *sname,
@@ -1907,8 +1911,8 @@ WERROR _srvsvc_NetShareSetInfo(struct pipes_struct *p,
 		ret = smbrun(command, NULL, NULL);
 		if (ret == 0) {
 			/* Tell everyone we updated smb.conf. */
-			message_send_all(p->msg_ctx, MSG_SMB_CONF_UPDATED,
-					 NULL, 0, NULL);
+			messaging_send_all(p->msg_ctx, MSG_SMB_CONF_UPDATED,
+					   NULL, 0);
 		}
 
 		if ( is_disk_op )
@@ -1983,7 +1987,7 @@ WERROR _srvsvc_NetShareAdd(struct pipes_struct *p,
 		return WERR_ACCESS_DENIED;
 
 	if (!lp_add_share_command(talloc_tos()) || !*lp_add_share_command(talloc_tos())) {
-		DEBUG(10,("_srvsvc_NetShareAdd: No add share command\n"));
+		DBG_WARNING("_srvsvc_NetShareAdd: No \"add share command\" parameter set in smb.conf.\n");
 		return WERR_ACCESS_DENIED;
 	}
 
@@ -2110,8 +2114,7 @@ WERROR _srvsvc_NetShareAdd(struct pipes_struct *p,
 	ret = smbrun(command, NULL, NULL);
 	if (ret == 0) {
 		/* Tell everyone we updated smb.conf. */
-		message_send_all(p->msg_ctx, MSG_SMB_CONF_UPDATED, NULL, 0,
-				 NULL);
+		messaging_send_all(p->msg_ctx, MSG_SMB_CONF_UPDATED, NULL, 0);
 	}
 
 	if ( is_disk_op )
@@ -2195,7 +2198,7 @@ WERROR _srvsvc_NetShareDel(struct pipes_struct *p,
 		return WERR_ACCESS_DENIED;
 
 	if (!lp_delete_share_command(talloc_tos()) || !*lp_delete_share_command(talloc_tos())) {
-		DEBUG(10,("_srvsvc_NetShareDel: No delete share command\n"));
+		DBG_WARNING("_srvsvc_NetShareDel: No \"delete share command\" parameter set in smb.conf.\n");
 		return WERR_ACCESS_DENIED;
 	}
 
@@ -2218,8 +2221,7 @@ WERROR _srvsvc_NetShareDel(struct pipes_struct *p,
 	ret = smbrun(command, NULL, NULL);
 	if (ret == 0) {
 		/* Tell everyone we updated smb.conf. */
-		message_send_all(p->msg_ctx, MSG_SMB_CONF_UPDATED, NULL, 0,
-				 NULL);
+		messaging_send_all(p->msg_ctx, MSG_SMB_CONF_UPDATED, NULL, 0);
 	}
 
 	if ( is_disk_op )
@@ -2312,17 +2314,18 @@ WERROR _srvsvc_NetRemoteTOD(struct pipes_struct *p,
 WERROR _srvsvc_NetGetFileSecurity(struct pipes_struct *p,
 				  struct srvsvc_NetGetFileSecurity *r)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	struct smb_filename *smb_fname = NULL;
 	size_t sd_size;
 	char *servicename = NULL;
 	SMB_STRUCT_STAT st;
 	NTSTATUS nt_status;
 	WERROR werr;
+	struct conn_struct_tos *c = NULL;
 	connection_struct *conn = NULL;
 	struct sec_desc_buf *sd_buf = NULL;
 	files_struct *fsp = NULL;
 	int snum;
-	char *oldcwd = NULL;
 	uint32_t ucf_flags = 0;
 
 	ZERO_STRUCT(st);
@@ -2331,7 +2334,7 @@ WERROR _srvsvc_NetGetFileSecurity(struct pipes_struct *p,
 		werr = WERR_NERR_NETNAMENOTFOUND;
 		goto error_exit;
 	}
-	snum = find_service(talloc_tos(), r->in.share, &servicename);
+	snum = find_service(frame, r->in.share, &servicename);
 	if (!servicename) {
 		werr = WERR_NOT_ENOUGH_MEMORY;
 		goto error_exit;
@@ -2342,22 +2345,21 @@ WERROR _srvsvc_NetGetFileSecurity(struct pipes_struct *p,
 		goto error_exit;
 	}
 
-	nt_status = create_conn_struct_cwd(talloc_tos(),
-					   server_event_context(),
-					   server_messaging_context(),
-					   &conn,
-					   snum, lp_path(talloc_tos(), snum),
-					   p->session_info, &oldcwd);
+	nt_status = create_conn_struct_tos_cwd(server_messaging_context(),
+					       snum,
+					       lp_path(frame, snum),
+					       p->session_info,
+					       &c);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		DEBUG(10, ("create_conn_struct failed: %s\n",
 			   nt_errstr(nt_status)));
 		werr = ntstatus_to_werror(nt_status);
 		goto error_exit;
 	}
+	conn = c->conn;
 
-	nt_status = filename_convert(talloc_tos(),
+	nt_status = filename_convert(frame,
 					conn,
-					false,
 					r->in.file,
 					ucf_flags,
 					NULL,
@@ -2423,12 +2425,7 @@ WERROR _srvsvc_NetGetFileSecurity(struct pipes_struct *p,
 
 	*r->out.sd_buf = sd_buf;
 
-	close_file(NULL, fsp, NORMAL_CLOSE);
-	vfs_ChDir(conn, oldcwd);
-	SMB_VFS_DISCONNECT(conn);
-	conn_free(conn);
 	werr = WERR_OK;
-	goto done;
 
 error_exit:
 
@@ -2436,19 +2433,7 @@ error_exit:
 		close_file(NULL, fsp, NORMAL_CLOSE);
 	}
 
-	if (oldcwd) {
-		vfs_ChDir(conn, oldcwd);
-	}
-
-	if (conn) {
-		SMB_VFS_DISCONNECT(conn);
-		conn_free(conn);
-	}
-
- done:
-
-	TALLOC_FREE(smb_fname);
-
+	TALLOC_FREE(frame);
 	return werr;
 }
 
@@ -2460,15 +2445,16 @@ error_exit:
 WERROR _srvsvc_NetSetFileSecurity(struct pipes_struct *p,
 				  struct srvsvc_NetSetFileSecurity *r)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	struct smb_filename *smb_fname = NULL;
 	char *servicename = NULL;
 	files_struct *fsp = NULL;
 	SMB_STRUCT_STAT st;
 	NTSTATUS nt_status;
 	WERROR werr;
+	struct conn_struct_tos *c = NULL;
 	connection_struct *conn = NULL;
 	int snum;
-	char *oldcwd = NULL;
 	struct security_descriptor *psd = NULL;
 	uint32_t security_info_sent = 0;
 	uint32_t ucf_flags = 0;
@@ -2480,7 +2466,7 @@ WERROR _srvsvc_NetSetFileSecurity(struct pipes_struct *p,
 		goto error_exit;
 	}
 
-	snum = find_service(talloc_tos(), r->in.share, &servicename);
+	snum = find_service(frame, r->in.share, &servicename);
 	if (!servicename) {
 		werr = WERR_NOT_ENOUGH_MEMORY;
 		goto error_exit;
@@ -2492,22 +2478,21 @@ WERROR _srvsvc_NetSetFileSecurity(struct pipes_struct *p,
 		goto error_exit;
 	}
 
-	nt_status = create_conn_struct_cwd(talloc_tos(),
-					   server_event_context(),
-					   server_messaging_context(),
-					   &conn,
-					   snum, lp_path(talloc_tos(), snum),
-					   p->session_info, &oldcwd);
+	nt_status = create_conn_struct_tos_cwd(server_messaging_context(),
+					       snum,
+					       lp_path(frame, snum),
+					       p->session_info,
+					       &c);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		DEBUG(10, ("create_conn_struct failed: %s\n",
 			   nt_errstr(nt_status)));
 		werr = ntstatus_to_werror(nt_status);
 		goto error_exit;
 	}
+	conn = c->conn;
 
-	nt_status = filename_convert(talloc_tos(),
+	nt_status = filename_convert(frame,
 					conn,
-					false,
 					r->in.file,
 					ucf_flags,
 					NULL,
@@ -2556,12 +2541,7 @@ WERROR _srvsvc_NetSetFileSecurity(struct pipes_struct *p,
 		goto error_exit;
 	}
 
-	close_file(NULL, fsp, NORMAL_CLOSE);
-	vfs_ChDir(conn, oldcwd);
-	SMB_VFS_DISCONNECT(conn);
-	conn_free(conn);
 	werr = WERR_OK;
-	goto done;
 
 error_exit:
 
@@ -2569,18 +2549,7 @@ error_exit:
 		close_file(NULL, fsp, NORMAL_CLOSE);
 	}
 
-	if (oldcwd) {
-		vfs_ChDir(conn, oldcwd);
-	}
-
-	if (conn) {
-		SMB_VFS_DISCONNECT(conn);
-		conn_free(conn);
-	}
-
- done:
-	TALLOC_FREE(smb_fname);
-
+	TALLOC_FREE(frame);
 	return werr;
 }
 
@@ -2713,6 +2682,7 @@ struct enum_file_close_state {
 };
 
 static int enum_file_close_fn(const struct share_mode_entry *e,
+			      const struct file_id *id,
 			      const char *sharepath,
 			      const char *fname,
 			      const char *sname,
@@ -2732,11 +2702,10 @@ static int enum_file_close_fn(const struct share_mode_entry *e,
 	}
 
 	/* Ok - send the close message. */
-	DEBUG(10,("enum_file_close_fn: request to close file %s, %s\n",
-		sharepath,
-		share_mode_str(talloc_tos(), 0, e) ));
+	DBG_DEBUG("request to close file %s, %s\n", sharepath,
+		  share_mode_str(talloc_tos(), 0, id, e));
 
-	share_mode_entry_to_message(msg, e);
+	share_mode_entry_to_message(msg, id, e);
 
 	state->r->out.result = ntstatus_to_werror(
 		messaging_send_buf(state->msg_ctx,

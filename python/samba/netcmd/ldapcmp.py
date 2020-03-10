@@ -122,7 +122,8 @@ class LDAPBase(object):
         res = None
         try:
             res = self.ldb.search(base=object_dn, scope=SCOPE_BASE)
-        except LdbError, (enum, estr):
+        except LdbError as e2:
+            (enum, estr) = e2.args
             if enum == ERR_NO_SUCH_OBJECT:
                 return False
             raise
@@ -131,7 +132,7 @@ class LDAPBase(object):
     def delete_force(self, object_dn):
         try:
             self.ldb.delete(object_dn)
-        except Ldb.LdbError, e:
+        except Ldb.LdbError as e:
             assert "No such object" in str(e)
 
     def get_attribute_name(self, key):
@@ -454,12 +455,17 @@ class LDAPObject(object):
 
         if self.two_domains:
             self.ignore_attributes +=  [
-                "objectCategory", "objectGUID", "objectSid", "whenCreated", "whenChanged", "pwdLastSet", "uSNCreated", "creationTime",
-                "modifiedCount", "priorSetTime", "rIDManagerReference", "gPLink", "ipsecNFAReference",
-                "fRSPrimaryMember", "fSMORoleOwner", "masteredBy", "ipsecOwnersReference", "wellKnownObjects",
-                "badPwdCount", "ipsecISAKMPReference", "ipsecFilterReference", "msDs-masteredBy", "lastSetTime",
-                "ipsecNegotiationPolicyReference", "subRefs", "gPCFileSysPath", "accountExpires", "invocationId",
-                "operatingSystemVersion", "oEMInformation",
+                "objectCategory", "objectGUID", "objectSid", "whenCreated",
+                "whenChanged", "pwdLastSet", "uSNCreated", "creationTime",
+                "modifiedCount", "priorSetTime", "rIDManagerReference",
+                "gPLink", "ipsecNFAReference", "fRSPrimaryMember",
+                "fSMORoleOwner", "masteredBy", "ipsecOwnersReference",
+                "wellKnownObjects", "otherWellKnownObjects", "badPwdCount",
+                "ipsecISAKMPReference", "ipsecFilterReference",
+                "msDs-masteredBy", "lastSetTime",
+                "ipsecNegotiationPolicyReference", "subRefs", "gPCFileSysPath",
+                "accountExpires", "invocationId", "operatingSystemVersion",
+                "oEMInformation",
                 # After Exchange preps
                 "targetAddress", "msExchMailboxGuid", "siteFolderGUID"]
             #
@@ -473,7 +479,14 @@ class LDAPObject(object):
                 "msExchHomeRoutingGroup", "msExchResponsibleMTAServer", "siteFolderServer", "msExchRoutingMasterDN",
                 "msExchRoutingGroupMembersBL", "homeMDBBL", "msExchHomePublicMDB", "msExchOwningServer", "templateRoots",
                 "addressBookRoots", "msExchPolicyRoots", "globalAddressList", "msExchOwningPFTree",
-                "msExchResponsibleMTAServerBL", "msExchOwningPFTreeBL",]
+                "msExchResponsibleMTAServerBL", "msExchOwningPFTreeBL",
+                # After 2012 R2 functional preparation
+                "msDS-MembersOfResourcePropertyListBL",
+                "msDS-ValueTypeReference",
+                "msDS-MembersOfResourcePropertyList",
+                "msDS-ValueTypeReferenceBL",
+                "msDS-ClaimTypeAppliesToClass",
+            ]
             self.dn_attributes = [x.upper() for x in self.dn_attributes]
             #
             # Attributes that contain the Domain name e.g. 'samba.org'
@@ -772,7 +785,8 @@ class LDAPBundel(object):
                                      summary=self.summary,
                                      filter_list=self.filter_list,
                                      outf=self.outf, errf=self.errf)
-            except LdbError, (enum, estr):
+            except LdbError as e:
+                (enum, estr) = e.args
                 if enum == ERR_NO_SUCH_OBJECT:
                     self.log( "\n!!! Object not found: %s" % self.dn_list[index] )
                     skip = True
@@ -783,7 +797,8 @@ class LDAPBundel(object):
                         summary=other.summary,
                         filter_list=self.filter_list,
                         outf=self.outf, errf=self.errf)
-            except LdbError, (enum, estr):
+            except LdbError as e1:
+                (enum, estr) = e1.args
                 if enum == ERR_NO_SUCH_OBJECT:
                     self.log( "\n!!! Object not found: %s" % other.dn_list[index] )
                     skip = True
@@ -839,7 +854,8 @@ class LDAPBundel(object):
             raise StandardError("Wrong 'scope' given. Choose from: SUB, ONE, BASE")
         try:
             res = self.con.ldb.search(base=self.search_base, scope=self.search_scope, attrs=["dn"])
-        except LdbError, (enum, estr):
+        except LdbError as e3:
+            (enum, estr) = e3.args
             self.outf.write("Failed search of base=%s\n" % self.search_base)
             raise
         for x in res:
@@ -866,12 +882,6 @@ class LDAPBundel(object):
 class cmd_ldapcmp(Command):
     """Compare two ldap databases."""
     synopsis = "%prog <URL1> <URL2> (domain|configuration|schema|dnsdomain|dnsforest) [options]"
-
-    takes_optiongroups = {
-        "sambaopts": options.SambaOptions,
-        "versionopts": options.VersionOptions,
-        "credopts": options.CredentialsOptionsDouble,
-    }
 
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,

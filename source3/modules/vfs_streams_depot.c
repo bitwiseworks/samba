@@ -67,13 +67,14 @@ static uint32_t hash_fn(DATA_BLOB key)
  * an option to put in a special ACL entry for a non-existing group.
  */
 
-static bool file_is_valid(vfs_handle_struct *handle, const char *path)
+static bool file_is_valid(vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname)
 {
 	char buf;
 
-	DEBUG(10, ("file_is_valid (%s) called\n", path));
+	DEBUG(10, ("file_is_valid (%s) called\n", smb_fname->base_name));
 
-	if (SMB_VFS_GETXATTR(handle->conn, path, SAMBA_XATTR_MARKER,
+	if (SMB_VFS_GETXATTR(handle->conn, smb_fname, SAMBA_XATTR_MARKER,
 				  &buf, sizeof(buf)) != sizeof(buf)) {
 		DEBUG(10, ("GETXATTR failed: %s\n", strerror(errno)));
 		return false;
@@ -87,14 +88,15 @@ static bool file_is_valid(vfs_handle_struct *handle, const char *path)
 	return true;
 }
 
-static bool mark_file_valid(vfs_handle_struct *handle, const char *path)
+static bool mark_file_valid(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname)
 {
 	char buf = '1';
 	int ret;
 
-	DEBUG(10, ("marking file %s as valid\n", path));
+	DEBUG(10, ("marking file %s as valid\n", smb_fname->base_name));
 
-	ret = SMB_VFS_SETXATTR(handle->conn, path, SAMBA_XATTR_MARKER,
+	ret = SMB_VFS_SETXATTR(handle->conn, smb_fname, SAMBA_XATTR_MARKER,
 				    &buf, sizeof(buf), 0);
 
 	if (ret == -1) {
@@ -227,7 +229,7 @@ static char *stream_dir(vfs_handle_struct *handle,
 		}
 
 		if (!check_valid ||
-		    file_is_valid(handle, smb_fname->base_name)) {
+		    file_is_valid(handle, smb_fname)) {
 			return result;
 		}
 
@@ -350,7 +352,7 @@ static char *stream_dir(vfs_handle_struct *handle,
 		goto fail;
 	}
 
-	if (check_valid && !mark_file_valid(handle, smb_fname->base_name)) {
+	if (check_valid && !mark_file_valid(handle, smb_fname)) {
 		goto fail;
 	}
 
@@ -1059,8 +1061,8 @@ static struct vfs_fn_pointers vfs_streams_depot_fns = {
 	.streaminfo_fn = streams_depot_streaminfo,
 };
 
-NTSTATUS vfs_streams_depot_init(void);
-NTSTATUS vfs_streams_depot_init(void)
+static_decl_vfs;
+NTSTATUS vfs_streams_depot_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "streams_depot",
 				&vfs_streams_depot_fns);

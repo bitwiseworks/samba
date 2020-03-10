@@ -59,11 +59,12 @@ CONFIG="--configfile=$PREFIX/etc/smb.conf"
 export CONFIG
 
 testit "reset password policies beside of minimum password age of 0 days" \
-	$VALGRIND $samba_tool domain passwordsettings $CONFIG set --complexity=default --history-length=default --min-pwd-length=default --min-pwd-age=0 --max-pwd-age=default || failed=`expr $failed + 1`
+	$VALGRIND $samba_tool domain passwordsettings set $CONFIG --complexity=default --history-length=default --min-pwd-length=default --min-pwd-age=0 --max-pwd-age=default || failed=`expr $failed + 1`
 
 TEST_USERNAME="$(mktemp -u alice-XXXXXX)"
 TEST_PASSWORD="testPaSS@00%"
 TEST_PASSWORD_NEW="testPaSS@01%"
+TEST_PASSWORD_NON_ASCII="Täst123"
 TEST_PASSWORD_SHORT="secret"
 TEST_PASSWORD_WEAK="Supersecret"
 TEST_PRINCIPAL="$TEST_USERNAME@$REALM"
@@ -99,6 +100,22 @@ testit "change user password with 'samba-tool user password' (unforced)" \
 TEST_PASSWORD_OLD=$TEST_PASSWORD
 TEST_PASSWORD=$TEST_PASSWORD_NEW
 TEST_PASSWORD_NEW="testPaSS@02%"
+
+testit "kinit with user password" \
+	do_kinit $TEST_PRINCIPAL $TEST_PASSWORD || failed=`expr $failed + 1`
+
+test_smbclient "Test login with user kerberos ccache" \
+	"ls" "$SMB_UNC" -k yes || failed=`expr $failed + 1`
+
+###########################################################
+### Change the users password
+###########################################################
+
+testit "change user (non-ascii) password with 'samba-tool user password' (unforced)" \
+	$VALGRIND $samba_tool user password -W$DOMAIN -U$TEST_USERNAME%$TEST_PASSWORD -k no --newpassword=$TEST_PASSWORD_NON_ASCII || failed=`expr $failed + 1`
+
+TEST_PASSWORD_OLD=$TEST_PASSWORD_NEW
+TEST_PASSWORD=$TEST_PASSWORD_NON_ASCII
 
 testit "kinit with user password" \
 	do_kinit $TEST_PRINCIPAL $TEST_PASSWORD || failed=`expr $failed + 1`
@@ -194,7 +211,7 @@ testit_expect_failure "try to set a short password (command should not succeed)"
 	$VALGRIND $samba_tool user password -W$DOMAIN "-U$DOMAIN/$TEST_USERNAME%$TEST_PASSWORD" -k no --newpassword="$TEST_PASSWORD_SHORT" && failed=`expr $failed + 1`
 
 testit "allow short passwords (length 1)" \
-	$VALGRIND $samba_tool domain passwordsettings $CONFIG set --min-pwd-length=1 || failed=`expr $failed + 1`
+	$VALGRIND $samba_tool domain passwordsettings set $CONFIG --min-pwd-length=1 || failed=`expr $failed + 1`
 
 testit "try to set a short password (command should succeed)" \
 	$VALGRIND $samba_tool user password -W$DOMAIN "-U$DOMAIN/$TEST_USERNAME%$TEST_PASSWORD" -k no --newpassword="$TEST_PASSWORD_SHORT" || failed=`expr $failed + 1`
@@ -203,16 +220,16 @@ TEST_PASSWORD=$TEST_PASSWORD_SHORT
 TEST_PASSWORD_NEW="testPaSS@07%"
 
 testit "require minimum password age of 1 day" \
-	$VALGRIND $samba_tool domain passwordsettings $CONFIG set --min-pwd-age=1 || failed=`expr $failed + 1`
+	$VALGRIND $samba_tool domain passwordsettings set $CONFIG --min-pwd-age=1 || failed=`expr $failed + 1`
 
 testit "show password settings" \
-	$VALGRIND $samba_tool domain passwordsettings $CONFIG show || failed=`expr $failed + 1`
+	$VALGRIND $samba_tool domain passwordsettings show $CONFIG || failed=`expr $failed + 1`
 
 testit_expect_failure "try to change password too quickly (command should not succeed)" \
 	$VALGRIND $samba_tool user password -W$DOMAIN "-U$DOMAIN/$TEST_USERNAME%$TEST_PASSWORD" -k no --newpassword="$TEST_PASSWORD_NEW"  && failed=`expr $failed + 1`
 
 testit "reset password policies" \
-	$VALGRIND $samba_tool domain passwordsettings $CONFIG set --complexity=default --history-length=default --min-pwd-length=default --min-pwd-age=default --max-pwd-age=default || failed=`expr $failed + 1`
+	$VALGRIND $samba_tool domain passwordsettings set $CONFIG --complexity=default --history-length=default --min-pwd-length=default --min-pwd-age=default --max-pwd-age=default || failed=`expr $failed + 1`
 
 testit "delete user $TEST_USERNAME" \
 	$VALGRIND $samba_tool user delete $TEST_USERNAME -U"$USERNAME%$PASSWORD" $CONFIG -k no  || failed=`expr $failed + 1`

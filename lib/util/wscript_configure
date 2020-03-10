@@ -6,6 +6,7 @@ if Options.options.disable_fault_handling:
 
 # backtrace could be in libexecinfo or in libc
 conf.CHECK_FUNCS_IN('backtrace backtrace_symbols', 'execinfo', checklibc=True, headers='execinfo.h')
+conf.CHECK_HEADERS('execinfo.h libunwind.h')
 
 conf.CHECK_STRUCTURE_MEMBER('struct statvfs', 'f_frsize', define='HAVE_FRSIZE', headers='sys/statvfs.h')
 
@@ -122,6 +123,8 @@ if Options.options.enable_systemd != False:
         conf.CHECK_LIB('systemd-daemon', shlib=True)
         conf.CHECK_LIB('systemd-journal', shlib=True)
 
+conf.SET_TARGET_TYPE('lttng-ust', 'EMPTY')
+
 if Options.options.enable_lttng != False:
     conf.CHECK_CFG(package='lttng-ust', args='--cflags --libs',
                    msg='Checking for lttng-ust', uselib_store="LTTNG-UST")
@@ -132,9 +135,6 @@ if (conf.CONFIG_SET('HAVE_LTTNG_TRACEF_H') and
     conf.CONFIG_SET('HAVE_LTTNG_UST')):
     conf.DEFINE('HAVE_LTTNG_TRACEF', '1')
     conf.env['HAVE_LTTNG_TRACEF'] = True
-else:
-    conf.SET_TARGET_TYPE('lttng-ust', 'EMPTY')
-    conf.undefine('HAVE_LTTNG_TRACEF')
 
 conf.env['CPPPATH_GPFS'] = Options.options.gpfs_headers_dir
 if conf.CHECK_HEADERS('gpfs.h', False, False, "gpfs"):

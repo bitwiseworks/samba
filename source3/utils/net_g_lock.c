@@ -19,8 +19,10 @@
 
 #include "includes.h"
 #include "net.h"
+#include "lib/util/server_id.h"
 #include "g_lock.h"
 #include "messages.h"
+#include "lib/util/util_tdb.h"
 
 static bool net_g_lock_init(TALLOC_CTX *mem_ctx,
 			    struct tevent_context **pev,
@@ -89,7 +91,7 @@ static int net_g_lock_do(struct net_context *c, int argc, const char **argv)
 	state.cmd = cmd;
 	state.result = -1;
 
-	status = g_lock_do(name, G_LOCK_WRITE,
+	status = g_lock_do(string_term_tdb_data(name), G_LOCK_WRITE,
 			   timeval_set(timeout / 1000, timeout % 1000),
 			   net_g_lock_do_fn, &state);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -108,13 +110,21 @@ done:
 	return state.result;
 }
 
-static int net_g_lock_dump_fn(struct server_id pid, enum g_lock_type lock_type,
-			      void *private_data)
+static void net_g_lock_dump_fn(const struct g_lock_rec *locks,
+			       size_t num_locks,
+			       const uint8_t *data,
+			       size_t datalen,
+			       void *private_data)
 {
-	struct server_id_buf idbuf;
-	d_printf("%s: %s\n", server_id_str_buf(pid, &idbuf),
-		 (lock_type & 1) ? "WRITE" : "READ");
-	return 0;
+	size_t i;
+
+	for (i=0; i<num_locks; i++) {
+		const struct g_lock_rec *l = &locks[i];
+		struct server_id_buf idbuf;
+		d_printf("%s: %s\n", server_id_str_buf(l->pid, &idbuf),
+			 (l->lock_type & 1) ? "WRITE" : "READ");
+	}
+	dump_data_file(data, datalen, true, stdout);
 }
 
 static int net_g_lock_dump(struct net_context *c, int argc, const char **argv)
@@ -133,7 +143,8 @@ static int net_g_lock_dump(struct net_context *c, int argc, const char **argv)
 		goto done;
 	}
 
-	(void)g_lock_dump(g_ctx, argv[0], net_g_lock_dump_fn, NULL);
+	(void)g_lock_dump(g_ctx, string_term_tdb_data(argv[0]),
+			  net_g_lock_dump_fn, NULL);
 
 	ret = 0;
 done:
@@ -143,9 +154,13 @@ done:
 	return ret;
 }
 
-static int net_g_lock_locks_fn(const char *name, void *private_data)
+static int net_g_lock_locks_fn(TDB_DATA key, void *private_data)
 {
-	d_printf("%s\n", name);
+	if ((key.dsize == 0) || (key.dptr[key.dsize-1] != 0)) {
+		DEBUG(1, ("invalid key in g_lock.tdb, ignoring\n"));
+		return 0;
+	}
+	d_printf("%s\n", (const char *)key.dptr);
 	return 0;
 }
 

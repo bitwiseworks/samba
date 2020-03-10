@@ -651,15 +651,36 @@ tdb_log_func tdb_log_fn(struct tdb_context *tdb);
 void *tdb_get_logging_private(struct tdb_context *tdb);
 
 /**
+ * @brief Is a transaction active?
+ *
+ * It is helpful for the application to know if a transaction is
+ * active, rather than needing to maintain an application-level reference
+ * count.
+ *
+ * @param[in]  tdb      The database to start the transaction.
+ *
+ * @return              true if there is a transaction active, false otherwise
+ *
+ * @see tdb_transaction_start()
+ * @see tdb_transaction_prepare_commit()
+ * @see tdb_transaction_commit()
+ * @see tdb_transaction_cancel()
+ */
+bool tdb_transaction_active(struct tdb_context *tdb);
+
+/**
  * @brief Start a transaction.
  *
  * All operations after the transaction start can either be committed with
  * tdb_transaction_commit() or cancelled with tdb_transaction_cancel().
  *
- * If you call tdb_transaction_start() again on the same tdb context while a
- * transaction is in progress, then the same transaction buffer is re-used. The
- * number of tdb_transaction_{commit,cancel} operations must match the number
- * of successful tdb_transaction_start() calls.
+ * If (the default) TDB_ALLOW_NESTING was specified or
+ * TDB_DISALLOW_NESTING was not specified as a flag via tdb_open() or
+ * tdb_open_ex(), you call tdb_transaction_start() again on the same
+ * tdb context while a transaction is in progress, then the same
+ * transaction buffer is re-used. The number of
+ * tdb_transaction_{commit,cancel} operations must match the number of
+ * successful tdb_transaction_start() calls.
  *
  * Note that transactions are by default disk synchronous, and use a recover
  * area in the database to automatically recover the database on the next open

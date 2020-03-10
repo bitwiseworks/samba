@@ -28,13 +28,6 @@ conf.CHECK_FUNCS('''atexit cgetent getprogname setprogname gethostname
             strptime strsep strsep_copy    strtok_r strupr swab umask uname unsetenv
             closefrom err warn errx warnx flock writev''')
 
-if conf.CHECK_FUNCS('strerror_r'):
-    # Check if strerror_r is BSD compatible (default GNU implementation is not what Heimdal expects)
-    conf.CHECK_CODE('int strerror_r(int errnum, char *buf, size_t buflen);',
-                    'STRERROR_R_PROTO_COMPATIBLE',
-                    headers='string.h', addmain=False, link=False,
-                    msg="Checking for XSI (rather than GNU) prototype for strerror_r")
-
 conf.CHECK_FUNCS_IN('hstrerror', 'resolv socket nsl', checklibc=True)
 conf.CHECK_FUNCS_IN('''getnameinfo sendmsg socket getipnodebyname gethostent gethostent_r
                        sethostent endhostent getipnodebyaddr freehostent gethostbyname
@@ -78,7 +71,6 @@ Logs.info("Using in-tree heimdal kerberos defines")
 conf.define('HAVE_GSSAPI_GSSAPI_H', 1)
 conf.define('HAVE_GSSAPI_GSSAPI_KRB5_H', 1)
 conf.define('HAVE_AP_OPTS_USE_SUBKEY', 1)
-conf.define('HAVE_KRB5_ADDRESSES', 1)
 conf.define('HAVE_KRB5_KEYTAB_ENTRY_KEYBLOCK', 1)
 conf.define('HAVE_KRB5_SET_REAL_TIME', 1)
 conf.define('HAVE_COM_ERR_H', 1)
@@ -184,7 +176,10 @@ if krb5_config:
             if l.startswith("libdir="):
                 heimdal_libdirs.append(l.strip()[len("libdir="):])
             elif l.startswith("includedir="):
-                heimdal_includedirs.append(l.strip()[len("includedir="):])
+                include_path = l.strip()[len("includedir="):]
+                heimdal_includedirs.append(include_path)
+                conf.define('HEIMDAL_KRB5_TYPES_PATH',
+                            include_path + "/krb5-types.h")
     finally:
         f.close()
 

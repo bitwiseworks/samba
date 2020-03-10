@@ -19,6 +19,7 @@
 
 #include "includes.h"
 #include "winbindd.h"
+#include "libsmb/namequery.h"
 #include "idmap.h"
 #include "tldap_gensec_bind.h"
 #include "tldap_util.h"
@@ -357,7 +358,6 @@ static NTSTATUS idmap_ad_context_create(TALLOC_CTX *mem_ctx,
 					struct idmap_ad_context **pctx)
 {
 	struct idmap_ad_context *ctx;
-	char *schema_config_option;
 	const char *schema_mode;
 	NTSTATUS status;
 	TLDAPRC rc;
@@ -385,21 +385,13 @@ static NTSTATUS idmap_ad_context_create(TALLOC_CTX *mem_ctx,
 		return status;
 	}
 
-	schema_config_option = talloc_asprintf(
-		ctx, "idmap config %s", domname);
-	if (schema_config_option == NULL) {
-		TALLOC_FREE(ctx);
-		return NT_STATUS_NO_MEMORY;
-	}
+	ctx->unix_primary_group = idmap_config_bool(
+		domname, "unix_primary_group", false);
+	ctx->unix_nss_info = idmap_config_bool(
+		domname, "unix_nss_info", false);
 
-	ctx->unix_primary_group = lp_parm_bool(
-		-1, schema_config_option, "unix_primary_group", false);
-	ctx->unix_nss_info = lp_parm_bool(
-		-1, schema_config_option, "unix_nss_info", false);
-
-	schema_mode = lp_parm_const_string(
-		-1, schema_config_option, "schema_mode", "rfc2307");
-	TALLOC_FREE(schema_config_option);
+	schema_mode = idmap_config_const_string(
+		domname, "schema_mode", "rfc2307");
 
 	rc = get_posix_schema_names(ctx->ld, schema_mode, ctx, &ctx->schema);
 	if (!TLDAP_RC_IS_SUCCESS(rc)) {
@@ -540,6 +532,17 @@ static NTSTATUS idmap_ad_get_context(struct idmap_domain *dom,
 {
 	struct idmap_ad_context *ctx = NULL;
 	NTSTATUS status;
+
+	if (IS_AD_DC) {
+		/*
+		 * Make sure we never try to use LDAP against
+		 * a trusted domain as AD_DC.
+		 *
+		 * This shouldn't be called currently,
+		 * but you never know what happens in future.
+		 */
+		return NT_STATUS_REQUEST_NOT_ACCEPTED;
+	}
 
 	if (dom->private_data != NULL) {
 		*pctx = talloc_get_type_abort(dom->private_data,
@@ -957,7 +960,7 @@ static struct idmap_methods ad_methods = {
 };
 
 static_decl_idmap;
-NTSTATUS idmap_ad_init(void)
+NTSTATUS idmap_ad_init(TALLOC_CTX *ctx)
 {
 	NTSTATUS status;
 
@@ -967,7 +970,7 @@ NTSTATUS idmap_ad_init(void)
 		return status;
 	}
 
-	status = idmap_ad_nss_init();
+	status = idmap_ad_nss_init(ctx);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}

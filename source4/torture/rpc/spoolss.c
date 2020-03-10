@@ -47,6 +47,7 @@
 #define TORTURE_WELLKNOWN_PRINTER_EX	"torture_wkn_printer_ex"
 #define TORTURE_PRINTER_EX		"torture_printer_ex"
 #define TORTURE_DRIVER			"torture_driver"
+#define TORTURE_DRIVER_ADD		"torture_driver_add"
 #define TORTURE_DRIVER_EX		"torture_driver_ex"
 #define TORTURE_DRIVER_ADOBE		"torture_driver_adobe"
 #define TORTURE_DRIVER_EX_ADOBE		"torture_driver_ex_adobe"
@@ -1401,6 +1402,8 @@ static bool test_SetPrinter_errors(struct torture_context *tctx,
 				/* ignored then */
 				break;
 			}
+
+			FALL_THROUGH;
 		case SPOOLSS_PRINTER_CONTROL_PAUSE: /* 1 */
 		case SPOOLSS_PRINTER_CONTROL_RESUME: /* 2 */
 		case SPOOLSS_PRINTER_CONTROL_PURGE: /* 3 */
@@ -2667,8 +2670,8 @@ static bool test_EnumForms_find_one(struct torture_context *tctx,
 				    bool print_server,
 				    const char *form_name)
 {
-	union spoolss_FormInfo *info;
-	uint32_t count;
+	union spoolss_FormInfo *info = NULL;
+	uint32_t count = 0;
 	bool found = false;
 	int i;
 
@@ -5554,11 +5557,12 @@ static bool test_SetPrinterDataEx_values(struct torture_context *tctx,
 
 	for (i=0; i < ARRAY_SIZE(values); i++) {
 
-		enum winreg_Type type;
-		DATA_BLOB blob_in, blob_out;
+		enum winreg_Type type = REG_NONE;
+		DATA_BLOB blob_in = data_blob_null;
+		DATA_BLOB blob_out = data_blob_null;
 		uint32_t ecount;
 		struct spoolss_PrinterEnumValues *einfo;
-		uint32_t needed;
+		uint32_t needed = 0;
 
 		if (torture_setting_bool(tctx, "samba3", false)) {
 			char *q;
@@ -5626,7 +5630,7 @@ static bool test_SetPrinterDataEx_matrix(struct torture_context *tctx,
 		REG_BINARY
 	};
 	const char *str = "abcdefghi";
-	int t, s;
+	size_t t, s;
 
 	for (t=0; t < ARRAY_SIZE(types); t++) {
 	for (s=0; s < strlen(str); s++) {
@@ -7822,11 +7826,11 @@ static bool compose_local_driver_directory(struct torture_context *tctx,
 	}
 	p++;
 
-	if (strequal(environment, "Windows x64")) {
+	if (strequal(environment, SPOOLSS_ARCHITECTURE_x64)) {
 		if (!strequal(p, "x64")) {
 			*path = talloc_asprintf(tctx, "%s/x64", local_dir);
 		}
-	} else if (strequal(environment, "Windows NT x86")) {
+	} else if (strequal(environment, SPOOLSS_ARCHITECTURE_NT_X86)) {
 		if (!strequal(p, "i386")) {
 			*path = talloc_asprintf(tctx, "%s/i386", local_dir);
 		}
@@ -8559,35 +8563,79 @@ static bool torture_rpc_spoolss_printerdm_setup(struct torture_context *tctx, vo
 }
 #endif
 
+static bool test_DeletePrinterDriverEx_exp(struct torture_context *tctx,
+					   struct dcerpc_binding_handle *b,
+					   const char *server,
+					   const char *driver,
+					   const char *environment,
+					   uint32_t delete_flags,
+					   uint32_t version,
+					   WERROR expected_result);
+
 static bool torture_rpc_spoolss_printer_teardown_common(struct torture_context *tctx, struct torture_printer_context *t)
 {
 	bool found = false;
 	struct dcerpc_pipe *p = t->spoolss_pipe;
-	struct dcerpc_binding_handle *b;
-	const char *printer_name = t->info2.printername;
+	struct dcerpc_binding_handle *b = NULL;
+	const char *server_name_slash;
+	bool ok = true;
 
-	if (t->added_driver) {
-		torture_assert(tctx,
-			remove_printer_driver(tctx, dcerpc_server_name(t->spoolss_pipe), &t->driver),
-			"failed to remove printer driver");
+	if (p == NULL) {
+		return true;
 	}
+	b = p->binding_handle;
 
-	if (p && !t->wellknown) {
-		b = p->binding_handle;
+	server_name_slash = talloc_asprintf(tctx, "\\\\%s", dcerpc_server_name(p));
 
-		torture_assert(tctx,
+	if (!t->wellknown) {
+		const char *printer_name = t->info2.printername;
+
+		torture_assert_goto(tctx,
 			test_DeletePrinter(tctx, b, &t->handle),
+			ok,
+			remove_driver,
 			"failed to delete printer");
 
-		torture_assert(tctx,
+		torture_assert_goto(tctx,
 			test_EnumPrinters_findname(tctx, b, PRINTER_ENUM_LOCAL, 1,
 						   printer_name, &found),
+			ok,
+			remove_driver,
 			"failed to enumerate printers");
 
-		torture_assert(tctx, !found, "deleted printer still there");
+		torture_assert_goto(tctx,
+			!found,
+			ok,
+			remove_driver,
+			"deleted printer still there");
 	}
 
-	return true;
+
+remove_driver:
+	if (t->added_driver) {
+		ok = remove_printer_driver(tctx,
+					   dcerpc_server_name(p),
+					   &t->driver);
+		if (!ok) {
+			torture_warning(tctx,
+					"failed to remove printer driver\n");
+		}
+
+		ok = test_DeletePrinterDriverEx_exp(tctx, b,
+						    server_name_slash,
+						    t->driver.info8.driver_name,
+						    t->driver.info8.architecture,
+						    DPD_DELETE_ALL_FILES,
+						    t->driver.info8.version,
+						    WERR_OK);
+		if (!ok) {
+			torture_warning(tctx,
+					"failed to delete printer driver via "
+					"spoolss\n");
+		}
+	}
+
+	return ok;
 }
 
 static bool torture_rpc_spoolss_printer_teardown(struct torture_context *tctx, void *data)
@@ -8696,7 +8744,6 @@ static bool test_print_test_smbd(struct torture_context *tctx,
 
 	struct smb2_tree *tree;
 	struct smb2_handle job_h;
-	struct cli_credentials *credentials = cmdline_credentials;
 	struct smbcli_options options;
 	TALLOC_CTX *mem_ctx = talloc_new(tctx);
 	/*
@@ -8716,7 +8763,7 @@ static bool test_print_test_smbd(struct torture_context *tctx,
 			      lpcfg_smb_ports(tctx->lp_ctx),
 			      share,
 			      lpcfg_resolve_context(tctx->lp_ctx),
-			      credentials,
+			      popt_get_cmdline_credentials(),
 			      &tree,
 			      tctx->ev,
 			      &options,
@@ -9173,14 +9220,26 @@ static bool test_printer_set_publish(struct torture_context *tctx,
 					 "info7 publish flag not set");
 	} else {
 		struct GUID guid;
+		char *ref_guid;
 		torture_assert_int_equal(tctx,
 					 info.info7.action,
 					 DSPRINT_PUBLISH,
 					 "info7 publish flag not set");
+
+		/* GUID_from_string is able to parse both plain and
+		 * curly-braced guids */
 		torture_assert_ntstatus_ok(tctx,
 					   GUID_from_string(info.info7.guid,
 					   &guid),
 					   "invalid published printer GUID");
+
+		/* Build reference GUID string */
+		ref_guid = GUID_string2(tctx, &guid);
+		torture_assert_not_null(tctx, ref_guid, "ENOMEM");
+		ref_guid = talloc_strdup_upper(tctx, ref_guid);
+		torture_assert_not_null(tctx, ref_guid, "ENOMEM");
+		torture_assert_str_equal(tctx, info.info7.guid, ref_guid,
+			"invalid GUID format");
 	}
 
 	return true;
@@ -10525,7 +10584,7 @@ static bool connect_printer_driver_share(struct torture_context *tctx,
 					lpcfg_smb_ports(tctx->lp_ctx),
 					share_name, NULL,
 					lpcfg_socket_options(tctx->lp_ctx),
-					cmdline_credentials,
+					popt_get_cmdline_credentials(),
 					lpcfg_resolve_context(tctx->lp_ctx),
 					tctx->ev,
 					&smb_options,
@@ -10772,7 +10831,6 @@ static bool test_add_driver_arg(struct torture_context *tctx,
 			}
 		}
 	}
-	info8.architecture      = d->local.environment;
 
 	for (i=0; i < ARRAY_SIZE(levels); i++) {
 
@@ -10861,14 +10919,15 @@ static bool test_add_driver_ex_64(struct torture_context *tctx,
 
 	d = talloc_zero(tctx, struct torture_driver_context);
 
+	d->local.environment		= talloc_strdup(d, SPOOLSS_ARCHITECTURE_x64);
+	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/x64");
+
 	d->info8.version		= SPOOLSS_DRIVER_VERSION_200X;
 	d->info8.driver_name		= TORTURE_DRIVER_EX;
-	d->info8.architecture		= NULL;
+	d->info8.architecture		= d->local.environment;
 	d->info8.driver_path		= talloc_strdup(d, "pscript5.dll");
 	d->info8.data_file		= talloc_strdup(d, "cups6.ppd");
 	d->info8.config_file		= talloc_strdup(d, "cupsui6.dll");
-	d->local.environment		= talloc_strdup(d, "Windows x64");
-	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/x64");
 	d->ex				= true;
 
 	return test_add_driver_arg(tctx, p, d);
@@ -10881,14 +10940,15 @@ static bool test_add_driver_ex_32(struct torture_context *tctx,
 
 	d = talloc_zero(tctx, struct torture_driver_context);
 
+	d->local.environment		= talloc_strdup(d, SPOOLSS_ARCHITECTURE_NT_X86);
+	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/i386");
+
 	d->info8.version		= SPOOLSS_DRIVER_VERSION_200X;
 	d->info8.driver_name		= TORTURE_DRIVER_EX;
-	d->info8.architecture		= NULL;
+	d->info8.architecture		= d->local.environment;
 	d->info8.driver_path		= talloc_strdup(d, "pscript5.dll");
 	d->info8.data_file		= talloc_strdup(d, "cups6.ppd");
 	d->info8.config_file		= talloc_strdup(d, "cupsui6.dll");
-	d->local.environment		= talloc_strdup(d, "Windows NT x86");
-	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/i386");
 	d->ex				= true;
 
 	return test_add_driver_arg(tctx, p, d);
@@ -10901,14 +10961,15 @@ static bool test_add_driver_64(struct torture_context *tctx,
 
 	d = talloc_zero(tctx, struct torture_driver_context);
 
+	d->local.environment		= talloc_strdup(d, SPOOLSS_ARCHITECTURE_x64);
+	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/x64");
+
 	d->info8.version		= SPOOLSS_DRIVER_VERSION_200X;
-	d->info8.driver_name		= TORTURE_DRIVER;
-	d->info8.architecture		= NULL;
+	d->info8.driver_name		= TORTURE_DRIVER_ADD;
+	d->info8.architecture		= d->local.environment;
 	d->info8.driver_path		= talloc_strdup(d, "pscript5.dll");
 	d->info8.data_file		= talloc_strdup(d, "cups6.ppd");
 	d->info8.config_file		= talloc_strdup(d, "cupsui6.dll");
-	d->local.environment		= talloc_strdup(d, "Windows x64");
-	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/x64");
 	d->ex				= false;
 
 	return test_add_driver_arg(tctx, p, d);
@@ -10921,14 +10982,15 @@ static bool test_add_driver_32(struct torture_context *tctx,
 
 	d = talloc_zero(tctx, struct torture_driver_context);
 
+	d->local.environment		= talloc_strdup(d, SPOOLSS_ARCHITECTURE_NT_X86);
+	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/i386");
+
 	d->info8.version		= SPOOLSS_DRIVER_VERSION_200X;
-	d->info8.driver_name		= TORTURE_DRIVER;
-	d->info8.architecture		= NULL;
+	d->info8.driver_name		= TORTURE_DRIVER_ADD;
+	d->info8.architecture		= d->local.environment;
 	d->info8.driver_path		= talloc_strdup(d, "pscript5.dll");
 	d->info8.data_file		= talloc_strdup(d, "cups6.ppd");
 	d->info8.config_file		= talloc_strdup(d, "cupsui6.dll");
-	d->local.environment		= talloc_strdup(d, "Windows NT x86");
-	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/i386");
 	d->ex				= false;
 
 	return test_add_driver_arg(tctx, p, d);
@@ -10945,9 +11007,12 @@ static bool test_add_driver_adobe(struct torture_context *tctx,
 
 	d = talloc_zero(tctx, struct torture_driver_context);
 
+	d->local.environment		= talloc_strdup(d, "Windows 4.0");
+	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/adobe/");
+
 	d->info8.version		= SPOOLSS_DRIVER_VERSION_9X;
 	d->info8.driver_name		= TORTURE_DRIVER_ADOBE;
-	d->info8.architecture		= NULL;
+	d->info8.architecture		= d->local.environment;
 	d->info8.driver_path		= talloc_strdup(d, "ADOBEPS4.DRV");
 	d->info8.data_file		= talloc_strdup(d, "DEFPRTR2.PPD");
 	d->info8.config_file		= talloc_strdup(d, "ADOBEPS4.DRV");
@@ -10955,8 +11020,6 @@ static bool test_add_driver_adobe(struct torture_context *tctx,
 	d->info8.help_file		= talloc_strdup(d, "ADOBEPS4.HLP");
 	d->info8.monitor_name		= talloc_strdup(d, "PSMON.DLL");
 #endif
-	d->local.environment		= talloc_strdup(d, "Windows 4.0");
-	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/adobe/");
 	d->ex				= false;
 
 	return test_add_driver_arg(tctx, p, d);
@@ -10974,9 +11037,12 @@ static bool test_add_driver_adobe_cupsaddsmb(struct torture_context *tctx,
 
 	d = talloc_zero(tctx, struct torture_driver_context);
 
+	d->local.environment		= talloc_strdup(d, "Windows 4.0");
+	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/adobe/");
+
 	d->info8.version		= SPOOLSS_DRIVER_VERSION_9X;
 	d->info8.driver_name		= TORTURE_DRIVER_ADOBE_CUPSADDSMB;
-	d->info8.architecture		= NULL;
+	d->info8.architecture		= d->local.environment;
 	d->info8.driver_path		= talloc_strdup(d, "ADOBEPS4.DRV");
 	d->info8.data_file		= talloc_strdup(d, "DEFPRTR2.PPD");
 	d->info8.config_file		= NULL;
@@ -10994,8 +11060,6 @@ static bool test_add_driver_adobe_cupsaddsmb(struct torture_context *tctx,
 	a->string[5]			= talloc_strdup(a->string, "ICONLIB.DLL");
 
 	d->info8.dependent_files	= a;
-	d->local.environment		= talloc_strdup(d, "Windows 4.0");
-	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/adobe/");
 	d->ex				= false;
 
 	return test_add_driver_arg(tctx, p, d);
@@ -11009,15 +11073,16 @@ static bool test_add_driver_timestamps(struct torture_context *tctx,
 
 	d = talloc_zero(tctx, struct torture_driver_context);
 
+	d->local.environment		= talloc_strdup(d, SPOOLSS_ARCHITECTURE_NT_X86);
+	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/i386");
+
 	d->info8.version		= SPOOLSS_DRIVER_VERSION_200X;
 	d->info8.driver_name		= TORTURE_DRIVER_TIMESTAMPS;
-	d->info8.architecture		= NULL;
+	d->info8.architecture		= d->local.environment;
 	d->info8.driver_path		= talloc_strdup(d, "pscript5.dll");
 	d->info8.data_file		= talloc_strdup(d, "cups6.ppd");
 	d->info8.config_file		= talloc_strdup(d, "cupsui6.dll");
 	d->info8.driver_date		= timeval_to_nttime(&t);
-	d->local.environment		= talloc_strdup(d, "Windows NT x86");
-	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/i386");
 	d->ex				= true;
 
 	torture_assert(tctx,
@@ -11046,12 +11111,14 @@ static bool test_multiple_drivers(struct torture_context *tctx,
 
 	d = talloc_zero(tctx, struct torture_driver_context);
 
+	d->local.environment		= talloc_strdup(d, SPOOLSS_ARCHITECTURE_NT_X86);
+	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/i386");
+
 	d->info8.version		= SPOOLSS_DRIVER_VERSION_200X;
 	d->info8.driver_path		= talloc_strdup(d, "pscript5.dll");
 	d->info8.data_file		= talloc_strdup(d, "cups6.ppd");
 	d->info8.config_file		= talloc_strdup(d, "cupsui6.dll");
-	d->local.environment		= talloc_strdup(d, "Windows NT x86");
-	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/i386");
+	d->info8.architecture           = d->local.environment;
 	d->ex				= true;
 
 	torture_assert(tctx,
@@ -11067,7 +11134,6 @@ static bool test_multiple_drivers(struct torture_context *tctx,
 		"failed to upload printer driver");
 
 	info8 = d->info8;
-	info8.architecture      = d->local.environment;
 
 	for (i=0; i < 3; i++) {
 		info8.driver_name		= talloc_asprintf(d, "torture_test_driver_%d", i);
@@ -11109,7 +11175,8 @@ static bool test_multiple_drivers(struct torture_context *tctx,
 }
 
 static bool test_driver_copy_from_directory(struct torture_context *tctx,
-					    struct dcerpc_pipe *p)
+					    struct dcerpc_pipe *p,
+					    const char *architecture)
 {
 	struct torture_driver_context *d;
 	struct spoolss_StringArray *a;
@@ -11125,12 +11192,16 @@ static bool test_driver_copy_from_directory(struct torture_context *tctx,
 	d = talloc_zero(tctx, struct torture_driver_context);
 	torture_assert_not_null(tctx, d, "ENOMEM");
 
-	d->local.environment		=
-		talloc_asprintf(d, SPOOLSS_ARCHITECTURE_x64);
+	d->local.environment		= talloc_strdup(d, architecture);
 	torture_assert_not_null_goto(tctx, d->local.environment, ok, done, "ENOMEM");
 
-	d->local.driver_directory	=
-		talloc_asprintf(d, "/usr/share/cups/drivers/x64");
+	if (strequal(architecture, SPOOLSS_ARCHITECTURE_x64)) {
+		d->local.driver_directory =
+			talloc_strdup(d, "/usr/share/cups/drivers/x64");
+	} else {
+		d->local.driver_directory =
+			talloc_strdup(d, "/usr/share/cups/drivers/i386");
+	}
 	torture_assert_not_null_goto(tctx, d->local.driver_directory, ok, done, "ENOMEM");
 
 	d->remote.driver_upload_directory = GUID_string2(d, &guid);
@@ -11208,6 +11279,18 @@ done:
 	return ok;
 }
 
+static bool test_driver_copy_from_directory_64(struct torture_context *tctx,
+					       struct dcerpc_pipe *p)
+{
+	return test_driver_copy_from_directory(tctx, p, SPOOLSS_ARCHITECTURE_x64);
+}
+
+static bool test_driver_copy_from_directory_32(struct torture_context *tctx,
+					       struct dcerpc_pipe *p)
+{
+	return test_driver_copy_from_directory(tctx, p, SPOOLSS_ARCHITECTURE_NT_X86);
+}
+
 static bool test_del_driver_all_files(struct torture_context *tctx,
 				      struct dcerpc_pipe *p)
 {
@@ -11220,16 +11303,17 @@ static bool test_del_driver_all_files(struct torture_context *tctx,
 
 	d = talloc_zero(tctx, struct torture_driver_context);
 
+	d->local.environment		= talloc_strdup(d, SPOOLSS_ARCHITECTURE_x64);
+	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/x64");
+
 	d->ex				= true;
 	d->info8.version		= SPOOLSS_DRIVER_VERSION_200X;
 	d->info8.driver_name		= TORTURE_DRIVER_DELETER;
-	d->info8.architecture		= NULL;
+	d->info8.architecture		= d->local.environment;
 	d->info8.driver_path		= talloc_strdup(d, "pscript5.dll");
 	d->info8.data_file		= talloc_strdup(d, "cups6.ppd");
 	d->info8.config_file		= talloc_strdup(d, "cupsui6.dll");
 	d->info8.help_file		= talloc_strdup(d, "pscript.hlp");
-	d->local.environment		= talloc_strdup(d, SPOOLSS_ARCHITECTURE_x64);
-	d->local.driver_directory	= talloc_strdup(d, "/usr/share/cups/drivers/x64");
 
 	a				= talloc_zero(d, struct spoolss_StringArray);
 	a->string			= talloc_zero_array(a, const char *, 3);
@@ -11237,7 +11321,6 @@ static bool test_del_driver_all_files(struct torture_context *tctx,
 	a->string[1]			= talloc_strdup(a->string, "cups6.ini");
 
 	d->info8.dependent_files	= a;
-	d->info8.architecture		= d->local.environment;
 
 	torture_assert(tctx,
 		fillup_printserver_info(tctx, p, d),
@@ -11258,7 +11341,7 @@ static bool test_del_driver_all_files(struct torture_context *tctx,
 	torture_assert(tctx,
 		test_DeletePrinterDriverEx(tctx, b, server_name_slash,
 					   d->info8.driver_name,
-					   d->local.environment,
+					   d->info8.architecture,
 					   delete_flags,
 					   d->info8.version),
 		"failed to delete driver");
@@ -11282,6 +11365,10 @@ static bool test_del_driver_unused_files(struct torture_context *tctx,
 
 	d1 = talloc_zero(tctx, struct torture_driver_context);
 	d1->ex				= true;
+
+	d1->local.environment		= talloc_strdup(d1, SPOOLSS_ARCHITECTURE_x64);
+	d1->local.driver_directory	= talloc_strdup(d1, "/usr/share/cups/drivers/x64");
+
 	d1->info8.version		= SPOOLSS_DRIVER_VERSION_200X;
 	d1->info8.driver_name		= TORTURE_DRIVER_DELETER;
 	d1->info8.architecture		= NULL;
@@ -11289,12 +11376,14 @@ static bool test_del_driver_unused_files(struct torture_context *tctx,
 	d1->info8.data_file		= talloc_strdup(d1, "cups6.ppd");
 	d1->info8.config_file		= talloc_strdup(d1, "cupsui6.dll");
 	d1->info8.help_file		= talloc_strdup(d1, "pscript.hlp");
-	d1->local.environment		= talloc_strdup(d1, SPOOLSS_ARCHITECTURE_x64);
-	d1->local.driver_directory	= talloc_strdup(d1, "/usr/share/cups/drivers/x64");
 	d1->info8.architecture		= d1->local.environment;
 
 	d2 = talloc_zero(tctx, struct torture_driver_context);
 	d2->ex				= true;
+
+	d2->local.environment		= talloc_strdup(d2, SPOOLSS_ARCHITECTURE_x64);
+	d2->local.driver_directory	= talloc_strdup(d2, "/usr/share/cups/drivers/x64");
+
 	d2->info8.version		= SPOOLSS_DRIVER_VERSION_200X;
 	d2->info8.driver_name		= TORTURE_DRIVER_DELETERIN;
 	d2->info8.architecture		= NULL;
@@ -11302,8 +11391,6 @@ static bool test_del_driver_unused_files(struct torture_context *tctx,
 	d2->info8.data_file		= talloc_strdup(d2, "cupsps6.dll");
 	d2->info8.config_file		= talloc_strdup(d2, "cups6.ini");
 	d2->info8.help_file		= talloc_strdup(d2, "pscript.hlp");	/* overlapping */
-	d2->local.environment		= talloc_strdup(d2, SPOOLSS_ARCHITECTURE_x64);
-	d2->local.driver_directory	= talloc_strdup(d2, "/usr/share/cups/drivers/x64");
 	d2->info8.architecture		= d2->local.environment;
 
 	torture_assert(tctx,
@@ -11335,7 +11422,7 @@ static bool test_del_driver_unused_files(struct torture_context *tctx,
 	torture_assert(tctx,
 		test_DeletePrinterDriverEx_exp(tctx, b, server_name_slash,
 					       d1->info8.driver_name,
-					       d1->local.environment,
+					       d1->info8.architecture,
 					       DPD_DELETE_ALL_FILES,
 					       d1->info8.version,
 					       WERR_PRINTER_DRIVER_IN_USE),
@@ -11345,7 +11432,7 @@ static bool test_del_driver_unused_files(struct torture_context *tctx,
 	torture_assert(tctx,
 		test_DeletePrinterDriverEx_exp(tctx, b, server_name_slash,
 					       d1->info8.driver_name,
-					       d1->local.environment,
+					       d1->info8.architecture,
 					       DPD_DELETE_UNUSED_FILES,
 					       d1->info8.version,
 					       WERR_OK),
@@ -11365,7 +11452,7 @@ static bool test_del_driver_unused_files(struct torture_context *tctx,
 	torture_assert(tctx,
 		test_DeletePrinterDriverEx_exp(tctx, b, server_name_slash,
 					       d2->info8.driver_name,
-					       d2->local.environment,
+					       d2->info8.architecture,
 					       DPD_DELETE_ALL_FILES,
 					       d2->info8.version,
 					       WERR_OK),
@@ -11401,8 +11488,12 @@ struct torture_suite *torture_rpc_spoolss_driver(TALLOC_CTX *mem_ctx)
 	torture_rpc_tcase_add_test(tcase, "multiple_drivers", test_multiple_drivers);
 
 	torture_rpc_tcase_add_test(tcase,
-				   "test_driver_copy_from_directory",
-				   test_driver_copy_from_directory);
+				   "test_driver_copy_from_directory_64",
+				   test_driver_copy_from_directory_64);
+
+	torture_rpc_tcase_add_test(tcase,
+				   "test_driver_copy_from_directory_32",
+				   test_driver_copy_from_directory_32);
 
 	torture_rpc_tcase_add_test(tcase, "del_driver_all_files", test_del_driver_all_files);
 

@@ -2,35 +2,33 @@
 
 . "${TEST_SCRIPTS_DIR}/unit.sh"
 
-define_test "failing event script"
+define_test "enabled event script"
 
 setup_eventd
 
-cat > "$eventd_scriptdir/01.test" <<EOF
-#!/bin/sh
+ok_null
+simple_test script enable random 02.enabled
 
-exit 1
-EOF
-chmod +x "$eventd_scriptdir/01.test"
+ok_null
+simple_test script enable random 02.enabled
 
-required_result 1 <<EOF
-Failed to run event monitor, result=1
-EOF
-simple_test run monitor 30
+ok_null
+simple_test run 10 random monitor
 
-required_result 1 <<EOF
-01.test              ERROR      DURATION DATETIME
-  OUTPUT: 
+ok <<EOF
+01.disabled          DISABLED  
+02.enabled           OK         DURATION DATETIME
 EOF
-simple_test status monitor lastrun
+simple_test status random monitor
 
-required_result 0 <<EOF
-Event monitor has never passed
-EOF
-simple_test status monitor lastpass
+ok_null
+simple_test script enable random 01.disabled
 
-required_result 1 <<EOF
-01.test              ERROR      DURATION DATETIME
-  OUTPUT: 
+ok_null
+simple_test run 10 random monitor
+
+ok <<EOF
+01.disabled          OK         DURATION DATETIME
+02.enabled           OK         DURATION DATETIME
 EOF
-simple_test status monitor lastfail
+simple_test status random monitor

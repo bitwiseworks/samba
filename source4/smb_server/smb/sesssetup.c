@@ -39,6 +39,36 @@ struct sesssetup_context {
 };
 
 /*
+ * Log the SMB authentication, as by not calling GENSEC we won't log
+ * it during the gensec_session_info().
+ */
+void smbsrv_not_spengo_sesssetup_authz_log(struct smbsrv_request *req,
+					       struct auth_session_info *session_info)
+{
+	struct tsocket_address *local_address;
+	struct tsocket_address *remote_address;
+	TALLOC_CTX *frame = talloc_stackframe();
+
+	remote_address = socket_get_remote_addr(req->smb_conn->connection->socket,
+						frame);
+	local_address = socket_get_local_addr(req->smb_conn->connection->socket,
+					      frame);
+
+	log_successful_authz_event(req->smb_conn->connection->msg_ctx,
+				   req->smb_conn->lp_ctx,
+				   remote_address,
+				   local_address,
+				   "SMB",
+				   "bare-NTLM",
+				   AUTHZ_TRANSPORT_PROTECTION_SMB,
+				   session_info);
+
+	talloc_free(frame);
+	return;
+}
+
+
+/*
   setup the OS, Lanman and domain portions of a session setup reply
 */
 static void sesssetup_common_strings(struct smbsrv_request *req,
@@ -72,9 +102,11 @@ static void sesssetup_old_send(struct tevent_req *subreq)
 	struct auth_session_info *session_info;
 	struct smbsrv_session *smb_sess;
 	NTSTATUS status;
+	uint8_t authoritative = 0;
 	uint32_t flags;
 
-	status = auth_check_password_recv(subreq, req, &user_info_dc);
+	status = auth_check_password_recv(subreq, req, &user_info_dc,
+					  &authoritative);
 	TALLOC_FREE(subreq);
 	if (!NT_STATUS_IS_OK(status)) goto failed;
 
@@ -95,6 +127,8 @@ static void sesssetup_old_send(struct tevent_req *subreq)
 		status = NT_STATUS_INSUFFICIENT_RESOURCES;
 		goto failed;
 	}
+
+	smbsrv_not_spengo_sesssetup_authz_log(req, session_info);
 
 	/* Ensure this is marked as a 'real' vuid, not one
 	 * simply valid for the session setup leg */
@@ -117,7 +151,7 @@ failed:
 static void sesssetup_old(struct smbsrv_request *req, union smb_sesssetup *sess)
 {
 	struct auth_usersupplied_info *user_info = NULL;
-	struct tsocket_address *remote_address;
+	struct tsocket_address *remote_address, *local_address;
 	const char *remote_machine = NULL;
 	struct tevent_req *subreq;
 	struct sesssetup_context *state;
@@ -146,8 +180,13 @@ static void sesssetup_old(struct smbsrv_request *req, union smb_sesssetup *sess)
 		if (!remote_machine) goto nomem;
 	}
 
+	local_address = socket_get_local_addr(req->smb_conn->connection->socket, req);
+	if (!local_address) goto nomem;
+
 	user_info = talloc_zero(req, struct auth_usersupplied_info);
 	if (!user_info) goto nomem;
+
+	user_info->service_description = "SMB";
 	
 	user_info->mapped_state = false;
 	user_info->logon_parameters = 0;
@@ -155,7 +194,9 @@ static void sesssetup_old(struct smbsrv_request *req, union smb_sesssetup *sess)
 	user_info->client.account_name = sess->old.in.user;
 	user_info->client.domain_name = sess->old.in.domain;
 	user_info->workstation_name = remote_machine;
+
 	user_info->remote_host = talloc_steal(user_info, remote_address);
+	user_info->local_host = talloc_steal(user_info, local_address);
 	
 	user_info->password_state = AUTH_PASSWORD_RESPONSE;
 	user_info->password.response.lanman = sess->old.in.password;
@@ -202,11 +243,12 @@ static void sesssetup_nt1_send(struct tevent_req *subreq)
 	struct auth_user_info_dc *user_info_dc = NULL;
 	struct auth_session_info *session_info;
 	struct smbsrv_session *smb_sess;
-
+	uint8_t authoritative = 0;
 	uint32_t flags;
 	NTSTATUS status;
 
-	status = auth_check_password_recv(subreq, req, &user_info_dc);
+	status = auth_check_password_recv(subreq, req, &user_info_dc,
+					  &authoritative);
 	TALLOC_FREE(subreq);
 	if (!NT_STATUS_IS_OK(status)) goto failed;
 
@@ -229,6 +271,8 @@ static void sesssetup_nt1_send(struct tevent_req *subreq)
 		status = NT_STATUS_INSUFFICIENT_RESOURCES;
 		goto failed;
 	}
+
+	smbsrv_not_spengo_sesssetup_authz_log(req, session_info);
 
 	/* Ensure this is marked as a 'real' vuid, not one
 	 * simply valid for the session setup leg */
@@ -259,7 +303,7 @@ static void sesssetup_nt1(struct smbsrv_request *req, union smb_sesssetup *sess)
 {
 	NTSTATUS status;
 	struct auth_usersupplied_info *user_info = NULL;
-	struct tsocket_address *remote_address;
+	struct tsocket_address *remote_address, *local_address;
 	const char *remote_machine = NULL;
 	struct tevent_req *subreq;
 	struct sesssetup_context *state;
@@ -322,8 +366,14 @@ static void sesssetup_nt1(struct smbsrv_request *req, union smb_sesssetup *sess)
 		if (!remote_machine) goto nomem;
 	}
 
+	local_address = socket_get_local_addr(req->smb_conn->connection->socket, req);
+	if (!local_address) goto nomem;
+
 	user_info = talloc_zero(req, struct auth_usersupplied_info);
 	if (!user_info) goto nomem;
+
+	user_info->service_description = "SMB";
+	user_info->auth_description = "bare-NTLM";
 
 	user_info->mapped_state = false;
 	user_info->logon_parameters = 0;
@@ -332,6 +382,7 @@ static void sesssetup_nt1(struct smbsrv_request *req, union smb_sesssetup *sess)
 	user_info->client.domain_name = sess->nt1.in.domain;
 	user_info->workstation_name = remote_machine;
 	user_info->remote_host = talloc_steal(user_info, remote_address);
+	user_info->local_host = talloc_steal(user_info, local_address);
 	
 	user_info->password_state = AUTH_PASSWORD_RESPONSE;
 	user_info->password.response.lanman = sess->nt1.in.password1;
@@ -448,7 +499,7 @@ static void sesssetup_spnego(struct smbsrv_request *req, union smb_sesssetup *se
 	/* lookup an existing session */
 	if (vuid == 0) {
 		struct gensec_security *gensec_ctx;
-
+		struct tsocket_address *remote_address, *local_address;
 		status = samba_server_gensec_start(req,
 						   req->smb_conn->connection->event.ctx,
 						   req->smb_conn->connection->msg_ctx,
@@ -462,6 +513,45 @@ static void sesssetup_spnego(struct smbsrv_request *req, union smb_sesssetup *se
 		}
 
 		gensec_want_feature(gensec_ctx, GENSEC_FEATURE_SESSION_KEY);
+		gensec_want_feature(gensec_ctx, GENSEC_FEATURE_SMB_TRANSPORT);
+
+		remote_address = socket_get_remote_addr(req->smb_conn->connection->socket,
+							req);
+		if (!remote_address) {
+			status = NT_STATUS_INTERNAL_ERROR;
+			DBG_ERR("Failed to obtain remote address");
+			goto failed;
+		}
+
+		status = gensec_set_remote_address(gensec_ctx,
+						   remote_address);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("Failed to set remote address");
+			goto failed;
+		}
+
+		local_address = socket_get_local_addr(req->smb_conn->connection->socket,
+							req);
+		if (!local_address) {
+			status = NT_STATUS_INTERNAL_ERROR;
+			DBG_ERR("Failed to obtain local address");
+			goto failed;
+		}
+
+		status = gensec_set_local_address(gensec_ctx,
+						   local_address);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("Failed to set local address");
+			goto failed;
+		}
+
+		status = gensec_set_target_service_description(gensec_ctx,
+							       "SMB");
+
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("Failed to set service description");
+			goto failed;
+		}
 
 		status = gensec_start_mech_by_oid(gensec_ctx, req->smb_conn->negotiate.oid);
 		if (!NT_STATUS_IS_OK(status)) {

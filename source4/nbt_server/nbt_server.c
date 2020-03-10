@@ -30,7 +30,7 @@
 #include "dsdb/samdb/samdb.h"
 #include "param/param.h"
 
-NTSTATUS server_service_nbtd_init(void);
+NTSTATUS server_service_nbtd_init(TALLOC_CTX *);
 
 /*
   startup the nbtd task
@@ -73,7 +73,12 @@ static void nbtd_task_init(struct task_server *task)
 		return;
 	}
 
-	nbtsrv->sam_ctx = samdb_connect(nbtsrv, task->event_ctx, task->lp_ctx, system_session(task->lp_ctx), 0);
+	nbtsrv->sam_ctx = samdb_connect(nbtsrv,
+				        task->event_ctx,
+					task->lp_ctx,
+					system_session(task->lp_ctx),
+					NULL,
+					0);
 	if (nbtsrv->sam_ctx == NULL) {
 		task_server_terminate(task, "nbtd failed to open samdb", true);
 		return;
@@ -98,7 +103,11 @@ static void nbtd_task_init(struct task_server *task)
 /*
   register ourselves as a available server
 */
-NTSTATUS server_service_nbtd_init(void)
+NTSTATUS server_service_nbtd_init(TALLOC_CTX *ctx)
 {
-	return register_server_service("nbt", nbtd_task_init);
+	struct service_details details = {
+		.inhibit_fork_on_accept = true,
+		.inhibit_pre_fork = true
+	};
+	return register_server_service(ctx, "nbt", nbtd_task_init, &details);
 }

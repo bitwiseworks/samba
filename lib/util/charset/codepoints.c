@@ -20,10 +20,12 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 */
-#include "includes.h"
+#include "replace.h"
 #include "lib/util/charset/charset.h"
 #include "system/locale.h"
 #include "dynconfig/dynconfig.h"
+#include "lib/util/debug.h"
+#include "lib/util/byteorder.h"
 
 #ifdef strcasecmp
 #undef strcasecmp
@@ -16500,13 +16502,19 @@ struct smb_iconv_handle {
 	smb_iconv_t conv_handles[NUM_CHARSETS][NUM_CHARSETS];
 };
 
-struct smb_iconv_handle *global_iconv_handle = NULL;
+static struct smb_iconv_handle *global_iconv_handle = NULL;
 
 struct smb_iconv_handle *get_iconv_handle(void)
 {
-	if (global_iconv_handle == NULL)
-		global_iconv_handle = smb_iconv_handle_reinit(talloc_autofree_context(),
-							      "ASCII", "UTF-8", true, NULL);
+	if (global_iconv_handle == NULL) {
+		global_iconv_handle =
+			smb_iconv_handle_reinit(NULL,
+						"ASCII",
+						"UTF-8",
+						true,
+						NULL);
+	}
+
 	return global_iconv_handle;
 }
 
@@ -16517,6 +16525,24 @@ struct smb_iconv_handle *get_iconv_testing_handle(TALLOC_CTX *mem_ctx,
 {
 	return smb_iconv_handle_reinit(mem_ctx,
 				       dos_charset, unix_charset, use_builtin_handlers, NULL);
+}
+
+struct smb_iconv_handle *reinit_iconv_handle(TALLOC_CTX *mem_ctx,
+				const char *dos_charset,
+				const char *unix_charset)
+{
+	global_iconv_handle =
+		smb_iconv_handle_reinit(mem_ctx,
+					dos_charset,
+					unix_charset,
+					true,
+					global_iconv_handle);
+	return global_iconv_handle;
+}
+
+void free_iconv_handle(void)
+{
+	TALLOC_FREE(global_iconv_handle);
 }
 
 /**
@@ -16817,6 +16843,10 @@ _PUBLIC_ codepoint_t next_codepoint_ext(const char *str, size_t len,
 
 _PUBLIC_ codepoint_t next_codepoint(const char *str, size_t *size)
 {
+	if ((str[0] & 0x80) == 0) {
+		*size = 1;
+		return str[0];
+	}
 	return next_codepoint_handle(get_iconv_handle(), str, size);
 }
 

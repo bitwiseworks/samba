@@ -7,7 +7,7 @@
 	<manvolnum>8</manvolnum>
 	<refmiscinfo class="source">Samba</refmiscinfo>
 	<refmiscinfo class="manual">System Administration tools</refmiscinfo>
-	<refmiscinfo class="version">4.6</refmiscinfo>
+	<refmiscinfo class="version">&doc.version;</refmiscinfo>
 </refmeta>
 
 
@@ -62,7 +62,26 @@
 	<programlisting>
 		<smbconfsection name="[share]"/>
 		<smbconfoption name="vfs objects">ceph</smbconfoption>
+		<smbconfoption name="path">/non-mounted/cephfs/path</smbconfoption>
+		<smbconfoption name="kernel share modes">no</smbconfoption>
 	</programlisting>
+
+	<para>
+		Since <command>vfs_ceph</command> does not require a filesystem
+		mount, the share <command>path</command> is treated differently:
+		it is interpreted as an absolute path within the Ceph filesystem
+		on the attached Ceph cluster.
+		In a ctdb cluster environment where ctdb manages Samba,
+		<command>CTDB_SAMBA_SKIP_SHARE_CHECK=yes</command> must be
+		configured to disable local share path checks, otherwise ctdb
+		will not reach a healthy state.
+	</para>
+
+	<para>
+		Note that currently <command>kernel share modes</command> have
+		to be disabled in a share running with the CephFS vfs module for
+		file serving to work properly.
+	</para>
 </refsect1>
 
 <refsect1>
@@ -83,6 +102,20 @@
 		</listitem>
 		</varlistentry>
 
+		<varlistentry>
+		<term>ceph:user_id = name</term>
+		<listitem>
+		<para>
+			Allows one to explicitly set the client ID used for the
+			CephFS mount handle. Empty by default (CephFS uses the
+			process id).
+		</para>
+		<para>
+			Example: ceph:user_id = samba
+		</para>
+		</listitem>
+		</varlistentry>
+
 	</variablelist>
 
 </refsect1>
@@ -91,7 +124,7 @@
 	<title>VERSION</title>
 
 	<para>
-		This man page is correct for version 4.2.0 of the Samba suite.
+		This man page is part of version &doc.version; of the Samba suite.
 	</para>
 </refsect1>
 

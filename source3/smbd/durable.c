@@ -22,6 +22,7 @@
 
 #include "includes.h"
 #include "system/filesys.h"
+#include "lib/util/server_id.h"
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
 #include "libcli/security/security.h"
@@ -193,10 +194,7 @@ NTSTATUS vfs_default_durable_disconnect(struct files_struct *fsp,
 
 	/* Ensure any pending write time updates are done. */
 	if (fsp->update_write_time_event) {
-		update_write_time_handler(fsp->conn->sconn->ev_ctx,
-					fsp->update_write_time_event,
-					timeval_current(),
-					(void *)fsp);
+		fsp_flush_write_time_update(fsp);
 	}
 
 	/*
@@ -303,30 +301,6 @@ static bool vfs_default_durable_reconnect_check_stat(
 				const char *name)
 {
 	int ret;
-
-	if (cookie_st->st_ex_dev != fsp_st->st_ex_dev) {
-		DEBUG(1, ("vfs_default_durable_reconnect (%s): "
-			  "stat_ex.%s differs: "
-			  "cookie:%llu != stat:%llu, "
-			  "denying durable reconnect\n",
-			  name,
-			  "st_ex_dev",
-			  (unsigned long long)cookie_st->st_ex_dev,
-			  (unsigned long long)fsp_st->st_ex_dev));
-		return false;
-	}
-
-	if (cookie_st->st_ex_ino != fsp_st->st_ex_ino) {
-		DEBUG(1, ("vfs_default_durable_reconnect (%s): "
-			  "stat_ex.%s differs: "
-			  "cookie:%llu != stat:%llu, "
-			  "denying durable reconnect\n",
-			  name,
-			  "st_ex_ino",
-			  (unsigned long long)cookie_st->st_ex_ino,
-			  (unsigned long long)fsp_st->st_ex_ino));
-		return false;
-	}
 
 	if (cookie_st->st_ex_mode != fsp_st->st_ex_mode) {
 		DEBUG(1, ("vfs_default_durable_reconnect (%s): "

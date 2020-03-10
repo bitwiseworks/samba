@@ -23,10 +23,10 @@
 #include "torture/smbtorture.h"
 #include "torture/raw/proto.h"
 
-NTSTATUS torture_raw_init(void)
+NTSTATUS torture_raw_init(TALLOC_CTX *ctx)
 {
 	struct torture_suite *suite = torture_suite_create(
-		talloc_autofree_context(), "raw");
+		ctx, "raw");
 	/* RAW smb tests */
 	torture_suite_add_simple_test(suite, "bench-oplock", torture_bench_oplock);
 	torture_suite_add_simple_test(suite, "ping-pong", torture_ping_pong);
@@ -79,7 +79,7 @@ NTSTATUS torture_raw_init(void)
 
 	suite->description = talloc_strdup(suite, "Tests for the raw SMB interface");
 
-	torture_register_suite(suite);
+	torture_register_suite(ctx, suite);
 
 	return NT_STATUS_OK;
 }

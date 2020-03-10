@@ -85,11 +85,154 @@ out:
 	return ret;
 }
 
+static bool fill_default_spns(TALLOC_CTX *ctx, const char *machine_name,
+                                          const char *my_fqdn, const char *spn,
+					  const char ***spns)
+{
+	char *psp1, *psp2;
+
+	if (*spns == NULL) {
+		*spns = talloc_zero_array(ctx, const char*, 3);
+		if (*spns == NULL) {
+			return false;
+		}
+	}
+
+	psp1 = talloc_asprintf(ctx,
+			       "%s/%s",
+			       spn,
+			       machine_name);
+	if (psp1 == NULL) {
+		return false;
+	}
+
+	if (!strlower_m(&psp1[strlen(spn) + 1])) {
+		return false;
+	}
+	(*spns)[0] = psp1;
+
+	psp2 = talloc_asprintf(ctx,
+			       "%s/%s",
+			       spn,
+			       my_fqdn);
+	if (psp2 == NULL) {
+		return false;
+	}
+
+	if (!strlower_m(&psp2[strlen(spn) + 1])) {
+		return false;
+	}
+
+	(*spns)[1] = psp2;
+
+	return true;
+}
+
+static bool ads_set_machine_account_spns(TALLOC_CTX *ctx,
+					 ADS_STRUCT *ads,
+					 const char *service_or_spn,
+					 const char *my_fqdn)
+{
+	const char **spn_names = NULL;
+	ADS_STATUS aderr;
+	struct spn_struct* spn_struct = NULL;
+	char *tmp = NULL;
+
+	/* SPN should have '/' */
+	tmp = strchr_m(service_or_spn, '/');
+	if (tmp != NULL) {
+		spn_struct = parse_spn(ctx, service_or_spn);
+		if (spn_struct == NULL) {
+			return false;
+		}
+	}
+
+	DBG_INFO("Attempting to add/update '%s'\n", service_or_spn);
+
+	if (spn_struct != NULL) {
+		spn_names = talloc_zero_array(ctx, const char*, 2);
+		spn_names[0] = service_or_spn;
+	} else {
+		bool ok;
+
+		ok = fill_default_spns(ctx,
+				       lp_netbios_name(),
+				       my_fqdn,
+				       service_or_spn,
+				       &spn_names);
+		if (!ok) {
+			return false;
+		}
+	}
+	aderr = ads_add_service_principal_names(ads,
+						lp_netbios_name(),
+						spn_names);
+	if (!ADS_ERR_OK(aderr)) {
+		DBG_WARNING("Failed to add service principal name.\n");
+		return false;
+	}
+
+	return true;
+}
+
+/*
+ * Create kerberos principal(s) from SPN or service name.
+ */
+static bool service_or_spn_to_kerberos_princ(TALLOC_CTX *ctx,
+					     const char *service_or_spn,
+					     const char *my_fqdn,
+					     char **p_princ_s,
+					     char **p_short_princ_s)
+{
+	char *princ_s = NULL;
+	char *short_princ_s = NULL;
+	const char *service = service_or_spn;
+	const char *host = my_fqdn;
+	struct spn_struct* spn_struct = NULL;
+	char *tmp = NULL;
+	bool ok = true;
+
+	/* SPN should have '/' */
+	tmp = strchr_m(service_or_spn, '/');
+	if (tmp != NULL) {
+		spn_struct = parse_spn(ctx, service_or_spn);
+		if (spn_struct == NULL) {
+			ok = false;
+			goto out;
+		}
+	}
+	if (spn_struct != NULL) {
+		service = spn_struct->serviceclass;
+		host = spn_struct->host;
+	}
+	princ_s = talloc_asprintf(ctx, "%s/%s@%s",
+				  service,
+				  host, lp_realm());
+	if (princ_s == NULL) {
+		ok = false;
+		goto out;
+	}
+
+	if (spn_struct == NULL) {
+		short_princ_s = talloc_asprintf(ctx, "%s/%s@%s",
+					service, lp_netbios_name(),
+					lp_realm());
+		if (short_princ_s == NULL) {
+			ok = false;
+			goto out;
+		}
+	}
+	*p_princ_s = princ_s;
+	*p_short_princ_s = short_princ_s;
+out:
+	return ok;
+}
+
 /**********************************************************************
  Adds a single service principal, i.e. 'host' to the system keytab
 ***********************************************************************/
 
-int ads_keytab_add_entry(ADS_STRUCT *ads, const char *srvPrinc)
+int ads_keytab_add_entry(ADS_STRUCT *ads, const char *srvPrinc, bool update_ads)
 {
 	krb5_error_code ret = 0;
 	krb5_context context = NULL;
@@ -114,8 +257,6 @@ int ads_keytab_add_entry(ADS_STRUCT *ads, const char *srvPrinc)
 	char *password_s = NULL;
 	char *my_fqdn;
 	TALLOC_CTX *tmpctx = NULL;
-	char *machine_name;
-	ADS_STATUS aderr;
 	int i;
 
 	initialize_krb5_error_table();
@@ -163,15 +304,13 @@ int ads_keytab_add_entry(ADS_STRUCT *ads, const char *srvPrinc)
 		goto out;
 	}
 
-	machine_name = ads_get_samaccountname(ads, tmpctx, lp_netbios_name());
-	if (!machine_name) {
+	/* make sure we have a single instance of a the computer account */
+	if (!ads_has_samaccountname(ads, tmpctx, lp_netbios_name())) {
 		DEBUG(0, (__location__ ": unable to determine machine "
 			  "account's short name in AD!\n"));
 		ret = -1;
 		goto out;
 	}
-	/*strip the trailing '$' */
-	machine_name[strlen(machine_name)-1] = '\0';
 
 	/* Construct our principal */
 	if (strchr_m(srvPrinc, '@')) {
@@ -194,16 +333,11 @@ int ads_keytab_add_entry(ADS_STRUCT *ads, const char *srvPrinc)
 		 * can obtain credentials for it and double-check the salt value
 		 * used to generate the service's keys. */
 
-		princ_s = talloc_asprintf(tmpctx, "%s/%s@%s",
-					  srvPrinc, my_fqdn, lp_realm());
-		if (!princ_s) {
-			ret = -1;
-			goto out;
-		}
-		short_princ_s = talloc_asprintf(tmpctx, "%s/%s@%s",
-						srvPrinc, machine_name,
-						lp_realm());
-		if (short_princ_s == NULL) {
+		if (!service_or_spn_to_kerberos_princ(tmpctx,
+						      srvPrinc,
+						      my_fqdn,
+						      &princ_s,
+						      &short_princ_s)) {
 			ret = -1;
 			goto out;
 		}
@@ -213,16 +347,13 @@ int ads_keytab_add_entry(ADS_STRUCT *ads, const char *srvPrinc)
 		   host/... principal in the AD account.
 		   So only create these in the keytab, not in AD.  --jerry */
 
-		if (!strequal(srvPrinc, "cifs") &&
+		if (update_ads && !strequal(srvPrinc, "cifs") &&
 		    !strequal(srvPrinc, "host")) {
-			DEBUG(3, (__location__ ": Attempting to add/update "
-				  "'%s'\n", princ_s));
-
-			aderr = ads_add_service_principal_name(ads,
-					lp_netbios_name(), my_fqdn, srvPrinc);
-			if (!ADS_ERR_OK(aderr)) {
-				DEBUG(1, (__location__ ": failed to "
-					 "ads_add_service_principal_name.\n"));
+			if (!ads_set_machine_account_spns(tmpctx,
+							  ads,
+							  srvPrinc,
+							  my_fqdn)) {
+				ret = -1;
 				goto out;
 			}
 		}
@@ -375,6 +506,7 @@ int ads_keytab_create_default(ADS_STRUCT *ads)
 	char **spn_array;
 	size_t num_spns;
 	size_t i;
+	bool ok = false;
 	ADS_STATUS status;
 
 	ZERO_STRUCT(kt_entry);
@@ -413,7 +545,7 @@ int ads_keytab_create_default(ADS_STRUCT *ads)
 		p[0] = '\0';
 
 		/* Add the SPNs found on the DC */
-		ret = ads_keytab_add_entry(ads, srv_princ);
+		ret = ads_keytab_add_entry(ads, srv_princ, false);
 		if (ret != 0) {
 			DEBUG(1, ("ads_keytab_add_entry failed while "
 				  "adding '%s' principal.\n",
@@ -426,7 +558,7 @@ int ads_keytab_create_default(ADS_STRUCT *ads)
 	   really needs them and we will fall back to verifying against
 	   secrets.tdb */
 
-	ret = ads_keytab_add_entry(ads, "cifs"));
+	ret = ads_keytab_add_entry(ads, "cifs", false));
 	if (ret != 0 ) {
 		DEBUG(1, (__location__ ": ads_keytab_add_entry failed while "
 			  "adding 'cifs'.\n"));
@@ -451,14 +583,23 @@ int ads_keytab_create_default(ADS_STRUCT *ads)
 	}
 
 	/* now add the userPrincipalName and sAMAccountName entries */
-	sam_account_name = ads_get_samaccountname(ads, frame, machine_name);
-	if (!sam_account_name) {
+	ok = ads_has_samaccountname(ads, frame, machine_name);
+	if (!ok) {
 		DEBUG(0, (__location__ ": unable to determine machine "
 			  "account's name in AD!\n"));
 		ret = -1;
 		goto done;
 	}
 
+	/*
+	 * append '$' to netbios name so 'ads_keytab_add_entry' recognises
+	 * it as a machine account rather than a service or Windows SPN.
+	 */
+	sam_account_name = talloc_asprintf(frame, "%s$",machine_name);
+	if (sam_account_name == NULL) {
+		ret = -1;
+		goto done;
+	}
 	/* upper case the sAMAccountName to make it easier for apps to
 	   know what case to use in the keytab file */
 	if (!strupper_m(sam_account_name)) {
@@ -466,7 +607,7 @@ int ads_keytab_create_default(ADS_STRUCT *ads)
 		goto done;
 	}
 
-	ret = ads_keytab_add_entry(ads, sam_account_name);
+	ret = ads_keytab_add_entry(ads, sam_account_name, false);
 	if (ret != 0) {
 		DEBUG(1, (__location__ ": ads_keytab_add_entry() failed "
 			  "while adding sAMAccountName (%s)\n",
@@ -477,7 +618,7 @@ int ads_keytab_create_default(ADS_STRUCT *ads)
 	/* remember that not every machine account will have a upn */
 	upn = ads_get_upn(ads, frame, machine_name);
 	if (upn) {
-		ret = ads_keytab_add_entry(ads, upn);
+		ret = ads_keytab_add_entry(ads, upn, false);
 		if (ret != 0) {
 			DEBUG(1, (__location__ ": ads_keytab_add_entry() "
 				  "failed while adding UPN (%s)\n", upn));
@@ -591,7 +732,7 @@ int ads_keytab_create_default(ADS_STRUCT *ads)
 
 	ret = 0;
 	for (i = 0; oldEntries[i]; i++) {
-		ret |= ads_keytab_add_entry(ads, oldEntries[i]);
+		ret |= ads_keytab_add_entry(ads, oldEntries[i], false);
 		TALLOC_FREE(oldEntries[i]);
 	}
 
@@ -639,15 +780,15 @@ int ads_keytab_list(const char *keytab_name)
 		return ret;
 	}
 
-#ifdef HAVE_ADS
 	if (keytab_name == NULL) {
-		ret = ads_keytab_open(context, &keytab);
-	} else {
-#endif
-		ret = smb_krb5_kt_open(context, keytab_name, False, &keytab);
 #ifdef HAVE_ADS
-	}
+		ret = ads_keytab_open(context, &keytab);
+#else
+		ret = ENOENT;
 #endif
+	} else {
+		ret = smb_krb5_kt_open(context, keytab_name, False, &keytab);
+	}
 	if (ret) {
 		DEBUG(1, ("smb_krb5_kt_open failed (%s)\n",
 			  error_message(ret)));

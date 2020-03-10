@@ -35,6 +35,7 @@
 struct smb2_connect_state {
 	struct tevent_context *ev;
 	struct cli_credentials *credentials;
+	bool fallback_to_anonymous;
 	uint64_t previous_session_id;
 	struct resolve_context *resolve_ctx;
 	const char *host;
@@ -50,6 +51,7 @@ struct smb2_connect_state {
 	struct smb2_tree *tree;
 };
 
+static void smb2_connect_session_start(struct tevent_req *req);
 static void smb2_connect_socket_done(struct composite_context *creq);
 
 /*
@@ -63,6 +65,8 @@ struct tevent_req *smb2_connect_send(TALLOC_CTX *mem_ctx,
 				     const char *share,
 				     struct resolve_context *resolve_ctx,
 				     struct cli_credentials *credentials,
+				     bool fallback_to_anonymous,
+				     struct smbXcli_conn **existing_conn,
 				     uint64_t previous_session_id,
 				     const struct smbcli_options *options,
 				     const char *socket_options,
@@ -81,6 +85,7 @@ struct tevent_req *smb2_connect_send(TALLOC_CTX *mem_ctx,
 
 	state->ev = ev;
 	state->credentials = credentials;
+	state->fallback_to_anonymous = fallback_to_anonymous;
 	state->previous_session_id = previous_session_id;
 	state->options = *options;
 	state->host = host;
@@ -104,6 +109,25 @@ struct tevent_req *smb2_connect_send(TALLOC_CTX *mem_ctx,
 				    state->host, state->share);
 	if (tevent_req_nomem(state->unc, req)) {
 		return tevent_req_post(req, ev);
+	}
+
+	if (existing_conn != NULL) {
+		NTSTATUS status;
+
+		status = smb2_transport_raw_init(state, ev,
+						 existing_conn,
+						 options,
+						 &state->transport);
+		if (tevent_req_nterror(req, status)) {
+			return tevent_req_post(req, ev);
+		}
+
+		smb2_connect_session_start(req);
+		if (!tevent_req_is_in_progress(req)) {
+			return tevent_req_post(req, ev);
+		}
+
+		return req;
 	}
 
 	creq = smbcli_sock_connect_send(state, NULL, state->ports,
@@ -155,7 +179,8 @@ static void smb2_connect_socket_done(struct composite_context *creq)
 	subreq = smbXcli_negprot_send(state, state->ev,
 				      state->transport->conn, timeout_msec,
 				      min_protocol,
-				      state->transport->options.max_protocol);
+				      state->transport->options.max_protocol,
+				      state->transport->options.max_credits);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
@@ -169,10 +194,6 @@ static void smb2_connect_negprot_done(struct tevent_req *subreq)
 	struct tevent_req *req =
 		tevent_req_callback_data(subreq,
 		struct tevent_req);
-	struct smb2_connect_state *state =
-		tevent_req_data(req,
-		struct smb2_connect_state);
-	struct smb2_transport *transport = state->transport;
 	NTSTATUS status;
 
 	status = smbXcli_negprot_recv(subreq);
@@ -181,8 +202,16 @@ static void smb2_connect_negprot_done(struct tevent_req *subreq)
 		return;
 	}
 
-	/* This is a hack... */
-	smb2cli_conn_set_max_credits(transport->conn, 30);
+	smb2_connect_session_start(req);
+}
+
+static void smb2_connect_session_start(struct tevent_req *req)
+{
+	struct smb2_connect_state *state =
+		tevent_req_data(req,
+		struct smb2_connect_state);
+	struct smb2_transport *transport = state->transport;
+	struct tevent_req *subreq = NULL;
 
 	state->session = smb2_session_init(transport, state->gensec_settings, state);
 	if (tevent_req_nomem(state->session, req)) {
@@ -214,6 +243,34 @@ static void smb2_connect_session_done(struct tevent_req *subreq)
 
 	status = smb2_session_setup_spnego_recv(subreq);
 	TALLOC_FREE(subreq);
+	if (!NT_STATUS_IS_OK(status) &&
+	    !cli_credentials_is_anonymous(state->credentials) &&
+	    state->fallback_to_anonymous) {
+		struct cli_credentials *anon_creds = NULL;
+
+		/*
+		 * The transport was moved to session,
+		 * we need to revert that before removing
+		 * the old broken session.
+		 */
+		state->transport = talloc_move(state, &state->session->transport);
+		TALLOC_FREE(state->session);
+
+		anon_creds = cli_credentials_init_anon(state);
+		if (tevent_req_nomem(anon_creds, req)) {
+			return;
+		}
+		cli_credentials_set_workstation(anon_creds,
+		   cli_credentials_get_workstation(state->credentials),
+		   CRED_SPECIFIED);
+
+		/*
+		 * retry with anonymous credentials
+		 */
+		state->credentials = anon_creds;
+		smb2_connect_session_start(req);
+		return;
+	}
 	if (tevent_req_nterror(req, status)) {
 		return;
 	}
@@ -305,6 +362,8 @@ NTSTATUS smb2_connect_ext(TALLOC_CTX *mem_ctx,
 				   share,
 				   resolve_ctx,
 				   credentials,
+				   false, /* fallback_to_anonymous */
+				   NULL, /* existing_conn */
 				   previous_session_id,
 				   options,
 				   socket_options,

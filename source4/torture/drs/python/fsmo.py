@@ -25,6 +25,7 @@
 #  PYTHONPATH="$PYTHONPATH:$samba4srcdir/torture/drs/python" $SUBUNITRUN fsmo -U"$DOMAIN/$DC_USERNAME"%"$DC_PASSWORD"
 #
 
+from __future__ import print_function
 import sys
 import time
 import os
@@ -58,9 +59,8 @@ class DrsFsmoTestCase(drs_base.DrsBaseTestCase):
         # find out where is samba-tool command
         net_cmd = os.path.abspath("./bin/samba-tool")
         # make command line credentials string
-        creds = self.get_credentials()
-        cmd_line_auth = "-U%s/%s%%%s" % (creds.get_domain(),
-                                         creds.get_username(), creds.get_password())
+        ccache_name = self.get_creds_ccache_name()
+        cmd_line_auth = "--krb5-ccache=%s" % ccache_name
         (result, out, err) = self.runsubcmd("fsmo", "transfer",
                                             "--role=%s" % role,
                                             "-H", "ldap://%s:389" % DC,
@@ -99,7 +99,7 @@ class DrsFsmoTestCase(drs_base.DrsBaseTestCase):
         """Triggers transfer of role from DC1 to DC2
            and vice versa so the role goes back to the original dc"""
         # dc2 gets the role from dc1
-        print "Testing for %s role transfer from %s to %s" % (role, self.dnsname_dc1, self.dnsname_dc2)
+        print("Testing for %s role transfer from %s to %s" % (role, self.dnsname_dc1, self.dnsname_dc2))
 
         self._net_fsmo_role_transfer(DC=self.dnsname_dc2, role=role)
         # check if the role is transfered
@@ -110,7 +110,7 @@ class DrsFsmoTestCase(drs_base.DrsBaseTestCase):
                         "Transferring %s role to %s has failed, master is: %s!"%(role, self.dsServiceName_dc2, master))
 
         # dc1 gets back the role from dc2
-        print "Testing for %s role transfer from %s to %s" % (role, self.dnsname_dc2, self.dnsname_dc1)
+        print("Testing for %s role transfer from %s to %s" % (role, self.dnsname_dc2, self.dnsname_dc1))
         self._net_fsmo_role_transfer(DC=self.dnsname_dc1, role=role)
         # check if the role is transfered
         (res, master) = self._wait_for_role_transfer(ldb_dc=self.ldb_dc1,
@@ -120,7 +120,7 @@ class DrsFsmoTestCase(drs_base.DrsBaseTestCase):
                         "Transferring %s role to %s has failed, master is: %s!"%(role, self.dsServiceName_dc1, master))
 
         # dc1 keeps the role
-        print "Testing for no-op %s role transfer from %s to %s" % (role, self.dnsname_dc2, self.dnsname_dc1)
+        print("Testing for no-op %s role transfer from %s to %s" % (role, self.dnsname_dc2, self.dnsname_dc1))
         self._net_fsmo_role_transfer(DC=self.dnsname_dc1, role=role, noop=True)
         # check if the role is transfered
         (res, master) = self._wait_for_role_transfer(ldb_dc=self.ldb_dc1,

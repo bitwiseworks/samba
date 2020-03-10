@@ -23,6 +23,7 @@
 
 #include "includes.h"
 #include "system/filesys.h"
+#include "lib/util/server_id.h"
 #include "locking/proto.h"
 #include "dbwrap/dbwrap.h"
 #include "dbwrap/dbwrap_rbt.h"
@@ -144,7 +145,8 @@ static bool posix_lock_in_range(off_t *offset_out, off_t *count_out,
 	 * Truncate count to end at max lock offset.
 	 */
 
-	if (offset + count < 0 || offset + count > max_positive_lock_offset) {
+	if (offset > INT64_MAX - count ||
+	    offset + count > max_positive_lock_offset) {
 		count = max_positive_lock_offset - offset;
 	}
 

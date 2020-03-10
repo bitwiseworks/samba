@@ -57,15 +57,14 @@
       </varlistentry>
 
       <varlistentry><term>-f <parameter>FILENAME</parameter></term>
-        <listitem>
-          <para>
-            Specify an alternative nodes FILENAME to use instead of
-            the default.  This option overrides the CTDB_NODES_FILE
-            and CTDB_NODES variables.  See the discussion of
-            <filename>/usr/local/etc/ctdb/nodes</filename> in the FILES section
-            for more details.
+      <listitem>
+	<para>
+	  Specify an alternative nodes FILENAME to use instead of
+	  the default.  See the discussion of
+	  <filename>/usr/local/etc/ctdb/nodes</filename> in the
+	  FILES section for more details.
 	  </para>
-        </listitem>
+      </listitem>
       </varlistentry>
 
       <varlistentry><term>-i</term>
@@ -74,8 +73,8 @@
 	    Keep standard input open, allowing data to be piped to
 	    onnode.  Normally onnode closes stdin to avoid surprises
 	    when scripting.  Note that this option is ignored when
-	    using <option>-p</option> or if <envar>SSH</envar> is set
-	    to anything other than "ssh".
+	    using <option>-p</option> or if <envar>ONNODE_SSH</envar>
+	    is set to anything other than "ssh".
 	  </para>
         </listitem>
       </varlistentry>
@@ -235,32 +234,6 @@
   </refsect1>
 
   <refsect1>
-    <title>ENVIRONMENT</title>
-
-    <variablelist>
-      <varlistentry><term><envar>CTDB_BASE</envar></term>
-        <listitem>
-          <para>
-	    Directory containing CTDB configuration files.  The
-	    default is <filename>/usr/local/etc/ctdb</filename>.
-	  </para>
-        </listitem>
-      </varlistentry>
-
-      <varlistentry><term><envar>CTDB_NODES_FILE</envar></term>
-        <listitem>
-          <para>
-	    Name of alternative nodes file to use instead of the
-	    default.  See the <citetitle>FILES</citetitle> section for
-	    more details.
-	  </para>
-        </listitem>
-      </varlistentry>
-
-    </variablelist>
-  </refsect1>
-
-  <refsect1>
     <title>FILES</title>
 
     <variablelist>
@@ -271,37 +244,29 @@
             or hostname.
 	  </para>
 	  <para>
-	    As above, a file specified via the <option>-f</option> or
-	    <envar>CTDB_NODES_FILE</envar> is given precedence.  If a
+	    As above, a file specified via the <option>-f</option>
+	    is given precedence.  If a
 	    relative path is specified and no corresponding file
 	    exists relative to the current directory then the file is
-	    also searched for in the <filename>$CTDB_BASE</filename>
-	    directory.
-	  </para>
-	  <para>
-	    If <envar>CTDB_NODES_FILE</envar> is not set and
-	    <envar>CTDB_NODES</envar> is set in configuration then the
-	    file pointed to by <envar>CTDB_NODES</envar> is used.
+	    also searched for in the CTDB configuration directory.
 	  </para>
 	  <para>
 	    Otherwise the default is
-	    <filename>$CTDB_BASE/nodes</filename>, where
-	    <envar>CTDB_BASE</envar> defaults to
-	    <filename>/usr/local/etc/ctdb</filename>.
+	    <filename>/usr/local/etc/ctdb/nodes</filename>.
           </para>
 	</listitem>
       </varlistentry>
 
-      <varlistentry><term><filename>/usr/local/etc/ctdb/onnode.conf</filename></term>
-        <listitem>
-          <para>
-            If this file exists it is sourced by onnode.  The main
-            purpose is to allow the administrator to set
-            <envar>SSH</envar> to something other than "ssh".  In this
-            case the -t option is ignored.  For example, the
-            administrator may choose to use use rsh instead of ssh.
+      <varlistentry>
+	<term><filename>/usr/local/etc/ctdb/onnode.conf</filename></term>
+	<listitem>
+	  <para>
+	    If this file exists it is sourced by onnode.  The main
+	    purpose is to allow the administrator to set
+	    <envar>ONNODE_SSH</envar> to something other than "ssh".
+	    In this case the -t option is ignored.
 	  </para>
-        </listitem>
+	</listitem>
       </varlistentry>
     </variablelist>
   </refsect1>

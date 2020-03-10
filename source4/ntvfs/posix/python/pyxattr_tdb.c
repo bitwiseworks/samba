@@ -19,6 +19,7 @@
 */
 
 #include <Python.h>
+#include "python/py3compat.h"
 #include "includes.h"
 #include "system/filesys.h"
 #include <tdb.h>
@@ -31,8 +32,6 @@
 #include "lib/dbwrap/dbwrap_open.h"
 #include "lib/dbwrap/dbwrap_tdb.h"
 #include "source3/lib/xattr_tdb.h"
-
-void initxattr_tdb(void);
 
 static PyObject *py_is_xattr_supported(PyObject *self)
 {
@@ -51,7 +50,7 @@ static PyObject *py_wrap_setxattr(PyObject *self, PyObject *args)
 	struct file_id id;
 	struct stat sbuf;
 
-	if (!PyArg_ParseTuple(args, "ssss#", &tdbname, &filename, &attribute, 
+	if (!PyArg_ParseTuple(args, "sss"PYARG_BYTES_LEN, &tdbname, &filename, &attribute,
 						  &blob.data, &blobsize))
 		return NULL;
 
@@ -138,7 +137,7 @@ static PyObject *py_wrap_getxattr(PyObject *self, PyObject *args)
 		talloc_free(mem_ctx);
 		return NULL;
 	}
-	ret_obj = PyString_FromStringAndSize((char *)blob.data, xattr_size);
+	ret_obj = Py_BuildValue(PYARG_BYTES_LEN, blob.data, xattr_size);
 	talloc_free(mem_ctx);
 	return ret_obj;
 }
@@ -155,13 +154,23 @@ static PyMethodDef py_xattr_methods[] = {
 	{ NULL }
 };
 
-void initxattr_tdb(void)
+static struct PyModuleDef moduledef = {
+    PyModuleDef_HEAD_INIT,
+    .m_name = "xattr_tdb",
+    .m_doc = "Python bindings for xattr manipulation.",
+    .m_size = -1,
+    .m_methods = py_xattr_methods,
+};
+
+MODULE_INIT_FUNC(xattr_tdb)
 {
 	PyObject *m;
 
-	m = Py_InitModule3("xattr_tdb", py_xattr_methods,
-			   "Python bindings for xattr manipulation.");
+	m = PyModule_Create(&moduledef);
+
 	if (m == NULL)
-		return;
+		return NULL;
+
+	return m;
 }
 

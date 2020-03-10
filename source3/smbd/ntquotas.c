@@ -74,6 +74,8 @@ NTSTATUS vfs_get_ntquota(files_struct *fsp, enum SMB_QUOTA_TYPE qtype,
 	int ret;
 	SMB_DISK_QUOTA D;
 	unid_t id;
+	struct smb_filename *smb_fname_cwd = NULL;
+	int saved_errno = 0;
 
 	ZERO_STRUCT(D);
 
@@ -91,7 +93,23 @@ NTSTATUS vfs_get_ntquota(files_struct *fsp, enum SMB_QUOTA_TYPE qtype,
 		return NT_STATUS_NO_SUCH_USER;
 	}
 
-	ret = SMB_VFS_GET_QUOTA(fsp->conn, ".", qtype, id, &D);
+	smb_fname_cwd = synthetic_smb_fname(talloc_tos(),
+				".",
+				NULL,
+				NULL,
+				0);
+	if (smb_fname_cwd == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	ret = SMB_VFS_GET_QUOTA(fsp->conn, smb_fname_cwd, qtype, id, &D);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(smb_fname_cwd);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
 
 	if (psid)
 		qt->sid    = *psid;
@@ -139,7 +157,7 @@ int vfs_set_ntquota(files_struct *fsp, enum SMB_QUOTA_TYPE qtype, struct dom_sid
 	return ret;
 }
 
-static bool allready_in_quota_list(SMB_NTQUOTA_LIST *qt_list, uid_t uid)
+static bool already_in_quota_list(SMB_NTQUOTA_LIST *qt_list, uid_t uid)
 {
 	SMB_NTQUOTA_LIST *tmp_list = NULL;
 	
@@ -179,8 +197,8 @@ int vfs_get_user_ntquota_list(files_struct *fsp, SMB_NTQUOTA_LIST **qt_list)
 
 		ZERO_STRUCT(tmp_qt);
 
-		if (allready_in_quota_list((*qt_list),usr->pw_uid)) {
-			DEBUG(5,("record for uid[%ld] allready in the list\n",(long)usr->pw_uid));
+		if (already_in_quota_list((*qt_list),usr->pw_uid)) {
+			DEBUG(5,("record for uid[%ld] already in the list\n",(long)usr->pw_uid));
 			continue;
 		}
 

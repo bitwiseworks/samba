@@ -49,9 +49,9 @@ bool torture_libnetapi_init_context(struct torture_context *tctx,
 	}
 
 	libnetapi_set_username(ctx,
-		cli_credentials_get_username(cmdline_credentials));
+		cli_credentials_get_username(popt_get_cmdline_credentials()));
 	libnetapi_set_password(ctx,
-		cli_credentials_get_password(cmdline_credentials));
+		cli_credentials_get_password(popt_get_cmdline_credentials()));
 
 	*ctx_p = ctx;
 
@@ -80,11 +80,11 @@ static bool torture_libnetapi_initialize(struct torture_context *tctx)
 	return true;
 }
 
-NTSTATUS torture_libnetapi_init(void)
+NTSTATUS torture_libnetapi_init(TALLOC_CTX *ctx)
 {
 	struct torture_suite *suite;
 
-	suite = torture_suite_create(talloc_autofree_context(), "netapi");
+	suite = torture_suite_create(ctx, "netapi");
 
 	torture_suite_add_simple_test(suite, "server", torture_libnetapi_server);
 	torture_suite_add_simple_test(suite, "group", torture_libnetapi_group);
@@ -93,7 +93,7 @@ NTSTATUS torture_libnetapi_init(void)
 
 	suite->description = talloc_strdup(suite, "libnetapi convenience interface tests");
 
-	torture_register_suite(suite);
+	torture_register_suite(ctx, suite);
 
 	return NT_STATUS_OK;
 }

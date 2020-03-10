@@ -74,7 +74,8 @@ static int inject_unix_error(const char *vfs_func, vfs_handle_struct *handle)
 	return 0;
 }
 
-static int vfs_error_inject_chdir(vfs_handle_struct *handle, const char *path)
+static int vfs_error_inject_chdir(vfs_handle_struct *handle,
+				  const struct smb_filename *smb_fname)
 {
 	int error;
 
@@ -84,7 +85,7 @@ static int vfs_error_inject_chdir(vfs_handle_struct *handle, const char *path)
 		return -1;
 	}
 
-	return SMB_VFS_NEXT_CHDIR(handle, path);
+	return SMB_VFS_NEXT_CHDIR(handle, smb_fname);
 }
 
 static struct vfs_fn_pointers vfs_error_inject_fns = {
@@ -92,7 +93,7 @@ static struct vfs_fn_pointers vfs_error_inject_fns = {
 };
 
 static_decl_vfs;
-NTSTATUS vfs_error_inject_init(void)
+NTSTATUS vfs_error_inject_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "error_inject",
 				&vfs_error_inject_fns);

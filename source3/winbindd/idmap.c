@@ -143,7 +143,7 @@ static bool idmap_init(void)
 
 	DEBUG(10, ("idmap_init(): calling static_init_idmap\n"));
 
-	static_init_idmap;
+	static_init_idmap(NULL);
 
 	initialized = true;
 
@@ -177,10 +177,55 @@ static bool idmap_init(void)
 	return true;
 }
 
+const char *idmap_config_const_string(const char *domname, const char *option,
+				      const char *def)
+{
+	int len = snprintf(NULL, 0, "idmap config %s", domname);
+
+	if (len == -1) {
+		return NULL;
+	}
+	{
+		char config_option[len+1];
+		snprintf(config_option, sizeof(config_option),
+			 "idmap config %s", domname);
+		return lp_parm_const_string(-1, config_option, option, def);
+	}
+}
+
+bool idmap_config_bool(const char *domname, const char *option, bool def)
+{
+	int len = snprintf(NULL, 0, "idmap config %s", domname);
+
+	if (len == -1) {
+		return def;
+	}
+	{
+		char config_option[len+1];
+		snprintf(config_option, sizeof(config_option),
+			 "idmap config %s", domname);
+		return lp_parm_bool(-1, config_option, option, def);
+	}
+}
+
+int idmap_config_int(const char *domname, const char *option, int def)
+{
+	int len = snprintf(NULL, 0, "idmap config %s", domname);
+
+	if (len == -1) {
+		return def;
+	}
+	{
+		char config_option[len+1];
+		snprintf(config_option, sizeof(config_option),
+			 "idmap config %s", domname);
+		return lp_parm_int(-1, config_option, option, def);
+	}
+}
+
 bool domain_has_idmap_config(const char *domname)
 {
 	int i;
-	char *config_option;
 	const char *range = NULL;
 	const char *backend = NULL;
 	bool ok;
@@ -198,23 +243,14 @@ bool domain_has_idmap_config(const char *domname)
 
 	/* fallback: also check loadparm */
 
-	config_option = talloc_asprintf(talloc_tos(), "idmap config %s",
-					domname);
-	if (config_option == NULL) {
-		DEBUG(0, ("out of memory\n"));
-		return false;
-	}
-
-	range = lp_parm_const_string(-1, config_option, "range", NULL);
-	backend = lp_parm_const_string(-1, config_option, "backend", NULL);
+	range = idmap_config_const_string(domname, "range", NULL);
+	backend = idmap_config_const_string(domname, "backend", NULL);
 	if (range != NULL && backend != NULL) {
 		DEBUG(5, ("idmap configuration specified for domain '%s'\n",
 			domname));
-		TALLOC_FREE(config_option);
 		return true;
 	}
 
-	TALLOC_FREE(config_option);
 	return false;
 }
 
@@ -266,11 +302,6 @@ bool idmap_is_offline(void)
 {
 	return ( lp_winbind_offline_logon() &&
 	     get_global_winbindd_state_offline() );
-}
-
-bool idmap_is_online(void)
-{
-	return !idmap_is_offline();
 }
 
 /**********************************************************************
@@ -340,7 +371,6 @@ static struct idmap_domain *idmap_init_domain(TALLOC_CTX *mem_ctx,
 {
 	struct idmap_domain *result;
 	NTSTATUS status;
-	char *config_option = NULL;
 	const char *range;
 	unsigned low_id = 0;
 	unsigned high_id = 0;
@@ -384,17 +414,8 @@ static struct idmap_domain *idmap_init_domain(TALLOC_CTX *mem_ctx,
 	 * load ranges and read only information from the config
 	 */
 
-	config_option = talloc_asprintf(result, "idmap config %s",
-					result->name);
-	if (config_option == NULL) {
-		DEBUG(0, ("Out of memory!\n"));
-		goto fail;
-	}
-
-	result->read_only = lp_parm_bool(-1, config_option, "read only", false);
-	range = lp_parm_const_string(-1, config_option, "range", NULL);
-
-	talloc_free(config_option);
+	result->read_only = idmap_config_bool(result->name, "read only", false);
+	range = idmap_config_const_string(result->name, "range", NULL);
 
 	if (range == NULL) {
 		if (check_range) {
@@ -448,7 +469,6 @@ static struct idmap_domain *idmap_init_named_domain(TALLOC_CTX *mem_ctx,
 						    const char *domname)
 {
 	struct idmap_domain *result = NULL;
-	char *config_option;
 	const char *backend;
 	bool ok;
 
@@ -457,14 +477,7 @@ static struct idmap_domain *idmap_init_named_domain(TALLOC_CTX *mem_ctx,
 		return NULL;
 	}
 
-	config_option = talloc_asprintf(talloc_tos(), "idmap config %s",
-					domname);
-	if (config_option == NULL) {
-		DEBUG(0, ("talloc failed\n"));
-		goto fail;
-	}
-
-	backend = lp_parm_const_string(-1, config_option, "backend", NULL);
+	backend = idmap_config_const_string(domname, "backend", NULL);
 	if (backend == NULL) {
 		DEBUG(10, ("no idmap backend configured for domain '%s'\n",
 			   domname));
@@ -476,11 +489,9 @@ static struct idmap_domain *idmap_init_named_domain(TALLOC_CTX *mem_ctx,
 		goto fail;
 	}
 
-	TALLOC_FREE(config_option);
 	return result;
 
 fail:
-	TALLOC_FREE(config_option);
 	TALLOC_FREE(result);
 	return NULL;
 }

@@ -39,6 +39,7 @@ def build(bld):
            smb2cli_flush.c
            smb2cli_set_info.c
            smb2cli_query_info.c
+           smb2cli_notify.c
            smb2cli_query_directory.c
            smb2cli_ioctl.c
            smb2cli_echo.c
@@ -64,3 +65,8 @@ def build(bld):
                     tstream_smbXcli_np.h
     ''',
     )
+
+    bld.SAMBA_BINARY('test_smb1cli_session',
+                     source='test_smb1cli_session.c',
+                     deps='cmocka cli_smb_common',
+                     install=False)

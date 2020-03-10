@@ -16,7 +16,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
+from __future__ import print_function
 
 import optparse
 import sys
@@ -30,9 +30,12 @@ from samba import sites
 from samba import subnets
 from samba.auth import system_session
 from samba.samdb import SamDB
+from samba import gensec
+from samba.credentials import Credentials, DONT_USE_KERBEROS
 import samba.tests
+from samba.tests import delete_force
 from samba.dcerpc import security
-from ldb import SCOPE_SUBTREE
+from ldb import SCOPE_SUBTREE, LdbError, ERR_INSUFFICIENT_ACCESS_RIGHTS
 
 parser = optparse.OptionParser("sites.py [options] <host>")
 sambaopts = options.SambaOptions(parser)
@@ -182,6 +185,89 @@ class SimpleSubnetTests(SitesBaseTests):
 
         self.assertRaises(subnets.SubnetNotFound,
                           subnets.delete_subnet, self.ldb, basedn, cidr)
+
+    def get_user_and_ldb(self, username, password, hostname=ldaphost):
+        """Get a connection for a temporarily user that will vanish as soon as
+        the test is over."""
+        user = self.ldb.newuser(username, password)
+        creds_tmp = Credentials()
+        creds_tmp.set_username(username)
+        creds_tmp.set_password(password)
+        creds_tmp.set_domain(creds.get_domain())
+        creds_tmp.set_realm(creds.get_realm())
+        creds_tmp.set_workstation(creds.get_workstation())
+        creds_tmp.set_gensec_features(creds_tmp.get_gensec_features()
+                                      | gensec.FEATURE_SEAL)
+        creds_tmp.set_kerberos_state(DONT_USE_KERBEROS)
+        ldb_target = SamDB(url=hostname, credentials=creds_tmp, lp=lp)
+        self.addCleanup(delete_force, self.ldb, self.get_user_dn(username))
+        return (user, ldb_target)
+
+    def test_rename_delete_good_subnet_to_good_subnet_other_user(self):
+        """Make sure that we can't rename or delete subnets when we aren't
+        admin."""
+        basedn = self.ldb.get_config_basedn()
+        cidr = "10.16.0.0/24"
+        new_cidr = "10.16.1.0/24"
+        subnets.create_subnet(self.ldb, basedn, cidr, self.sitename)
+        user, non_admin_ldb = self.get_user_and_ldb("notadmin", "samba123@")
+        try:
+            subnets.rename_subnet(non_admin_ldb, basedn, cidr, new_cidr)
+        except LdbError as e:
+            self.assertEqual(e.args[0], ERR_INSUFFICIENT_ACCESS_RIGHTS,
+                             ("subnet rename by non-admin failed "
+                              "in the wrong way: %s" % e))
+        else:
+            self.fail("subnet rename by non-admin succeeded: %s" % e)
+
+        ret = self.ldb.search(base=basedn, scope=SCOPE_SUBTREE,
+                              expression='(&(objectclass=subnet)(cn=%s))' % cidr)
+
+        self.assertEqual(len(ret), 1, ('Subnet %s destroyed or renamed '
+                                       'by non-admin' % cidr))
+
+        ret = self.ldb.search(base=basedn, scope=SCOPE_SUBTREE,
+                              expression=('(&(objectclass=subnet)(cn=%s))'
+                                          % new_cidr))
+
+        self.assertEqual(len(ret), 0,
+                         'New subnet %s created by non-admin' % cidr)
+
+        try:
+            subnets.delete_subnet(non_admin_ldb, basedn, cidr)
+        except LdbError as e:
+            self.assertEqual(e.args[0], ERR_INSUFFICIENT_ACCESS_RIGHTS,
+                             ("subnet delete by non-admin failed "
+                              "in the wrong way: %s" % e))
+        else:
+            self.fail("subnet delete by non-admin succeeded: %s" % e)
+
+        ret = self.ldb.search(base=basedn, scope=SCOPE_SUBTREE,
+                              expression='(&(objectclass=subnet)(cn=%s))' % cidr)
+
+        self.assertEqual(len(ret), 1, 'Subnet %s deleted non-admin' % cidr)
+
+        subnets.delete_subnet(self.ldb, basedn, cidr)
+
+    def test_create_good_subnet_other_user(self):
+        """Make sure that we can't create subnets when we aren't admin."""
+        basedn = self.ldb.get_config_basedn()
+        cidr = "10.16.0.0/24"
+        user, non_admin_ldb = self.get_user_and_ldb("notadmin", "samba123@")
+        try:
+            subnets.create_subnet(non_admin_ldb, basedn, cidr, self.sitename)
+        except LdbError as e:
+            self.assertEqual(e.args[0], ERR_INSUFFICIENT_ACCESS_RIGHTS,
+                             ("subnet create by non-admin failed "
+                              "in the wrong way: %s" % e))
+        else:
+            subnets.delete_subnet(self.ldb, basedn, cidr)
+            self.fail("subnet create by non-admin succeeded: %s")
+
+        ret = self.ldb.search(base=basedn, scope=SCOPE_SUBTREE,
+                              expression='(&(objectclass=subnet)(cn=%s))' % cidr)
+
+        self.assertEqual(len(ret), 0, 'New subnet %s created by non-admin' % cidr)
 
     def test_rename_good_subnet_to_good_subnet(self):
         """Make sure that we can rename subnets"""
@@ -387,18 +473,18 @@ class SimpleSubnetTests(SitesBaseTests):
             try:
                 subnets.create_subnet(self.ldb, basedn, cidr, self.sitename)
             except subnets.SubnetInvalid:
-                print >> sys.stderr, "%s fails properly" % (cidr,)
+                print("%s fails properly" % (cidr,), file=sys.stderr)
                 continue
 
             # we are here because it succeeded when it shouldn't have.
-            print >> sys.stderr, "CIDR %s fails to fail" % (cidr,)
+            print("CIDR %s fails to fail" % (cidr,), file=sys.stderr)
             failures.append(cidr)
             subnets.delete_subnet(self.ldb, basedn, cidr)
 
         if failures:
-            print "These bad subnet names were accepted:"
+            print("These bad subnet names were accepted:")
             for cidr in failures:
-                print "    %s" % cidr
+                print("    %s" % cidr)
             self.fail()
 
     def test_create_good_ranges(self):
@@ -526,8 +612,8 @@ class SimpleSubnetTests(SitesBaseTests):
         for cidr in cidrs:
             try:
                 subnets.create_subnet(self.ldb, basedn, cidr, self.sitename)
-            except subnets.SubnetInvalid, e:
-                print e
+            except subnets.SubnetInvalid as e:
+                print(e)
                 failures.append(cidr)
                 continue
 
@@ -536,15 +622,15 @@ class SimpleSubnetTests(SitesBaseTests):
                                               cidr))
 
             if len(ret) != 1:
-                print "%s was not created" % cidr
+                print("%s was not created" % cidr)
                 failures.append(cidr)
                 continue
             subnets.delete_subnet(self.ldb, basedn, cidr)
 
         if failures:
-            print "These good subnet names were not accepted:"
+            print("These good subnet names were not accepted:")
             for cidr in failures:
-                print "    %s" % cidr
+                print("    %s" % cidr)
             self.fail()
 
 

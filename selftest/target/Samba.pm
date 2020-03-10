@@ -22,33 +22,71 @@ sub new($$$$$) {
 	return $self;
 }
 
+%Samba::ENV_DEPS = (%Samba3::ENV_DEPS, %Samba4::ENV_DEPS);
+our %ENV_DEPS;
+
+%Samba::ENV_TARGETS = (
+	(map { $_ => "Samba3" } keys %Samba3::ENV_DEPS),
+	(map { $_ => "Samba4" } keys %Samba4::ENV_DEPS),
+);
+our %ENV_TARGETS;
+
+%Samba::ENV_NEEDS_AD_DC = (
+	(map { $_ => 1 } keys %Samba4::ENV_DEPS)
+);
+our %ENV_NEEDS_AD_DC;
+foreach my $env (keys %Samba3::ENV_DEPS) {
+    $ENV_NEEDS_AD_DC{$env} = ($env =~ /^ad_/);
+}
+
 sub setup_env($$$)
 {
 	my ($self, $envname, $path) = @_;
 
-	$ENV{ENVNAME} = $envname;
-
-	my $env = $self->{samba4}->setup_env($envname, $path);
-	if (defined($env) and $env ne "UNKNOWN") {
-	    if (not defined($env->{target})) {
-		$env->{target} = $self->{samba4};
-	    }
-	} elsif (defined($env) and $env eq "UNKNOWN") {
-	   	$env = $self->{samba3}->setup_env($envname, $path);
-		if (defined($env) and $env ne "UNKNOWN") {
-		    if (not defined($env->{target})) {
-			$env->{target} = $self->{samba3};
-		    }
-		}
-	}
-	if (defined($env) and ($env eq "UNKNOWN")) {
+	my $targetname = $ENV_TARGETS{$envname};
+	if (not defined($targetname)) {
 		warn("Samba can't provide environment '$envname'");
 		return "UNKNOWN";
 	}
-	if (not defined $env) {
+
+	my %targetlookup = (
+		"Samba3" => $self->{samba3},
+		"Samba4" => $self->{samba4}
+	);
+	my $target = $targetlookup{$targetname};
+
+	if (defined($target->{vars}->{$envname})) {
+		return $target->{vars}->{$envname};
+	}
+
+	my @dep_vars;
+	foreach(@{$ENV_DEPS{$envname}}) {
+		my $vars = $self->setup_env($_, $path);
+		if (defined($vars)) {
+			push(@dep_vars, $vars);
+		} else {
+			warn("Failed setting up $_ as a dependency of $envname");
+			return undef;
+		}
+	}
+
+	$ENV{ENVNAME} = $envname;
+	# Avoid hitting system krb5.conf -
+	# An env that needs Kerberos will reset this to the real value.
+	$ENV{KRB5_CONFIG} = "$path/no_krb5.conf";
+
+	my $setup_name = $ENV_TARGETS{$envname}."::setup_".$envname;
+	my $setup_sub = \&$setup_name;
+	my $env = &$setup_sub($target, "$path/$envname", @dep_vars);
+
+	if (not defined($env)) {
 		warn("failed to start up environment '$envname'");
 		return undef;
 	}
+
+	$target->{vars}->{$envname} = $env;
+	$target->{vars}->{$envname}->{target} = $target;
+
 	return $env;
 }
 
@@ -201,6 +239,13 @@ sub mk_krb5_conf($$)
  ticket_lifetime = 24h
  forwardable = yes
  allow_weak_crypto = yes
+ # Set the grace clocskew to 5 seconds
+ # This is especially required by samba3.raw.session krb5 and
+ # reauth tests
+ clockskew = 5
+ # We are running on the same machine, do not correct
+ # system clock differences
+ kdc_timesync = 0
 
 ";
 
@@ -247,7 +292,7 @@ sub mk_realms_stanza($$$$)
 {
 	my ($realm, $dnsname, $domain, $kdc_ipv4) = @_;
 	my $lc_domain = lc($domain);
-	
+
 	my $realms_stanza = "
  $realm = {
   kdc = $kdc_ipv4:88
@@ -274,6 +319,55 @@ sub mk_realms_stanza($$$$)
         return $realms_stanza;
 }
 
+sub mk_mitkdc_conf($$)
+{
+	# samba_kdb_dir is the path to mit_samba.so
+	my ($ctx, $samba_kdb_dir) = @_;
+
+	unless (open(KDCCONF, ">$ctx->{mitkdc_conf}")) {
+	        warn("can't open $ctx->{mitkdc_conf}$?");
+		return undef;
+	}
+
+	print KDCCONF "
+# Generated kdc.conf for $ctx->{realm}
+
+[kdcdefaults]
+	kdc_ports = 88
+	kdc_tcp_ports = 88
+
+[realms]
+	$ctx->{realm} = {
+	}
+
+	$ctx->{dnsname} = {
+	}
+
+	$ctx->{domain} = {
+	}
+
+[dbmodules]
+	db_module_dir = $samba_kdb_dir
+
+	$ctx->{realm} = {
+		db_library = samba
+	}
+
+	$ctx->{dnsname} = {
+		db_library = samba
+	}
+
+	$ctx->{domain} = {
+		db_library = samba
+	}
+
+[logging]
+	kdc = FILE:$ctx->{logdir}/mit_kdc.log
+";
+
+	close(KDCCONF);
+}
+
 sub get_interface($)
 {
     my ($netbiosname) = @_;
@@ -290,6 +384,9 @@ sub get_interface($)
 
     # 11-16 used by selftest.pl for client interfaces
 
+    $interfaces{"addc_no_nss"} = 17;
+    $interfaces{"addc_no_ntlm"} = 18;
+    $interfaces{"idmapadmember"} = 19;
     $interfaces{"idmapridmember"} = 20;
     $interfaces{"localdc"} = 21;
     $interfaces{"localvampiredc"} = 22;
@@ -309,10 +406,15 @@ sub get_interface($)
     $interfaces{"fakednsforwarder1"} = 36;
     $interfaces{"fakednsforwarder2"} = 37;
     $interfaces{"s4member_dflt"} = 38;
+    $interfaces{"vampire2000dc"} = 39;
+    $interfaces{"backupfromdc"} = 40;
+    $interfaces{"restoredc"} = 41;
+    $interfaces{"renamedc"} = 42;
+    $interfaces{"labdc"} = 43;
 
     # update lib/socket_wrapper/socket_wrapper.c
-    #  #define MAX_WRAPPED_INTERFACES 40
-    # if you wish to have more than 40 interfaces
+    #  #define MAX_WRAPPED_INTERFACES 64
+    # if you wish to have more than 64 interfaces
 
     if (not defined($interfaces{$netbiosname})) {
 	die();
@@ -343,6 +445,12 @@ sub cleanup_child($$)
 	printf STDERR "%s child process %d exited with value %d\n", $name, $childpid, $? >> 8;
     }
     return $childpid;
+}
+
+sub random_domain_sid()
+{
+	my $domain_sid = "S-1-5-21-". int(rand(4294967295)) . "-" . int(rand(4294967295)) . "-" . int(rand(4294967295));
+	return $domain_sid;
 }
 
 1;

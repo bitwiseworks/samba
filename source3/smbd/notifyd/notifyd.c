@@ -19,6 +19,7 @@
 
 #include "replace.h"
 #include <tevent.h>
+#include "lib/util/server_id.h"
 #include "lib/util/data_blob.h"
 #include "librpc/gen_ndr/notify.h"
 #include "librpc/gen_ndr/messaging.h"
@@ -56,7 +57,7 @@ struct notifyd_state {
 	/*
 	 * Database of everything clients show interest in. Indexed by
 	 * absolute path. The database keys are not 0-terminated
-	 * because the criticial operation, notifyd_trigger, can walk
+	 * to allow the criticial operation, notifyd_trigger, to walk
 	 * the structure from the top without adding intermediate 0s.
 	 * The database records contain an array of
 	 *
@@ -80,7 +81,7 @@ struct notifyd_state {
 	 * broadcasts its messaging_reclog to every other notifyd in
 	 * the cluster. This is done by making ctdb send a message to
 	 * srvid CTDB_SRVID_SAMBA_NOTIFY_PROXY with destination node
-	 * number CTDB_BROADCAST_VNNMAP. Everybody in the cluster who
+	 * number CTDB_BROADCAST_CONNECTED. Everybody in the cluster who
 	 * had called register_with_ctdbd this srvid will receive the
 	 * broadcasts.
 	 *
@@ -178,7 +179,8 @@ static int sys_notify_watch_dummy(
 #ifdef CLUSTER_SUPPORT
 static void notifyd_broadcast_reclog_finished(struct tevent_req *subreq);
 static void notifyd_clean_peers_finished(struct tevent_req *subreq);
-static int notifyd_snoop_broadcast(uint32_t src_vnn, uint32_t dst_vnn,
+static int notifyd_snoop_broadcast(struct tevent_context *ev,
+				   uint32_t src_vnn, uint32_t dst_vnn,
 				   uint64_t dst_srvid,
 				   const uint8_t *msg, size_t msglen,
 				   void *private_data);
@@ -997,7 +999,7 @@ static void notifyd_broadcast_reclog(struct ctdbd_connection *ctdbd_conn,
 				  .iov_len = blob.length };
 
 	ret = ctdbd_messaging_send_iov(
-		ctdbd_conn, CTDB_BROADCAST_VNNMAP,
+		ctdbd_conn, CTDB_BROADCAST_CONNECTED,
 		CTDB_SRVID_SAMBA_NOTIFY_PROXY, iov, ARRAY_SIZE(iov));
 	TALLOC_FREE(blob.data);
 	if (ret != 0) {
@@ -1386,7 +1388,8 @@ fail:
  * broadcast, which will then trigger a fresh database pull.
  */
 
-static int notifyd_snoop_broadcast(uint32_t src_vnn, uint32_t dst_vnn,
+static int notifyd_snoop_broadcast(struct tevent_context *ev,
+				   uint32_t src_vnn, uint32_t dst_vnn,
 				   uint64_t dst_srvid,
 				   const uint8_t *msg, size_t msglen,
 				   void *private_data)

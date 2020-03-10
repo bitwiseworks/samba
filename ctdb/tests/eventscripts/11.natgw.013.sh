@@ -4,7 +4,7 @@
 
 define_test "master node, no gateway"
 
-setup_ctdb
+setup
 
 setup_ctdb_natgw <<EOF
 192.168.1.21 master
@@ -13,7 +13,9 @@ setup_ctdb_natgw <<EOF
 192.168.1.24
 EOF
 
+setup_script_options <<EOF
 CTDB_NATGW_DEFAULT_GATEWAY=""
+EOF
 
 ok_null
 simple_test_event "ipreallocated"

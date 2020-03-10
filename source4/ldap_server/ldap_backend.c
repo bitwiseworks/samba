@@ -24,12 +24,14 @@
 #include "auth/credentials/credentials.h"
 #include "auth/gensec/gensec.h"
 #include "auth/gensec/gensec_internal.h" /* TODO: remove this */
+#include "auth/common_auth.h"
 #include "param/param.h"
 #include "smbd/service_stream.h"
 #include "dsdb/samdb/samdb.h"
 #include <ldb_errors.h>
 #include <ldb_module.h>
 #include "ldb_wrap.h"
+#include "lib/tsocket/tsocket.h"
 
 static int map_ldb_error(TALLOC_CTX *mem_ctx, int ldb_err,
 	const char *add_err_string, const char **errstring)
@@ -179,15 +181,20 @@ static int map_ldb_error(TALLOC_CTX *mem_ctx, int ldb_err,
 /*
   connect to the sam database
 */
-NTSTATUS ldapsrv_backend_Init(struct ldapsrv_connection *conn) 
+int ldapsrv_backend_Init(struct ldapsrv_connection *conn,
+			      char **errstring)
 {
-	conn->ldb = samdb_connect(conn, 
-				     conn->connection->event.ctx,
-				     conn->lp_ctx,
-				     conn->session_info,
-				     conn->global_catalog ? LDB_FLG_RDONLY : 0);
-	if (conn->ldb == NULL) {
-		return NT_STATUS_INTERNAL_DB_CORRUPTION;
+	int ret = samdb_connect_url(conn,
+				    conn->connection->event.ctx,
+				    conn->lp_ctx,
+				    conn->session_info,
+				    conn->global_catalog ? LDB_FLG_RDONLY : 0,
+				    "sam.ldb",
+				    conn->connection->remote_address,
+				    &conn->ldb,
+				    errstring);
+	if (ret != LDB_SUCCESS) {
+		return ret;
 	}
 
 	if (conn->server_credentials) {
@@ -204,11 +211,11 @@ NTSTATUS ldapsrv_backend_Init(struct ldapsrv_connection *conn)
 				char *sasl_name = talloc_strdup(conn, ops[i]->sasl_name);
 
 				if (!sasl_name) {
-					return NT_STATUS_NO_MEMORY;
+					return LDB_ERR_OPERATIONS_ERROR;
 				}
 				sasl_mechs = talloc_realloc(conn, sasl_mechs, char *, j + 2);
 				if (!sasl_mechs) {
-					return NT_STATUS_NO_MEMORY;
+					return LDB_ERR_OPERATIONS_ERROR;
 				}
 				sasl_mechs[j] = sasl_name;
 				talloc_steal(sasl_mechs, sasl_name);
@@ -226,21 +233,18 @@ NTSTATUS ldapsrv_backend_Init(struct ldapsrv_connection *conn)
 		ldb_set_opaque(conn->ldb, "supportedSASLMechanisms", sasl_mechs);
 	}
 
-	ldb_set_opaque(conn->ldb, "remoteAddress",
-		       conn->connection->remote_address);
-
-	return NT_STATUS_OK;
+	return LDB_SUCCESS;
 }
 
 struct ldapsrv_reply *ldapsrv_init_reply(struct ldapsrv_call *call, uint8_t type)
 {
 	struct ldapsrv_reply *reply;
 
-	reply = talloc(call, struct ldapsrv_reply);
+	reply = talloc_zero(call, struct ldapsrv_reply);
 	if (!reply) {
 		return NULL;
 	}
-	reply->msg = talloc(reply, struct ldap_message);
+	reply->msg = talloc_zero(reply, struct ldap_message);
 	if (reply->msg == NULL) {
 		talloc_free(reply);
 		return NULL;
@@ -1235,6 +1239,67 @@ NTSTATUS ldapsrv_do_call(struct ldapsrv_call *call)
 			DEBUG(3, ("ldapsrv_do_call: Critical extension %s is not known to this server\n",
 				  msg->controls[i]->oid));
 			return ldapsrv_unwilling(call, LDAP_UNAVAILABLE_CRITICAL_EXTENSION);
+		}
+	}
+
+	if (call->conn->authz_logged == false) {
+		bool log = true;
+
+		/*
+		 * We do not want to log anonymous access if the query
+		 * is just for the rootDSE, or it is a startTLS or a
+		 * Bind.
+		 *
+		 * A rootDSE search could also be done over
+		 * CLDAP anonymously for example, so these don't
+		 * really count.
+		 * Essentially we want to know about
+		 * access beyond that normally done prior to a
+		 * bind.
+		 */
+
+		switch(call->request->type) {
+		case LDAP_TAG_BindRequest:
+		case LDAP_TAG_UnbindRequest:
+		case LDAP_TAG_AbandonRequest:
+			log = false;
+			break;
+		case LDAP_TAG_ExtendedResponse: {
+			struct ldap_ExtendedRequest *req = &call->request->r.ExtendedRequest;
+			if (strcmp(req->oid, LDB_EXTENDED_START_TLS_OID) == 0) {
+				log = false;
+			}
+			break;
+		}
+		case LDAP_TAG_SearchRequest: {
+			struct ldap_SearchRequest *req = &call->request->r.SearchRequest;
+			if (req->scope == LDAP_SEARCH_SCOPE_BASE) {
+				if (req->basedn[0] == '\0') {
+					log = false;
+				}
+			}
+			break;
+		}
+		default:
+			break;
+		}
+
+		if (log) {
+			const char *transport_protection = AUTHZ_TRANSPORT_PROTECTION_NONE;
+			if (call->conn->sockets.active == call->conn->sockets.tls) {
+				transport_protection = AUTHZ_TRANSPORT_PROTECTION_TLS;
+			}
+
+			log_successful_authz_event(call->conn->connection->msg_ctx,
+						   call->conn->connection->lp_ctx,
+						   call->conn->connection->remote_address,
+						   call->conn->connection->local_address,
+						   "LDAP",
+						   "no bind",
+						   transport_protection,
+						   call->conn->session_info);
+
+			call->conn->authz_logged = true;
 		}
 	}
 

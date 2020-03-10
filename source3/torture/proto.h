@@ -65,6 +65,7 @@ bool torture_nttrans_scan(int dummy);
 
 bool smbcli_parse_unc(const char *unc_name, TALLOC_CTX *mem_ctx,
 		      char **hostname, char **sharename);
+bool torture_open_connection_flags(struct cli_state **c, int conn_index, int flags);
 bool torture_open_connection(struct cli_state **c, int conn_index);
 bool torture_init_connection(struct cli_state **pcli);
 bool torture_cli_session_setup2(struct cli_state *cli, uint16_t *new_vuid);
@@ -94,11 +95,13 @@ bool run_nttrans_create(int dummy);
 bool run_nttrans_fsctl(int dummy);
 bool run_smb2_basic(int dummy);
 bool run_smb2_negprot(int dummy);
+bool run_smb2_anonymous(int dummy);
 bool run_smb2_session_reconnect(int dummy);
 bool run_smb2_tcon_dependence(int dummy);
 bool run_smb2_multi_channel(int dummy);
 bool run_smb2_session_reauth(int dummy);
 bool run_smb2_ftruncate(int dummy);
+bool run_smb2_dir_fsync(int dummy);
 bool run_chain3(int dummy);
 bool run_local_conv_auth_info(int dummy);
 bool run_local_sprintf_append(int dummy);
@@ -109,6 +112,8 @@ bool run_cleanup4(int dummy);
 bool run_notify_bench2(int dummy);
 bool run_notify_bench3(int dummy);
 bool run_dbwrap_watch1(int dummy);
+bool run_dbwrap_watch2(int dummy);
+bool run_dbwrap_do_locked1(int dummy);
 bool run_idmap_tdb_common_test(int dummy);
 bool run_local_dbwrap_ctdb(int dummy);
 bool run_qpathinfo_bufsize(int dummy);
@@ -121,7 +126,16 @@ bool run_messaging_fdpass1(int dummy);
 bool run_messaging_fdpass2(int dummy);
 bool run_messaging_fdpass2a(int dummy);
 bool run_messaging_fdpass2b(int dummy);
+bool run_messaging_send_all(int dummy);
 bool run_oplock_cancel(int dummy);
 bool run_pthreadpool_tevent(int dummy);
+bool run_g_lock1(int dummy);
+bool run_g_lock2(int dummy);
+bool run_g_lock3(int dummy);
+bool run_g_lock4(int dummy);
+bool run_g_lock5(int dummy);
+bool run_g_lock6(int dummy);
+bool run_g_lock_ping_pong(int dummy);
+bool run_local_namemap_cache1(int dummy);
 
 #endif /* __TORTURE_H__ */

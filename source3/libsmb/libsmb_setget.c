@@ -29,7 +29,7 @@
 
 
 /** Get the netbios name used for making connections */
-char *
+const char *
 smbc_getNetbiosName(SMBCCTX *c)
 {
         return c->netbios_name;
@@ -37,7 +37,7 @@ smbc_getNetbiosName(SMBCCTX *c)
 
 /** Set the netbios name used for making connections */
 void
-smbc_setNetbiosName(SMBCCTX *c, char * netbios_name)
+smbc_setNetbiosName(SMBCCTX *c, const char *netbios_name)
 {
 	SAFE_FREE(c->netbios_name);
 	if (netbios_name) {
@@ -46,7 +46,7 @@ smbc_setNetbiosName(SMBCCTX *c, char * netbios_name)
 }
 
 /** Get the workgroup used for making connections */
-char *
+const char *
 smbc_getWorkgroup(SMBCCTX *c)
 {
         return c->workgroup;
@@ -54,7 +54,7 @@ smbc_getWorkgroup(SMBCCTX *c)
 
 /** Set the workgroup used for making connections */
 void
-smbc_setWorkgroup(SMBCCTX *c, char * workgroup)
+smbc_setWorkgroup(SMBCCTX *c, const char *workgroup)
 {
 	SAFE_FREE(c->workgroup);
 	if (workgroup) {
@@ -63,7 +63,7 @@ smbc_setWorkgroup(SMBCCTX *c, char * workgroup)
 }
 
 /** Get the username used for making connections */
-char *
+const char *
 smbc_getUser(SMBCCTX *c)
 {
         return c->user;
@@ -71,7 +71,7 @@ smbc_getUser(SMBCCTX *c)
 
 /** Set the username used for making connections */
 void
-smbc_setUser(SMBCCTX *c, char * user)
+smbc_setUser(SMBCCTX *c, const char *user)
 {
 	SAFE_FREE(c->user);
 	if (user) {
@@ -98,6 +98,29 @@ smbc_setDebug(SMBCCTX *c, int debug)
 	TALLOC_FREE(frame);
 }
 
+/** set callback function which will be called for logging */
+void
+smbc_setLogCallback(SMBCCTX *c, void *private_ptr,
+		    smbc_debug_callback_fn fn)
+{
+	debug_set_callback(private_ptr, fn);
+}
+
+/** set configuration file */
+int smbc_setConfiguration(SMBCCTX *c, const char *file)
+{
+        bool ok;
+
+        ok = lp_load_client_no_reinit(file);
+        if (!ok) {
+                DBG_WARNING("Could not load config file: %s\n", file);
+                errno = ENOENT;
+                return -1;
+        }
+
+        DBG_NOTICE("Configuration loaded successfully: %s\n", file);
+        return 0;
+}
 /**
  * Get the timeout used for waiting on connections and response data
  * (in milliseconds)
@@ -854,6 +877,16 @@ void
 smbc_setFunctionReaddir(SMBCCTX *c, smbc_readdir_fn fn)
 {
         c->readdir = fn;
+}
+
+smbc_readdirplus_fn smbc_getFunctionReaddirPlus(SMBCCTX *c)
+{
+	return c->readdirplus;
+}
+
+void smbc_setFunctionReaddirPlus(SMBCCTX *c, smbc_readdirplus_fn fn)
+{
+	c->readdirplus = fn;
 }
 
 smbc_getdents_fn

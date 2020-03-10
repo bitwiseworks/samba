@@ -19,6 +19,8 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import print_function
+from __future__ import division
 """Helpers used for upgrading between different database formats."""
 
 import os
@@ -138,7 +140,12 @@ def get_ldbs(paths, creds, session, lp):
 
     ldbs = ProvisionLDB()
 
-    ldbs.sam = SamDB(paths.samdb, session_info=session, credentials=creds, lp=lp, options=["modules:samba_dsdb"])
+    ldbs.sam = SamDB(paths.samdb,
+                     session_info=session,
+                     credentials=creds,
+                     lp=lp,
+                     options=["modules:samba_dsdb"],
+                     flags=0)
     ldbs.secrets = Ldb(paths.secrets, session_info=session, credentials=creds, lp=lp)
     ldbs.idmap = Ldb(paths.idmapdb, session_info=session, credentials=creds, lp=lp)
     ldbs.privilege = Ldb(paths.privilege, session_info=session, credentials=creds, lp=lp)
@@ -226,7 +233,7 @@ def update_policyids(names, samdb):
         names.policyid_dc = None
 
 
-def newprovision(names, session, smbconf, provdir, logger):
+def newprovision(names, session, smbconf, provdir, logger, base_schema=None):
     """Create a new provision.
 
     This provision will be the reference for knowing what has changed in the
@@ -256,7 +263,7 @@ def newprovision(names, session, smbconf, provdir, logger):
             backend_type=None, ldapadminpass=None, ol_mmr_urls=None,
             slapd_path=None,
             dom_for_fun_level=names.domainlevel, dns_backend=names.dns_backend,
-            useeadb=True, use_ntvfs=True)
+            useeadb=True, use_ntvfs=True, base_schema=base_schema)
 
 
 def dn_sort(x, y):
@@ -276,6 +283,7 @@ def dn_sort(x, y):
     len1 = len(tab1)-1
     len2 = len(tab2)-1
     # Note: python range go up to upper limit but do not include it
+    cmp = lambda x, y:  (x > y) - (x < y)  # cmp is removed in py3
     for i in range(0, minimum):
         ret = cmp(tab1[len1-i], tab2[len2-i])
         if ret != 0:
@@ -345,7 +353,7 @@ def update_secrets(newsecrets_ldb, secrets_ldb, messagefunc):
         hash[str(current[i]["dn"]).lower()] = current[i]["dn"]
 
     for k in hash_new.keys():
-        if not hash.has_key(k):
+        if k not in hash:
             listMissing.append(hash_new[k])
         else:
             listPresent.append(hash_new[k])
@@ -481,7 +489,7 @@ def increment_calculated_keyversion_number(samdb, rootdn, hashDns):
         raise ProvisioningError("Unable to find msDs-KeyVersionNumber")
     else:
         for e in entry:
-            if hashDns.has_key(str(e.dn).lower()):
+            if str(e.dn).lower() in hashDns:
                 val = e.get("msDs-KeyVersionNumber")
                 if not val:
                     val = "0"
@@ -637,11 +645,10 @@ def update_dns_account_password(samdb, secrets_ldb, names):
 
         secrets_ldb.modify(msg)
 
-def update_krbtgt_account_password(samdb, names):
+def update_krbtgt_account_password(samdb):
     """Update (change) the password of the krbtgt account
 
-    :param samdb: An LDB object related to the sam.ldb file of a given provision
-    :param names: List of key provision parameters"""
+    :param samdb: An LDB object related to the sam.ldb file of a given provision"""
 
     expression = "samAccountName=krbtgt"
     res = samdb.search(expression=expression, attrs=[])
@@ -682,7 +689,7 @@ def search_constructed_attrs_stored(samdb, rootdn, attrs):
     for ent in entry:
         for att in attrs:
             if ent.get(att):
-                if hashAtt.has_key(att):
+                if att in hashAtt:
                     hashAtt[att][str(ent.dn).lower()] = str(ent[att])
                 else:
                     hashAtt[att] = {}
@@ -718,7 +725,7 @@ def findprovisionrange(samdb, basedn):
 
         for o in obj.array:
             # like a timestamp but with the resolution of 1 minute
-            minutestamp =_glue.nttime2unix(o.originating_change_time)/60
+            minutestamp =_glue.nttime2unix(o.originating_change_time) // 60
             hash_ts = hash_id.get(str(o.originating_invocation_id))
 
             if hash_ts is None:
@@ -771,9 +778,9 @@ def print_provision_ranges(dic, limit_print, dest, samdb_path, invocationid):
             obj = hash_ts[k]
             if obj["num"] > limit_print:
                 dt = _glue.nttime2string(_glue.unix2nttime(k*60))
-                print "%s # of modification: %d  \tmin: %d max: %d" % (dt , obj["num"],
+                print("%s # of modification: %d  \tmin: %d max: %d" % (dt , obj["num"],
                                                                     obj["min"],
-                                                                    obj["max"])
+                                                                    obj["max"]))
             if hash_ts[k]["num"] > 600:
                 kept_record.append(k)
 
@@ -798,11 +805,11 @@ def print_provision_ranges(dic, limit_print, dest, samdb_path, invocationid):
 
     if ldif != "":
         file = tempfile.mktemp(dir=dest, prefix="usnprov", suffix=".ldif")
-        print
-        print "To track the USNs modified/created by provision and upgrade proivsion,"
-        print " the following ranges are proposed to be added to your provision sam.ldb: \n%s" % ldif
-        print "We recommend to review them, and if it's correct to integrate the following ldif: %s in your sam.ldb" % file
-        print "You can load this file like this: ldbadd -H %s %s\n"%(str(samdb_path),file)
+        print()
+        print("To track the USNs modified/created by provision and upgrade proivsion,")
+        print(" the following ranges are proposed to be added to your provision sam.ldb: \n%s" % ldif)
+        print("We recommend to review them, and if it's correct to integrate the following ldif: %s in your sam.ldb" % file)
+        print("You can load this file like this: ldbadd -H %s %s\n"%(str(samdb_path),file))
         ldif = "dn: @PROVISION\nprovisionnerID: %s\n%s" % (invocationid, ldif)
         open(file,'w').write(ldif)
 

@@ -31,6 +31,7 @@
 #include "dsdb/samdb/samdb.h"
 #include "torture/rpc/torture_rpc.h"
 #include "torture/drs/proto.h"
+#include "lib/util/util_paths.h"
 
 
 struct DsGetinfoBindInfo {
@@ -134,7 +135,7 @@ static struct DsGetinfoTest *test_create_context(struct torture_context *tctx)
 	}
 
 	/* ctx->admin ...*/
-	ctx->admin.credentials				= cmdline_credentials;
+	ctx->admin.credentials = popt_get_cmdline_credentials();
 
 	our_bind_info28				= &ctx->admin.drsuapi.our_bind_info28;
 	our_bind_info28->supported_extensions	= 0xFFFFFFFF;

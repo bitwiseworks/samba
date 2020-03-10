@@ -19,6 +19,7 @@
 
 #include "includes.h"
 #include "winbindd.h"
+#include "libcli/security/dom_sid.h"
 
 struct winbindd_pam_auth_state {
 	struct winbindd_request *request;
@@ -35,9 +36,10 @@ struct tevent_req *winbindd_pam_auth_send(TALLOC_CTX *mem_ctx,
 	struct tevent_req *req, *subreq;
 	struct winbindd_pam_auth_state *state;
 	struct winbindd_domain *domain;
-	fstring name_domain, name_user;
+	fstring name_namespace, name_domain, name_user;
 	char *mapped = NULL;
 	NTSTATUS status;
+	bool ok;
 
 	req = tevent_req_create(mem_ctx, &state,
 				struct winbindd_pam_auth_state);
@@ -70,12 +72,16 @@ struct tevent_req *winbindd_pam_auth_send(TALLOC_CTX *mem_ctx,
 		fstrcpy(request->data.auth.user, mapped);
 	}
 
-	if (!canonicalize_username(request->data.auth.user, name_domain, name_user)) {
+	ok = canonicalize_username(request->data.auth.user,
+				   name_namespace,
+				   name_domain,
+				   name_user);
+	if (!ok) {
 		tevent_req_nterror(req, NT_STATUS_NO_SUCH_USER);
 		return tevent_req_post(req, ev);
 	}
 
-	domain = find_auth_domain(request->flags, name_domain);
+	domain = find_auth_domain(request->flags, name_namespace);
 	if (domain == NULL) {
 		tevent_req_nterror(req, NT_STATUS_NO_SUCH_USER);
 		return tevent_req_post(req, ev);
@@ -125,6 +131,20 @@ NTSTATUS winbindd_pam_auth_recv(struct tevent_req *req,
 	status = NT_STATUS(response->data.auth.nt_status);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
+	}
+
+	if (state->request->flags & WBFLAG_PAM_INFO3_TEXT) {
+		bool ok;
+
+		ok = add_trusted_domain_from_auth(
+			state->response->data.auth.validation_level,
+			&state->response->data.auth.info3,
+			&state->response->data.auth.info6);
+		if (!ok) {
+			DBG_ERR("add_trusted_domain_from_auth failed\n");
+			set_auth_errors(response, NT_STATUS_LOGON_FAILURE);
+			return NT_STATUS_LOGON_FAILURE;
+		}
 	}
 
 	if (state->request->flags & WBFLAG_PAM_CACHED_LOGIN) {

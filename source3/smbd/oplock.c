@@ -21,6 +21,7 @@
 
 #define DBGC_CLASS DBGC_LOCKING
 #include "includes.h"
+#include "lib/util/server_id.h"
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
 #include "messages.h"
@@ -337,6 +338,11 @@ static void lease_timeout_handler(struct tevent_context *ctx,
 	struct share_mode_lock *lck;
 	uint16_t old_epoch = lease->lease.lease_epoch;
 
+	/*
+	 * This function runs without any specific impersonation
+	 * and must not call any SMB_VFS operations!
+	 */
+
 	fsp = file_find_one_fsp_from_lease_key(lease->sconn,
 					       &lease->lease.lease_key);
 	if (fsp == NULL) {
@@ -428,7 +434,12 @@ bool fsp_lease_update(struct share_mode_lock *lck,
 
 			DEBUG(10,("%s: setup timeout handler\n", __func__));
 
-			lease->timeout = tevent_add_timer(lease->sconn->ev_ctx,
+			/*
+			 * lease_timeout_handler() only accesses locking.tdb
+			 * so we don't use any impersonation and use
+			 * the raw tevent context.
+			 */
+			lease->timeout = tevent_add_timer(lease->sconn->raw_ev_ctx,
 							  lease, t,
 							  lease_timeout_handler,
 							  lease);
@@ -575,7 +586,8 @@ NTSTATUS downgrade_lease(struct smbXsrv_connection *xconn,
 			lck->data->modified = true;
 		}
 
-		tevent_schedule_immediate(state->im, xconn->ev_ctx,
+		tevent_schedule_immediate(state->im,
+					  xconn->client->raw_ev_ctx,
 					  downgrade_lease_additional_trigger,
 					  state);
 	}
@@ -715,6 +727,11 @@ static void oplock_timeout_handler(struct tevent_context *ctx,
 {
 	files_struct *fsp = (files_struct *)private_data;
 
+	/*
+	 * Note this function doesn't run under any specific impersonation and
+	 * is not expected to call any SMB_VFS operation!
+	 */
+
 	SMB_ASSERT(fsp->sent_oplock_break != NO_BREAK_SENT);
 
 	/* Remove the timed event handler. */
@@ -749,8 +766,15 @@ static void add_oplock_timeout_handler(files_struct *fsp)
 			  "around\n"));
 	}
 
+	/*
+	 * For now we keep the logic and use the
+	 * raw event context. We're called from
+	 * the messaging system from a raw event context.
+	 * Also oplock_timeout_handler doesn't invoke
+	 * SMB_VFS calls.
+	 */
 	fsp->oplock_timeout =
-		tevent_add_timer(fsp->conn->sconn->ev_ctx, fsp,
+		tevent_add_timer(fsp->conn->sconn->raw_ev_ctx, fsp,
 				 timeval_current_ofs(OPLOCK_BREAK_TIMEOUT, 0),
 				 oplock_timeout_handler, fsp);
 
@@ -791,6 +815,7 @@ static void process_oplock_break_message(struct messaging_context *msg_ctx,
 					 struct server_id src,
 					 DATA_BLOB *data)
 {
+	struct file_id id;
 	struct share_mode_entry msg;
 	files_struct *fsp;
 	bool use_kernel;
@@ -815,15 +840,15 @@ static void process_oplock_break_message(struct messaging_context *msg_ctx,
 	}
 
 	/* De-linearize incoming message. */
-	message_to_share_mode_entry(&msg, (char *)data->data);
+	message_to_share_mode_entry(&id, &msg, (char *)data->data);
 	break_to = msg.op_type;
 
 	DEBUG(10, ("Got oplock break to %u message from pid %s: %s/%llu\n",
 		   (unsigned)break_to, server_id_str_buf(src, &tmp),
-		   file_id_string_tos(&msg.id),
+		   file_id_string_tos(&id),
 		   (unsigned long long)msg.share_file_id));
 
-	fsp = initial_break_processing(sconn, msg.id, msg.share_file_id);
+	fsp = initial_break_processing(sconn, id, msg.share_file_id);
 
 	if (fsp == NULL) {
 		/* We hit a race here. Break messages are sent, and before we
@@ -1125,15 +1150,24 @@ static void contend_level2_oplocks_begin_default(files_struct *fsp,
 		TALLOC_FREE(state);
 		return;
 	}
-	tevent_schedule_immediate(im, sconn->ev_ctx, do_break_to_none, state);
+
+	/*
+	 * do_break_to_none() only operates on the
+	 * locking.tdb and send network packets to
+	 * the client. That doesn't require any
+	 * impersonation, so we just use the
+	 * raw tevent context here.
+	 */
+	tevent_schedule_immediate(im, sconn->raw_ev_ctx, do_break_to_none, state);
 }
 
 static void send_break_to_none(struct messaging_context *msg_ctx,
+			       const struct file_id *id,
 			       const struct share_mode_entry *e)
 {
 	char msg[MSG_SMB_SHARE_MODE_ENTRY_SIZE];
 
-	share_mode_entry_to_message(msg, e);
+	share_mode_entry_to_message(msg, id, e);
 	/* Overload entry->op_type */
 	SSVAL(msg, OP_BREAK_MSG_OP_TYPE_OFFSET, NO_OPLOCK);
 
@@ -1150,6 +1184,11 @@ static void do_break_to_none(struct tevent_context *ctx,
 	uint32_t i;
 	struct share_mode_lock *lck;
 	struct share_mode_data *d;
+
+	/*
+	 * Note this function doesn't run under any specific impersonation and
+	 * is not expected to call any SMB_VFS operation!
+	 */
 
 	lck = get_existing_share_mode_lock(talloc_tos(), state->id);
 	if (lck == NULL) {
@@ -1201,7 +1240,7 @@ static void do_break_to_none(struct tevent_context *ctx,
 		DEBUG(10, ("Breaking lease# %"PRIu32" with share_entry# "
 			   "%"PRIu32"\n", i, j));
 
-		send_break_to_none(state->sconn->msg_ctx, e);
+		send_break_to_none(state->sconn->msg_ctx, &state->id, e);
 	}
 
 	for(i = 0; i < d->num_share_modes; i++) {
@@ -1244,7 +1283,7 @@ static void do_break_to_none(struct tevent_context *ctx,
 			abort();
 		}
 
-		send_break_to_none(state->sconn->msg_ctx, e);
+		send_break_to_none(state->sconn->msg_ctx, &state->id, e);
 	}
 
 	/* We let the message receivers handle removing the oplock state
@@ -1290,7 +1329,8 @@ void smbd_contend_level2_oplocks_end(files_struct *fsp,
  Linearize a share mode entry struct to an internal oplock break message.
 ****************************************************************************/
 
-void share_mode_entry_to_message(char *msg, const struct share_mode_entry *e)
+void share_mode_entry_to_message(char *msg, const struct file_id *id,
+				 const struct share_mode_entry *e)
 {
 	SIVAL(msg,OP_BREAK_MSG_PID_OFFSET,(uint32_t)e->pid.pid);
 	SBVAL(msg,OP_BREAK_MSG_MID_OFFSET,e->op_mid);
@@ -1300,7 +1340,11 @@ void share_mode_entry_to_message(char *msg, const struct share_mode_entry *e)
 	SIVAL(msg,OP_BREAK_MSG_PRIV_OFFSET,e->private_options);
 	SIVAL(msg,OP_BREAK_MSG_TIME_SEC_OFFSET,(uint32_t)e->time.tv_sec);
 	SIVAL(msg,OP_BREAK_MSG_TIME_USEC_OFFSET,(uint32_t)e->time.tv_usec);
-	push_file_id_24(msg+OP_BREAK_MSG_DEV_OFFSET, &e->id);
+	/*
+	 * "id" used to be part of share_mode_entry, thus the strange
+	 * place to put this. Feel free to move somewhere else :-)
+	 */
+	push_file_id_24(msg+OP_BREAK_MSG_DEV_OFFSET, id);
 	SIVAL(msg,OP_BREAK_MSG_FILE_ID_OFFSET,e->share_file_id);
 	SIVAL(msg,OP_BREAK_MSG_UID_OFFSET,e->uid);
 	SSVAL(msg,OP_BREAK_MSG_FLAGS_OFFSET,e->flags);
@@ -1312,7 +1356,9 @@ void share_mode_entry_to_message(char *msg, const struct share_mode_entry *e)
  De-linearize an internal oplock break message to a share mode entry struct.
 ****************************************************************************/
 
-void message_to_share_mode_entry(struct share_mode_entry *e, const char *msg)
+void message_to_share_mode_entry(struct file_id *id,
+				 struct share_mode_entry *e,
+				 const char *msg)
 {
 	e->pid.pid = (pid_t)IVAL(msg,OP_BREAK_MSG_PID_OFFSET);
 	e->op_mid = BVAL(msg,OP_BREAK_MSG_MID_OFFSET);
@@ -1322,7 +1368,11 @@ void message_to_share_mode_entry(struct share_mode_entry *e, const char *msg)
 	e->private_options = IVAL(msg,OP_BREAK_MSG_PRIV_OFFSET);
 	e->time.tv_sec = (time_t)IVAL(msg,OP_BREAK_MSG_TIME_SEC_OFFSET);
 	e->time.tv_usec = (int)IVAL(msg,OP_BREAK_MSG_TIME_USEC_OFFSET);
-	pull_file_id_24(msg+OP_BREAK_MSG_DEV_OFFSET, &e->id);
+	/*
+	 * "id" used to be part of share_mode_entry, thus the strange
+	 * place to put this. Feel free to move somewhere else :-)
+	 */
+	pull_file_id_24(msg+OP_BREAK_MSG_DEV_OFFSET, id);
 	e->share_file_id = (unsigned long)IVAL(msg,OP_BREAK_MSG_FILE_ID_OFFSET);
 	e->uid = (uint32_t)IVAL(msg,OP_BREAK_MSG_UID_OFFSET);
 	e->flags = (uint16_t)SVAL(msg,OP_BREAK_MSG_FLAGS_OFFSET);

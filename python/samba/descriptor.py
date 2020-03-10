@@ -268,6 +268,17 @@ def get_domain_users_descriptor(domain_sid, name_map={}):
     "S:"
     return sddl2binary(sddl, domain_sid, name_map)
 
+def get_managed_service_accounts_descriptor(domain_sid, name_map={}):
+    sddl = "D:" \
+    "(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;SY)" \
+    "(A;;RPWPCRCCDCLCLORCWOWDSW;;;DA)" \
+    "(OA;;CCDC;ce206244-5827-4a86-ba1c-1c0c386c1b64;;AO)" \
+    "(OA;;CCDC;bf967aba-0de6-11d0-a285-00aa003049e2;;AO)" \
+    "(OA;;CCDC;bf967a9c-0de6-11d0-a285-00aa003049e2;;AO)" \
+    "(A;;RPLCLORC;;;AU)" \
+    "S:"
+    return sddl2binary(sddl, domain_sid, name_map)
+
 def get_domain_controllers_descriptor(domain_sid, name_map={}):
     sddl = "D:" \
     "(A;;RPLCLORC;;;AU)" \
@@ -404,7 +415,7 @@ def get_wellknown_sds(samdb):
     for nc in current[0]["namingContexts"]:
 
         dnsforestdn = ldb.Dn(samdb, "DC=ForestDnsZones,%s" % (str(samdb.get_root_basedn())))
-        if ldb.Dn(samdb, nc) == dnsforestdn:
+        if ldb.Dn(samdb, nc.decode('utf8')) == dnsforestdn:
             c = (ldb.Dn(samdb, "%s" % str(dnsforestdn)), get_dns_partition_descriptor)
             subcontainers.append(c)
             c = (ldb.Dn(samdb, "CN=Infrastructure,%s" % str(dnsforestdn)),
@@ -419,7 +430,7 @@ def get_wellknown_sds(samdb):
             continue
 
         dnsdomaindn = ldb.Dn(samdb, "DC=DomainDnsZones,%s" % (str(samdb.domain_dn())))
-        if ldb.Dn(samdb, nc) == dnsdomaindn:
+        if ldb.Dn(samdb, nc.decode('utf8')) == dnsdomaindn:
             c = (ldb.Dn(samdb, "%s" % str(dnsdomaindn)), get_dns_partition_descriptor)
             subcontainers.append(c)
             c = (ldb.Dn(samdb, "CN=Infrastructure,%s" % str(dnsdomaindn)),
@@ -532,23 +543,23 @@ def get_diff_sds(refsd, cursd, domainsid, checkSacl = True):
     hash_cur = chunck_sddl(cursddl)
     hash_ref = chunck_sddl(refsddl)
 
-    if not hash_cur.has_key("owner"):
+    if "owner" not in hash_cur:
         txt = "\tNo owner in current SD"
-    elif hash_ref.has_key("owner") and hash_cur["owner"] != hash_ref["owner"]:
+    elif "owner" in hash_ref and hash_cur["owner"] != hash_ref["owner"]:
         txt = "\tOwner mismatch: %s (in ref) %s" \
               "(in current)\n" % (hash_ref["owner"], hash_cur["owner"])
 
-    if not hash_cur.has_key("group"):
+    if "group" not in hash_cur:
         txt = "%s\tNo group in current SD" % txt
-    elif hash_ref.has_key("group") and hash_cur["group"] != hash_ref["group"]:
+    elif "group" in hash_ref and hash_cur["group"] != hash_ref["group"]:
         txt = "%s\tGroup mismatch: %s (in ref) %s" \
               "(in current)\n" % (txt, hash_ref["group"], hash_cur["group"])
 
-    parts = [ "dacl" ]
+    parts = ["dacl"]
     if checkSacl:
         parts.append("sacl")
     for part in parts:
-        if hash_cur.has_key(part) and hash_ref.has_key(part):
+        if part in hash_cur and part in hash_ref:
 
             # both are present, check if they contain the same ACE
             h_cur = set()
@@ -579,9 +590,9 @@ def get_diff_sds(refsd, cursd, domainsid, checkSacl = True):
                     txt = "%s\t\t%s ACE is not present in the" \
                           " current\n" % (txt, item)
 
-        elif hash_cur.has_key(part) and not hash_ref.has_key(part):
+        elif part in hash_cur and part not in hash_ref:
             txt = "%s\tReference ACL hasn't a %s part\n" % (txt, part)
-        elif not hash_cur.has_key(part) and hash_ref.has_key(part):
+        elif part not in hash_cur and part in hash_ref:
             txt = "%s\tCurrent ACL hasn't a %s part\n" % (txt, part)
 
     return txt

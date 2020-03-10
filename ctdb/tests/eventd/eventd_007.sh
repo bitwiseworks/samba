@@ -2,36 +2,18 @@
 
 . "${TEST_SCRIPTS_DIR}/unit.sh"
 
-define_test "capture event script output"
+define_test "timing out event script"
 
 setup_eventd
 
-cat > "$eventd_scriptdir/01.test" <<EOF
-#!/bin/sh
-
-echo "args: \$*"
-exit 1
+required_error ETIMEDOUT <<EOF
+Event timeout in random timed out
 EOF
-chmod +x "$eventd_scriptdir/01.test"
+simple_test run 5 random timeout
 
-required_result 1 <<EOF
-Failed to run event monitor, result=1
+required_error ETIMEDOUT <<EOF
+01.disabled          DISABLED  
+02.enabled           TIMEDOUT   DATETIME
+  OUTPUT: 
 EOF
-simple_test run monitor 30
-
-required_result 1 <<EOF
-01.test              ERROR      DURATION DATETIME
-  OUTPUT: args: monitor
-EOF
-simple_test status monitor lastrun
-
-required_result 0 <<EOF
-Event monitor has never passed
-EOF
-simple_test status monitor lastpass
-
-required_result 1 <<EOF
-01.test              ERROR      DURATION DATETIME
-  OUTPUT: args: monitor
-EOF
-simple_test status monitor lastfail
+simple_test status random timeout

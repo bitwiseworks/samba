@@ -7,7 +7,7 @@
 	<manvolnum>1</manvolnum>
 	<refmiscinfo class="source">Samba</refmiscinfo>
 	<refmiscinfo class="manual">User Commands</refmiscinfo>
-	<refmiscinfo class="version">4.6</refmiscinfo>
+	<refmiscinfo class="version">&doc.version;</refmiscinfo>
 </refmeta>
 
 
@@ -124,8 +124,6 @@
 		<listitem><para><command>get_nt_acl</command> - VFS get_nt_acl()</para></listitem>
 		<listitem><para><command>fset_nt_acl</command> - VFS fset_nt_acl()</para></listitem>
 		<listitem><para><command>set_nt_acl</command> - VFS open() and fset_nt_acl()</para></listitem>
-		<listitem><para><command>fchmod_acl</command> - VFS fchmod_acl()</para></listitem>
-		<listitem><para><command>chmod_acl</command> - VFS chmod_acl()</para></listitem>
 		<listitem><para><command>sys_acl_get_file</command> - VFS sys_acl_get_file()</para></listitem>
 		<listitem><para><command>sys_acl_get_fd</command> - VFS sys_acl_get_fd()</para></listitem>
 		<listitem><para><command>sys_acl_blob_get_file</command> - VFS sys_acl_blob_get_file()</para></listitem>
@@ -154,7 +152,7 @@
 <refsect1>
 	<title>VERSION</title>
 
-	<para>This man page is correct for version 3 and 4 of the Samba
+	<para>This man page is part of version &doc.version; of the Samba
 	suite.</para>
 </refsect1>
 

@@ -30,13 +30,30 @@
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
 
+uint32_t ucf_flags_from_smb_request(struct smb_request *req)
+{
+	uint32_t ucf_flags = 0;
+
+	if (req != NULL) {
+		if (req->posix_pathnames) {
+			ucf_flags |= UCF_POSIX_PATHNAMES;
+		}
+		if (req->flags2 & FLAGS2_DFS_PATHNAMES) {
+			ucf_flags |= UCF_DFS_PATHNAME;
+		}
+		if (req->flags2 & FLAGS2_REPARSE_PATH) {
+			ucf_flags |= UCF_GMT_PATHNAME;
+		}
+	}
+
+	return ucf_flags;
+}
+
 uint32_t filename_create_ucf_flags(struct smb_request *req, uint32_t create_disposition)
 {
 	uint32_t ucf_flags = 0;
 
-	if (req != NULL && req->posix_pathnames) {
-		ucf_flags |= UCF_POSIX_PATHNAMES;
-	}
+	ucf_flags |= ucf_flags_from_smb_request(req);
 
 	switch (create_disposition) {
 	case FILE_OPEN:
@@ -417,6 +434,7 @@ NTSTATUS unix_convert(TALLOC_CTX *ctx,
 	bool allow_wcard_last_component =
 	    (ucf_flags & UCF_ALWAYS_ALLOW_WCARD_LCOMP);
 	bool save_last_component = ucf_flags & UCF_SAVE_LCOMP;
+	bool snapshot_path = (ucf_flags & UCF_GMT_PATHNAME);
 	NTSTATUS status;
 	int ret = -1;
 
@@ -499,7 +517,7 @@ NTSTATUS unix_convert(TALLOC_CTX *ctx,
 	}
 
 	/* Canonicalize any @GMT- paths. */
-	if (posix_pathnames == false) {
+	if (snapshot_path) {
 		status = canonicalize_snapshot_path(smb_fname);
 		if (!NT_STATUS_IS_OK(status)) {
 			goto err;
@@ -1213,8 +1231,11 @@ NTSTATUS unix_convert(TALLOC_CTX *ctx,
  Ensure a path is not vetoed.
 ****************************************************************************/
 
-static NTSTATUS check_veto_path(connection_struct *conn, const char *name)
+static NTSTATUS check_veto_path(connection_struct *conn,
+			const struct smb_filename *smb_fname)
 {
+	const char *name = smb_fname->base_name;
+
 	if (IS_VETO_PATH(conn, name))  {
 		/* Is it not dot or dot dot. */
 		if (!(ISDOT(name) || ISDOTDOT(name))) {
@@ -1233,19 +1254,21 @@ static NTSTATUS check_veto_path(connection_struct *conn, const char *name)
  a valid one for the user to access.
 ****************************************************************************/
 
-NTSTATUS check_name(connection_struct *conn, const char *name)
+NTSTATUS check_name(connection_struct *conn,
+			const struct smb_filename *smb_fname)
 {
-	NTSTATUS status = check_veto_path(conn, name);
+	NTSTATUS status = check_veto_path(conn, smb_fname);
 
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
 
 	if (!lp_widelinks(SNUM(conn)) || !lp_follow_symlinks(SNUM(conn))) {
-		status = check_reduced_name(conn, NULL, name);
+		status = check_reduced_name(conn, NULL, smb_fname);
 		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(5,("check_name: name %s failed with %s\n",name,
-						nt_errstr(status)));
+			DEBUG(5,("check_name: name %s failed with %s\n",
+					smb_fname->base_name,
+					nt_errstr(status)));
 			return status;
 		}
 	}
@@ -1260,15 +1283,15 @@ NTSTATUS check_name(connection_struct *conn, const char *name)
 
 static NTSTATUS check_name_with_privilege(connection_struct *conn,
 		struct smb_request *smbreq,
-		const char *name)
+		const struct smb_filename *smb_fname)
 {
-	NTSTATUS status = check_veto_path(conn, name);
+	NTSTATUS status = check_veto_path(conn, smb_fname);
 
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
 	return check_reduced_name_with_privilege(conn,
-			name,
+			smb_fname,
 			smbreq);
 }
 
@@ -1420,6 +1443,11 @@ int get_real_filename(connection_struct *conn, const char *path,
 	int ret;
 	bool mangled;
 
+	/* handle null paths */
+	if ((path == NULL) || (*path == 0)) {
+		path = ".";
+	}
+
 	mangled = mangle_is_mangled(name, conn->params);
 
 	if (mangled) {
@@ -1521,7 +1549,6 @@ static NTSTATUS build_stream_path(TALLOC_CTX *mem_ctx,
  *
  * @param ctx		talloc_ctx to allocate memory with.
  * @param conn		connection struct for vfs calls.
- * @param dfs_path	Whether this path requires dfs resolution.
  * @param smbreq	SMB request if we're using privileges.
  * @param name_in	The unconverted name.
  * @param ucf_flags	flags to pass through to unix_convert().
@@ -1533,12 +1560,11 @@ static NTSTATUS build_stream_path(TALLOC_CTX *mem_ctx,
  * @param pp_smb_fname	The final converted name will be allocated if the
  *			return is NT_STATUS_OK.
  *
- * @return NT_STATUS_OK if all operations completed succesfully, appropriate
+ * @return NT_STATUS_OK if all operations completed successfully, appropriate
  * 	   error otherwise.
  */
 static NTSTATUS filename_convert_internal(TALLOC_CTX *ctx,
 				connection_struct *conn,
-				bool dfs_path,
 				struct smb_request *smbreq,
 				const char *name_in,
 				uint32_t ucf_flags,
@@ -1546,23 +1572,30 @@ static NTSTATUS filename_convert_internal(TALLOC_CTX *ctx,
 				struct smb_filename **pp_smb_fname)
 {
 	NTSTATUS status;
-	char *fname = NULL;
 
 	*pp_smb_fname = NULL;
 
-	status = resolve_dfspath_wcard(ctx, conn,
-				dfs_path,
+	if (ucf_flags & UCF_DFS_PATHNAME) {
+		bool path_contains_wcard = false;
+		char *fname = NULL;
+		status = resolve_dfspath_wcard(ctx, conn,
 				name_in,
 				ucf_flags,
 				!conn->sconn->using_smb2,
 				&fname,
-				ppath_contains_wcard);
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(10,("filename_convert_internal: resolve_dfspath failed "
-			"for name %s with %s\n",
-			name_in,
-			nt_errstr(status) ));
-		return status;
+				&path_contains_wcard);
+		if (!NT_STATUS_IS_OK(status)) {
+			DEBUG(10,("filename_convert_internal: resolve_dfspath "
+				"failed for name %s with %s\n",
+				name_in,
+				nt_errstr(status) ));
+			return status;
+		}
+		name_in = fname;
+		if (ppath_contains_wcard != NULL && path_contains_wcard) {
+			*ppath_contains_wcard = path_contains_wcard;
+		}
+		ucf_flags &= ~UCF_DFS_PATHNAME;
 	}
 
 	if (is_fake_file_path(name_in)) {
@@ -1588,11 +1621,11 @@ static NTSTATUS filename_convert_internal(TALLOC_CTX *ctx,
 		ucf_flags |= UCF_ALWAYS_ALLOW_WCARD_LCOMP;
 	}
 
-	status = unix_convert(ctx, conn, fname, pp_smb_fname, ucf_flags);
+	status = unix_convert(ctx, conn, name_in, pp_smb_fname, ucf_flags);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(10,("filename_convert_internal: unix_convert failed "
 			"for name %s with %s\n",
-			fname,
+			name_in,
 			nt_errstr(status) ));
 		return status;
 	}
@@ -1600,13 +1633,14 @@ static NTSTATUS filename_convert_internal(TALLOC_CTX *ctx,
 	if ((ucf_flags & UCF_UNIX_NAME_LOOKUP) &&
 			VALID_STAT((*pp_smb_fname)->st) &&
 			S_ISLNK((*pp_smb_fname)->st.st_ex_mode)) {
-		return check_veto_path(conn, (*pp_smb_fname)->base_name);
+		return check_veto_path(conn, (*pp_smb_fname));
 	}
 
 	if (!smbreq) {
-		status = check_name(conn, (*pp_smb_fname)->base_name);
+		status = check_name(conn, (*pp_smb_fname));
 	} else {
-		status = check_name_with_privilege(conn, smbreq, (*pp_smb_fname)->base_name);
+		status = check_name_with_privilege(conn, smbreq,
+				(*pp_smb_fname));
 	}
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(3,("filename_convert_internal: check_name failed "
@@ -1627,7 +1661,6 @@ static NTSTATUS filename_convert_internal(TALLOC_CTX *ctx,
 
 NTSTATUS filename_convert(TALLOC_CTX *ctx,
 				connection_struct *conn,
-				bool dfs_path,
 				const char *name_in,
 				uint32_t ucf_flags,
 				bool *ppath_contains_wcard,
@@ -1635,7 +1668,6 @@ NTSTATUS filename_convert(TALLOC_CTX *ctx,
 {
 	return filename_convert_internal(ctx,
 					conn,
-					dfs_path,
 					NULL,
 					name_in,
 					ucf_flags,
@@ -1658,7 +1690,6 @@ NTSTATUS filename_convert_with_privilege(TALLOC_CTX *ctx,
 {
 	return filename_convert_internal(ctx,
 					conn,
-					smbreq->flags2 & FLAGS2_DFS_PATHNAMES,
 					smbreq,
 					name_in,
 					ucf_flags,

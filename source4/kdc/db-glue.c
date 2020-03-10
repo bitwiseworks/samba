@@ -35,6 +35,9 @@
 #include "kdc/sdb.h"
 #include "kdc/samba_kdc.h"
 #include "kdc/db-glue.h"
+#include "librpc/gen_ndr/ndr_irpc_c.h"
+#include "lib/messaging/irpc.h"
+
 
 #define SAMBA_KVNO_GET_KRBTGT(kvno) \
 	((uint16_t)(((uint32_t)kvno) >> 16))
@@ -54,17 +57,66 @@ enum trust_direction {
 };
 
 static const char *trust_attrs[] = {
+	"securityIdentifier",
+	"flatName",
 	"trustPartner",
+	"trustAttributes",
+	"trustDirection",
+	"trustType",
+	"msDS-TrustForestTrustInfo",
 	"trustAuthIncoming",
 	"trustAuthOutgoing",
 	"whenCreated",
 	"msDS-SupportedEncryptionTypes",
-	"trustAttributes",
-	"trustDirection",
-	"trustType",
 	NULL
 };
 
+/*
+  send a message to the drepl server telling it to initiate a
+  REPL_SECRET getncchanges extended op to fetch the users secrets
+ */
+static void auth_sam_trigger_repl_secret(TALLOC_CTX *mem_ctx,
+                                  struct imessaging_context *msg_ctx,
+                                  struct tevent_context *event_ctx,
+                                  struct ldb_dn *user_dn)
+{
+        struct dcerpc_binding_handle *irpc_handle;
+        struct drepl_trigger_repl_secret r;
+        struct tevent_req *req;
+        TALLOC_CTX *tmp_ctx;
+
+        tmp_ctx = talloc_new(mem_ctx);
+        if (tmp_ctx == NULL) {
+                return;
+        }
+
+        irpc_handle = irpc_binding_handle_by_name(tmp_ctx, msg_ctx,
+                                                  "dreplsrv",
+                                                  &ndr_table_irpc);
+        if (irpc_handle == NULL) {
+                DEBUG(1,(__location__ ": Unable to get binding handle for dreplsrv\n"));
+                TALLOC_FREE(tmp_ctx);
+                return;
+        }
+
+        r.in.user_dn = ldb_dn_get_linearized(user_dn);
+
+        /*
+         * This seem to rely on the current IRPC implementation,
+         * which delivers the message in the _send function.
+         *
+         * TODO: we need a ONE_WAY IRPC handle and register
+         * a callback and wait for it to be triggered!
+         */
+        req = dcerpc_drepl_trigger_repl_secret_r_send(tmp_ctx,
+                                                      event_ctx,
+                                                      irpc_handle,
+                                                      &r);
+
+        /* we aren't interested in a reply */
+        talloc_free(req);
+        TALLOC_FREE(tmp_ctx);
+}
 
 static time_t ldb_msg_find_krb5time_ldap_time(struct ldb_message *msg, const char *attr, time_t default_val)
 {
@@ -504,7 +556,8 @@ static krb5_error_code samba_kdc_message2entry_keys(krb5_context context,
 	if (allocated_keys == 0) {
 		if (kdc_db_ctx->rodc) {
 			/* We are on an RODC, but don't have keys for this account.  Signal this to the caller */
-			/* TODO:  We need to call a generalised version of auth_sam_trigger_repl_secret from here */
+			auth_sam_trigger_repl_secret(kdc_db_ctx, kdc_db_ctx->msg_ctx,
+						     kdc_db_ctx->ev_ctx, msg->dn);
 			return SDB_ERR_NOT_FOUND_HERE;
 		}
 
@@ -775,6 +828,7 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 		goto out;
 	}
 
+	p->is_rodc = is_rodc;
 	p->kdc_db_ctx = kdc_db_ctx;
 	p->realm_dn = talloc_reference(p, realm_dn);
 	if (!p->realm_dn) {
@@ -821,6 +875,8 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 	 */
 
 	if (ent_type == SAMBA_KDC_ENT_TYPE_KRBTGT) {
+		p->is_krbtgt = true;
+
 		if (flags & (SDB_F_CANON)) {
 			/*
 			 * When requested to do so, ensure that the
@@ -1117,7 +1173,6 @@ static krb5_error_code samba_kdc_trust_message2entry(krb5_context context,
 {
 	struct loadparm_context *lp_ctx = kdc_db_ctx->lp_ctx;
 	const char *our_realm = lpcfg_realm(lp_ctx);
-	const char *dnsdomain = NULL;
 	char *partner_realm = NULL;
 	const char *realm = NULL;
 	const char *krbtgt_realm = NULL;
@@ -1133,7 +1188,7 @@ static krb5_error_code samba_kdc_trust_message2entry(krb5_context context,
 	uint32_t previous_kvno;
 	uint32_t num_keys = 0;
 	enum ndr_err_code ndr_err;
-	int ret, trust_direction_flags;
+	int ret;
 	unsigned int i;
 	struct AuthenticationInformationArray *auth_array;
 	struct timeval tv;
@@ -1141,6 +1196,8 @@ static krb5_error_code samba_kdc_trust_message2entry(krb5_context context,
 	uint32_t *auth_kvno;
 	bool preferr_current = false;
 	uint32_t supported_enctypes = ENC_RC4_HMAC_MD5;
+	struct lsa_TrustDomainInfoInfoEx *tdo = NULL;
+	NTSTATUS status;
 
 	if (dsdb_functional_level(kdc_db_ctx->samdb) >= DS_DOMAIN_FUNCTION_2008) {
 		supported_enctypes = ldb_msg_find_attr_as_uint(msg,
@@ -1148,20 +1205,44 @@ static krb5_error_code samba_kdc_trust_message2entry(krb5_context context,
 					supported_enctypes);
 	}
 
-	trust_direction_flags = ldb_msg_find_attr_as_int(msg, "trustDirection", 0);
-	if (!(trust_direction_flags & direction)) {
+	status = dsdb_trust_parse_tdo_info(mem_ctx, msg, &tdo);
+	if (!NT_STATUS_IS_OK(status)) {
+		krb5_clear_error_message(context);
+		ret = ENOMEM;
+		goto out;
+	}
+
+	if (!(tdo->trust_direction & direction)) {
 		krb5_clear_error_message(context);
 		ret = SDB_ERR_NOENTRY;
 		goto out;
 	}
 
-	dnsdomain = ldb_msg_find_attr_as_string(msg, "trustPartner", NULL);
-	if (dnsdomain == NULL) {
+	if (tdo->trust_type != LSA_TRUST_TYPE_UPLEVEL) {
+		/*
+		 * Only UPLEVEL domains support kerberos here,
+		 * as we don't support LSA_TRUST_TYPE_MIT.
+		 */
 		krb5_clear_error_message(context);
 		ret = SDB_ERR_NOENTRY;
 		goto out;
 	}
-	partner_realm = strupper_talloc(mem_ctx, dnsdomain);
+
+	if (tdo->trust_attributes & LSA_TRUST_ATTRIBUTE_CROSS_ORGANIZATION) {
+		/*
+		 * We don't support selective authentication yet.
+		 */
+		krb5_clear_error_message(context);
+		ret = SDB_ERR_NOENTRY;
+		goto out;
+	}
+
+	if (tdo->domain_name.string == NULL) {
+		krb5_clear_error_message(context);
+		ret = SDB_ERR_NOENTRY;
+		goto out;
+	}
+	partner_realm = strupper_talloc(mem_ctx, tdo->domain_name.string);
 	if (partner_realm == NULL) {
 		krb5_clear_error_message(context);
 		ret = ENOMEM;
@@ -1194,12 +1275,13 @@ static krb5_error_code samba_kdc_trust_message2entry(krb5_context context,
 		goto out;
 	}
 
-	p = talloc(mem_ctx, struct samba_kdc_entry);
+	p = talloc_zero(mem_ctx, struct samba_kdc_entry);
 	if (!p) {
 		ret = ENOMEM;
 		goto out;
 	}
 
+	p->is_trust = true;
 	p->kdc_db_ctx = kdc_db_ctx;
 	p->realm_dn = realm_dn;
 
@@ -2677,9 +2759,11 @@ NTSTATUS samba_kdc_setup_db_ctx(TALLOC_CTX *mem_ctx, struct samba_kdc_base_conte
 	}
 	kdc_db_ctx->ev_ctx = base_ctx->ev_ctx;
 	kdc_db_ctx->lp_ctx = base_ctx->lp_ctx;
+	kdc_db_ctx->msg_ctx = base_ctx->msg_ctx;
 
 	/* get default kdc policy */
-	lpcfg_default_kdc_policy(base_ctx->lp_ctx,
+	lpcfg_default_kdc_policy(mem_ctx,
+				 base_ctx->lp_ctx,
 				 &kdc_db_ctx->policy.svc_tkt_lifetime,
 				 &kdc_db_ctx->policy.usr_tkt_lifetime,
 				 &kdc_db_ctx->policy.renewal_lifetime);
@@ -2690,8 +2774,12 @@ NTSTATUS samba_kdc_setup_db_ctx(TALLOC_CTX *mem_ctx, struct samba_kdc_base_conte
 	}
 
 	/* Setup the link to LDB */
-	kdc_db_ctx->samdb = samdb_connect(kdc_db_ctx, base_ctx->ev_ctx,
-					  base_ctx->lp_ctx, session_info, 0);
+	kdc_db_ctx->samdb = samdb_connect(kdc_db_ctx,
+					  base_ctx->ev_ctx,
+					  base_ctx->lp_ctx,
+					  session_info,
+					  NULL,
+					  0);
 	if (kdc_db_ctx->samdb == NULL) {
 		DEBUG(1, ("samba_kdc_setup_db_ctx: Cannot open samdb for KDC backend!"));
 		talloc_free(kdc_db_ctx);

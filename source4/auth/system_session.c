@@ -29,6 +29,8 @@
 #include "auth/session.h"
 #include "auth/system_session_proto.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_AUTH
 
 /*
   prevent the static system session being freed
@@ -51,7 +53,12 @@ _PUBLIC_ struct auth_session_info *system_session(struct loadparm_context *lp_ct
 		return static_session;
 	}
 
-	nt_status = auth_system_session_info(talloc_autofree_context(),
+	/*
+	 * Use NULL here, not the autofree context for this
+	 * static pointer. The destructor prevents freeing this
+	 * memory anyway.
+	 */
+	nt_status = auth_system_session_info(NULL,
 					     lp_ctx,
 					     &static_session);
 	if (!NT_STATUS_IS_OK(nt_status)) {

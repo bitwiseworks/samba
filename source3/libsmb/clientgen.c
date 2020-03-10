@@ -75,7 +75,6 @@ struct GUID cli_state_client_guid;
 struct cli_state *cli_state_create(TALLOC_CTX *mem_ctx,
 				   int fd,
 				   const char *remote_name,
-				   const char *remote_realm,
 				   int signing_state, int flags)
 {
 	struct cli_state *cli = NULL;
@@ -209,13 +208,6 @@ struct cli_state *cli_state_create(TALLOC_CTX *mem_ctx,
 
 	smb2_capabilities = SMB2_CAP_ALL;
 
-	if (remote_realm) {
-		cli->remote_realm = talloc_strdup(cli, remote_realm);
-		if (cli->remote_realm == NULL) {
-			goto error;
-		}
-	}
-
 	cli->conn = smbXcli_conn_create(cli, fd, remote_name,
 					signing_state,
 					smb1_capabilities,
@@ -306,11 +298,6 @@ void cli_shutdown(struct cli_state *cli)
 	}
 
 	_cli_shutdown(cli);
-}
-
-const char *cli_state_remote_realm(struct cli_state *cli)
-{
-	return cli->remote_realm;
 }
 
 uint16_t cli_state_get_vc_num(struct cli_state *cli)

@@ -24,6 +24,7 @@
 #include "../libcli/smb/smbXcli_base.h"
 #include "libcli/security/security.h"
 #include "libsmb/proto.h"
+#include "auth/credentials/credentials.h"
 #include "auth/gensec/gensec.h"
 #include "auth_generic.h"
 #include "../librpc/ndr/libndr.h"
@@ -246,40 +247,12 @@ bool run_smb2_negprot(int dummy)
 	}
 
 	protocol = smbXcli_conn_protocol(cli->conn);
+	name = smb_protocol_types_string(protocol);
 
-	switch (protocol) {
-	case PROTOCOL_SMB2_02:
-		name = "SMB2_02";
-		break;
-	case PROTOCOL_SMB2_10:
-		name = "SMB2_10";
-		break;
-	case PROTOCOL_SMB2_22:
-		name = "SMB2_22";
-		break;
-	case PROTOCOL_SMB2_24:
-		name = "SMB2_24";
-		break;
-	case PROTOCOL_SMB3_00:
-		name = "SMB3_00";
-		break;
-	case PROTOCOL_SMB3_02:
-		name = "SMB3_02";
-		break;
-	case PROTOCOL_SMB3_10:
-		name = "SMB3_10";
-		break;
-	case PROTOCOL_SMB3_11:
-		name = "SMB3_11";
-		break;
-	default:
-		break;
-	}
-
-	if (name) {
+	if (protocol >= PROTOCOL_SMB2_02) {
 		printf("Server supports %s\n", name);
 	} else {
-		printf("Server DOES NOT support SMB2\n");
+		printf("Server DOES NOT support SMB2, only %s\n", name);
 		return false;
 	}
 
@@ -296,6 +269,47 @@ bool run_smb2_negprot(int dummy)
 	if (smbXcli_conn_is_connected(cli->conn)) {
 		printf("2nd smbXcli_negprot should disconnect "
 		       "- still connected\n");
+		return false;
+	}
+
+	return true;
+}
+
+bool run_smb2_anonymous(int dummy)
+{
+	struct cli_state *cli = NULL;
+	NTSTATUS status;
+	struct cli_credentials *anon_creds = NULL;
+	bool guest = false;
+
+	printf("Starting SMB2-ANONYMOUS\n");
+
+	if (!torture_init_connection(&cli)) {
+		return false;
+	}
+
+	status = smbXcli_negprot(cli->conn, cli->timeout,
+				 PROTOCOL_SMB2_02, PROTOCOL_LATEST);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smbXcli_negprot returned %s\n", nt_errstr(status));
+		return false;
+	}
+
+	anon_creds = cli_credentials_init_anon(talloc_tos());
+	if (anon_creds == NULL) {
+		printf("cli_credentials_init_anon failed\n");
+		return false;
+	}
+
+	status = cli_session_setup_creds(cli, anon_creds);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("cli_session_setup returned %s\n", nt_errstr(status));
+		return false;
+	}
+
+	guest = smbXcli_session_is_guest(cli->smb2.session);
+	if (guest) {
+		printf("anonymous session should not have guest authentication\n");
 		return false;
 	}
 
@@ -2050,4 +2064,274 @@ bool run_smb2_ftruncate(int dummy)
 		correct = false;
 	}
 	return correct;
+}
+
+/* Ensure SMB2 flush on directories behaves correctly. */
+
+static bool test_dir_fsync(struct cli_state *cli, const char *path)
+{
+	NTSTATUS status;
+	uint64_t fid_persistent, fid_volatile;
+	uint8_t *dir_data = NULL;
+	uint32_t dir_data_length = 0;
+
+	/* Open directory - no write abilities. */
+	status = smb2cli_create(cli->conn, cli->timeout, cli->smb2.session,
+			cli->smb2.tcon, path,
+			SMB2_OPLOCK_LEVEL_NONE, /* oplock_level, */
+			SMB2_IMPERSONATION_IMPERSONATION, /* impersonation_level, */
+			SEC_STD_SYNCHRONIZE|
+			SEC_DIR_LIST|
+			SEC_DIR_READ_ATTRIBUTE, /* desired_access, */
+			0, /* file_attributes, */
+			FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, /* share_access, */
+			FILE_OPEN, /* create_disposition, */
+			FILE_SYNCHRONOUS_IO_NONALERT|FILE_DIRECTORY_FILE, /* create_options, */
+			NULL, /* smb2_create_blobs *blobs */
+			&fid_persistent,
+			&fid_volatile,
+			NULL, NULL, NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_create '%s' (readonly) returned %s\n",
+			path,
+			nt_errstr(status));
+		return false;
+	}
+
+	status = smb2cli_query_directory(
+		cli->conn, cli->timeout, cli->smb2.session, cli->smb2.tcon,
+		1, 0, 0, fid_persistent, fid_volatile, "*", 0xffff,
+		talloc_tos(), &dir_data, &dir_data_length);
+
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_query_directory returned %s\n",
+			nt_errstr(status));
+		return false;
+	}
+
+	/* Open directory no write access. Flush should fail. */
+
+	status = smb2cli_flush(cli->conn, cli->timeout, cli->smb2.session,
+			       cli->smb2.tcon, fid_persistent, fid_volatile);
+	if (!NT_STATUS_EQUAL(status, NT_STATUS_ACCESS_DENIED)) {
+		printf("smb2cli_flush on a read-only directory returned %s\n",
+			nt_errstr(status));
+		return false;
+	}
+
+	status = smb2cli_close(cli->conn, cli->timeout, cli->smb2.session,
+			       cli->smb2.tcon, 0, fid_persistent, fid_volatile);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_close returned %s\n", nt_errstr(status));
+		return false;
+	}
+
+	/* Open directory write-attributes only. Flush should still fail. */
+
+	status = smb2cli_create(cli->conn, cli->timeout, cli->smb2.session,
+			cli->smb2.tcon, path,
+			SMB2_OPLOCK_LEVEL_NONE, /* oplock_level, */
+			SMB2_IMPERSONATION_IMPERSONATION, /* impersonation_level, */
+			SEC_STD_SYNCHRONIZE|
+			SEC_DIR_LIST|
+			SEC_DIR_WRITE_ATTRIBUTE|
+			SEC_DIR_READ_ATTRIBUTE, /* desired_access, */
+			0, /* file_attributes, */
+			FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, /* share_access, */
+			FILE_OPEN, /* create_disposition, */
+			FILE_SYNCHRONOUS_IO_NONALERT|FILE_DIRECTORY_FILE, /* create_options, */
+			NULL, /* smb2_create_blobs *blobs */
+			&fid_persistent,
+			&fid_volatile,
+			NULL, NULL, NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_create '%s' (write attr) returned %s\n",
+			path,
+			nt_errstr(status));
+		return false;
+	}
+
+	status = smb2cli_query_directory(
+		cli->conn, cli->timeout, cli->smb2.session, cli->smb2.tcon,
+		1, 0, 0, fid_persistent, fid_volatile, "*", 0xffff,
+		talloc_tos(), &dir_data, &dir_data_length);
+
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_query_directory returned %s\n", nt_errstr(status));
+		return false;
+	}
+
+	status = smb2cli_flush(cli->conn, cli->timeout, cli->smb2.session,
+			       cli->smb2.tcon, fid_persistent, fid_volatile);
+	if (!NT_STATUS_EQUAL(status, NT_STATUS_ACCESS_DENIED)) {
+		printf("smb2cli_flush on a write-attributes directory "
+			"returned %s\n",
+			nt_errstr(status));
+		return false;
+	}
+
+	status = smb2cli_close(cli->conn, cli->timeout, cli->smb2.session,
+			       cli->smb2.tcon, 0, fid_persistent, fid_volatile);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_close returned %s\n", nt_errstr(status));
+		return false;
+	}
+
+	/* Open directory with SEC_DIR_ADD_FILE access. Flush should now succeed. */
+
+	status = smb2cli_create(cli->conn, cli->timeout, cli->smb2.session,
+			cli->smb2.tcon, path,
+			SMB2_OPLOCK_LEVEL_NONE, /* oplock_level, */
+			SMB2_IMPERSONATION_IMPERSONATION, /* impersonation_level, */
+			SEC_STD_SYNCHRONIZE|
+			SEC_DIR_LIST|
+			SEC_DIR_ADD_FILE, /* desired_access, */
+			0, /* file_attributes, */
+			FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, /* share_access, */
+			FILE_OPEN, /* create_disposition, */
+			FILE_SYNCHRONOUS_IO_NONALERT|FILE_DIRECTORY_FILE, /* create_options, */
+			NULL, /* smb2_create_blobs *blobs */
+			&fid_persistent,
+			&fid_volatile,
+			NULL, NULL, NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_create '%s' (write FILE access) returned %s\n",
+			path,
+			nt_errstr(status));
+		return false;
+	}
+
+	status = smb2cli_query_directory(
+		cli->conn, cli->timeout, cli->smb2.session, cli->smb2.tcon,
+		1, 0, 0, fid_persistent, fid_volatile, "*", 0xffff,
+		talloc_tos(), &dir_data, &dir_data_length);
+
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_query_directory returned %s\n", nt_errstr(status));
+		return false;
+	}
+
+	status = smb2cli_flush(cli->conn, cli->timeout, cli->smb2.session,
+			       cli->smb2.tcon, fid_persistent, fid_volatile);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_flush on a directory returned %s\n",
+			nt_errstr(status));
+		return false;
+	}
+
+	status = smb2cli_close(cli->conn, cli->timeout, cli->smb2.session,
+			       cli->smb2.tcon, 0, fid_persistent, fid_volatile);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_close returned %s\n", nt_errstr(status));
+		return false;
+	}
+
+	/* Open directory with SEC_DIR_ADD_FILE access. Flush should now succeed. */
+
+	status = smb2cli_create(cli->conn, cli->timeout, cli->smb2.session,
+			cli->smb2.tcon, path,
+			SMB2_OPLOCK_LEVEL_NONE, /* oplock_level, */
+			SMB2_IMPERSONATION_IMPERSONATION, /* impersonation_level, */
+			SEC_STD_SYNCHRONIZE|
+			SEC_DIR_LIST|
+			SEC_DIR_ADD_SUBDIR, /* desired_access, */
+			0, /* file_attributes, */
+			FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE, /* share_access, */
+			FILE_OPEN, /* create_disposition, */
+			FILE_SYNCHRONOUS_IO_NONALERT|FILE_DIRECTORY_FILE, /* create_options, */
+			NULL, /* smb2_create_blobs *blobs */
+			&fid_persistent,
+			&fid_volatile,
+			NULL, NULL, NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_create '%s' (write DIR access) returned %s\n",
+			path,
+			nt_errstr(status));
+		return false;
+	}
+
+	status = smb2cli_query_directory(
+		cli->conn, cli->timeout, cli->smb2.session, cli->smb2.tcon,
+		1, 0, 0, fid_persistent, fid_volatile, "*", 0xffff,
+		talloc_tos(), &dir_data, &dir_data_length);
+
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_query_directory returned %s\n", nt_errstr(status));
+		return false;
+	}
+
+	status = smb2cli_flush(cli->conn, cli->timeout, cli->smb2.session,
+			       cli->smb2.tcon, fid_persistent, fid_volatile);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_flush on a directory returned %s\n",
+			nt_errstr(status));
+		return false;
+	}
+
+	status = smb2cli_close(cli->conn, cli->timeout, cli->smb2.session,
+			       cli->smb2.tcon, 0, fid_persistent, fid_volatile);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smb2cli_close returned %s\n", nt_errstr(status));
+		return false;
+	}
+
+
+	return true;
+}
+
+bool run_smb2_dir_fsync(int dummy)
+{
+	struct cli_state *cli = NULL;
+	NTSTATUS status;
+	bool bret = false;
+	const char *dname = "fsync_test_dir";
+
+	printf("Starting SMB2-DIR-FSYNC\n");
+
+	if (!torture_init_connection(&cli)) {
+		return false;
+	}
+
+	status = smbXcli_negprot(cli->conn, cli->timeout,
+				 PROTOCOL_SMB2_02, PROTOCOL_SMB2_02);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("smbXcli_negprot returned %s\n", nt_errstr(status));
+		return false;
+	}
+
+	status = cli_session_setup_creds(cli, torture_creds);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("cli_session_setup returned %s\n", nt_errstr(status));
+		return false;
+	}
+
+	status = cli_tree_connect(cli, share, "?????", NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("cli_tree_connect returned %s\n", nt_errstr(status));
+		return false;
+	}
+
+	(void)cli_rmdir(cli, dname);
+	status = cli_mkdir(cli, dname);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("cli_mkdir(%s) returned %s\n",
+			dname,
+			nt_errstr(status));
+		return false;
+	}
+
+	/* Test on a subdirectory. */
+	bret = test_dir_fsync(cli, dname);
+	if (bret == false) {
+		(void)cli_rmdir(cli, dname);
+		return false;
+	}
+	(void)cli_rmdir(cli, dname);
+
+	/* Test on the root handle of a share. */
+	bret = test_dir_fsync(cli, "");
+	if (bret == false) {
+		return false;
+	}
+	return true;
 }

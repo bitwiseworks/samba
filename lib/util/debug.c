@@ -27,7 +27,8 @@
 #include "time_basic.h"
 #include "close_low_fd.h"
 #include "memory.h"
-#include "samba_util.h" /* LIST_SEP */
+#include "util_strlist.h" /* LIST_SEP */
+#include "blocking.h"
 #include "debug.h"
 
 /* define what facility to use for syslog */
@@ -149,7 +150,7 @@ static void debug_file_log(int msg_level,
 
 #ifdef WITH_SYSLOG
 static void debug_syslog_reload(bool enabled, bool previously_enabled,
-				const char *prog_name)
+				const char *prog_name, char *option)
 {
 	if (enabled && !previously_enabled) {
 #ifdef LOG_DAEMON
@@ -207,7 +208,7 @@ static void debug_lttng_log(int msg_level,
 #ifdef HAVE_GPFS
 #include "gpfswrap.h"
 static void debug_gpfs_reload(bool enabled, bool previously_enabled,
-			      const char *prog_name)
+			      const char *prog_name, char *option)
 {
 	gpfswrap_init();
 
@@ -236,12 +237,92 @@ static void debug_gpfs_log(int msg_level,
 }
 #endif /* HAVE_GPFS */
 
+#define DEBUG_RINGBUF_SIZE (1024 * 1024)
+#define DEBUG_RINGBUF_SIZE_OPT "size="
+
+static char *debug_ringbuf;
+static size_t debug_ringbuf_size;
+static size_t debug_ringbuf_ofs;
+
+/* We ensure in debug_ringbuf_log() that this is always \0 terminated */
+char *debug_get_ringbuf(void)
+{
+	return debug_ringbuf;
+}
+
+/* Return the size of the ringbuf (including a \0 terminator) */
+size_t debug_get_ringbuf_size(void)
+{
+	return debug_ringbuf_size;
+}
+
+static void debug_ringbuf_reload(bool enabled, bool previously_enabled,
+				 const char *prog_name, char *option)
+{
+	bool cmp;
+	size_t optlen = strlen(DEBUG_RINGBUF_SIZE_OPT);
+
+	debug_ringbuf_size = DEBUG_RINGBUF_SIZE;
+	debug_ringbuf_ofs = 0;
+
+	SAFE_FREE(debug_ringbuf);
+
+	if (!enabled) {
+		return;
+	}
+
+	if (option != NULL) {
+		cmp = strncmp(option, DEBUG_RINGBUF_SIZE_OPT, optlen);
+		if (cmp == 0) {
+			debug_ringbuf_size = (size_t)strtoull(
+				option + optlen, NULL, 10);
+		}
+	}
+
+	debug_ringbuf = calloc(debug_ringbuf_size, sizeof(char));
+	if (debug_ringbuf == NULL) {
+		return;
+	}
+}
+
+static void debug_ringbuf_log(int msg_level,
+			      const char *msg,
+			      const char *msg_no_nl)
+{
+	size_t msglen = strlen(msg);
+	size_t allowed_size;
+
+	if (debug_ringbuf == NULL) {
+		return;
+	}
+
+	/* Ensure the buffer is always \0 terminated */
+	allowed_size = debug_ringbuf_size - 1;
+
+	if (msglen > allowed_size) {
+		return;
+	}
+
+	if ((debug_ringbuf_ofs + msglen) < debug_ringbuf_ofs) {
+		return;
+	}
+
+	if ((debug_ringbuf_ofs + msglen) > allowed_size) {
+		debug_ringbuf_ofs = 0;
+	}
+
+	memcpy(debug_ringbuf + debug_ringbuf_ofs, msg, msglen);
+	debug_ringbuf_ofs += msglen;
+}
+
 static struct debug_backend {
 	const char *name;
 	int log_level;
 	int new_log_level;
-	void (*reload)(bool enabled, bool prev_enabled, const char *prog_name);
+	void (*reload)(bool enabled, bool prev_enabled,
+		       const char *prog_name, char *option);
 	void (*log)(int msg_level, const char *msg, const char *msg_no_nl);
+	char *option;
 } debug_backends[] = {
 	{
 		.name = "file",
@@ -276,6 +357,11 @@ static struct debug_backend {
 		.log = debug_gpfs_log,
 	},
 #endif
+	{
+		.name = "ringbuf",
+		.log = debug_ringbuf_log,
+		.reload = debug_ringbuf_reload,
+	},
 };
 
 static struct debug_backend *debug_find_backend(const char *name)
@@ -297,6 +383,7 @@ static struct debug_backend *debug_find_backend(const char *name)
 static void debug_backend_parse_token(char *tok)
 {
 	char *backend_name_option, *backend_name,*backend_level, *saveptr;
+	char *backend_option;
 	struct debug_backend *b;
 
 	/*
@@ -317,12 +404,7 @@ static void debug_backend_parse_token(char *tok)
 		return;
 	}
 
-	/*
-	 * No backend is using the option yet.
-	 */
-#if 0
 	backend_option = strtok_r(NULL, "\0", &saveptr);
-#endif
 
 	/*
 	 * Find and update backend
@@ -336,6 +418,13 @@ static void debug_backend_parse_token(char *tok)
 		b->new_log_level = MAX_DEBUG_LEVEL;
 	} else {
 		b->new_log_level = atoi(backend_level);
+	}
+
+	if (backend_option != NULL) {
+		b->option = strdup(backend_option);
+		if (b->option == NULL) {
+			return;
+		}
 	}
 }
 
@@ -355,6 +444,7 @@ static void debug_set_backends(const char *param)
 	 * disabled
 	 */
 	for (i = 0; i < ARRAY_SIZE(debug_backends); i++) {
+		SAFE_FREE(debug_backends[i].option);
 		debug_backends[i].new_log_level = -1;
 	}
 
@@ -380,7 +470,8 @@ static void debug_set_backends(const char *param)
 			bool enabled = b->new_log_level > -1;
 			bool previously_enabled = b->log_level > -1;
 
-			b->reload(enabled, previously_enabled, state.prog_name);
+			b->reload(enabled, previously_enabled, state.prog_name,
+				  b->option);
 		}
 		b->log_level = b->new_log_level;
 	}
@@ -389,8 +480,8 @@ static void debug_set_backends(const char *param)
 static void debug_backends_log(const char *msg, int msg_level)
 {
 	char msg_no_nl[FORMAT_BUFR_SIZE];
-	unsigned i;
-	int len;
+	size_t i;
+	size_t len;
 
 	/*
 	 * Some backends already add an extra newline, so also provide
@@ -446,6 +537,20 @@ static const char *default_classname_table[] = {
 	[DBGC_DNS] =		"dns",
 	[DBGC_LDB] =		"ldb",
 	[DBGC_TEVENT] =		"tevent",
+	[DBGC_AUTH_AUDIT] =	"auth_audit",
+	[DBGC_AUTH_AUDIT_JSON] = "auth_json_audit",
+	[DBGC_KERBEROS] =       "kerberos",
+	[DBGC_DRS_REPL] =       "drs_repl",
+	[DBGC_SMB2] =           "smb2",
+	[DBGC_SMB2_CREDITS] =   "smb2_credits",
+	[DBGC_DSDB_AUDIT]  =	"dsdb_audit",
+	[DBGC_DSDB_AUDIT_JSON] = "dsdb_json_audit",
+	[DBGC_DSDB_PWD_AUDIT]  =	"dsdb_password_audit",
+	[DBGC_DSDB_PWD_AUDIT_JSON] = "dsdb_password_json_audit",
+	[DBGC_DSDB_TXN_AUDIT]  =	"dsdb_transaction_audit",
+	[DBGC_DSDB_TXN_AUDIT_JSON] = "dsdb_transaction_json_audit",
+	[DBGC_DSDB_GROUP_AUDIT] =	"dsdb_group_audit",
+	[DBGC_DSDB_GROUP_AUDIT_JSON] = "dsdb_group_json_audit",
 };
 
 /*
@@ -454,7 +559,7 @@ static const char *default_classname_table[] = {
  */
 static const int debug_class_list_initial[ARRAY_SIZE(default_classname_table)];
 
-static int debug_num_classes = 0;
+static size_t debug_num_classes = 0;
 int     *DEBUGLEVEL_CLASS = discard_const_p(int, debug_class_list_initial);
 
 
@@ -508,6 +613,8 @@ static void debug_init(void);
 
 void gfree_debugsyms(void)
 {
+	unsigned i;
+
 	TALLOC_FREE(classname_table);
 
 	if ( DEBUGLEVEL_CLASS != debug_class_list_initial ) {
@@ -518,6 +625,10 @@ void gfree_debugsyms(void)
 	debug_num_classes = 0;
 
 	state.initialized = false;
+
+	for (i = 0; i < ARRAY_SIZE(debug_backends); i++) {
+		SAFE_FREE(debug_backends[i].option);
+	}
 }
 
 /****************************************************************************
@@ -527,7 +638,7 @@ utility lists registered debug class names's
 char *debug_list_class_names_and_levels(void)
 {
 	char *buf = NULL;
-	unsigned int i;
+	size_t i;
 	/* prepare strings */
 	for (i = 0; i < debug_num_classes; i++) {
 		buf = talloc_asprintf_append(buf,
@@ -548,7 +659,7 @@ char *debug_list_class_names_and_levels(void)
 
 static int debug_lookup_classname_int(const char* classname)
 {
-	int i;
+	size_t i;
 
 	if (!classname) return -1;
 
@@ -638,7 +749,7 @@ static int debug_lookup_classname(const char *classname)
 
 static void debug_dump_status(int level)
 {
-	int q;
+	size_t q;
 
 	DEBUG(level, ("INFO: Current debug levels:\n"));
 	for (q = 0; q < debug_num_classes; q++) {
@@ -687,7 +798,7 @@ bool debug_parse_levels(const char *params_str)
 	size_t str_len = strlen(params_str);
 	char str[str_len+1];
 	char *tok, *saveptr;
-	int i;
+	size_t i;
 
 	/* Just in case */
 	debug_init();
@@ -973,8 +1084,11 @@ bool reopen_logs_internal(void)
 	force_check_log_size();
 	(void)umask(oldumask);
 
-	/* Take over stderr to catch output into logs */
-	if (state.fd > 0) {
+	/*
+	 * If log file was opened or created successfully, take over stderr to
+	 * catch output into logs.
+	 */
+	if (new_fd != -1) {
 		if (dup2(state.fd, 2) == -1) {
 			/* Close stderr too, if dup2 can't point it -
 			   at the logfile.  There really isn't much

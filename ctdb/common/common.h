@@ -39,8 +39,21 @@ struct ctdb_queue *ctdb_queue_setup(struct ctdb_context *ctdb,
 
 /* From common/ctdb_ltdb.c */
 
+int ctdb_db_tdb_flags(uint8_t db_flags, bool with_valgrind, bool with_mutex);
+
 struct ctdb_db_context *ctdb_db_handle(struct ctdb_context *ctdb,
 				       const char *name);
+
+bool ctdb_db_persistent(struct ctdb_db_context *ctdb_db);
+bool ctdb_db_replicated(struct ctdb_db_context *ctdb_db);
+bool ctdb_db_volatile(struct ctdb_db_context *ctdb_db);
+
+bool ctdb_db_readonly(struct ctdb_db_context *ctdb_db);
+void ctdb_db_set_readonly(struct ctdb_db_context *ctdb_db);
+void ctdb_db_reset_readonly(struct ctdb_db_context *ctdb_db);
+
+bool ctdb_db_sticky(struct ctdb_db_context *ctdb_db);
+void ctdb_db_set_sticky(struct ctdb_db_context *ctdb_db);
 
 uint32_t ctdb_lmaster(struct ctdb_context *ctdb, const TDB_DATA *key);
 
@@ -89,8 +102,6 @@ void ctdb_die(struct ctdb_context *ctdb, const char *msg);
 bool ctdb_set_helper(const char *type, char *helper, size_t size,
 		     const char *envvar,
 		     const char *dir, const char *file);
-
-void ctdb_external_trace(void);
 
 int ctdb_parse_address(TALLOC_CTX *mem_ctx, const char *str,
 		       ctdb_sock_addr *address);

@@ -55,4 +55,18 @@ fi
 
 AC_SUBST(TARGETS)
 
-AC_OUTPUT( Makefile.settings build/catalog.xml)
+. ../VERSION
+if test x"$DOC_VERSION" = x; then
+	#AC_MSG_ERROR([Please export DOC_VERSION variable])
+	VERSION_SUFFIX=""
+	if test x"$SAMBA_VERSION_PRE_RELEASE" != x; then
+		VERSION_SUFFIX=pre
+	fi
+	DOC_VERSION=${SAMBA_VERSION_MAJOR}.${SAMBA_VERSION_MINOR}.${SAMBA_VERSION_RELEASE}${VERSION_SUFFIX}
+else
+	AC_MSG_RESULT([DOC_VERSION: ${DOC_VERSION}])
+fi
+
+doc_version="${DOC_VERSION}"
+AC_SUBST(doc_version)
+AC_OUTPUT( Makefile.settings build/catalog.xml build/DTD/samba.build.version)

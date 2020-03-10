@@ -38,9 +38,9 @@ static SMB_ACL_PERM_T tru64_permset_to_smb(const acl_perm_t tru64_permset);
 /* public functions - the api */
 
 SMB_ACL_T tru64acl_sys_acl_get_file(vfs_handle_struct *handle,
-				    const char *path_p,
-				    SMB_ACL_TYPE_T type,
-				    TALLOC_CTX *mem_ctx)
+				const struct smb_filename *smb_fname,
+				SMB_ACL_TYPE_T type,
+				TALLOC_CTX *mem_ctx)
 {
         struct smb_acl_t *result;
         acl_type_t the_acl_type;
@@ -60,7 +60,7 @@ SMB_ACL_T tru64acl_sys_acl_get_file(vfs_handle_struct *handle,
                 return NULL;
         }
 
-        tru64_acl = acl_get_file((char *)path_p, the_acl_type);
+        tru64_acl = acl_get_file((char *)smb_fname->base_name, the_acl_type);
 
         if (tru64_acl == NULL) {
                 return NULL;
@@ -88,7 +88,7 @@ SMB_ACL_T tru64acl_sys_acl_get_fd(vfs_handle_struct *handle,
 }
 
 int tru64acl_sys_acl_set_file(vfs_handle_struct *handle,
-			      const char *name,
+			      const struct smb_filename *smb_fname,
 			      SMB_ACL_TYPE_T type,
 			      SMB_ACL_T theacl)
 {
@@ -97,7 +97,7 @@ int tru64acl_sys_acl_set_file(vfs_handle_struct *handle,
         acl_t tru64_acl;
 
         DEBUG(10, ("tru64acl_sys_acl_set_file called with name %s, type %d\n", 
-			name, type));
+			smb_fname->base_name, type));
 
         switch(type) {
         case SMB_ACL_TYPE_ACCESS:
@@ -120,7 +120,8 @@ int tru64acl_sys_acl_set_file(vfs_handle_struct *handle,
                 goto fail;
         }
 	DEBUG(10, ("got tru64 acl...\n"));
-        res = acl_set_file((char *)name, the_acl_type, tru64_acl);
+        res = acl_set_file((char *)smb_fname->base_name,
+				the_acl_type, tru64_acl);
         acl_free(tru64_acl);
         if (res != 0) {
                 DEBUG(10, ("acl_set_file failed: %s\n", strerror(errno)));
@@ -148,9 +149,9 @@ int tru64acl_sys_acl_set_fd(vfs_handle_struct *handle,
 }
 
 int tru64acl_sys_acl_delete_def_file(vfs_handle_struct *handle,
-				     const char *path)
+				const struct smb_filename *smb_fname)
 {
-	return acl_delete_def_file((char *)path);
+	return acl_delete_def_file((char *)smb_fname->base_name);
 }
 
 
@@ -480,8 +481,8 @@ static struct vfs_fn_pointers tru64acl_fns = {
 	.sys_acl_delete_def_file_fn = tru64acl_sys_acl_delete_def_file,
 };
 
-NTSTATUS vfs_tru64acl_init(void);
-NTSTATUS vfs_tru64acl_init(void)
+static_decl_vfs;
+NTSTATUS vfs_tru64acl_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "tru64acl",
 				&tru64acl_fns);

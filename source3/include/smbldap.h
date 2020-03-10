@@ -33,66 +33,10 @@
  *
  */
 
-struct smbldap_state {
-	LDAP *ldap_struct;
-	pid_t pid;
-	time_t last_ping; /* monotonic */
-	/* retrive-once info */
-	const char *uri;
-
-	/* credentials */
-	bool anonymous;
-	char *bind_dn;
-	char *bind_secret;
-	int (*bind_callback)(LDAP *ldap_struct, struct smbldap_state *ldap_state, void *data);
-	void *bind_callback_data;
-
-	bool paged_results;
-
-	unsigned int num_failures;
-
-	time_t last_use; /* monotonic */
-	struct tevent_context *tevent_context;
-	struct tevent_timer *idle_event;
-
-	struct timeval last_rebind; /* monotonic */
-};
-
-/* struct used by both pdb_ldap.c and pdb_nds.c */
-
-struct ipasam_privates;
-
-struct ldapsam_privates {
-	struct smbldap_state *smbldap_state;
-
-	/* Former statics */
-	LDAPMessage *result;
-	LDAPMessage *entry;
-	int index;
-
-	const char *domain_name;
-	struct dom_sid domain_sid;
-
-	/* configuration items */
-	int schema_ver;
-
-	char *domain_dn;
-
-	/* Is this NDS ldap? */
-	int is_nds_ldap;
-
-	/* Is this IPA ldap? */
-	int is_ipa_ldap;
-	struct ipasam_privates *ipasam_privates;
-
-	/* ldap server location parameter */
-	char *location;
-
-	struct {
-		char *filter;
-		LDAPMessage *result;
-	} search_cache;
-};
+struct smbldap_state;
+typedef int (*smbldap_bind_callback_fn)(LDAP *ldap_struct,
+					struct smbldap_state *ldap_state,
+					void *data);
 
 /* The following definitions come from lib/smbldap.c  */
 
@@ -103,6 +47,15 @@ NTSTATUS smbldap_init(TALLOC_CTX *mem_ctx,
 		      const char *bind_dn,
 		      const char *bind_secret,
 		      struct smbldap_state **smbldap_state);
+
+LDAP *smbldap_get_ldap(struct smbldap_state *state);
+bool smbldap_get_paged_results(struct smbldap_state *state);
+void smbldap_set_paged_results(struct smbldap_state *state,
+			       bool paged_results);
+
+void smbldap_set_bind_callback(struct smbldap_state *state,
+			       smbldap_bind_callback_fn callback,
+			       void *callback_data);
 
 void smbldap_set_mod (LDAPMod *** modlist, int modop, const char *attribute, const char *value);
 void smbldap_set_mod_blob(LDAPMod *** modlist, int modop, const char *attribute, const DATA_BLOB *newblob);

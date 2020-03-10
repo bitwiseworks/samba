@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Run commands on CTDB nodes.
 
@@ -31,7 +31,7 @@ usage ()
 Usage: onnode [OPTION] ... <NODES> <COMMAND> ...
   options:
     -c          Run in current working directory on specified nodes.
-    -f          Specify nodes file, overrides CTDB_NODES_FILE.
+    -f          Specify nodes file, overriding default.
     -i          Keep standard input open - the default is to close it.
     -n          Allow nodes to be specified by name.
     -o <prefix> Save standard output from each node to file <prefix>.<ip>
@@ -57,6 +57,7 @@ invalid_nodespec ()
 
 # Defaults.
 current=false
+ctdb_nodes_file=""
 parallel=false
 verbose=false
 quiet=false
@@ -69,42 +70,32 @@ if [ -z "$CTDB_BASE" ] ; then
     CTDB_BASE="/usr/local/etc/ctdb"
 fi
 
-. "${CTDB_BASE}/functions"
-loadconfig "ctdb"
-
 parse_options ()
 {
-    # $POSIXLY_CORRECT means that the command passed to onnode can
-    # take options and getopt won't reorder things to make them
-    # options ot onnode.
-    local temp
-    # Not on the previous line - local returns 0!
-    temp=$(POSIXLY_CORRECT=1 getopt -n "$prog" -o "cf:hno:pqvPi" -l help -- "$@")
+	local opt
 
-    [ $? != 0 ] && usage
+	while getopts "cf:hno:pqvPi?" opt ; do
+		case "$opt" in
+		c) current=true ;;
+		f) ctdb_nodes_file="$OPTARG" ;;
+		n) names_ok=true ;;
+		o) prefix="$OPTARG" ;;
+		p) parallel=true ;;
+		q) quiet=true ;;
+		v) verbose=true ;;
+		P) push=true ;;
+		i) stdin=true ;;
+		\?|h) usage ;;
+		esac
+	done
+	shift $((OPTIND - 1))
 
-    eval set -- "$temp"
+	if [ $# -lt 2 ] ; then
+		usage
+	fi
 
-    while true ; do
-	case "$1" in
-	    -c) current=true ; shift ;;
-	    -f) CTDB_NODES_FILE="$2" ; shift 2 ;;
-	    -n) names_ok=true ; shift ;;
-	    -o) prefix="$2" ; shift 2 ;;
-	    -p) parallel=true ; shift ;;
-	    -q) quiet=true ; shift ;;
-	    -v) verbose=true ; shift ;;
-	    -P) push=true ; shift ;;
-	    -i) stdin=true ; shift ;;
-	    --) shift ; break ;;
-	    -h|--help|*) usage ;; # Shouldn't happen, so this is reasonable.
-	esac
-    done
-
-    [ $# -lt 2 ] && usage
-
-    nodespec="$1" ; shift
-    command="$*"
+	nodespec="$1" ; shift
+	command="$*"
 }
 
 echo_nth ()
@@ -147,6 +138,8 @@ get_nodes_with_status ()
 
     if [ -z "$ctdb_status_output" ] ; then
 	ctdb_status_output=$(ctdb -X status 2>&1)
+	# No! Checking the exit code afterwards is actually clearer...
+	# shellcheck disable=SC2181
 	if [ $? -ne 0 ] ; then
 	    echo "${prog}: unable to get status of CTDB nodes" >&2
 	    echo "$ctdb_status_output" >&2
@@ -214,57 +207,50 @@ get_any_available_node ()
 
 get_nodes ()
 {
-    local all_nodes
+	local all_nodes
 
-    if [ -n "$CTDB_NODES_SOCKETS" ] ; then 
-	all_nodes="$CTDB_NODES_SOCKETS"
-    else
 	local f="${CTDB_BASE}/nodes"
-	if [ -n "$CTDB_NODES_FILE" ] ; then
-	    f="$CTDB_NODES_FILE"
-	    if [ ! -e "$f" -a "${f#/}" = "$f" ] ; then
-		# $f is relative, try in $CTDB_BASE
-		f="${CTDB_BASE}/${f}"
-	    fi
-	elif [ -n "$CTDB_NODES" ] ; then
-	    f="$CTDB_NODES"
+	if [ -n "$ctdb_nodes_file" ] ; then
+		f="$ctdb_nodes_file"
+		if [ ! -e "$f" -a "${f#/}" = "$f" ] ; then
+			# $f is relative, try in $CTDB_BASE
+			f="${CTDB_BASE}/${f}"
+		fi
 	fi
 
 	if [ ! -r "$f" ] ; then
-	    echo "${prog}: unable to open nodes file  \"${f}\"" >&2
-	    exit 1
+		echo "${prog}: unable to open nodes file  \"${f}\"" >&2
+		exit 1
 	fi
 
 	all_nodes=$(sed -e 's@#.*@@g' -e 's@ *@@g' -e 's@^$@#DEAD@' "$f")
-    fi
 
-    local nodes=""
-    local n
-    for n in $(parse_nodespec "$1") ; do
-	[ $? != 0 ] && exit 1  # Required to catch exit in above subshell.
-	case "$n" in
-	    all)
-		echo "${all_nodes//#DEAD/}"
-		;;
-	    any)
-		get_any_available_node "$all_nodes" || exit 1
-		;;
-	    ok|healthy) 
-		get_nodes_with_status "$all_nodes" "healthy" || exit 1
-		;;
-	    con|connected) 
-		get_nodes_with_status "$all_nodes" "connected" || exit 1
-		;;
-	    [0-9]|[0-9][0-9]|[0-9][0-9][0-9])
-		# Intentional multi-word expansion
-		# shellcheck disable=SC2086
-		echo_nth "$n" $all_nodes
-		;;
-	    *)
-		$names_ok || invalid_nodespec
-		echo "$n"
-	esac
-    done
+	local n nodes
+	nodes=$(parse_nodespec "$1") || exit $?
+	for n in $nodes ; do
+		case "$n" in
+		all)
+			echo "${all_nodes//#DEAD/}"
+			;;
+		any)
+			get_any_available_node "$all_nodes" || exit 1
+			;;
+		ok|healthy)
+			get_nodes_with_status "$all_nodes" "healthy" || exit 1
+			;;
+		con|connected)
+			get_nodes_with_status "$all_nodes" "connected" || exit 1
+			;;
+		[0-9]|[0-9][0-9]|[0-9][0-9][0-9])
+			# Intentional multi-word expansion
+			# shellcheck disable=SC2086
+			echo_nth "$n" $all_nodes
+			;;
+		*)
+			$names_ok || invalid_nodespec
+			echo "$n"
+		esac
+	done
 }
 
 push()
@@ -280,11 +266,6 @@ push()
 	    *)  rsync "${PWD}/${f}" "[${host}]:${PWD}/${f}" ;;
 	esac
     done
-}
-
-fakessh ()
-{
-    CTDB_SOCKET="$1" sh -c "$2" 3>/dev/null
 }
 
 stdout_filter ()
@@ -313,32 +294,26 @@ parse_options "$@"
 
 ssh_opts=
 if $push ; then
-    SSH=push
-    EXTRA_SSH_OPTS=""
+	ONNODE_SSH=push
+	ONNODE_SSH_OPTS=""
 else
-    $current && command="cd $PWD && $command"
+	$current && command="cd $PWD && $command"
 
-    if [ -n "$CTDB_NODES_SOCKETS" ] ; then
-	SSH=fakessh
-	EXTRA_SSH_OPTS=""
-    else 
 	# Could "2>/dev/null || true" but want to see errors from typos in file.
 	[ -r "${CTDB_BASE}/onnode.conf" ] && . "${CTDB_BASE}/onnode.conf"
-	[ -n "$SSH" ] || SSH=ssh
-	if [ "$SSH" = "ssh" ] ; then
-	    if $parallel || ! $stdin ; then
-		ssh_opts="-n"
-	    fi
+	[ -n "$ONNODE_SSH" ] || ONNODE_SSH=ssh
+	if [ "$ONNODE_SSH" = "ssh" ] ; then
+		if $parallel || ! $stdin ; then
+			ssh_opts="-n"
+		fi
 	else
-	    : # rsh? All bets are off!
+		: # rsh? All bets are off!
 	fi
-    fi
 fi
 
 ######################################################################
 
-nodes=$(get_nodes "$nodespec")
-[ $? != 0 ] && exit 1   # Required to catch exit in above subshell.
+nodes=$(get_nodes "$nodespec") || exit $?
 
 if $quiet ; then
     verbose=false
@@ -358,25 +333,38 @@ trap 'kill -TERM $pids 2>/dev/null' INT TERM
 # the part of the window where it matter is very small.
 retcode=0
 for n in $nodes ; do
-    set -o pipefail 2>/dev/null
-    if $parallel ; then
-	{ exec 3>&1 ; { $SSH $ssh_opts $EXTRA_SSH_OPTS "$n" "$command" | stdout_filter >&3 ; } 2>&1 | stderr_filter ; } &
-	pids="${pids} $!"
-    else
-	if $verbose ; then
-	    echo >&2 ; echo ">> NODE: $n <<" >&2
-	fi
+	set -o pipefail 2>/dev/null
 
-	{ exec 3>&1 ; { $SSH $ssh_opts $EXTRA_SSH_OPTS "$n" "$command" | stdout_filter >&3 ; } 2>&1 | stderr_filter ; }
-	[ $? = 0 ] || retcode=$?
-    fi
+	# The following code applies stdout_filter and stderr_filter to
+	# the relevant streams.  Both filters are at the end of pipes so
+	# they read from stdin and (by default) write to stdout.  To allow
+	# the filters to operate independently, the output of
+	# stdout_filter is sent to a temporary file descriptor (3), which
+	# is redirected back to stdout at the outermost level.
+	ssh_cmd="$ONNODE_SSH $ssh_opts $ONNODE_SSH_OPTS"
+	if $parallel ; then
+		{
+			exec 3>&1
+			{
+				$ssh_cmd "$n" "$command" 3>&- |
+					stdout_filter >&3
+			} 2>&1 | stderr_filter
+		} &
+		pids="${pids} $!"
+	else
+		if $verbose ; then
+			echo >&2 ; echo ">> NODE: $n <<" >&2
+		fi
+		{
+			$ssh_cmd "$n" "$command" | stdout_filter
+		} || retcode=$?
+	fi
 done
 
-$parallel && {
-    for p in $pids; do
-	wait "$p"
-	[ $? = 0 ] || retcode=$?
-    done
-}
+if $parallel ; then
+	for p in $pids; do
+		wait "$p" || retcode=$?
+	done
+fi
 
 exit $retcode

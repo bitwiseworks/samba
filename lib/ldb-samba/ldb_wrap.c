@@ -33,9 +33,12 @@
 #include "lib/ldb-samba/ldif_handlers.h"
 #include "ldb_wrap.h"
 #include "dsdb/samdb/samdb.h"
+#include "dsdb/common/util.h"
 #include "param/param.h"
 #include "../lib/util/dlinklist.h"
+#include "lib/util/util_paths.h"
 #include <tdb.h>
+#include <unistd.h>
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_LDB
@@ -93,6 +96,8 @@ static struct ldb_wrap {
 		/* the context is what we use to tell if two ldb
 		 * connections are exactly equivalent
 		 */
+		pid_t pid; /* We want to re-open in a new PID due to
+			    * the LMDB backend */
 		const char *url;
 		struct tevent_context *ev;
 		struct loadparm_context *lp_ctx;
@@ -142,7 +147,7 @@ char *wrap_casefold(void *context, void *mem_ctx, const char *s, size_t n)
 	ldb_set_utf8_fns(ldb, NULL, wrap_casefold);
 
 	if (session_info) {
-		if (ldb_set_opaque(ldb, "sessionInfo", session_info)) {
+		if (ldb_set_opaque(ldb, DSDB_SESSION_INFO, session_info)) {
 			talloc_free(ldb);
 			return NULL;
 		}
@@ -185,10 +190,12 @@ char *wrap_casefold(void *context, void *mem_ctx, const char *s, size_t n)
 				   struct cli_credentials *credentials,
 				   unsigned int flags)
 {
+	pid_t pid = getpid();
 	struct ldb_wrap *w;
 	/* see if we can re-use an existing ldb */
 	for (w=ldb_wrap_list; w; w=w->next) {
-		if (w->context.ev == ev &&
+		if (w->context.pid == pid &&
+		    w->context.ev == ev &&
 		    w->context.lp_ctx == lp_ctx &&
 		    w->context.session_info == session_info &&
 		    w->context.credentials == credentials &&
@@ -248,6 +255,7 @@ int samba_ldb_connect(struct ldb_context *ldb, struct loadparm_context *lp_ctx,
 		return false;
 	}
 
+	c.pid          = getpid();
 	c.url          = url;
 	c.ev           = ev;
 	c.lp_ctx       = lp_ctx;
@@ -302,9 +310,13 @@ int samba_ldb_connect(struct ldb_context *ldb, struct loadparm_context *lp_ctx,
 	struct ldb_context *ldb;
 	int ret;
 
-	ldb = ldb_wrap_find(url, ev, lp_ctx, session_info, credentials, flags);
-	if (ldb != NULL)
-		return talloc_reference(mem_ctx, ldb);
+	/*
+	 * Unlike samdb_connect_url() do not try and cache the LDB
+	 * handle, get a new one each time.  Only sam.ldb is
+	 * punitively expensive to open and helpful caches like this
+	 * cause challenges (such as if the value for 'private dir'
+	 * changes).
+	 */
 
 	ldb = samba_ldb_init(mem_ctx, ev, lp_ctx, session_info, credentials);
 
@@ -317,31 +329,17 @@ int samba_ldb_connect(struct ldb_context *ldb, struct loadparm_context *lp_ctx,
 		return NULL;
 	}
 
-	if (!ldb_wrap_add(url, ev, lp_ctx, session_info, credentials, flags, ldb)) {
-		talloc_free(ldb);
-		return NULL;
-	}
-
 	DEBUG(3,("ldb_wrap open of %s\n", url));
 
 	return ldb;
 }
 
 /*
-  when we fork() we need to make sure that any open ldb contexts have
-  any open transactions cancelled (ntdb databases doesn't need reopening,
-  as we don't use clear_if_first).
- */
+  call tdb_reopen_all() in case there is a TDB open so we are
+  not blocked from re-opening it inside ldb_tdb.
+*/
  void ldb_wrap_fork_hook(void)
 {
-	struct ldb_wrap *w;
-
-	for (w=ldb_wrap_list; w; w=w->next) {
-		if (ldb_transaction_cancel_noerr(w->ldb) != LDB_SUCCESS) {
-			smb_panic("Failed to cancel child transactions\n");
-		}
-	}
-
 	if (tdb_reopen_all(1) != 0) {
 		smb_panic("tdb_reopen_all failed\n");
 	}
@@ -358,6 +356,10 @@ int samba_ldb_connect(struct ldb_context *ldb, struct loadparm_context *lp_ctx,
 		return NULL;
 	}
 	if (strncmp("tdb://", base_url, 6) == 0) {
+		base_url = base_url+6;
+	} else if (strncmp("mdb://", base_url, 6) == 0) {
+		base_url = base_url+6;
+	} else if (strncmp("ldb://", base_url, 6) == 0) {
 		base_url = base_url+6;
 	}
 	path = talloc_strdup(mem_ctx, base_url);

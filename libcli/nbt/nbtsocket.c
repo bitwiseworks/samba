@@ -45,10 +45,7 @@ static int nbt_name_request_destructor(struct nbt_name_request *req)
 		idr_remove(req->nbtsock->idr, req->name_trn_id);
 		req->name_trn_id = 0;
 	}
-	if (req->te) {
-		talloc_free(req->te);
-		req->te = NULL;
-	}
+	TALLOC_FREE(req->te);
 	if (req->nbtsock->send_queue == NULL) {
 		TEVENT_FD_NOT_WRITEABLE(req->nbtsock->fde);
 	}
@@ -342,12 +339,11 @@ _PUBLIC_ struct nbt_name_socket *nbt_name_socket_init(TALLOC_CTX *mem_ctx,
 	nbtsock->event_ctx = event_ctx;
 	if (nbtsock->event_ctx == NULL) goto failed;
 
-	status = socket_create("ip", SOCKET_TYPE_DGRAM, &nbtsock->sock, 0);
+	status = socket_create(nbtsock, "ip", SOCKET_TYPE_DGRAM,
+			       &nbtsock->sock, 0);
 	if (!NT_STATUS_IS_OK(status)) goto failed;
 
 	socket_set_option(nbtsock->sock, "SO_BROADCAST", "1");
-
-	talloc_steal(nbtsock, nbtsock->sock);
 
 	nbtsock->idr = idr_init(nbtsock);
 	if (nbtsock->idr == NULL) goto failed;
@@ -371,7 +367,8 @@ failed:
 /*
   send off a nbt name request
 */
-struct nbt_name_request *nbt_name_request_send(struct nbt_name_socket *nbtsock,
+struct nbt_name_request *nbt_name_request_send(TALLOC_CTX *mem_ctx,
+					       struct nbt_name_socket *nbtsock,
 					       struct socket_address *dest,
 					       struct nbt_name_packet *request,
 					       int timeout, int retries,
@@ -381,7 +378,7 @@ struct nbt_name_request *nbt_name_request_send(struct nbt_name_socket *nbtsock,
 	int id;
 	enum ndr_err_code ndr_err;
 
-	req = talloc_zero(nbtsock, struct nbt_name_request);
+	req = talloc_zero(mem_ctx, struct nbt_name_request);
 	if (req == NULL) goto failed;
 
 	req->nbtsock                = nbtsock;
@@ -530,7 +527,7 @@ NTSTATUS nbt_set_unexpected_handler(struct nbt_name_socket *nbtsock,
 */
 _PUBLIC_ NTSTATUS nbt_rcode_to_ntstatus(uint8_t rcode)
 {
-	int i;
+	size_t i;
 	struct {
 		enum nbt_rcode rcode;
 		NTSTATUS status;

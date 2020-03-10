@@ -399,6 +399,11 @@ bld.SAMBA_SUBSYSTEM('NDR_SMB2_LEASE_STRUCT',
     public_headers='gen_ndr/smb2_lease_struct.h'
     )
 
+bld.SAMBA_SUBSYSTEM('NDR_QUOTA',
+    source='gen_ndr/ndr_quota.c',
+    public_deps='ndr',
+    )
+
 bld.SAMBA_SUBSYSTEM('NDR_SCHANNEL',
     source='ndr/ndr_schannel.c gen_ndr/ndr_schannel.c',
     public_deps='ndr ndr_nbt'
@@ -513,6 +518,11 @@ bld.SAMBA_SUBSYSTEM('RPC_NDR_DRSUAPI',
 bld.SAMBA_SUBSYSTEM('RPC_NDR_DRSBLOBS',
     source='gen_ndr/ndr_drsblobs_c.c',
     public_deps='dcerpc-binding NDR_DRSBLOBS'
+    )
+
+bld.SAMBA_SUBSYSTEM('RPC_NDR_NTLMSSP',
+    source='gen_ndr/ndr_ntlmssp_c.c',
+    public_deps='dcerpc-binding NDR_NTLMSSP'
     )
 
 bld.SAMBA_SUBSYSTEM('RPC_NDR_POLICYAGENT',
@@ -712,10 +722,10 @@ bld.SAMBA_LIBRARY('dcerpc-samba',
 bld.SAMBA_LIBRARY('ndr',
     source='ndr/ndr_string.c ndr/ndr_basic.c ndr/uuid.c ndr/ndr.c ndr/ndr_misc.c gen_ndr/ndr_misc.c ndr/util.c',
     pc_files='ndr.pc',
-    public_deps='samba-errors talloc samba-util',
+    public_deps='samba-errors talloc samba-util util_str_hex',
     public_headers='gen_ndr/misc.h gen_ndr/ndr_misc.h ndr/libndr.h:ndr.h',
     header_path= [('*gen_ndr*', 'gen_ndr')],
-    vnum='0.0.8',
+    vnum='0.1.0',
     abi_directory='ABI',
     abi_match='ndr_* GUID_*',
     )

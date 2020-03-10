@@ -46,6 +46,7 @@ struct ldapsrv_connection {
 	bool global_catalog;
 	bool is_privileged;
 	enum ldap_server_require_strong_auth require_strong_auth;
+	bool authz_logged;
 
 	struct {
 		int initial_timeout;
@@ -71,6 +72,12 @@ struct ldapsrv_call {
 		struct ldap_message *msg;
 	} *replies;
 	struct iovec out_iov;
+
+	struct tevent_req *(*wait_send)(TALLOC_CTX *mem_ctx,
+					struct tevent_context *ev,
+					void *private_data);
+	NTSTATUS (*wait_recv)(struct tevent_req *req);
+	void *wait_private;
 
 	struct tevent_req *(*postprocess_send)(TALLOC_CTX *mem_ctx,
 					       struct tevent_context *ev,

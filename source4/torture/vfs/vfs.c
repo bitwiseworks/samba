@@ -101,19 +101,20 @@ struct torture_test *torture_suite_add_2ns_smb2_test(struct torture_suite *suite
 	return test;
 }
 
-NTSTATUS torture_vfs_init(void)
+NTSTATUS torture_vfs_init(TALLOC_CTX *ctx)
 {
 	struct torture_suite *suite = torture_suite_create(
-		talloc_autofree_context(), "vfs");
+		ctx, "vfs");
 
 	suite->description = talloc_strdup(suite, "VFS modules tests");
 
-	torture_suite_add_suite(suite, torture_vfs_fruit());
-	torture_suite_add_suite(suite, torture_vfs_fruit_netatalk());
-	torture_suite_add_suite(suite, torture_acl_xattr());
-	torture_suite_add_suite(suite, torture_vfs_fruit_file_id());
+	torture_suite_add_suite(suite, torture_vfs_fruit(suite));
+	torture_suite_add_suite(suite, torture_vfs_fruit_netatalk(suite));
+	torture_suite_add_suite(suite, torture_acl_xattr(suite));
+	torture_suite_add_suite(suite, torture_vfs_fruit_file_id(suite));
+	torture_suite_add_suite(suite, torture_vfs_fruit_timemachine(suite));
 
-	torture_register_suite(suite);
+	torture_register_suite(ctx, suite);
 
 	return NT_STATUS_OK;
 }

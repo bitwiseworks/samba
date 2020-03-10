@@ -25,6 +25,7 @@
 
 #include "includes.h"
 #include "system/filesys.h"
+#include "lib/util/server_id.h"
 #include "popt_common.h"
 #include "librpc/gen_ndr/spoolss.h"
 #include "nt_printing.h"
@@ -60,19 +61,14 @@ static bool send_message(struct messaging_context *msg_ctx,
 			 struct server_id pid, int msg_type,
 			 const void *buf, int len)
 {
-	bool ret;
-	int n_sent = 0;
-
 	if (procid_to_pid(&pid) != 0)
 		return NT_STATUS_IS_OK(
 			messaging_send_buf(msg_ctx, pid, msg_type,
 					   (const uint8_t *)buf, len));
 
-	ret = message_send_all(msg_ctx, msg_type, buf, len, &n_sent);
-	DEBUG(10,("smbcontrol/send_message: broadcast message to "
-		  "%d processes\n", n_sent));
+	messaging_send_all(msg_ctx, msg_type, buf, len);
 
-	return ret;
+	return true;
 }
 
 static void smbcontrol_timeout(struct tevent_context *event_ctx,
@@ -321,13 +317,9 @@ cleanup:
 	ptrace(PTRACE_DETACH, pid, NULL, NULL);
 }
 
-static int stack_trace_server(const struct server_id *id,
-			      uint32_t msg_flags,
-			      void *priv)
+static int stack_trace_server(pid_t pid, void *priv)
 {
-	if (procid_is_local(id)) {
-		print_stack_trace(procid_to_pid(id), (int *)priv);
-	}
+	print_stack_trace(pid, (int *)priv);
 	return 0;
 }
 
@@ -354,7 +346,7 @@ static bool do_daemon_stack_trace(struct tevent_context *ev_ctx,
 		 */
 		print_stack_trace(dest, &count);
 	} else {
-		serverid_traverse_read(stack_trace_server, &count);
+		messaging_dgm_forall(stack_trace_server, &count);
 	}
 
 	return True;
@@ -886,6 +878,50 @@ static bool do_poolusage(struct tevent_context *ev_ctx,
 	return num_replies;
 }
 
+/* Fetch and print the ringbuf log */
+
+static void print_ringbuf_log_cb(struct messaging_context *msg,
+				 void *private_data,
+				 uint32_t msg_type,
+				 struct server_id pid,
+				 DATA_BLOB *data)
+{
+	printf("%s", (const char *)data->data);
+	num_replies++;
+}
+
+static bool do_ringbuflog(struct tevent_context *ev_ctx,
+			  struct messaging_context *msg_ctx,
+			  const struct server_id pid,
+			  const int argc, const char **argv)
+{
+	if (argc != 1) {
+		fprintf(stderr, "Usage: smbcontrol <dest> ringbuf-log\n");
+		return false;
+	}
+
+	messaging_register(msg_ctx, NULL, MSG_RINGBUF_LOG,
+			   print_ringbuf_log_cb);
+
+	/* Send a message and register our interest in a reply */
+
+	if (!send_message(msg_ctx, pid, MSG_REQ_RINGBUF_LOG, NULL, 0)) {
+		return false;
+	}
+
+	wait_replies(ev_ctx, msg_ctx, procid_to_pid(&pid) == 0);
+
+	/* No replies were received within the timeout period */
+
+	if (num_replies == 0) {
+		printf("No replies received\n");
+	}
+
+	messaging_deregister(msg_ctx, MSG_RINGBUF_LOG, NULL);
+
+	return num_replies != 0;
+}
+
 /* Perform a dmalloc mark */
 
 static bool do_dmalloc_mark(struct tevent_context *ev_ctx,
@@ -1124,10 +1160,6 @@ static bool do_winbind_onlinestatus(struct tevent_context *ev_ctx,
 				    const struct server_id pid,
 				    const int argc, const char **argv)
 {
-	struct server_id myid;
-
-	myid = messaging_server_id(msg_ctx);
-
 	if (argc != 1) {
 		fprintf(stderr, "Usage: smbcontrol winbindd onlinestatus\n");
 		return False;
@@ -1136,9 +1168,9 @@ static bool do_winbind_onlinestatus(struct tevent_context *ev_ctx,
 	messaging_register(msg_ctx, NULL, MSG_WINBIND_ONLINESTATUS,
 			   print_pid_string_cb);
 
-	if (!send_message(msg_ctx, pid, MSG_WINBIND_ONLINESTATUS, &myid,
-			  sizeof(myid)))
+	if (!send_message(msg_ctx, pid, MSG_WINBIND_ONLINESTATUS, NULL, 0)) {
 		return False;
+	}
 
 	wait_replies(ev_ctx, msg_ctx, procid_to_pid(&pid) == 0);
 
@@ -1152,19 +1184,6 @@ static bool do_winbind_onlinestatus(struct tevent_context *ev_ctx,
 	return num_replies;
 }
 
-static bool do_dump_event_list(struct tevent_context *ev_ctx,
-			       struct messaging_context *msg_ctx,
-			       const struct server_id pid,
-			       const int argc, const char **argv)
-{
-	if (argc != 1) {
-		fprintf(stderr, "Usage: smbcontrol <dest> dump-event-list\n");
-		return False;
-	}
-
-	return send_message(msg_ctx, pid, MSG_DUMP_EVENT_LIST, NULL, 0);
-}
-
 static bool do_winbind_dump_domain_list(struct tevent_context *ev_ctx,
 					struct messaging_context *msg_ctx,
 					const struct server_id pid,
@@ -1172,11 +1191,6 @@ static bool do_winbind_dump_domain_list(struct tevent_context *ev_ctx,
 {
 	const char *domain = NULL;
 	int domain_len = 0;
-	struct server_id myid;
-	uint8_t *buf = NULL;
-	int buf_len = 0;
-
-	myid = messaging_server_id(msg_ctx);
 
 	if (argc < 1 || argc > 2) {
 		fprintf(stderr, "Usage: smbcontrol <dest> dump-domain-list "
@@ -1192,19 +1206,9 @@ static bool do_winbind_dump_domain_list(struct tevent_context *ev_ctx,
 	messaging_register(msg_ctx, NULL, MSG_WINBIND_DUMP_DOMAIN_LIST,
 			   print_pid_string_cb);
 
-	buf_len = sizeof(myid)+domain_len;
-	buf = SMB_MALLOC_ARRAY(uint8_t, buf_len);
-	if (!buf) {
-		return false;
-	}
-
-	memcpy(buf, &myid, sizeof(myid));
-	memcpy(&buf[sizeof(myid)], domain, domain_len);
-
 	if (!send_message(msg_ctx, pid, MSG_WINBIND_DUMP_DOMAIN_LIST,
-			  buf, buf_len))
+			  domain, domain_len))
 	{
-		SAFE_FREE(buf);
 		return false;
 	}
 
@@ -1212,7 +1216,6 @@ static bool do_winbind_dump_domain_list(struct tevent_context *ev_ctx,
 
 	/* No replies were received within the timeout period */
 
-	SAFE_FREE(buf);
 	if (num_replies == 0) {
 		printf("No replies received\n");
 	}
@@ -1220,6 +1223,19 @@ static bool do_winbind_dump_domain_list(struct tevent_context *ev_ctx,
 	messaging_deregister(msg_ctx, MSG_WINBIND_DUMP_DOMAIN_LIST, NULL);
 
 	return num_replies;
+}
+
+static bool do_msg_disconnect_dc(struct tevent_context *ev_ctx,
+				 struct messaging_context *msg_ctx,
+				 const struct server_id pid,
+				 const int argc, const char **argv)
+{
+	if (argc != 1) {
+		fprintf(stderr, "Usage: smbcontrol <dest> disconnect-dc\n");
+		return False;
+	}
+
+	return send_message(msg_ctx, pid, MSG_WINBIND_DISCONNECT_DC, NULL, 0);
 }
 
 static void winbind_validate_cache_cb(struct messaging_context *msg,
@@ -1385,6 +1401,7 @@ static const struct {
 	{ "lockretry", do_lockretry, "Force a blocking lock retry" },
 	{ "brl-revalidate", do_brl_revalidate, "Revalidate all brl entries" },
 	{ "pool-usage", do_poolusage, "Display talloc memory usage" },
+	{ "ringbuf-log", do_ringbuflog, "Display ringbuf log" },
 	{ "dmalloc-mark", do_dmalloc_mark, "" },
 	{ "dmalloc-log-changed", do_dmalloc_changed, "" },
 	{ "shutdown", do_shutdown, "Shut down daemon" },
@@ -1395,10 +1412,10 @@ static const struct {
 	{ "online", do_winbind_online, "Ask winbind to go into online state"},
 	{ "offline", do_winbind_offline, "Ask winbind to go into offline state"},
 	{ "onlinestatus", do_winbind_onlinestatus, "Request winbind online status"},
-	{ "dump-event-list", do_dump_event_list, "Dump event list"},
 	{ "validate-cache" , do_winbind_validate_cache,
 	  "Validate winbind's credential cache" },
 	{ "dump-domain-list", do_winbind_dump_domain_list, "Dump winbind domain list"},
+	{ "disconnect-dc", do_msg_disconnect_dc },
 	{ "notify-cleanup", do_notify_cleanup },
 	{ "num-children", do_num_children,
 	  "Print number of smbd child processes" },

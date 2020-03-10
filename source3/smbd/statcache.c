@@ -73,7 +73,7 @@ void stat_cache_add( const char *full_orig_name,
 	 * would be a waste.
 	 */
 
-	if (case_sensitive && (strcmp(full_orig_name, translated_path) == 0)) {
+	if (!case_sensitive && (strcmp(full_orig_name, translated_path) == 0)) {
 		return;
 	}
 
@@ -354,11 +354,10 @@ void smbd_send_stat_cache_delete_message(struct messaging_context *msg_ctx,
 					 const char *name)
 {
 #ifdef DEVELOPER
-	message_send_all(msg_ctx,
-			MSG_SMB_STAT_CACHE_DELETE,
-			name,
-			strlen(name)+1,
-			NULL);
+	messaging_send_all(msg_ctx,
+			   MSG_SMB_STAT_CACHE_DELETE,
+			   name,
+			   strlen(name)+1);
 #endif
 }
 

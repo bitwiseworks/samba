@@ -7,7 +7,7 @@
 	<manvolnum>8</manvolnum>
 	<refmiscinfo class="source">Samba</refmiscinfo>
 	<refmiscinfo class="manual">System Administration tools</refmiscinfo>
-	<refmiscinfo class="version">4.6</refmiscinfo>
+	<refmiscinfo class="version">&doc.version;</refmiscinfo>
 </refmeta>
 
 
@@ -62,8 +62,7 @@
 	<manvolnum>8</manvolnum></citerefentry>. As a consequence in order for this to 
 	succeed the smbd daemon must be running on the local machine. On a 
 	UNIX machine the encrypted SMB passwords are usually stored in 
-	the <citerefentry><refentrytitle>smbpasswd</refentrytitle>
-	<manvolnum>5</manvolnum></citerefentry> file. </para>
+	the default passdb backend.</para>
 
 	<para>When run by an ordinary user with no options, smbpasswd 
 	will prompt them for their old SMB password and then ask them 
@@ -401,7 +400,7 @@
 <refsect1>
 	<title>VERSION</title>
 
-	<para>This man page is correct for version 3 of the Samba suite.</para>
+	<para>This man page is part of version &doc.version; of the Samba suite.</para>
 </refsect1>
 
 <refsect1>
@@ -418,14 +417,6 @@
 	were created by Andrew Tridgell. Samba is now developed
 	by the Samba Team as an Open Source project similar 
 	to the way the Linux kernel is developed.</para>
-	
-	<para>The original Samba man pages were written by Karl Auer. 
-	The man page sources were converted to YODL format (another 
-	excellent piece of Open Source software, available at <ulink url="ftp://ftp.icce.rug.nl/pub/unix/">
-	ftp://ftp.icce.rug.nl/pub/unix/</ulink>) and updated for the Samba 2.0 
-	release by Jeremy Allison.  The conversion to DocBook for 
-	Samba 2.2 was done by Gerald Carter. The conversion to DocBook XML 4.2
-	for Samba 3.0 was done by Alexander Bokovoy.</para>
 </refsect1>
 
 </refentry>

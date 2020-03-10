@@ -235,6 +235,8 @@ static NTSTATUS ipv4_accept(struct socket_context *sock, struct socket_context *
 			return map_nt_error_from_unix_common(errno);
 		}
 	}
+	smb_set_close_on_exec(new_fd);
+
 
 	/* TODO: we could add a 'accept_check' hook here
 	 *	 which get the black/white lists via socket_set_accept_filter()
@@ -314,7 +316,8 @@ static NTSTATUS ipv4_recvfrom(struct socket_context *sock, void *buf,
 	if (gotlen == 0) {
 		talloc_free(src);
 		return NT_STATUS_END_OF_FILE;
-	} else if (gotlen == -1) {
+	}
+	if (gotlen == -1) {
 		talloc_free(src);
 		return map_nt_error_from_unix_common(errno);
 	}
@@ -762,6 +765,7 @@ static NTSTATUS ipv6_tcp_accept(struct socket_context *sock, struct socket_conte
 			return map_nt_error_from_unix_common(errno);
 		}
 	}
+	smb_set_close_on_exec(new_fd);
 
 	/* TODO: we could add a 'accept_check' hook here
 	 *	 which get the black/white lists via socket_set_accept_filter()

@@ -873,6 +873,14 @@ static struct functable net_func[] = {
 		   "'net notify' commands.")
 	},
 
+	{	"tdb",
+		net_tdb,
+		NET_TRANSPORT_LOCAL,
+		N_("Show information from tdb records"),
+		N_("  Use 'net help tdb' to get more information about "
+		   "'net tdb' commands.")
+	},
+
 #ifdef WITH_FAKE_KASERVER
 	{	"afs",
 		net_afs,
@@ -907,6 +915,7 @@ static struct functable net_func[] = {
 	const char **argv_const = discard_const_p(const char *, argv);
 	poptContext pc;
 	TALLOC_CTX *frame = talloc_stackframe();
+	struct tevent_context *ev;
 	struct net_context *c = talloc_zero(frame, struct net_context);
 	NTSTATUS status;
 
@@ -1028,9 +1037,12 @@ static struct functable net_func[] = {
 		exit(1);
 	}
 
-	status = messaging_init_client(c,
-				       samba_tevent_context_init(c),
-				       &c->msg_ctx);
+	ev = samba_tevent_context_init(c);
+	if (ev == NULL) {
+		d_fprintf(stderr, "samba_tevent_context_init failed\n");
+		exit(1);
+	}
+	status = messaging_init_client(c, ev, &c->msg_ctx);
 	if (geteuid() != 0 &&
 			NT_STATUS_EQUAL(status, NT_STATUS_ACCESS_DENIED)) {
 		/*

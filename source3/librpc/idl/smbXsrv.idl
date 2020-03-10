@@ -107,7 +107,7 @@ interface smbXsrv
 
 	typedef [public] struct {
 		[ignore] smbXsrv_client_table		*table;
-		[ignore] struct tevent_context		*ev_ctx;
+		[ignore] struct tevent_context		*raw_ev_ctx;
 		[ignore] struct messaging_context	*msg_ctx;
 
 		[ref] smbXsrv_client_global0		*global;
@@ -123,7 +123,6 @@ interface smbXsrv
 		 * this session_table is used for SMB1 and SMB2,
 		 */
 		[ignore] struct smbXsrv_session_table	*session_table;
-		[ignore] hyper				last_session_id;
 		/*
 		 * this tcon_table is only used for SMB1.
 		 */

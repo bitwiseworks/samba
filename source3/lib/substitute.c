@@ -247,6 +247,17 @@ static const char *get_smb_user_name(void)
 void set_current_user_info(const char *smb_name, const char *unix_name,
 			   const char *domain)
 {
+	static const void *last_smb_name;
+	static const void *last_unix_name;
+	static const void *last_domain;
+
+	if (likely(last_smb_name == smb_name &&
+	    last_unix_name == unix_name &&
+	    last_domain == domain))
+	{
+		return;
+	}
+
 	fstrcpy(current_user_info.smb_name, smb_name);
 	fstrcpy(current_user_info.unix_name, unix_name);
 	fstrcpy(current_user_info.domain, domain);
@@ -255,6 +266,10 @@ void set_current_user_info(const char *smb_name, const char *unix_name,
 	 * has already been sanitised in register_existing_vuid. */
 
 	sub_set_smb_name(current_user_info.smb_name);
+
+	last_smb_name = smb_name;
+	last_unix_name = unix_name;
+	last_domain = domain;
 }
 
 /*******************************************************************
@@ -454,6 +469,20 @@ void standard_sub_basic(const char *smb_name, const char *domain_name,
 	TALLOC_FREE( s );
 }
 
+/*
+ * Limit addresses to hexalpha charactes and underscore, safe for path
+ * components for Windows clients.
+ */
+static void make_address_pathsafe(char *addr)
+{
+	while(addr && *addr) {
+		if(!isxdigit(*addr)) {
+			*addr = '_';
+		}
+		++addr;
+	}
+}
+
 /****************************************************************************
  Do some standard substitutions in a string.
  This function will return a talloced string that has to be freed.
@@ -550,11 +579,25 @@ char *talloc_sub_basic(TALLOC_CTX *mem_ctx,
 				sub_peeraddr[0] ? sub_peeraddr : "0.0.0.0");
 			break;
 		}
+		case 'J' : {
+			r = talloc_strdup(tmp_ctx,
+				sub_peeraddr[0] ? sub_peeraddr : "0.0.0.0");
+			make_address_pathsafe(r);
+			a_string = realloc_string_sub(a_string, "%J", r);
+			break;
+		}
 		case 'i': 
 			a_string = realloc_string_sub(
 				a_string, "%i",
 				sub_sockaddr[0] ? sub_sockaddr : "0.0.0.0");
 			break;
+		case 'j' : {
+			r = talloc_strdup(tmp_ctx,
+				sub_sockaddr[0] ? sub_sockaddr : "0.0.0.0");
+			make_address_pathsafe(r);
+			a_string = realloc_string_sub(a_string, "%j", r);
+			break;
+		}
 		case 'L' : 
 			if ( strncasecmp_m(p, "%LOGONSERVER%", strlen("%LOGONSERVER%")) == 0 ) {
 				break;
@@ -577,6 +620,10 @@ char *talloc_sub_basic(TALLOC_CTX *mem_ctx,
 			break;
 		case 'T' :
 			a_string = realloc_string_sub(a_string, "%T", current_timestring(tmp_ctx, False));
+			break;
+		case 't' :
+			a_string = realloc_string_sub(a_string, "%t",
+						      current_minimal_timestring(tmp_ctx, False));
 			break;
 		case 'a' :
 			a_string = realloc_string_sub(a_string, "%a",

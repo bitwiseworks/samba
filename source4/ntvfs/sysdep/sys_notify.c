@@ -120,10 +120,11 @@ _PUBLIC_ NTSTATUS sys_notify_watch(struct sys_notify_context *ctx,
 /*
   register a notify backend
 */
-_PUBLIC_ NTSTATUS sys_notify_register(struct sys_notify_backend *backend)
+_PUBLIC_ NTSTATUS sys_notify_register(TALLOC_CTX *ctx,
+			struct sys_notify_backend *backend)
 {
 	struct sys_notify_backend *b;
-	b = talloc_realloc(talloc_autofree_context(), backends, 
+	b = talloc_realloc(ctx, backends,
 			   struct sys_notify_backend, num_backends+1);
 	NT_STATUS_HAVE_NO_MEMORY(b);
 	backends = b;
@@ -135,14 +136,14 @@ _PUBLIC_ NTSTATUS sys_notify_register(struct sys_notify_backend *backend)
 _PUBLIC_ NTSTATUS sys_notify_init(void)
 {
 	static bool initialized = false;
-#define _MODULE_PROTO(init) extern NTSTATUS init(void);
+#define _MODULE_PROTO(init) extern NTSTATUS init(TALLOC_CTX *);
 	STATIC_sys_notify_MODULES_PROTO;
 	init_module_fn static_init[] = { STATIC_sys_notify_MODULES };
 
 	if (initialized) return NT_STATUS_OK;
 	initialized = true;
 
-	run_init_functions(static_init);
+	run_init_functions(NULL, static_init);
 	
 	return NT_STATUS_OK;
 }

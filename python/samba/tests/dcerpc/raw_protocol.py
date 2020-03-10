@@ -18,6 +18,7 @@
 
 import sys
 import os
+import time
 
 sys.path.insert(0, "bin/python")
 os.environ["PYTHONUNBUFFERED"] = "1"
@@ -30,7 +31,7 @@ import samba.dcerpc.mgmt
 import samba.dcerpc.netlogon
 import struct
 from samba import gensec
-from samba.tests import RawDCERPCTest
+from samba.tests.dcerpc.raw_testcase import RawDCERPCTest
 
 global_ndr_print = False
 global_hexdump = False
@@ -1974,7 +1975,7 @@ class TestDCERPC_BIND(RawDCERPCTest):
 
             # And now try a request without auth_info
             # netr_ServerReqChallenge()
-            req = self.generate_request(call_id = 2,
+            req = self.generate_request(call_id = 0x21234,
                                         pfc_flags=pfc_flags,
                                         context_id=ctx.context_id,
                                         opnum=4,
@@ -4930,6 +4931,8 @@ class TestDCERPC_BIND(RawDCERPCTest):
         ack = self.do_generic_bind(ctx=ctx)
 
         self._disconnect("test_assoc_group_fail2")
+        self.assertNotConnected()
+        time.sleep(0.5)
         self.connect()
 
         ack2 = self.do_generic_bind(ctx=ctx,assoc_group_id=ack.u.assoc_group_id,

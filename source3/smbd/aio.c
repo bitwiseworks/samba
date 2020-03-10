@@ -26,27 +26,6 @@
 #include "lib/tevent_wait.h"
 
 /****************************************************************************
- Statics plus accessor functions.
-*****************************************************************************/
-
-static int outstanding_aio_calls;
-
-int get_outstanding_aio_calls(void)
-{
-	return outstanding_aio_calls;
-}
-
-void increment_outstanding_aio_calls(void)
-{
-	outstanding_aio_calls++;
-}
-
-void decrement_outstanding_aio_calls(void)
-{
-	outstanding_aio_calls--;
-}
-
-/****************************************************************************
  The buffer we keep around whilst an aio request is in process.
 *****************************************************************************/
 
@@ -67,12 +46,6 @@ struct aio_extra {
 bool aio_write_through_requested(struct aio_extra *aio_ex)
 {
 	return aio_ex->write_through;
-}
-
-static int aio_extra_destructor(struct aio_extra *aio_ex)
-{
-	decrement_outstanding_aio_calls();
-	return 0;
 }
 
 /****************************************************************************
@@ -101,9 +74,7 @@ static struct aio_extra *create_aio_extra(TALLOC_CTX *mem_ctx,
 			return NULL;
 		}
 	}
-	talloc_set_destructor(aio_ex, aio_extra_destructor);
 	aio_ex->fsp = fsp;
-	increment_outstanding_aio_calls();
 	return aio_ex;
 }
 
@@ -227,7 +198,7 @@ NTSTATUS schedule_aio_read_and_X(connection_struct *conn,
 		&aio_ex->lock);
 
 	/* Take the lock until the AIO completes. */
-	if (!SMB_VFS_STRICT_LOCK(conn, fsp, &aio_ex->lock)) {
+	if (!SMB_VFS_STRICT_LOCK_CHECK(conn, fsp, &aio_ex->lock)) {
 		TALLOC_FREE(aio_ex);
 		return NT_STATUS_FILE_LOCK_CONFLICT;
 	}
@@ -235,14 +206,13 @@ NTSTATUS schedule_aio_read_and_X(connection_struct *conn,
 	aio_ex->nbyte = smb_maxcnt;
 	aio_ex->offset = startpos;
 
-	req = SMB_VFS_PREAD_SEND(aio_ex, fsp->conn->sconn->ev_ctx,
+	req = SMB_VFS_PREAD_SEND(aio_ex, smbreq->ev_ctx,
 				 fsp,
 				 smb_buf(aio_ex->outbuf.data) + 1 /* pad */,
 				 smb_maxcnt, startpos);
 	if (req == NULL) {
 		DEBUG(0,("schedule_aio_read_and_X: aio_read failed. "
 			 "Error %s\n", strerror(errno) ));
-		SMB_VFS_STRICT_UNLOCK(conn, fsp, &aio_ex->lock);
 		TALLOC_FREE(aio_ex);
 		return NT_STATUS_RETRY;
 	}
@@ -250,7 +220,6 @@ NTSTATUS schedule_aio_read_and_X(connection_struct *conn,
 
 	if (!aio_add_req_to_fsp(fsp, req)) {
 		DEBUG(1, ("Could not add req to fsp\n"));
-		SMB_VFS_STRICT_UNLOCK(conn, fsp, &aio_ex->lock);
 		TALLOC_FREE(aio_ex);
 		return NT_STATUS_RETRY;
 	}
@@ -270,7 +239,7 @@ static void aio_pread_smb1_done(struct tevent_req *req)
 	struct aio_extra *aio_ex = tevent_req_callback_data(
 		req, struct aio_extra);
 	files_struct *fsp = aio_ex->fsp;
-	int outsize;
+	size_t outsize;
 	char *outbuf = (char *)aio_ex->outbuf.data;
 	ssize_t nread;
 	struct vfs_aio_state vfs_aio_state;
@@ -288,9 +257,6 @@ static void aio_pread_smb1_done(struct tevent_req *req)
 		TALLOC_FREE(aio_ex);
 		return;
 	}
-
-	/* Unlock now we're done. */
-	SMB_VFS_STRICT_UNLOCK(fsp->conn, fsp, &aio_ex->lock);
 
 	if (nread < 0) {
 		DEBUG( 3, ("handle_aio_read_complete: file %s nread == %d. "
@@ -310,7 +276,15 @@ static void aio_pread_smb1_done(struct tevent_req *req)
 			   (int)aio_ex->nbyte, (int)nread ) );
 
 	}
-	smb_setlen(outbuf, outsize - 4);
+
+	if (outsize <= 4) {
+		DBG_INFO("Invalid outsize (%zu)\n", outsize);
+		TALLOC_FREE(aio_ex);
+		return;
+	}
+	outsize -= 4;
+	_smb_setlen_large(outbuf, outsize);
+
 	show_msg(outbuf);
 	if (!srv_send_smb(aio_ex->smbreq->xconn, outbuf,
 			  true, aio_ex->smbreq->seqnum+1,
@@ -477,7 +451,7 @@ NTSTATUS schedule_aio_write_and_X(connection_struct *conn,
 		&aio_ex->lock);
 
 	/* Take the lock until the AIO completes. */
-	if (!SMB_VFS_STRICT_LOCK(conn, fsp, &aio_ex->lock)) {
+	if (!SMB_VFS_STRICT_LOCK_CHECK(conn, fsp, &aio_ex->lock)) {
 		TALLOC_FREE(aio_ex);
 		return NT_STATUS_FILE_LOCK_CONFLICT;
 	}
@@ -485,13 +459,12 @@ NTSTATUS schedule_aio_write_and_X(connection_struct *conn,
 	aio_ex->nbyte = numtowrite;
 	aio_ex->offset = startpos;
 
-	req = pwrite_fsync_send(aio_ex, fsp->conn->sconn->ev_ctx, fsp,
+	req = pwrite_fsync_send(aio_ex, smbreq->ev_ctx, fsp,
 				data, numtowrite, startpos,
 				aio_ex->write_through);
 	if (req == NULL) {
 		DEBUG(3,("schedule_aio_wrote_and_X: aio_write failed. "
 			 "Error %s\n", strerror(errno) ));
-		SMB_VFS_STRICT_UNLOCK(conn, fsp, &aio_ex->lock);
 		TALLOC_FREE(aio_ex);
 		return NT_STATUS_RETRY;
 	}
@@ -499,7 +472,6 @@ NTSTATUS schedule_aio_write_and_X(connection_struct *conn,
 
 	if (!aio_add_req_to_fsp(fsp, req)) {
 		DEBUG(1, ("Could not add req to fsp\n"));
-		SMB_VFS_STRICT_UNLOCK(conn, fsp, &aio_ex->lock);
 		TALLOC_FREE(aio_ex);
 		return NT_STATUS_RETRY;
 	}
@@ -530,11 +502,9 @@ NTSTATUS schedule_aio_write_and_X(connection_struct *conn,
 	}
 
 	DEBUG(10,("schedule_aio_write_and_X: scheduled aio_write for file "
-		  "%s, offset %.0f, len = %u (mid = %u) "
-		  "outstanding_aio_calls = %d\n",
+		  "%s, offset %.0f, len = %u (mid = %u)\n",
 		  fsp_str_dbg(fsp), (double)startpos, (unsigned int)numtowrite,
-		  (unsigned int)aio_ex->smbreq->mid,
-		  get_outstanding_aio_calls() ));
+		  (unsigned int)aio_ex->smbreq->mid));
 
 	return NT_STATUS_OK;
 }
@@ -562,9 +532,6 @@ static void aio_pwrite_smb1_done(struct tevent_req *req)
 		TALLOC_FREE(aio_ex);
 		return;
 	}
-
-	/* Unlock now we're done. */
-	SMB_VFS_STRICT_UNLOCK(fsp->conn, fsp, &aio_ex->lock);
 
 	mark_file_modified(fsp);
 
@@ -726,7 +693,7 @@ NTSTATUS schedule_smb2_aio_read(connection_struct *conn,
 		&aio_ex->lock);
 
 	/* Take the lock until the AIO completes. */
-	if (!SMB_VFS_STRICT_LOCK(conn, fsp, &aio_ex->lock)) {
+	if (!SMB_VFS_STRICT_LOCK_CHECK(conn, fsp, &aio_ex->lock)) {
 		TALLOC_FREE(aio_ex);
 		return NT_STATUS_FILE_LOCK_CONFLICT;
 	}
@@ -734,12 +701,11 @@ NTSTATUS schedule_smb2_aio_read(connection_struct *conn,
 	aio_ex->nbyte = smb_maxcnt;
 	aio_ex->offset = startpos;
 
-	req = SMB_VFS_PREAD_SEND(aio_ex, fsp->conn->sconn->ev_ctx, fsp,
+	req = SMB_VFS_PREAD_SEND(aio_ex, smbreq->ev_ctx, fsp,
 				 preadbuf->data, smb_maxcnt, startpos);
 	if (req == NULL) {
 		DEBUG(0, ("smb2: SMB_VFS_PREAD_SEND failed. "
 			  "Error %s\n", strerror(errno)));
-		SMB_VFS_STRICT_UNLOCK(conn, fsp, &aio_ex->lock);
 		TALLOC_FREE(aio_ex);
 		return NT_STATUS_RETRY;
 	}
@@ -747,7 +713,6 @@ NTSTATUS schedule_smb2_aio_read(connection_struct *conn,
 
 	if (!aio_add_req_to_fsp(fsp, req)) {
 		DEBUG(1, ("Could not add req to fsp\n"));
-		SMB_VFS_STRICT_UNLOCK(conn, fsp, &aio_ex->lock);
 		TALLOC_FREE(aio_ex);
 		return NT_STATUS_RETRY;
 	}
@@ -788,9 +753,6 @@ static void aio_pread_smb2_done(struct tevent_req *req)
 		tevent_req_nterror(subreq, NT_STATUS_INTERNAL_ERROR);
 		return;
 	}
-
-	/* Unlock now we're done. */
-	SMB_VFS_STRICT_UNLOCK(fsp->conn, fsp, &aio_ex->lock);
 
 	/* Common error or success code processing for async or sync
 	   read returns. */
@@ -880,7 +842,7 @@ NTSTATUS schedule_aio_smb2_write(connection_struct *conn,
 		&aio_ex->lock);
 
 	/* Take the lock until the AIO completes. */
-	if (!SMB_VFS_STRICT_LOCK(conn, fsp, &aio_ex->lock)) {
+	if (!SMB_VFS_STRICT_LOCK_CHECK(conn, fsp, &aio_ex->lock)) {
 		TALLOC_FREE(aio_ex);
 		return NT_STATUS_FILE_LOCK_CONFLICT;
 	}
@@ -888,13 +850,12 @@ NTSTATUS schedule_aio_smb2_write(connection_struct *conn,
 	aio_ex->nbyte = in_data.length;
 	aio_ex->offset = in_offset;
 
-	req = pwrite_fsync_send(aio_ex, fsp->conn->sconn->ev_ctx, fsp,
+	req = pwrite_fsync_send(aio_ex, smbreq->ev_ctx, fsp,
 				in_data.data, in_data.length, in_offset,
 				write_through);
 	if (req == NULL) {
 		DEBUG(3, ("smb2: SMB_VFS_PWRITE_SEND failed. "
 			  "Error %s\n", strerror(errno)));
-		SMB_VFS_STRICT_UNLOCK(conn, fsp, &aio_ex->lock);
 		TALLOC_FREE(aio_ex);
 		return NT_STATUS_RETRY;
 	}
@@ -902,7 +863,6 @@ NTSTATUS schedule_aio_smb2_write(connection_struct *conn,
 
 	if (!aio_add_req_to_fsp(fsp, req)) {
 		DEBUG(1, ("Could not add req to fsp\n"));
-		SMB_VFS_STRICT_UNLOCK(conn, fsp, &aio_ex->lock);
 		TALLOC_FREE(aio_ex);
 		return NT_STATUS_RETRY;
 	}
@@ -923,13 +883,11 @@ NTSTATUS schedule_aio_smb2_write(connection_struct *conn,
 	 */
 
 	DEBUG(10,("smb2: scheduled aio_write for file "
-		"%s, offset %.0f, len = %u (mid = %u) "
-		"outstanding_aio_calls = %d\n",
+		"%s, offset %.0f, len = %u (mid = %u)\n",
 		fsp_str_dbg(fsp),
 		(double)in_offset,
 		(unsigned int)in_data.length,
-		(unsigned int)aio_ex->smbreq->mid,
-		get_outstanding_aio_calls() ));
+		(unsigned int)aio_ex->smbreq->mid));
 
 	return NT_STATUS_OK;
 }
@@ -958,9 +916,6 @@ static void aio_pwrite_smb2_done(struct tevent_req *req)
 		tevent_req_nterror(subreq, NT_STATUS_INTERNAL_ERROR);
 		return;
 	}
-
-	/* Unlock now we're done. */
-	SMB_VFS_STRICT_UNLOCK(fsp->conn, fsp, &aio_ex->lock);
 
 	mark_file_modified(fsp);
 

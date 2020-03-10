@@ -7,7 +7,7 @@
 	<manvolnum>1</manvolnum>
 	<refmiscinfo class="source">Samba</refmiscinfo>
 	<refmiscinfo class="manual">User Commands</refmiscinfo>
-	<refmiscinfo class="version">4.6</refmiscinfo>
+	<refmiscinfo class="version">&doc.version;</refmiscinfo>
 </refmeta>
 
 
@@ -346,9 +346,10 @@
 
 		<varlistentry>
 		<term>--online-status <replaceable>domain</replaceable></term>
-		<listitem><para>Show whether domains are marked as online or
-				offline. An optional domain argument limits the
-				output to the online status of a given domain.
+		<listitem><para>Display whether winbind currently maintains an
+				active connection or not. An optional domain
+				argument limits the output to the online status
+				of a given domain.
 		</para></listitem>
 		</varlistentry>
 
@@ -384,10 +385,35 @@
 
 		<varlistentry>
 		<term>-r|--user-groups <replaceable>username</replaceable></term>
-		<listitem><para>Try to obtain the list of UNIX group ids
-		to which the user belongs.  This only works for users
-		defined on a Domain Controller.
-		</para></listitem>
+		<listitem>
+			<para>
+			Try to obtain the list of UNIX group ids to which the
+			user belongs.  This only works for users defined on a
+			Domain Controller.
+			</para>
+
+			<para>There are two scenaries:</para>
+			<orderedlist>
+				<listitem>
+				<para>
+				User authenticated: When the user has been
+				authenticated, the access token for the user is
+				cached. The correct group memberships are then
+				returned from the cached user token (which can
+				be outdated).
+				</para>
+				</listitem>
+
+				<listitem>
+				<para>
+				User *NOT* authenticated: The information is
+				queries from the domain controller using the
+				machine account credentials which have limited
+				permissions. The result is normally incomplete
+				and can be also incorrect.
+				</para></listitem>
+			</orderedlist>
+		</listitem>
 		</varlistentry>
 
 		<varlistentry>
@@ -577,7 +603,7 @@
 <refsect1>
 	<title>VERSION</title>
 
-	<para>This man page is correct for version 3 of
+	<para>This man page is part of version &doc.version; of
 	the Samba suite.</para>
 </refsect1>
 

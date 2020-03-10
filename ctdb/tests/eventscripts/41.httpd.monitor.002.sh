@@ -4,8 +4,7 @@
 
 define_test "managed, down - 5 times"
 
-setup_httpd "down"
-export CTDB_MANAGES_HTTPD="yes"
+setup "down"
 
 ok_null
 simple_test

@@ -38,9 +38,11 @@
 #include "ctdb_private.h"
 #include "ctdb_client.h"
 
-#include "common/system.h"
+#include "common/system_socket.h"
 #include "common/common.h"
 #include "common/logging.h"
+
+#include "server/ctdb_config.h"
 
 #include "ctdb_cluster_mutex.h"
 
@@ -472,7 +474,7 @@ static int create_missing_remote_databases(struct ctdb_context *ctdb, struct ctd
 			ret = ctdb_ctrl_createdb(ctdb, CONTROL_TIMEOUT(),
 						 nodemap->nodes[j].pnn,
 						 mem_ctx, name,
-						 dbmap->dbs[db].flags & CTDB_DB_FLAGS_PERSISTENT);
+						 dbmap->dbs[db].flags, NULL);
 			if (ret != 0) {
 				DEBUG(DEBUG_ERR, (__location__ " Unable to create remote db:%s\n", name));
 				return -1;
@@ -534,8 +536,9 @@ static int create_missing_local_databases(struct ctdb_context *ctdb, struct ctdb
 					  nodemap->nodes[j].pnn));
 				return -1;
 			}
-			ctdb_ctrl_createdb(ctdb, CONTROL_TIMEOUT(), pnn, mem_ctx, name, 
-					   remote_dbmap->dbs[db].flags & CTDB_DB_FLAGS_PERSISTENT);
+			ctdb_ctrl_createdb(ctdb, CONTROL_TIMEOUT(), pnn,
+					   mem_ctx, name,
+					   remote_dbmap->dbs[db].flags, NULL);
 			if (ret != 0) {
 				DEBUG(DEBUG_ERR, (__location__ " Unable to create local db:%s\n", name));
 				return -1;
@@ -653,7 +656,7 @@ static void vacuum_fetch_handler(uint64_t srvid, TDB_DATA data,
 	TALLOC_CTX *tmp_ctx = talloc_new(ctdb);
 	const char *name;
 	struct ctdb_dbid_map_old *dbmap=NULL;
-	bool persistent = false;
+	uint8_t db_flags = 0;
 	struct ctdb_db_context *ctdb_db;
 	struct ctdb_rec_data_old *r;
 
@@ -672,7 +675,7 @@ static void vacuum_fetch_handler(uint64_t srvid, TDB_DATA data,
 
 	for (i=0;i<dbmap->num;i++) {
 		if (dbmap->dbs[i].db_id == recs->db_id) {
-			persistent = dbmap->dbs[i].flags & CTDB_DB_FLAGS_PERSISTENT;
+			db_flags = dbmap->dbs[i].flags;
 			break;
 		}
 	}
@@ -688,7 +691,7 @@ static void vacuum_fetch_handler(uint64_t srvid, TDB_DATA data,
 	}
 
 	/* attach to it */
-	ctdb_db = ctdb_attach(ctdb, CONTROL_TIMEOUT(), name, persistent, 0);
+	ctdb_db = ctdb_attach(ctdb, CONTROL_TIMEOUT(), name, db_flags);
 	if (ctdb_db == NULL) {
 		DEBUG(DEBUG_ERR,(__location__ " Failed to attach to database '%s'\n", name));
 		goto done;
@@ -1025,6 +1028,7 @@ static int helper_run(struct ctdb_recoverd *rec, TALLOC_CTX *mem_ctx,
 	struct tevent_fd *fde;
 	const char **args;
 	int nargs, ret;
+	uint32_t recmaster = rec->recmaster;
 
 	state = talloc_zero(mem_ctx, struct helper_state);
 	if (state == NULL) {
@@ -1084,6 +1088,14 @@ static int helper_run(struct ctdb_recoverd *rec, TALLOC_CTX *mem_ctx,
 
 	while (!state->done) {
 		tevent_loop_once(rec->ctdb->ev);
+
+		/* If recmaster changes, we have lost election */
+		if (recmaster != rec->recmaster) {
+			D_ERR("Recmaster changed to %u, aborting %s\n",
+			      rec->recmaster, type);
+			state->result = 1;
+			break;
+		}
 	}
 
 	close(state->fd[0]);
@@ -1117,7 +1129,7 @@ static int ctdb_takeover(struct ctdb_recoverd *rec,
 {
 	static char prog[PATH_MAX+1] = "";
 	char *arg;
-	int i;
+	int i, ret;
 
 	if (!ctdb_set_helper("takeover_helper", prog, sizeof(prog),
 			     "CTDB_TAKEOVER_HELPER", CTDB_HELPER_BINDIR,
@@ -1135,6 +1147,14 @@ static int ctdb_takeover(struct ctdb_recoverd *rec,
 		}
 		if (arg == NULL) {
 			DEBUG(DEBUG_ERR, (__location__ " memory error\n"));
+			return -1;
+		}
+	}
+
+	if (ctdb_config.failover_disabled) {
+		ret = setenv("CTDB_DISABLE_IP_FAILOVER", "1", 1);
+		if (ret != 0) {
+			D_ERR("Failed to set CTDB_DISABLE_IP_FAILOVER variable\n");
 			return -1;
 		}
 	}
@@ -1424,7 +1444,7 @@ static int do_recovery(struct ctdb_recoverd *rec,
 	   We now wait for rerecovery_timeout before we allow
 	   another recovery to take place.
 	*/
-	DEBUG(DEBUG_NOTICE, ("Just finished a recovery. New recoveries will now be supressed for the rerecovery timeout (%d seconds)\n", ctdb->tunable.rerecovery_timeout));
+	DEBUG(DEBUG_NOTICE, ("Just finished a recovery. New recoveries will now be suppressed for the rerecovery timeout (%d seconds)\n", ctdb->tunable.rerecovery_timeout));
 	ctdb_op_disable(rec->recovery, ctdb->ev,
 			ctdb->tunable.rerecovery_timeout);
 	return 0;
@@ -2315,7 +2335,7 @@ static int verify_local_ip_allocation(struct ctdb_context *ctdb,
 	}
 
 	/* Return early if disabled... */
-	if (ctdb->tunable.disable_ip_failover != 0 ||
+	if (ctdb_config.failover_disabled ||
 	    ctdb_op_is_disabled(rec->takeover_run)) {
 		return  0;
 	}
@@ -3194,7 +3214,7 @@ int ctdb_start_recoverd(struct ctdb_context *ctdb)
 		return -1;
 	}
 
-	prctl_set_comment("ctdb_recovered");
+	prctl_set_comment("ctdb_recoverd");
 	if (switch_from_server_to_client(ctdb) != 0) {
 		DEBUG(DEBUG_CRIT, (__location__ "ERROR: failed to switch recovery daemon into client mode. shutting down.\n"));
 		exit(1);

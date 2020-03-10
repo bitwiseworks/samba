@@ -6,59 +6,35 @@ define_test "multiple events"
 
 setup_eventd
 
-cat > "$eventd_scriptdir/01.test" <<EOF
-#!/bin/sh
+ok_null
+simple_test run 10 random monitor
 
-echo "args: \$*"
-
-case "\$1" in
-startup)
-	exit 0
-	;;
-monitor)
-	exit 1
-	;;
-esac
+ok <<EOF
+01.disabled          DISABLED  
+02.enabled           OK         DURATION DATETIME
 EOF
-chmod +x "$eventd_scriptdir/01.test"
+simple_test status random monitor
 
-required_result 0 <<EOF
+required_error ENOEXEC <<EOF
+Event failure in random failed
 EOF
-simple_test run startup 30
-
-required_result 0 <<EOF
-01.test              OK         DURATION DATETIME
-EOF
-simple_test status startup lastrun
-
-required_result 0 <<EOF
-01.test              OK         DURATION DATETIME
-EOF
-simple_test status startup lastpass
-
-required_result 0 <<EOF
-Event startup has never failed
-EOF
-simple_test status startup lastfail
+simple_test run 10 random failure
 
 required_result 1 <<EOF
-Failed to run event monitor, result=1
+01.disabled          DISABLED  
+02.enabled           ERROR      DURATION DATETIME
+  OUTPUT: 
 EOF
-simple_test run monitor 30
+simple_test status random failure
+
+required_error ENOEXEC <<EOF
+Event verbosefailure in random failed
+EOF
+simple_test run 10 random verbosefailure
 
 required_result 1 <<EOF
-01.test              ERROR      DURATION DATETIME
-  OUTPUT: args: monitor
+01.disabled          DISABLED  
+02.enabled           ERROR      DURATION DATETIME
+  OUTPUT: args: verbosefailure
 EOF
-simple_test status monitor lastrun
-
-required_result 0 <<EOF
-Event monitor has never passed
-EOF
-simple_test status monitor lastpass
-
-required_result 1 <<EOF
-01.test              ERROR      DURATION DATETIME
-  OUTPUT: args: monitor
-EOF
-simple_test status monitor lastfail
+simple_test status random verbosefailure

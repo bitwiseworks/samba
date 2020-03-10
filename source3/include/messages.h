@@ -35,18 +35,6 @@
  */
 #define MSG_FLAG_LOWPRIORITY		0x80000000
 
-
-/*
- * ctdb gives us 64-bit server ids for messaging_send. This is done to avoid
- * pid clashes and to be able to register for special messages like "all
- * smbds".
- *
- * Normal individual server id's have the upper 32 bits to 0, I picked "1" for
- * Samba, other subsystems might use something else.
- */
-
-#define MSG_SRVID_SAMBA 0x0000000100000000LL
-
 #include "librpc/gen_ndr/server_id.h"
 #include "lib/util/data_blob.h"
 #include "system/network.h"
@@ -55,23 +43,6 @@
 
 struct messaging_context;
 struct messaging_rec;
-
-struct messaging_backend {
-	int (*send_fn)(struct server_id src,
-		       struct server_id pid, int msg_type,
-		       const struct iovec *iov, int iovlen,
-		       const int *fds, size_t num_fds,
-		       struct messaging_backend *backend);
-	void *private_data;
-};
-
-int messaging_ctdbd_init(struct messaging_context *msg_ctx,
-			 TALLOC_CTX *mem_ctx,
-			 struct messaging_backend **presult);
-int messaging_ctdbd_reinit(struct messaging_context *msg_ctx,
-			   TALLOC_CTX *mem_ctx,
-			   struct messaging_backend *backend);
-struct ctdbd_connection *messaging_ctdbd_connection(void);
 
 struct messaging_context *messaging_init(TALLOC_CTX *mem_ctx, 
 					 struct tevent_context *ev);
@@ -125,6 +96,8 @@ NTSTATUS messaging_send_iov(struct messaging_context *msg_ctx,
 			    struct server_id server, uint32_t msg_type,
 			    const struct iovec *iov, int iovlen,
 			    const int *fds, size_t num_fds);
+void messaging_send_all(struct messaging_context *msg_ctx,
+			int msg_type, const void *buf, size_t len);
 
 struct tevent_req *messaging_filtered_read_send(
 	TALLOC_CTX *mem_ctx, struct tevent_context *ev,

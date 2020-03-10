@@ -27,7 +27,7 @@
 #include "lib/dbwrap/dbwrap_rbt.h"
 #include "libcli/security/dom_sid.h"
 #include "mdssvc.h"
-#include "sparql_parser.h"
+#include "rpc_server/mdssvc/sparql_parser.tab.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_RPC_SRV
@@ -67,7 +67,7 @@ struct slq_destroy_state {
 /*
  * If these functions return an error, they hit something like a non
  * recoverable talloc error. Most errors are dealt with by returning
- * an errror code in the Spotlight RPC reply.
+ * an error code in the Spotlight RPC reply.
  */
 static bool slrpc_fetch_properties(struct mds_ctx *mds_ctx,
 				   const DALLOC_CTX *query, DALLOC_CTX *reply);
@@ -1136,6 +1136,8 @@ static bool slrpc_open_query(struct mds_ctx *mds_ctx,
 	struct sl_query *slq = NULL;
 	int result;
 	char *querystring;
+	char *scope = NULL;
+	char *escaped_scope = NULL;
 
 	array = dalloc_zero(reply, sl_array_t);
 	if (array == NULL) {
@@ -1214,12 +1216,20 @@ static bool slrpc_open_query(struct mds_ctx *mds_ctx,
 		goto error;
 	}
 
-	slq->path_scope = dalloc_get(path_scope, "char *", 0);
-	if (slq->path_scope == NULL) {
+	scope = dalloc_get(path_scope, "char *", 0);
+	if (scope == NULL) {
 		goto error;
 	}
 
-	slq->path_scope = talloc_strdup(slq, slq->path_scope);
+	escaped_scope = g_uri_escape_string(scope,
+					    G_URI_RESERVED_CHARS_ALLOWED_IN_PATH,
+					    TRUE);
+	if (escaped_scope == NULL) {
+		goto error;
+	}
+
+	slq->path_scope = talloc_strdup(slq, escaped_scope);
+	g_free(escaped_scope);
 	if (slq->path_scope == NULL) {
 		goto error;
 	}

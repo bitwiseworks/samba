@@ -34,6 +34,9 @@
 #include <gssapi/gssapi.h>
 #include "libcli/wbclient/wbclient.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_AUTH
+
 _PUBLIC_ struct auth_session_info *anonymous_session(TALLOC_CTX *mem_ctx, 
 					    struct loadparm_context *lp_ctx)
 {
@@ -154,6 +157,15 @@ _PUBLIC_ NTSTATUS auth_generate_session_info(TALLOC_CTX *mem_ctx,
 		num_sids++;
 	}
 
+	if (session_info_flags & AUTH_SESSION_INFO_NTLM) {
+		sids = talloc_realloc(tmp_ctx, sids, struct dom_sid, num_sids + 1);
+		NT_STATUS_HAVE_NO_MEMORY(sids);
+
+		if (!dom_sid_parse(SID_NT_NTLM_AUTHENTICATION, &sids[num_sids])) {
+			return NT_STATUS_INTERNAL_ERROR;
+		}
+		num_sids++;
+	}
 
 
 	if (num_sids > PRIMARY_USER_SID_INDEX && dom_sid_equal(anonymous_sid, &sids[PRIMARY_USER_SID_INDEX])) {
@@ -210,6 +222,8 @@ _PUBLIC_ NTSTATUS auth_generate_session_info(TALLOC_CTX *mem_ctx,
 		TALLOC_FREE(tmp_ctx);
 		return nt_status;
 	}
+
+	session_info->unique_session_token = GUID_random();
 
 	session_info->credentials = NULL;
 
@@ -404,5 +418,6 @@ void auth_session_info_debug(int dbg_lev,
 		return;	
 	}
 
-	security_token_debug(0, dbg_lev, session_info->security_token);
+	security_token_debug(DBGC_AUTH, dbg_lev,
+			     session_info->security_token);
 }

@@ -19,6 +19,8 @@
 
 #include "includes.h"
 #include "messages.h"
+#include "lib/messages_ctdb.h"
+#include "lib/messages_ctdb_ref.h"
 #include "ctdbd_conn.h"
 #include "lib/dbwrap/dbwrap.h"
 #include "lib/dbwrap/dbwrap_ctdb.h"
@@ -37,7 +39,8 @@ int ctdbd_messaging_send_iov(struct ctdbd_connection *conn,
 }
 
 int register_with_ctdbd(struct ctdbd_connection *conn, uint64_t srvid,
-			int (*cb)(uint32_t src_vnn, uint32_t dst_vnn,
+			int (*cb)(struct tevent_context *ev,
+				  uint32_t src_vnn, uint32_t dst_vnn,
 				  uint64_t dst_srvid,
 				  const uint8_t *msg, size_t msglen,
 				  void *private_data),
@@ -49,7 +52,8 @@ int register_with_ctdbd(struct ctdbd_connection *conn, uint64_t srvid,
 int ctdbd_register_ips(struct ctdbd_connection *conn,
 		       const struct sockaddr_storage *_server,
 		       const struct sockaddr_storage *_client,
-		       int (*cb)(uint32_t src_vnn, uint32_t dst_vnn,
+		       int (*cb)(struct tevent_context *ev,
+				 uint32_t src_vnn, uint32_t dst_vnn,
 				 uint64_t dst_srvid,
 				 const uint8_t *msg, size_t msglen,
 				 void *private_data),
@@ -58,14 +62,14 @@ int ctdbd_register_ips(struct ctdbd_connection *conn,
 	return ENOSYS;
 }
 
-bool ctdbd_process_exists(struct ctdbd_connection *conn, uint32_t vnn, pid_t pid)
+bool ctdbd_process_exists(struct ctdbd_connection *conn, uint32_t vnn,
+			  pid_t pid, uint64_t unique_id)
 {
 	return false;
 }
 
 struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 				struct messaging_context *msg_ctx,
-				struct ctdbd_connection *conn,
 				const char *name,
 				int hash_size, int tdb_flags,
 				int open_flags, mode_t mode,
@@ -76,21 +80,36 @@ struct db_context *db_open_ctdb(TALLOC_CTX *mem_ctx,
 	return NULL;
 }
 
-int messaging_ctdbd_init(struct messaging_context *msg_ctx,
-			 TALLOC_CTX *mem_ctx,
-			      struct messaging_backend **presult)
+int messaging_ctdb_send(uint32_t dst_vnn, uint64_t dst_srvid,
+			const struct iovec *iov, int iovlen)
 {
 	return ENOSYS;
 }
 
-int messaging_ctdbd_reinit(struct messaging_context *msg_ctx,
-			   TALLOC_CTX *mem_ctx,
-			   struct messaging_backend *backend)
-{
-	return ENOSYS;
-}
-
-struct ctdbd_connection *messaging_ctdbd_connection(void)
+void *messaging_ctdb_ref(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
+			 const char *sockname, int timeout, uint64_t unique_id,
+			 void (*recv_cb)(struct tevent_context *ev,
+					 const uint8_t *msg, size_t msg_len,
+					 int *fds, size_t num_fds,
+					 void *private_data),
+			 void *private_data,
+			 int *err)
 {
 	return NULL;
+}
+
+struct messaging_ctdb_fde *messaging_ctdb_register_tevent_context(
+	TALLOC_CTX *mem_ctx, struct tevent_context *ev)
+{
+	return NULL;
+}
+
+struct ctdbd_connection *messaging_ctdb_connection(void)
+{
+	return NULL;
+}
+
+int ctdb_async_ctx_reinit(TALLOC_CTX *mem_ctx, struct tevent_context *ev)
+{
+	return ENOSYS;
 }

@@ -20,6 +20,7 @@
 
 #include "includes.h"
 #include "system/shmem.h"
+#include "libsmb/namequery.h"
 #include "wbc_async.h"
 #include "torture/proto.h"
 #include "libcli/security/security.h"
@@ -31,7 +32,6 @@
 #include "dbwrap/dbwrap.h"
 #include "dbwrap/dbwrap_open.h"
 #include "dbwrap/dbwrap_rbt.h"
-#include "talloc_dict.h"
 #include "async_smb.h"
 #include "libsmb/libsmb.h"
 #include "libsmb/clirap.h"
@@ -43,6 +43,7 @@
 #include "../libcli/smb/smbXcli_base.h"
 #include "lib/util/sys_rw_data.h"
 #include "lib/util/base64.h"
+#include "lib/util/time.h"
 
 #ifdef __OS2__
 #define pipe(A) os2_pipe(A)
@@ -330,15 +331,10 @@ bool smbcli_parse_unc(const char *unc_name, TALLOC_CTX *mem_ctx,
 
 static bool torture_open_connection_share(struct cli_state **c,
 				   const char *hostname, 
-				   const char *sharename)
+				   const char *sharename,
+				   int flags)
 {
-	int flags = 0;
 	NTSTATUS status;
-
-	if (use_oplocks)
-		flags |= CLI_FULL_CONNECTION_OPLOCKS;
-	if (use_level_II_oplocks)
-		flags |= CLI_FULL_CONNECTION_LEVEL_II_OPLOCKS;
 
 	status = cli_full_connection_creds(c,
 					   myname,
@@ -365,7 +361,7 @@ static bool torture_open_connection_share(struct cli_state **c,
 	return True;
 }
 
-bool torture_open_connection(struct cli_state **c, int conn_index)
+bool torture_open_connection_flags(struct cli_state **c, int conn_index, int flags)
 {
 	char **unc_list = NULL;
 	int num_unc_names = 0;
@@ -387,14 +383,28 @@ bool torture_open_connection(struct cli_state **c, int conn_index)
 			exit(1);
 		}
 
-		result = torture_open_connection_share(c, h, s);
+		result = torture_open_connection_share(c, h, s, flags);
 
 		/* h, s were copied earlier */
 		TALLOC_FREE(unc_list);
 		return result;
 	}
 
-	return torture_open_connection_share(c, host, share);
+	return torture_open_connection_share(c, host, share, flags);
+}
+
+bool torture_open_connection(struct cli_state **c, int conn_index)
+{
+	int flags = CLI_FULL_CONNECTION_FORCE_SMB1;
+
+	if (use_oplocks) {
+		flags |= CLI_FULL_CONNECTION_OPLOCKS;
+	}
+	if (use_level_II_oplocks) {
+		flags |= CLI_FULL_CONNECTION_LEVEL_II_OPLOCKS;
+	}
+
+	return torture_open_connection_flags(c, conn_index, flags);
 }
 
 bool torture_init_connection(struct cli_state **pcli)
@@ -1474,7 +1484,8 @@ static bool tcon_devtest(struct cli_state *cli,
 
 	if (NT_STATUS_IS_OK(expected_error)) {
 		if (NT_STATUS_IS_OK(status)) {
-			if (strcmp(cli->dev, return_devtype) == 0) {
+			if (return_devtype != NULL &&
+			    strequal(cli->dev, return_devtype)) {
 				ret = True;
 			} else { 
 				printf("tconX to share %s with type %s "
@@ -1514,7 +1525,7 @@ static bool tcon_devtest(struct cli_state *cli,
 static bool run_tcon_devtype_test(int dummy)
 {
 	static struct cli_state *cli1 = NULL;
-	int flags = 0;
+	int flags = CLI_FULL_CONNECTION_FORCE_SMB1;
 	NTSTATUS status;
 	bool ret = True;
 
@@ -2152,7 +2163,7 @@ static bool run_locktest5(int dummy)
 	ret = NT_STATUS_IS_OK(status);
 	EXPECTED(ret, False);
 
-	printf("a different processs %s get a read lock on the first process lock stack\n", ret?"can":"cannot");
+	printf("a different process %s get a read lock on the first process lock stack\n", ret?"can":"cannot");
 
 	/* Unlock the process 2 lock. */
 	cli_unlock(cli2, fnum2, 0, 4);
@@ -2161,7 +2172,7 @@ static bool run_locktest5(int dummy)
 	ret = NT_STATUS_IS_OK(status);
 	EXPECTED(ret, False);
 
-	printf("the same processs on a different fnum %s get a read lock\n", ret?"can":"cannot");
+	printf("the same process on a different fnum %s get a read lock\n", ret?"can":"cannot");
 
 	/* Unlock the process 1 fnum3 lock. */
 	cli_unlock(cli1, fnum3, 0, 4);
@@ -2204,7 +2215,7 @@ static bool run_locktest5(int dummy)
 	ret = NT_STATUS_IS_OK(status);
 	EXPECTED(ret, True);
 
-	printf("a different processs %s get a write lock on the unlocked stack\n", ret?"can":"cannot");
+	printf("a different process %s get a write lock on the unlocked stack\n", ret?"can":"cannot");
 
 
  fail:
@@ -3002,7 +3013,7 @@ static bool run_negprot_nowait(int dummy)
 		struct tevent_req *req;
 
 		req = smbXcli_negprot_send(ev, ev, cli->conn, cli->timeout,
-					   PROTOCOL_CORE, PROTOCOL_NT1);
+					   PROTOCOL_CORE, PROTOCOL_NT1, 0);
 		if (req == NULL) {
 			TALLOC_FREE(ev);
 			return false;
@@ -3210,7 +3221,7 @@ static bool run_attrtest(int dummy)
 		correct = False;
 	}
 
-	if (abs(t - time(NULL)) > 60*60*24*10) {
+	if (labs(t - time(NULL)) > 60*60*24*10) {
 		printf("ERROR: SMBgetatr bug. time is %s",
 		       ctime(&t));
 		t = time(NULL);
@@ -3441,13 +3452,13 @@ static bool run_trans2test(int dummy)
 			printf("modify time=%s", ctime(&m_time));
 			printf("This system appears to have sticky create times\n");
 		}
-		if ((abs(a_time - t) > 60) && (a_time % (60*60) == 0)) {
+		if ((labs(a_time - t) > 60) && (a_time % (60*60) == 0)) {
 			printf("access time=%s", ctime(&a_time));
 			printf("This system appears to set a midnight access time\n");
 			correct = False;
 		}
 
-		if (abs(m_time - t) > 60*60*24*7) {
+		if (labs(m_time - t) > 60*60*24*7) {
 			printf("ERROR: totally incorrect times - maybe word reversed? mtime=%s", ctime(&m_time));
 			correct = False;
 		}
@@ -4554,6 +4565,78 @@ static bool run_deletetest(int dummy)
 	return correct;
 }
 
+/*
+  Exercise delete on close semantics - use on the PRINT1 share in torture
+  testing.
+ */
+static bool run_delete_print_test(int dummy)
+{
+	struct cli_state *cli1 = NULL;
+	const char *fname = "print_delete.file";
+	uint16_t fnum1 = (uint16_t)-1;
+	bool correct = false;
+	const char *buf = "print file data\n";
+	NTSTATUS status;
+
+	printf("starting print delete test\n");
+
+	if (!torture_open_connection(&cli1, 0)) {
+		return false;
+	}
+
+	smbXcli_conn_set_sockopt(cli1->conn, sockops);
+
+	status = cli_ntcreate(cli1, fname, 0, GENERIC_ALL_ACCESS|DELETE_ACCESS,
+			      FILE_ATTRIBUTE_NORMAL, 0, FILE_OVERWRITE_IF,
+			      0, 0, &fnum1, NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("open of %s failed (%s)\n",
+			fname,
+			nt_errstr(status));
+		goto fail;
+	}
+
+	status = cli_writeall(cli1,
+			fnum1,
+			0,
+			(const uint8_t *)buf,
+			0, /* offset */
+			strlen(buf), /* size */
+			NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("writing print file data failed (%s)\n",
+			nt_errstr(status));
+		goto fail;
+	}
+
+	status = cli_nt_delete_on_close(cli1, fnum1, true);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("setting delete_on_close failed (%s)\n",
+			nt_errstr(status));
+		goto fail;
+	}
+
+	status = cli_close(cli1, fnum1);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("close failed (%s)\n", nt_errstr(status));
+		goto fail;
+	}
+
+	printf("finished print delete test\n");
+
+	correct = true;
+
+  fail:
+
+	if (fnum1 != (uint16_t)-1) {
+		cli_close(cli1, fnum1);
+	}
+
+	if (cli1 && !torture_close_connection(cli1)) {
+		correct = false;
+	}
+	return correct;
+}
 
 /*
   Test wildcard delete.
@@ -4852,7 +4935,7 @@ static bool run_rename(int dummy)
 		return False;
 	}
 
-	status = cli_rename(cli1, fname, fname1);
+	status = cli_rename(cli1, fname, fname1, false);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("First rename failed (SHARE_READ) (this is correct) - %s\n", nt_errstr(status));
 	} else {
@@ -4880,7 +4963,7 @@ static bool run_rename(int dummy)
 		return False;
 	}
 
-	status = cli_rename(cli1, fname, fname1);
+	status = cli_rename(cli1, fname, fname1, false);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("Second rename failed (SHARE_DELETE | SHARE_READ) - this should have succeeded - %s\n", nt_errstr(status));
 		correct = False;
@@ -4927,7 +5010,7 @@ static bool run_rename(int dummy)
   }
 #endif
 
-	status = cli_rename(cli1, fname, fname1);
+	status = cli_rename(cli1, fname, fname1, false);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("Third rename failed (SHARE_NONE) - this should have succeeded - %s\n", nt_errstr(status));
 		correct = False;
@@ -4955,7 +5038,7 @@ static bool run_rename(int dummy)
 		return False;
 	}
 
-	status = cli_rename(cli1, fname, fname1);
+	status = cli_rename(cli1, fname, fname1, false);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("Fourth rename failed (SHARE_READ | SHARE_WRITE) (this is correct) - %s\n", nt_errstr(status));
 	} else {
@@ -4983,7 +5066,7 @@ static bool run_rename(int dummy)
 		return False;
 	}
 
-	status = cli_rename(cli1, fname, fname1);
+	status = cli_rename(cli1, fname, fname1, false);
 	if (!NT_STATUS_IS_OK(status)) {
 		printf("Fifth rename failed (SHARE_READ | SHARE_WRITE | SHARE_DELETE) - this should have succeeded - %s ! \n", nt_errstr(status));
 		correct = False;
@@ -5192,13 +5275,13 @@ static bool run_rename_access(int dummy)
 	 * dst directory should fail.
 	 */
 
-	status = cli_rename(cli, src, dst);
+	status = cli_rename(cli, src, dst, false);
 	if (!NT_STATUS_EQUAL(status, NT_STATUS_ACCESS_DENIED)) {
 		printf("rename of %s -> %s should be ACCESS denied, was %s\n",
 			src, dst, nt_errstr(status));
 		goto fail;
 	}
-	status = cli_rename(cli, dsrc, ddst);
+	status = cli_rename(cli, dsrc, ddst, false);
 	if (!NT_STATUS_EQUAL(status, NT_STATUS_ACCESS_DENIED)) {
 		printf("rename of %s -> %s should be ACCESS denied, was %s\n",
 			src, dst, nt_errstr(status));
@@ -5215,7 +5298,7 @@ static bool run_rename_access(int dummy)
 	}
 
 	if (cli) {
-		if (fnum != (uint64_t)-1) {
+		if (fnum != (uint16_t)-1) {
 			cli_close(cli, fnum);
 		}
 		cli_unlink(cli, src,
@@ -8061,7 +8144,7 @@ static bool run_chain1(int dummy)
 	if (reqs[1] == NULL) return false;
 	tevent_req_set_callback(reqs[1], chain1_write_completion, NULL);
 
-	reqs[2] = cli_close_create(talloc_tos(), evt, cli1, 0, &smbreqs[2]);
+	reqs[2] = cli_smb1_close_create(talloc_tos(), evt, cli1, 0, &smbreqs[2]);
 	if (reqs[2] == NULL) return false;
 	tevent_req_set_callback(reqs[2], chain1_close_completion, &done);
 
@@ -8101,10 +8184,11 @@ static bool run_chain2(int dummy)
 	struct tevent_req *reqs[2], *smbreqs[2];
 	bool done = false;
 	NTSTATUS status;
+	int flags = CLI_FULL_CONNECTION_FORCE_SMB1;
 
 	printf("starting chain2 test\n");
 	status = cli_start_connection(&cli1, lp_netbios_name(), host, NULL,
-				      port_to_use, SMB_SIGNING_DEFAULT, 0);
+				      port_to_use, SMB_SIGNING_DEFAULT, flags);
 	if (!NT_STATUS_IS_OK(status)) {
 		return False;
 	}
@@ -8583,6 +8667,152 @@ static bool run_mangle1(int dummy)
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("cli_qpathinfo1(%s) failed: %s\n", alt_name,
 			 nt_errstr(status));
+		return false;
+	}
+
+	return true;
+}
+
+static NTSTATUS mangle_illegal_list_shortname_fn(const char *mntpoint,
+						 struct file_info *f,
+						 const char *mask,
+						 void *state)
+{
+	if (f->short_name == NULL) {
+		return NT_STATUS_OK;
+	}
+
+	if (strlen(f->short_name) == 0) {
+		return NT_STATUS_OK;
+	}
+
+	printf("unexpected shortname: %s\n", f->short_name);
+
+	return NT_STATUS_OBJECT_NAME_INVALID;
+}
+
+static NTSTATUS mangle_illegal_list_name_fn(const char *mntpoint,
+					    struct file_info *f,
+					    const char *mask,
+					    void *state)
+{
+	char *name = state;
+
+	printf("name: %s\n", f->name);
+	fstrcpy(name, f->name);
+	return NT_STATUS_OK;
+}
+
+static bool run_mangle_illegal(int dummy)
+{
+	struct cli_state *cli = NULL;
+	struct cli_state *cli_posix = NULL;
+	const char *fname = "\\MANGLE_ILLEGAL\\this_is_a_long_fname_to_be_mangled.txt";
+	const char *illegal_fname = "MANGLE_ILLEGAL/foo:bar";
+	char *mangled_path = NULL;
+	uint16_t fnum;
+	fstring name;
+	fstring alt_name;
+	NTSTATUS status;
+
+	printf("starting mangle-illegal test\n");
+
+	if (!torture_open_connection(&cli, 0)) {
+		return False;
+	}
+
+	smbXcli_conn_set_sockopt(cli->conn, sockops);
+
+	if (!torture_open_connection(&cli_posix, 0)) {
+		return false;
+	}
+
+	smbXcli_conn_set_sockopt(cli_posix->conn, sockops);
+
+	status = torture_setup_unix_extensions(cli_posix);
+	if (!NT_STATUS_IS_OK(status)) {
+		return false;
+	}
+
+	cli_rmdir(cli, "\\MANGLE_ILLEGAL");
+	status = cli_mkdir(cli, "\\MANGLE_ILLEGAL");
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("mkdir1 failed : %s\n", nt_errstr(status));
+		return False;
+	}
+
+	/*
+	 * Create a file with illegal NTFS characters and test that we
+	 * get a usable mangled name
+	 */
+
+	cli_setatr(cli_posix, illegal_fname, 0, 0);
+	cli_posix_unlink(cli_posix, illegal_fname);
+
+	status = cli_posix_open(cli_posix, illegal_fname, O_RDWR|O_CREAT|O_EXCL,
+				0600, &fnum);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("POSIX create of %s failed (%s)\n",
+		       illegal_fname, nt_errstr(status));
+		return false;
+	}
+
+	status = cli_close(cli_posix, fnum);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("close failed (%s)\n", nt_errstr(status));
+		return false;
+	}
+
+	status = cli_list(cli, "\\MANGLE_ILLEGAL\\*", 0, mangle_illegal_list_name_fn, &name);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_printf("cli_list failed: %s\n", nt_errstr(status));
+		return false;
+	}
+
+	mangled_path = talloc_asprintf(talloc_tos(), "\\MANGLE_ILLEGAL\\%s", name);
+	if (mangled_path == NULL) {
+		return false;
+	}
+
+	status = cli_openx(cli, mangled_path, O_RDONLY, DENY_NONE, &fnum);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_printf("cli_openx(%s) failed: %s\n", mangled_path, nt_errstr(status));
+		TALLOC_FREE(mangled_path);
+		return false;
+	}
+	TALLOC_FREE(mangled_path);
+	cli_close(cli, fnum);
+
+	cli_setatr(cli_posix, illegal_fname, 0, 0);
+	cli_posix_unlink(cli_posix, illegal_fname);
+
+	/*
+	 * Create a file with a long name and check that we got *no* short name.
+	 */
+
+	status = cli_ntcreate(cli, fname, 0, GENERIC_ALL_ACCESS|DELETE_ACCESS,
+			      FILE_ATTRIBUTE_NORMAL, 0, FILE_OVERWRITE_IF,
+			      0, 0, &fnum, NULL);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_printf("open %s failed: %s\n", fname, nt_errstr(status));
+		return false;
+	}
+	cli_close(cli, fnum);
+
+	status = cli_list(cli, fname, 0, mangle_illegal_list_shortname_fn, &alt_name);
+	if (!NT_STATUS_IS_OK(status)) {
+		d_printf("cli_list failed\n");
+		return false;
+	}
+
+	cli_unlink(cli, fname, 0);
+	cli_rmdir(cli, "\\MANGLE_ILLEGAL");
+
+	if (!torture_close_connection(cli_posix)) {
+		return false;
+	}
+
+	if (!torture_close_connection(cli)) {
 		return false;
 	}
 
@@ -9754,6 +9984,54 @@ static bool run_symlink_open_test(int dummy)
 	return correct;
 }
 
+/*
+ * Only testing minimal time strings, as the others
+ * need (locale-dependent) guessing at what strftime does and
+ * even may differ in builds.
+ */
+static bool timesubst_test(void)
+{
+	TALLOC_CTX *ctx = NULL;
+	/* Sa 23. Dez 04:33:20 CET 2017 */
+	const struct timeval tv = { 1514000000, 123 };
+	const char* expect_minimal = "20171223_033320";
+	const char* expect_minus   = "20171223_033320_000123";
+	char *s;
+	char *env_tz, *orig_tz = NULL;
+	bool result = true;
+
+	ctx = talloc_new(NULL);
+
+	env_tz = getenv("TZ");
+	if(env_tz) {
+		orig_tz = talloc_strdup(ctx, env_tz);
+	}
+	setenv("TZ", "UTC", 1);
+
+	s = minimal_timeval_string(ctx, &tv, false);
+
+	if(!s || strcmp(s, expect_minimal)) {
+		printf("minimal_timeval_string(ctx, tv, false) returned [%s], expected "
+		       "[%s]\n", s ? s : "<nil>", expect_minimal);
+		result = false;
+	}
+	TALLOC_FREE(s);
+	s = minimal_timeval_string(ctx, &tv, true);
+	if(!s || strcmp(s, expect_minus)) {
+		printf("minimal_timeval_string(ctx, tv, true) returned [%s], expected "
+		       "[%s]\n", s ? s : "<nil>", expect_minus);
+		result = false;
+	}
+	TALLOC_FREE(s);
+
+	if(orig_tz) {
+		setenv("TZ", orig_tz, 1);
+	}
+
+	TALLOC_FREE(ctx);
+	return result;
+}
+
 static bool run_local_substitute(int dummy)
 {
 	bool ok = true;
@@ -9766,6 +10044,10 @@ static bool run_local_substitute(int dummy)
 	ok &= subst_test("%G", "", "", -1, 0, gidtoname(0));
 	ok &= subst_test("%D%u", "u", "dom", -1, 0, "domu");
 	ok &= subst_test("%i %I", "", "", -1, -1, "0.0.0.0 0.0.0.0");
+	ok &= subst_test("%j %J", "", "", -1, -1, "0_0_0_0 0_0_0_0");
+	/* Substitution depends on current time, so better test the underlying
+	   formatting function. At least covers %t. */
+	ok &= timesubst_test();
 
 	/* Different captialization rules in sub_basic... */
 
@@ -9882,7 +10164,7 @@ static bool run_local_gencache(int dummy)
 	blob = data_blob_string_const_null("bar");
 	tm = time(NULL) + 60;
 
-	if (!gencache_set_data_blob("foo", &blob, tm)) {
+	if (!gencache_set_data_blob("foo", blob, tm)) {
 		d_printf("%s: gencache_set_data_blob() failed\n", __location__);
 		return False;
 	}
@@ -9921,7 +10203,7 @@ static bool run_local_gencache(int dummy)
 	blob.data = (uint8_t *)&v;
 	blob.length = sizeof(v);
 
-	if (!gencache_set_data_blob("blob", &blob, tm)) {
+	if (!gencache_set_data_blob("blob", blob, tm)) {
 		d_printf("%s: gencache_set_data_blob() failed\n",
 			 __location__);
 		return false;
@@ -10160,61 +10442,6 @@ static bool run_local_convert_string(int dummy)
 failed:
 	TALLOC_FREE(tmp_ctx);
 	return false;
-}
-
-
-struct talloc_dict_test {
-	int content;
-};
-
-static int talloc_dict_traverse_fn(DATA_BLOB key, void *data, void *priv)
-{
-	int *count = (int *)priv;
-	*count += 1;
-	return 0;
-}
-
-static bool run_local_talloc_dict(int dummy)
-{
-	struct talloc_dict *dict;
-	struct talloc_dict_test *t;
-	int key, count, res;
-	bool ok;
-
-	dict = talloc_dict_init(talloc_tos());
-	if (dict == NULL) {
-		return false;
-	}
-
-	t = talloc(talloc_tos(), struct talloc_dict_test);
-	if (t == NULL) {
-		return false;
-	}
-
-	key = 1;
-	t->content = 1;
-	ok = talloc_dict_set(dict, data_blob_const(&key, sizeof(key)), &t);
-	if (!ok) {
-		return false;
-	}
-
-	count = 0;
-	res = talloc_dict_traverse(dict, talloc_dict_traverse_fn, &count);
-	if (res == -1) {
-		return false;
-	}
-
-	if (count != 1) {
-		return false;
-	}
-
-	if (count != res) {
-		return false;
-	}
-
-	TALLOC_FREE(dict);
-
-	return true;
 }
 
 static bool run_local_string_to_sid(int dummy) {
@@ -10565,14 +10792,24 @@ static bool data_blob_equal(DATA_BLOB a, DATA_BLOB b)
 static bool run_local_memcache(int dummy)
 {
 	struct memcache *cache;
-	DATA_BLOB k1, k2;
-	DATA_BLOB d1, d2, d3;
-	DATA_BLOB v1, v2, v3;
+	DATA_BLOB k1, k2, k3;
+	DATA_BLOB d1, d3;
+	DATA_BLOB v1, v3;
 
 	TALLOC_CTX *mem_ctx;
+	char *ptr1 = NULL;
+	char *ptr2 = NULL;
+
 	char *str1, *str2;
 	size_t size1, size2;
 	bool ret = false;
+
+	mem_ctx = talloc_init("foo");
+	if (mem_ctx == NULL) {
+		return false;
+	}
+
+	/* STAT_CACHE TESTS */
 
 	cache = memcache_init(NULL, sizeof(void *) == 8 ? 200 : 100);
 
@@ -10582,28 +10819,19 @@ static bool run_local_memcache(int dummy)
 	}
 
 	d1 = data_blob_const("d1", 2);
-	d2 = data_blob_const("d2", 2);
 	d3 = data_blob_const("d3", 2);
 
 	k1 = data_blob_const("d1", 2);
 	k2 = data_blob_const("d2", 2);
+	k3 = data_blob_const("d3", 2);
 
 	memcache_add(cache, STAT_CACHE, k1, d1);
-	memcache_add(cache, GETWD_CACHE, k2, d2);
 
 	if (!memcache_lookup(cache, STAT_CACHE, k1, &v1)) {
 		printf("could not find k1\n");
 		return false;
 	}
 	if (!data_blob_equal(d1, v1)) {
-		return false;
-	}
-
-	if (!memcache_lookup(cache, GETWD_CACHE, k2, &v2)) {
-		printf("could not find k2\n");
-		return false;
-	}
-	if (!data_blob_equal(d2, v2)) {
 		return false;
 	}
 
@@ -10617,22 +10845,69 @@ static bool run_local_memcache(int dummy)
 		return false;
 	}
 
-	memcache_add(cache, GETWD_CACHE, k1, d1);
+	TALLOC_FREE(cache);
 
-	if (memcache_lookup(cache, GETWD_CACHE, k2, &v2)) {
+	/* GETWD_CACHE TESTS */
+	str1 = talloc_strdup(mem_ctx, "string1");
+	if (str1 == NULL) {
+		return false;
+	}
+	ptr2 = str1; /* Keep an alias for comparison. */
+
+	str2 = talloc_strdup(mem_ctx, "string2");
+	if (str2 == NULL) {
+		return false;
+	}
+
+	cache = memcache_init(NULL, sizeof(void *) == 8 ? 200 : 100);
+	if (cache == NULL) {
+		printf("memcache_init failed\n");
+		return false;
+	}
+
+	memcache_add_talloc(cache, GETWD_CACHE, k2, &str1);
+	/* str1 == NULL now. */
+	ptr1 = memcache_lookup_talloc(cache, GETWD_CACHE, k2);
+	if (ptr1 == NULL) {
+		printf("could not find k2\n");
+		return false;
+	}
+	if (ptr1 != ptr2) {
+		printf("fetch of k2 got wrong string\n");
+		return false;
+	}
+
+	/* Add a blob to ensure k2 gets purged. */
+	d3 = data_blob_talloc_zero(mem_ctx, 180);
+	memcache_add(cache, STAT_CACHE, k3, d3);
+
+	ptr2 = memcache_lookup_talloc(cache, GETWD_CACHE, k2);
+	if (ptr2 != NULL) {
 		printf("Did find k2, should have been purged\n");
 		return false;
 	}
 
 	TALLOC_FREE(cache);
-
-	cache = memcache_init(NULL, 0);
+	TALLOC_FREE(mem_ctx);
 
 	mem_ctx = talloc_init("foo");
+	if (mem_ctx == NULL) {
+		return false;
+	}
+
+	cache = memcache_init(NULL, 0);
+	if (cache == NULL) {
+		return false;
+	}
 
 	str1 = talloc_strdup(mem_ctx, "string1");
+	if (str1 == NULL) {
+		return false;
+	}
 	str2 = talloc_strdup(mem_ctx, "string2");
-
+	if (str2 == NULL) {
+		return false;
+	}
 	memcache_add_talloc(cache, SINGLETON_CACHE_TALLOC,
 			    data_blob_string_const("torture"), &str1);
 	size1 = talloc_total_size(cache);
@@ -10716,59 +10991,6 @@ static bool run_wbclient_multi_ping(int dummy)
 	result = true;
  fail:
 	TALLOC_FREE(ev);
-	return result;
-}
-
-static void getaddrinfo_finished(struct tevent_req *req)
-{
-	char *name = (char *)tevent_req_callback_data_void(req);
-	struct addrinfo *ainfo;
-	int res;
-
-	res = getaddrinfo_recv(req, &ainfo);
-	if (res != 0) {
-		d_printf("gai(%s) returned %s\n", name, gai_strerror(res));
-		return;
-	}
-	d_printf("gai(%s) succeeded\n", name);
-	freeaddrinfo(ainfo);
-}
-
-static bool run_getaddrinfo_send(int dummy)
-{
-	TALLOC_CTX *frame = talloc_stackframe();
-	struct fncall_context *ctx;
-	struct tevent_context *ev;
-	bool result = false;
-	const char *names[4] = { "www.samba.org", "notfound.samba.org",
-				 "www.slashdot.org", "heise.de" };
-	struct tevent_req *reqs[4];
-	int i;
-
-	ev = samba_tevent_context_init(frame);
-	if (ev == NULL) {
-		goto fail;
-	}
-
-	ctx = fncall_context_init(frame, 4);
-
-	for (i=0; i<ARRAY_SIZE(names); i++) {
-		reqs[i] = getaddrinfo_send(frame, ev, ctx, names[i], NULL,
-					   NULL);
-		if (reqs[i] == NULL) {
-			goto fail;
-		}
-		tevent_req_set_callback(reqs[i], getaddrinfo_finished,
-					discard_const_p(void, names[i]));
-	}
-
-	for (i=0; i<ARRAY_SIZE(reqs); i++) {
-		tevent_loop_once(ev);
-	}
-
-	result = true;
-fail:
-	TALLOC_FREE(frame);
 	return result;
 }
 
@@ -11165,7 +11387,7 @@ static bool run_local_canonicalize_path(int dummy)
 		}
 		if (strcmp(d, dst[i]) != 0) {
 			d_fprintf(stderr,
-				"canonicalize missmatch %s -> %s != %s",
+				"canonicalize mismatch %s -> %s != %s",
 				src[i], d, dst[i]);
 			return false;
 		}
@@ -11405,11 +11627,13 @@ static struct {
 	{"RENAME-ACCESS", run_rename_access, 0},
 	{"OWNER-RIGHTS", run_owner_rights, 0},
 	{"DELETE", run_deletetest, 0},
+	{"DELETE-PRINT", run_delete_print_test, 0},
 	{"WILDDELETE", run_wild_deletetest, 0},
 	{"DELETE-LN", run_deletetest_ln, 0},
 	{"PROPERTIES", run_properties, 0},
 	{"MANGLE", torture_mangle, 0},
 	{"MANGLE1", run_mangle1, 0},
+	{"MANGLE-ILLEGAL", run_mangle_illegal, 0},
 	{"W2K", run_w2ktest, 0},
 	{"TRANS2SCAN", torture_trans2_scan, 0},
 	{"NTTRANSSCAN", torture_nttrans_scan, 0},
@@ -11431,7 +11655,6 @@ static struct {
 	{ "NTTRANS-CREATE", run_nttrans_create, 0},
 	{ "NTTRANS-FSCTL", run_nttrans_fsctl, 0},
 	{ "CLI_ECHO", run_cli_echo, 0},
-	{ "GETADDRINFO", run_getaddrinfo_send, 0},
 	{ "TLDAP", run_tldap },
 	{ "STREAMERROR", run_streamerror },
 	{ "NOTIFY-BENCH", run_notify_bench },
@@ -11443,11 +11666,13 @@ static struct {
 	{ "NOTIFY-ONLINE", run_notify_online },
 	{ "SMB2-BASIC", run_smb2_basic },
 	{ "SMB2-NEGPROT", run_smb2_negprot },
+	{ "SMB2-ANONYMOUS", run_smb2_anonymous },
 	{ "SMB2-SESSION-RECONNECT", run_smb2_session_reconnect },
 	{ "SMB2-TCON-DEPENDENCE", run_smb2_tcon_dependence },
 	{ "SMB2-MULTI-CHANNEL", run_smb2_multi_channel },
 	{ "SMB2-SESSION-REAUTH", run_smb2_session_reauth },
 	{ "SMB2-FTRUNCATE", run_smb2_ftruncate },
+	{ "SMB2-DIR-FSYNC", run_smb2_dir_fsync },
 	{ "CLEANUP1", run_cleanup1 },
 	{ "CLEANUP2", run_cleanup2 },
 	{ "CLEANUP3", run_cleanup3 },
@@ -11456,8 +11681,9 @@ static struct {
 	{ "PIDHIGH", run_pidhigh },
 	{ "LOCAL-SUBSTITUTE", run_local_substitute, 0},
 	{ "LOCAL-GENCACHE", run_local_gencache, 0},
-	{ "LOCAL-TALLOC-DICT", run_local_talloc_dict, 0},
 	{ "LOCAL-DBWRAP-WATCH1", run_dbwrap_watch1, 0 },
+	{ "LOCAL-DBWRAP-WATCH2", run_dbwrap_watch2, 0 },
+	{ "LOCAL-DBWRAP-DO-LOCKED1", run_dbwrap_do_locked1, 0 },
 	{ "LOCAL-MESSAGING-READ1", run_messaging_read1, 0 },
 	{ "LOCAL-MESSAGING-READ2", run_messaging_read2, 0 },
 	{ "LOCAL-MESSAGING-READ3", run_messaging_read3, 0 },
@@ -11466,6 +11692,7 @@ static struct {
 	{ "LOCAL-MESSAGING-FDPASS2", run_messaging_fdpass2, 0 },
 	{ "LOCAL-MESSAGING-FDPASS2a", run_messaging_fdpass2a, 0 },
 	{ "LOCAL-MESSAGING-FDPASS2b", run_messaging_fdpass2b, 0 },
+	{ "LOCAL-MESSAGING-SEND-ALL", run_messaging_send_all, 0 },
 	{ "LOCAL-BASE64", run_local_base64, 0},
 	{ "LOCAL-RBTREE", run_local_rbtree, 0},
 	{ "LOCAL-MEMCACHE", run_local_memcache, 0},
@@ -11486,7 +11713,15 @@ static struct {
 	{ "LOCAL-DBWRAP-CTDB", run_local_dbwrap_ctdb, 0 },
 	{ "LOCAL-BENCH-PTHREADPOOL", run_bench_pthreadpool, 0 },
 	{ "LOCAL-PTHREADPOOL-TEVENT", run_pthreadpool_tevent, 0 },
+	{ "LOCAL-G-LOCK1", run_g_lock1, 0 },
+	{ "LOCAL-G-LOCK2", run_g_lock2, 0 },
+	{ "LOCAL-G-LOCK3", run_g_lock3, 0 },
+	{ "LOCAL-G-LOCK4", run_g_lock4, 0 },
+	{ "LOCAL-G-LOCK5", run_g_lock5, 0 },
+	{ "LOCAL-G-LOCK6", run_g_lock6, 0 },
+	{ "LOCAL-G-LOCK-PING-PONG", run_g_lock_ping_pong, 0 },
 	{ "LOCAL-CANONICALIZE-PATH", run_local_canonicalize_path, 0 },
+	{ "LOCAL-NAMEMAP-CACHE1", run_local_namemap_cache1, 0 },
 	{ "qpathinfo-bufsize", run_qpathinfo_bufsize, 0 },
 	{NULL, NULL, 0}};
 

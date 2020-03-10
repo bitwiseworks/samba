@@ -20,6 +20,7 @@
 */
 
 #include <Python.h>
+#include "python/py3compat.h"
 #include "includes.h"
 #include <ldb.h>
 #include <pyldb.h>
@@ -28,8 +29,8 @@
 #include "ldb_wrap.h"
 #include "lib/ldb-samba/ldif_handlers.h"
 #include "auth/pyauth.h"
+#include "source4/dsdb/common/util.h"
 
-void init_ldb(void);
 
 static PyObject *pyldb_module;
 static PyObject *py_ldb_error;
@@ -194,7 +195,7 @@ static PyObject *py_ldb_set_session_info(PyObject *self, PyObject *args)
 
 	info = PyAuthSession_AsSession(py_session_info);
 
-	ldb_set_opaque(ldb, "sessionInfo", info);
+	ldb_set_opaque(ldb, DSDB_SESSION_INFO, info);
 
 	Py_RETURN_NONE;
 }
@@ -237,6 +238,14 @@ static PyMethodDef py_samba_ldb_methods[] = {
 	{ NULL },
 };
 
+static struct PyModuleDef moduledef = {
+    PyModuleDef_HEAD_INIT,
+    .m_name = "_ldb",
+    .m_doc = "Samba-specific LDB python bindings",
+    .m_size = -1,
+    .m_methods = py_samba_ldb_methods,
+};
+
 static PyTypeObject PySambaLdb = {
 	.tp_name = "samba._ldb.Ldb",
 	.tp_doc = "Connection to a LDB database.",
@@ -244,27 +253,29 @@ static PyTypeObject PySambaLdb = {
 	.tp_flags = Py_TPFLAGS_DEFAULT|Py_TPFLAGS_BASETYPE,
 };
 
-void init_ldb(void)
+MODULE_INIT_FUNC(_ldb)
 {
 	PyObject *m;
 
 	pyldb_module = PyImport_ImportModule("ldb");
 	if (pyldb_module == NULL)
-		return;
+		return NULL;
 
 	PySambaLdb.tp_base = (PyTypeObject *)PyObject_GetAttrString(pyldb_module, "Ldb");
 	if (PySambaLdb.tp_base == NULL)
-		return;
+		return NULL;
 
 	py_ldb_error = PyObject_GetAttrString(pyldb_module, "LdbError");
 
 	if (PyType_Ready(&PySambaLdb) < 0)
-		return;
+		return NULL;
 
-	m = Py_InitModule3("_ldb", NULL, "Samba-specific LDB python bindings");
+	m = PyModule_Create(&moduledef);
 	if (m == NULL)
-		return;
+		return NULL;
 
 	Py_INCREF(&PySambaLdb);
 	PyModule_AddObject(m, "Ldb", (PyObject *)&PySambaLdb);
+
+	return m;
 }

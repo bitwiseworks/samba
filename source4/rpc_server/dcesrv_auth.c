@@ -43,12 +43,35 @@ bool dcesrv_auth_bind(struct dcesrv_call_state *call)
 	struct ncacn_packet *pkt = &call->pkt;
 	struct dcesrv_connection *dce_conn = call->conn;
 	struct dcesrv_auth *auth = &dce_conn->auth_state;
+	bool want_header_signing = false;
 	NTSTATUS status;
 
 	if (pkt->auth_length == 0) {
+		enum dcerpc_transport_t transport =
+			dcerpc_binding_get_transport(call->conn->endpoint->ep_description);
+		const char *auth_type = derpc_transport_string_by_transport(transport);
+		const char *transport_protection = AUTHZ_TRANSPORT_PROTECTION_NONE;
+		if (transport == NCACN_NP) {
+			transport_protection = AUTHZ_TRANSPORT_PROTECTION_SMB;
+		}
 		auth->auth_type = DCERPC_AUTH_TYPE_NONE;
 		auth->auth_level = DCERPC_AUTH_LEVEL_NONE;
 		auth->auth_context_id = 0;
+
+		/*
+		 * Log the authorization to this RPC interface.  This
+		 * covered ncacn_np pass-through auth, and anonymous
+		 * DCE/RPC (eg epmapper, netlogon etc)
+		 */
+		log_successful_authz_event(call->conn->msg_ctx,
+					   call->conn->dce_ctx->lp_ctx,
+					   call->conn->remote_address,
+					   call->conn->local_address,
+					   "DCE/RPC",
+					   auth_type,
+					   transport_protection,
+					   call->conn->auth_state.session_info);
+
 		return true;
 	}
 
@@ -125,11 +148,35 @@ bool dcesrv_auth_bind(struct dcesrv_call_state *call)
 		return false;
 	}
 
+	/*
+	 * We have to call this because we set the target_service for
+	 * Kerberos to NULL above, and in any case we wish to log a
+	 * more specific service target.
+	 *
+	 */
+	status = gensec_set_target_service_description(auth->gensec_security,
+						       "DCE/RPC");
+	if (!NT_STATUS_IS_OK(status)) {
+		DEBUG(1, ("Failed to call gensec_set_target_service_description %s\n",
+			  nt_errstr(status)));
+		return false;
+	}
+
 	if (call->conn->remote_address != NULL) {
 		status = gensec_set_remote_address(auth->gensec_security,
 						call->conn->remote_address);
 		if (!NT_STATUS_IS_OK(status)) {
 			DEBUG(1, ("Failed to call gensec_set_remote_address() %s\n",
+				  nt_errstr(status)));
+			return false;
+		}
+	}
+
+	if (call->conn->local_address != NULL) {
+		status = gensec_set_local_address(auth->gensec_security,
+						  call->conn->local_address);
+		if (!NT_STATUS_IS_OK(status)) {
+			DEBUG(1, ("Failed to call gensec_set_local_address() %s\n",
 				  nt_errstr(status)));
 			return false;
 		}
@@ -167,18 +214,100 @@ bool dcesrv_auth_bind(struct dcesrv_call_state *call)
 		return false;
 	}
 
+	if (call->pkt.pfc_flags & DCERPC_PFC_FLAG_SUPPORT_HEADER_SIGN) {
+		auth->client_hdr_signing = true;
+		want_header_signing = true;
+	}
+
+	if (want_header_signing) {
+		want_header_signing = gensec_have_feature(auth->gensec_security,
+						GENSEC_FEATURE_SIGN_PKT_HEADER);
+	}
+
+	if (want_header_signing) {
+		want_header_signing = lpcfg_parm_bool(dce_conn->dce_ctx->lp_ctx,
+						      NULL,
+						      "dcesrv",
+						      "header signing",
+						      true);
+	}
+
+	if (want_header_signing) {
+		gensec_want_feature(auth->gensec_security,
+				    GENSEC_FEATURE_SIGN_PKT_HEADER);
+		auth->hdr_signing = true;
+	}
+
 	return true;
+}
+
+NTSTATUS dcesrv_auth_complete(struct dcesrv_call_state *call, NTSTATUS status)
+{
+	struct dcesrv_connection *dce_conn = call->conn;
+	const char *pdu = "<unknown>";
+
+	switch (call->pkt.ptype) {
+	case DCERPC_PKT_BIND:
+		pdu = "BIND";
+		break;
+	case DCERPC_PKT_ALTER:
+		pdu = "ALTER";
+		break;
+	case DCERPC_PKT_AUTH3:
+		pdu = "AUTH3";
+		if (NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
+			DEBUG(4, ("GENSEC not finished at at %s\n", pdu));
+			return NT_STATUS_RPC_SEC_PKG_ERROR;
+		}
+		break;
+	default:
+		return NT_STATUS_INTERNAL_ERROR;
+	}
+
+	if (NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
+		return NT_STATUS_OK;
+	}
+
+	if (!NT_STATUS_IS_OK(status)) {
+		DEBUG(4, ("GENSEC mech rejected the incoming authentication "
+			  "at %s: %s\n", pdu, nt_errstr(status)));
+		return status;
+	}
+
+	status = gensec_session_info(dce_conn->auth_state.gensec_security,
+				     dce_conn,
+				     &dce_conn->auth_state.session_info);
+	if (!NT_STATUS_IS_OK(status)) {
+		DEBUG(1, ("Failed to establish session_info: %s\n",
+			  nt_errstr(status)));
+		return status;
+	}
+	dce_conn->auth_state.auth_finished = true;
+	dce_conn->allow_request = true;
+
+	/* Now that we are authenticated, go back to the generic session key... */
+	dce_conn->auth_state.session_key = dcesrv_generic_session_key;
+
+	if (call->pkt.ptype != DCERPC_PKT_AUTH3) {
+		return NT_STATUS_OK;
+	}
+
+	if (call->out_auth_info->credentials.length != 0) {
+		DEBUG(4, ("GENSEC produced output token (len=%zu) at %s\n",
+			  call->out_auth_info->credentials.length, pdu));
+		return NT_STATUS_RPC_SEC_PKG_ERROR;
+	}
+
+	return NT_STATUS_OK;
 }
 
 /*
   add any auth information needed in a bind ack, and process the authentication
   information found in the bind.
 */
-NTSTATUS dcesrv_auth_bind_ack(struct dcesrv_call_state *call, struct ncacn_packet *pkt)
+NTSTATUS dcesrv_auth_prepare_bind_ack(struct dcesrv_call_state *call, struct ncacn_packet *pkt)
 {
 	struct dcesrv_connection *dce_conn = call->conn;
-	NTSTATUS status;
-	bool want_header_signing = false;
 
 	dce_conn->allow_alter = true;
 	dce_conn->allow_auth3 = true;
@@ -194,13 +323,8 @@ NTSTATUS dcesrv_auth_bind_ack(struct dcesrv_call_state *call, struct ncacn_packe
 		return NT_STATUS_INTERNAL_ERROR;
 	}
 
-	if (call->pkt.pfc_flags & DCERPC_PFC_FLAG_SUPPORT_HEADER_SIGN) {
-		dce_conn->auth_state.client_hdr_signing = true;
-		want_header_signing = true;
-	}
-
-	if (!lpcfg_parm_bool(call->conn->dce_ctx->lp_ctx, NULL, "dcesrv","header signing", true)) {
-		want_header_signing = false;
+	if (dce_conn->auth_state.hdr_signing) {
+		pkt->pfc_flags |= DCERPC_PFC_FLAG_SUPPORT_HEADER_SIGN;
 	}
 
 	call->_out_auth_info = (struct dcerpc_auth) {
@@ -210,65 +334,13 @@ NTSTATUS dcesrv_auth_bind_ack(struct dcesrv_call_state *call, struct ncacn_packe
 	};
 	call->out_auth_info = &call->_out_auth_info;
 
-	status = gensec_update_ev(dce_conn->auth_state.gensec_security,
-			       call, call->event_ctx,
-			       call->in_auth_info.credentials,
-			       &call->out_auth_info->credentials);
-	
-	if (NT_STATUS_IS_OK(status)) {
-		status = gensec_session_info(dce_conn->auth_state.gensec_security,
-					     dce_conn,
-					     &dce_conn->auth_state.session_info);
-		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(1, ("Failed to establish session_info: %s\n", nt_errstr(status)));
-			return status;
-		}
-		dce_conn->auth_state.auth_finished = true;
-		dce_conn->allow_request = true;
-
-		if (!gensec_have_feature(dce_conn->auth_state.gensec_security,
-					 GENSEC_FEATURE_SIGN_PKT_HEADER))
-		{
-			want_header_signing = false;
-		}
-
-		if (want_header_signing) {
-			gensec_want_feature(dce_conn->auth_state.gensec_security,
-					    GENSEC_FEATURE_SIGN_PKT_HEADER);
-			dce_conn->auth_state.hdr_signing = true;
-			pkt->pfc_flags |= DCERPC_PFC_FLAG_SUPPORT_HEADER_SIGN;
-		}
-
-		/* Now that we are authenticated, go back to the generic session key... */
-		dce_conn->auth_state.session_key = dcesrv_generic_session_key;
-		return NT_STATUS_OK;
-	} else if (NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
-		if (!gensec_have_feature(dce_conn->auth_state.gensec_security,
-					 GENSEC_FEATURE_SIGN_PKT_HEADER))
-		{
-			want_header_signing = false;
-		}
-
-		if (want_header_signing) {
-			gensec_want_feature(dce_conn->auth_state.gensec_security,
-					    GENSEC_FEATURE_SIGN_PKT_HEADER);
-			dce_conn->auth_state.hdr_signing = true;
-			pkt->pfc_flags |= DCERPC_PFC_FLAG_SUPPORT_HEADER_SIGN;
-		}
-
-		return NT_STATUS_OK;
-	} else {
-		DEBUG(4, ("GENSEC mech rejected the incoming authentication at bind_ack: %s\n",
-			  nt_errstr(status)));
-		return status;
-	}
+	return NT_STATUS_OK;
 }
-
 
 /*
   process the final stage of a auth request
 */
-bool dcesrv_auth_auth3(struct dcesrv_call_state *call)
+bool dcesrv_auth_prepare_auth3(struct dcesrv_call_state *call)
 {
 	struct ncacn_packet *pkt = &call->pkt;
 	struct dcesrv_connection *dce_conn = call->conn;
@@ -317,37 +389,7 @@ bool dcesrv_auth_auth3(struct dcesrv_call_state *call)
 	};
 	call->out_auth_info = &call->_out_auth_info;
 
-	/* Pass the extra data we got from the client down to gensec for processing */
-	status = gensec_update_ev(dce_conn->auth_state.gensec_security,
-			       call, call->event_ctx,
-			       call->in_auth_info.credentials,
-			       &call->out_auth_info->credentials);
-	if (NT_STATUS_IS_OK(status)) {
-		status = gensec_session_info(dce_conn->auth_state.gensec_security,
-					     dce_conn,
-					     &dce_conn->auth_state.session_info);
-		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(1, ("Failed to establish session_info: %s\n", nt_errstr(status)));
-			return false;
-		}
-		dce_conn->auth_state.auth_finished = true;
-		dce_conn->allow_request = true;
-
-		/* Now that we are authenticated, go back to the generic session key... */
-		dce_conn->auth_state.session_key = dcesrv_generic_session_key;
-
-		if (call->out_auth_info->credentials.length != 0) {
-
-			DEBUG(4, ("GENSEC produced output token (len=%u) at bind_auth3\n",
-				  (unsigned)call->out_auth_info->credentials.length));
-			return false;
-		}
-		return true;
-	} else {
-		DEBUG(4, ("GENSEC mech rejected the incoming authentication at bind_auth3: %s\n",
-			  nt_errstr(status)));
-		return false;
-	}
+	return true;
 }
 
 /*
@@ -410,10 +452,9 @@ bool dcesrv_auth_alter(struct dcesrv_call_state *call)
   add any auth information needed in a alter ack, and process the authentication
   information found in the alter.
 */
-NTSTATUS dcesrv_auth_alter_ack(struct dcesrv_call_state *call, struct ncacn_packet *pkt)
+NTSTATUS dcesrv_auth_prepare_alter_ack(struct dcesrv_call_state *call, struct ncacn_packet *pkt)
 {
 	struct dcesrv_connection *dce_conn = call->conn;
-	NTSTATUS status;
 
 	/* on a pure interface change there is no auth_info structure
 	   setup */
@@ -432,32 +473,7 @@ NTSTATUS dcesrv_auth_alter_ack(struct dcesrv_call_state *call, struct ncacn_pack
 	};
 	call->out_auth_info = &call->_out_auth_info;
 
-	status = gensec_update_ev(dce_conn->auth_state.gensec_security,
-			       call, call->event_ctx,
-			       call->in_auth_info.credentials,
-			       &call->out_auth_info->credentials);
-
-	if (NT_STATUS_IS_OK(status)) {
-		status = gensec_session_info(dce_conn->auth_state.gensec_security,
-					     dce_conn,
-					     &dce_conn->auth_state.session_info);
-		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(1, ("Failed to establish session_info: %s\n", nt_errstr(status)));
-			return status;
-		}
-		dce_conn->auth_state.auth_finished = true;
-		dce_conn->allow_request = true;
-
-		/* Now that we are authenticated, got back to the generic session key... */
-		dce_conn->auth_state.session_key = dcesrv_generic_session_key;
-		return NT_STATUS_OK;
-	} else if (NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
-		return NT_STATUS_OK;
-	}
-
-	DEBUG(4, ("GENSEC mech rejected the incoming authentication at auth alter_ack: %s\n",
-		  nt_errstr(status)));
-	return status;
+	return NT_STATUS_OK;
 }
 
 /*

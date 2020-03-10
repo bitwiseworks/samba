@@ -62,8 +62,25 @@ def get_schema_descriptor(domain_sid, name_map={}):
 
 class Schema(object):
 
+    # the schema files (and corresponding object version) that we know about
+    base_schemas = {
+       "2008_R2_old" : ("MS-AD_Schema_2K8_R2_Attributes.txt",
+                        "MS-AD_Schema_2K8_R2_Classes.txt",
+                        47),
+       "2008_R2" : ("Attributes_for_AD_DS__Windows_Server_2008_R2.ldf",
+                    "Classes_for_AD_DS__Windows_Server_2008_R2.ldf",
+                    47),
+       "2012"    : ("AD_DS_Attributes__Windows_Server_2012.ldf",
+                    "AD_DS_Classes__Windows_Server_2012.ldf",
+                    56),
+       "2012_R2" : ("AD_DS_Attributes__Windows_Server_2012_R2.ldf",
+                    "AD_DS_Classes__Windows_Server_2012_R2.ldf",
+                    69),
+    }
+
     def __init__(self, domain_sid, invocationid=None, schemadn=None,
-                 files=None, override_prefixmap=None, additional_prefixmap=None):
+                 files=None, override_prefixmap=None, additional_prefixmap=None,
+                 base_schema=None):
         from samba.provision import setup_path
 
         """Load schema for the SamDB from the AD schema files and
@@ -76,6 +93,11 @@ class Schema(object):
         needing to add it to the db
         """
 
+        if base_schema is None:
+            base_schema = Schema.default_base_schema()
+
+        self.base_schema = base_schema
+
         self.schemadn = schemadn
         # We need to have the am_rodc=False just to keep some warnings quiet -
         # this isn't a real SAM, so it's meaningless.
@@ -84,8 +106,8 @@ class Schema(object):
             self.ldb.set_invocation_id(invocationid)
 
         self.schema_data = read_ms_schema(
-            setup_path('ad-schema/MS-AD_Schema_2K8_R2_Attributes.txt'),
-            setup_path('ad-schema/MS-AD_Schema_2K8_R2_Classes.txt'))
+            setup_path('ad-schema/%s' % Schema.base_schemas[base_schema][0]),
+            setup_path('ad-schema/%s' % Schema.base_schemas[base_schema][1]))
 
         if files is not None:
             for file in files:
@@ -95,11 +117,12 @@ class Schema(object):
             {"SCHEMADN": schemadn})
         check_all_substituted(self.schema_data)
 
+        schema_version = str(Schema.get_version(base_schema))
         self.schema_dn_modify = read_and_sub_file(
             setup_path("provision_schema_basedn_modify.ldif"),
-            {"SCHEMADN": schemadn})
+            {"SCHEMADN": schemadn, "OBJVERSION" : schema_version})
 
-        descr = b64encode(get_schema_descriptor(domain_sid))
+        descr = b64encode(get_schema_descriptor(domain_sid)).decode('utf8')
         self.schema_dn_add = read_and_sub_file(
             setup_path("provision_schema_basedn.ldif"),
             {"SCHEMADN": schemadn, "DESCRIPTOR": descr})
@@ -113,11 +136,21 @@ class Schema(object):
             for map in additional_prefixmap:
                 self.prefixmap_data += "%s\n" % map
 
-        self.prefixmap_data = b64encode(self.prefixmap_data)
+        self.prefixmap_data = b64encode(self.prefixmap_data).decode('utf8')
 
         # We don't actually add this ldif, just parse it
         prefixmap_ldif = "dn: %s\nprefixMap:: %s\n\n" % (self.schemadn, self.prefixmap_data)
         self.set_from_ldif(prefixmap_ldif, self.schema_data, self.schemadn)
+
+    @staticmethod
+    def default_base_schema():
+        """Returns the default base schema to use"""
+        return "2008_R2"
+
+    @staticmethod
+    def get_version(base_schema):
+        """Returns the base schema's object version, e.g. 47 for 2008_R2"""
+        return Schema.base_schemas[base_schema][2]
 
     def set_from_ldif(self, pf, df, dn):
         dsdb._dsdb_set_schema_from_ldif(self.ldb, pf, df, dn)
@@ -126,15 +159,22 @@ class Schema(object):
         self.ldb.connect(url=schemadb_path)
         self.ldb.transaction_start()
         try:
+            # These are actually ignored, as the schema has been forced
+            # when the ldb object was created, and that overrides this
             self.ldb.add_ldif("""dn: @ATTRIBUTES
 linkID: INTEGER
 
 dn: @INDEXLIST
 @IDXATTR: linkID
 @IDXATTR: attributeSyntax
+@IDXGUID: objectGUID
 """)
+
+            schema_dn_add = self.schema_dn_add \
+                            + "objectGUID: 24e2ca70-b093-4ae8-84c0-2d7ac652a1b8\n"
+
             # These bits of LDIF are supplied when the Schema object is created
-            self.ldb.add_ldif(self.schema_dn_add)
+            self.ldb.add_ldif(schema_dn_add)
             self.ldb.modify_ldif(self.schema_dn_modify)
             self.ldb.add_ldif(self.schema_data)
         except:

@@ -168,7 +168,7 @@ interface netlogon
 		[size_is(length)] uint8 *data;
 	} netr_GenericInfo;
 
-	typedef enum {
+	typedef [public] enum {
 		NetlogonInteractiveInformation = 1,
 		NetlogonNetworkInformation = 2,
 		NetlogonServiceInformation = 3,
@@ -231,11 +231,11 @@ interface netlogon
 		uint32 primary_gid;
 		samr_RidWithAttributeArray groups;
 		netr_UserFlags user_flags;
-		netr_UserSessionKey key;
+		[flag(NDR_SECRET)] netr_UserSessionKey key;
 		lsa_StringLarge logon_server;
 		lsa_StringLarge logon_domain;
 		dom_sid2 *domain_sid;
-		netr_LMSessionKey LMSessKey;
+		[flag(NDR_SECRET)] netr_LMSessionKey LMSessKey;
 		samr_AcctFlags acct_flags;
 		uint32 sub_auth_status;
 		NTTIME last_successful_logon;
@@ -1466,9 +1466,46 @@ interface netlogon
 		[out,ref] samr_Password *password
 		);
 
+	typedef [public] enum {
+		SendToSamUpdatePassword = 0,
+		SendToSamResetBadPasswordCount = 1,
+		SendToSamUpdatePasswordForward = 2,
+		SendToSamUpdateLastLogonTimestamp = 3,
+		SendToSamResetSmartCardPassword = 4
+	} netr_SendToSamType;
+
+	typedef struct {
+		GUID guid;
+	} netr_SendToSamResetBadPasswordCount;
+
+	typedef [nodiscriminant, public,switch_type(netr_SendToSamType)] union {
+		/* TODO Implement other SendToSam message types
+		 * [case(SendToSamUpdatePassword)] netr_SendToSamUpdatePassword ...; */
+		[case(SendToSamResetBadPasswordCount)] netr_SendToSamResetBadPasswordCount reset_bad_password;
+		/*
+		 * [case(SendToSamUpdatePasswordForward)] netrSendToSamUpdatePasswordForward ...;
+		 * [case(SendToSamUpdateLastLogonTimestamp)] netrSendToSamUpdateLastLogonTimestamp ...;
+		 * [case(SendToSamResetSmartCardPassword)]   netrSendToSamResetSmartCardPassword ...;
+		 */
+		[default];
+	} netr_SendToSamMessage;
+
+	typedef [public] struct {
+		netr_SendToSamType message_type;
+		uint32 message_size;
+		[switch_is(message_type), subcontext(0), subcontext_size(message_size)] netr_SendToSamMessage message;
+	} netr_SendToSamBase;
+
 	/****************/
 	/* Function 0x20 */
-	[todo] WERROR netr_NETRLOGONSENDTOSAM();
+	NTSTATUS netr_NetrLogonSendToSam(
+		[in,unique] [string,charset(UTF16)] uint16 *server_name,
+		[in]  [string,charset(UTF16)] uint16 *computer_name,
+		[in,ref] netr_Authenticator *credential,
+		[out,ref] netr_Authenticator *return_authenticator,
+		[in,ref]  [size_is(buffer_len)] uint8 *opaque_buffer,
+		[in] uint32 buffer_len
+		);
 
 	/****************/
 	/* Function 0x21 */
@@ -1560,6 +1597,17 @@ interface netlogon
 
 	/****************/
 	/* Function 0x27 */
+	typedef [public,bitmap32bit] bitmap {
+		/* Request MUST be passed to the domain controller at the root of the forest. */
+		NETLOGON_SAMLOGON_FLAG_PASS_TO_FOREST_ROOT = 0x00000001,
+		/* Request MUST be passed to the DC at the end of the first hop over a cross-forest trust. */
+		NETLOGON_SAMLOGON_FLAG_PASS_CROSS_FOREST_HOP = 0x00000002,
+		/* Request was passed by an RODC to a DC in a different domain. */
+		NETLOGON_SAMLOGON_FLAG_RODC_TO_OTHER_DOMAIN = 0x00000004,
+		/* Request is an NTLM authentication package request passed by an RODC. */
+		NETLOGON_SAMLOGON_FLAG_RODC_NTLM_REQUEST = 0x00000008
+	} netr_LogonSamLogon_flags;
+
 	NTSTATUS netr_LogonSamLogonEx(
 		[in,unique] [string,charset(UTF16)] uint16 *server_name,
 		[in,unique] [string,charset(UTF16)] uint16 *computer_name,
@@ -1568,7 +1616,7 @@ interface netlogon
 		[in]  uint16 validation_level,
 		[out,ref] [switch_is(validation_level)] netr_Validation *validation,
 		[out,ref] uint8 *authoritative,
-		[in,out,ref] uint32 *flags
+		[in,out,ref] netr_LogonSamLogon_flags *flags
 		);
 
 	/****************/
@@ -1641,7 +1689,7 @@ interface netlogon
 		[in]  uint16 validation_level,
 		[out,ref] [switch_is(validation_level)] netr_Validation *validation,
 		[out,ref] uint8 *authoritative,
-		[in,out,ref] uint32 *flags
+		[in,out,ref] netr_LogonSamLogon_flags *flags
 		);
 
 	/****************/

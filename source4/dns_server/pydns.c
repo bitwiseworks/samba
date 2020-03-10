@@ -20,6 +20,7 @@
 */
 
 #include <Python.h>
+#include "python/py3compat.h"
 #include "includes.h"
 #include <pyldb.h>
 #include <pytalloc.h>
@@ -32,26 +33,17 @@
 /* FIXME: These should be in a header file somewhere */
 #define PyErr_LDB_OR_RAISE(py_ldb, ldb) \
 	if (!py_check_dcerpc_type(py_ldb, "ldb", "Ldb")) { \
-		PyErr_SetString(py_ldb_get_exception(), "Ldb connection object required"); \
+		PyErr_SetString(PyExc_TypeError, "Ldb connection object required"); \
 		return NULL; \
 	} \
 	ldb = pyldb_Ldb_AsLdbContext(py_ldb);
 
 #define PyErr_LDB_DN_OR_RAISE(py_ldb_dn, dn) \
 	if (!py_check_dcerpc_type(py_ldb_dn, "ldb", "Dn")) { \
-		PyErr_SetString(py_ldb_get_exception(), "ldb Dn object required"); \
+		PyErr_SetString(PyExc_TypeError, "ldb Dn object required"); \
 		return NULL; \
 	} \
 	dn = pyldb_Dn_AsDn(py_ldb_dn);
-
-static PyObject *py_ldb_get_exception(void)
-{
-	PyObject *mod = PyImport_ImportModule("ldb");
-	if (mod == NULL)
-		return NULL;
-
-	return PyObject_GetAttrString(mod, "LdbError");
-}
 
 static PyObject *py_dnsp_DnssrvRpcRecord_get_list(struct dnsp_DnssrvRpcRecord *records,
 						  uint16_t num_records)
@@ -102,34 +94,49 @@ static int py_dnsp_DnssrvRpcRecord_get_array(PyObject *value,
 	return 0;
 }
 
-static PyObject *py_dsdb_dns_lookup(PyObject *self, PyObject *args)
+static PyObject *py_dsdb_dns_lookup(PyObject *self,
+				    PyObject *args, PyObject *kwargs)
 {
 	struct ldb_context *samdb;
-	PyObject *py_ldb;
+	PyObject *py_ldb, *ret, *pydn;
+	PyObject *py_dns_partition = NULL;
 	char *dns_name;
 	TALLOC_CTX *frame;
 	NTSTATUS status;
 	WERROR werr;
 	struct dns_server_zone *zones_list;
-	struct ldb_dn *dn;
+	struct ldb_dn *dn, *dns_partition = NULL;
 	struct dnsp_DnssrvRpcRecord *records;
 	uint16_t num_records;
+	const char * const kwnames[] = { "ldb", "dns_name",
+					 "dns_partition", NULL };
 
-	if (!PyArg_ParseTuple(args, "Os", &py_ldb, &dns_name)) {
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Os|O",
+					 discard_const_p(char *, kwnames),
+					 &py_ldb, &dns_name,
+					 &py_dns_partition)) {
 		return NULL;
 	}
 	PyErr_LDB_OR_RAISE(py_ldb, samdb);
 
+	if (py_dns_partition) {
+		PyErr_LDB_DN_OR_RAISE(py_dns_partition,
+				      dns_partition);
+	}
+
 	frame = talloc_stackframe();
 
-	status = dns_common_zones(samdb, frame, &zones_list);
+	status = dns_common_zones(samdb, frame, dns_partition,
+				  &zones_list);
 	if (!NT_STATUS_IS_OK(status)) {
+		talloc_free(frame);
 		PyErr_SetNTSTATUS(status);
 		return NULL;
 	}
 
 	werr = dns_common_name2dn(samdb, zones_list, frame, dns_name, &dn);
 	if (!W_ERROR_IS_OK(werr)) {
+		talloc_free(frame);
 		PyErr_SetWERROR(werr);
 		return NULL;
 	}
@@ -141,28 +148,36 @@ static PyObject *py_dsdb_dns_lookup(PyObject *self, PyObject *args)
 				 &num_records,
 				 NULL);
 	if (!W_ERROR_IS_OK(werr)) {
+		talloc_free(frame);
 		PyErr_SetWERROR(werr);
 		return NULL;
 	}
 
-	return py_dnsp_DnssrvRpcRecord_get_list(records, num_records);
+	ret = py_dnsp_DnssrvRpcRecord_get_list(records, num_records);
+	pydn = pyldb_Dn_FromDn(dn);
+	talloc_free(frame);
+	return Py_BuildValue("(OO)", pydn, ret);
 }
 
 static PyObject *py_dsdb_dns_extract(PyObject *self, PyObject *args)
 {
-	PyObject *py_dns_el;
+	struct ldb_context *samdb;
+	PyObject *py_dns_el, *ret;
+	PyObject *py_ldb = NULL;
 	TALLOC_CTX *frame;
 	WERROR werr;
 	struct ldb_message_element *dns_el;
 	struct dnsp_DnssrvRpcRecord *records;
 	uint16_t num_records;
 
-	if (!PyArg_ParseTuple(args, "O", &py_dns_el)) {
+	if (!PyArg_ParseTuple(args, "OO", &py_ldb, &py_dns_el)) {
 		return NULL;
 	}
 
+	PyErr_LDB_OR_RAISE(py_ldb, samdb);
+
 	if (!py_check_dcerpc_type(py_dns_el, "ldb", "MessageElement")) {
-		PyErr_SetString(py_ldb_get_exception(),
+		PyErr_SetString(PyExc_TypeError,
 				"ldb MessageElement object required");
 		return NULL;
 	}
@@ -170,16 +185,19 @@ static PyObject *py_dsdb_dns_extract(PyObject *self, PyObject *args)
 
 	frame = talloc_stackframe();
 
-	werr = dns_common_extract(dns_el,
+	werr = dns_common_extract(samdb, dns_el,
 				  frame,
 				  &records,
 				  &num_records);
 	if (!W_ERROR_IS_OK(werr)) {
+		talloc_free(frame);
 		PyErr_SetWERROR(werr);
 		return NULL;
 	}
 
-	return py_dnsp_DnssrvRpcRecord_get_list(records, num_records);
+	ret = py_dnsp_DnssrvRpcRecord_get_list(records, num_records);
+	talloc_free(frame);
+	return ret;
 }
 
 static PyObject *py_dsdb_dns_replace(PyObject *self, PyObject *args)
@@ -210,15 +228,17 @@ static PyObject *py_dsdb_dns_replace(PyObject *self, PyObject *args)
 
 	frame = talloc_stackframe();
 
-	status = dns_common_zones(samdb, frame, &zones_list);
+	status = dns_common_zones(samdb, frame, NULL, &zones_list);
 	if (!NT_STATUS_IS_OK(status)) {
 		PyErr_SetNTSTATUS(status);
+		talloc_free(frame);
 		return NULL;
 	}
 
 	werr = dns_common_name2dn(samdb, zones_list, frame, dns_name, &dn);
 	if (!W_ERROR_IS_OK(werr)) {
 		PyErr_SetWERROR(werr);
+		talloc_free(frame);
 		return NULL;
 	}
 
@@ -226,6 +246,7 @@ static PyObject *py_dsdb_dns_replace(PyObject *self, PyObject *args)
 						frame,
 						&records, &num_records);
 	if (ret != 0) {
+		talloc_free(frame);
 		return NULL;
 	}
 
@@ -238,9 +259,11 @@ static PyObject *py_dsdb_dns_replace(PyObject *self, PyObject *args)
 				  num_records);
 	if (!W_ERROR_IS_OK(werr)) {
 		PyErr_SetWERROR(werr);
+		talloc_free(frame);
 		return NULL;
 	}
 
+	talloc_free(frame);
 	Py_RETURN_NONE;
 }
 
@@ -275,6 +298,7 @@ static PyObject *py_dsdb_dns_replace_by_dn(PyObject *self, PyObject *args)
 						frame,
 						&records, &num_records);
 	if (ret != 0) {
+		talloc_free(frame);
 		return NULL;
 	}
 
@@ -287,8 +311,11 @@ static PyObject *py_dsdb_dns_replace_by_dn(PyObject *self, PyObject *args)
 				  num_records);
 	if (!W_ERROR_IS_OK(werr)) {
 		PyErr_SetWERROR(werr);
+		talloc_free(frame);
 		return NULL;
 	}
+
+	talloc_free(frame);
 
 	Py_RETURN_NONE;
 }
@@ -296,7 +323,8 @@ static PyObject *py_dsdb_dns_replace_by_dn(PyObject *self, PyObject *args)
 static PyMethodDef py_dsdb_dns_methods[] = {
 
 	{ "lookup", (PyCFunction)py_dsdb_dns_lookup,
-		METH_VARARGS, "Get the DNS database entries for a DNS name"},
+	        METH_VARARGS|METH_KEYWORDS,
+	        "Get the DNS database entries for a DNS name"},
 	{ "replace", (PyCFunction)py_dsdb_dns_replace,
 		METH_VARARGS, "Replace the DNS database entries for a DNS name"},
 	{ "replace_by_dn", (PyCFunction)py_dsdb_dns_replace_by_dn,
@@ -306,14 +334,22 @@ static PyMethodDef py_dsdb_dns_methods[] = {
 	{ NULL }
 };
 
-void initdsdb_dns(void);
+static struct PyModuleDef moduledef = {
+    PyModuleDef_HEAD_INIT,
+    .m_name = "dsdb_dns",
+    .m_doc = "Python bindings for the DNS objects in the directory service databases.",
+    .m_size = -1,
+    .m_methods = py_dsdb_dns_methods,
+};
 
-void initdsdb_dns(void)
+MODULE_INIT_FUNC(dsdb_dns)
 {
 	PyObject *m;
 
-	m = Py_InitModule3("dsdb_dns", py_dsdb_dns_methods,
-			   "Python bindings for the DNS objects in the directory service databases.");
+	m = PyModule_Create(&moduledef);
+
 	if (m == NULL)
-		return;
+		return NULL;
+
+	return m;
 }

@@ -383,3 +383,29 @@ void ldb_schema_attribute_set_override_handler(struct ldb_context *ldb,
 	ldb->schema.attribute_handler_override_private = private_data;
 	ldb->schema.attribute_handler_override = override;
 }
+
+/*
+  set that the attribute handler override function - used to delegate
+  schema handling to external code, is handling setting
+  LDB_ATTR_FLAG_INDEXED
+ */
+void ldb_schema_set_override_indexlist(struct ldb_context *ldb,
+				       bool one_level_indexes)
+{
+	ldb->schema.index_handler_override = true;
+	ldb->schema.one_level_indexes = one_level_indexes;
+}
+
+/*
+ * set that the GUID index mode is in operation
+ *
+ * The caller must ensure the supplied strings do not go out of
+ * scope (they are typically constant memory).
+ */
+void ldb_schema_set_override_GUID_index(struct ldb_context *ldb,
+					const char *GUID_index_attribute,
+					const char *GUID_index_dn_component)
+{
+	ldb->schema.GUID_index_attribute = GUID_index_attribute;
+	ldb->schema.GUID_index_dn_component = GUID_index_dn_component;
+}

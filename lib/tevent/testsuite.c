@@ -25,14 +25,14 @@
 */
 
 #include "includes.h"
-#include "lib/tevent/tevent.h"
+#include "tevent.h"
 #include "system/filesys.h"
 #include "system/select.h"
 #include "system/network.h"
 #include "torture/torture.h"
 #include "torture/local/proto.h"
 #ifdef HAVE_PTHREAD
-#include <pthread.h>
+#include "system/threads.h"
 #include <assert.h>
 #endif
 
@@ -195,8 +195,9 @@ static bool test_event_context(struct torture_context *test,
 	while (!finished) {
 		errno = 0;
 		if (tevent_loop_once(ev_ctx) == -1) {
-			talloc_free(ev_ctx);
+			TALLOC_FREE(ev_ctx);
 			torture_fail(test, talloc_asprintf(test, "Failed event loop %s\n", strerror(errno)));
+			return false;
 		}
 	}
 
@@ -379,6 +380,7 @@ static bool test_event_fd1(struct torture_context *tctx,
 			   const void *test_data)
 {
 	struct test_event_fd1_state state;
+	int ret;
 
 	ZERO_STRUCT(state);
 	state.tctx = tctx;
@@ -419,7 +421,9 @@ static bool test_event_fd1(struct torture_context *tctx,
 	 */
 	state.sock[0] = -1;
 	state.sock[1] = -1;
-	socketpair(AF_UNIX, SOCK_STREAM, 0, state.sock);
+
+	ret = socketpair(AF_UNIX, SOCK_STREAM, 0, state.sock);
+	torture_assert(tctx, ret == 0, "socketpair() failed");
 
 	state.te = tevent_add_timer(state.ev, state.ev,
 				    timeval_current_ofs(0,1000),
@@ -694,6 +698,511 @@ static bool test_event_fd2(struct torture_context *tctx,
 		       "%s", state.error));
 
 	return true;
+}
+
+struct test_wrapper_state {
+	struct torture_context *tctx;
+	int num_events;
+	int num_wrap_handlers;
+};
+
+static bool test_wrapper_before_use(struct tevent_context *wrap_ev,
+				    void *private_data,
+				    struct tevent_context *main_ev,
+				    const char *location)
+{
+	struct test_wrapper_state *state =
+		talloc_get_type_abort(private_data,
+		struct test_wrapper_state);
+
+	torture_comment(state->tctx, "%s\n", __func__);
+	state->num_wrap_handlers++;
+	return true;
+}
+
+static void test_wrapper_after_use(struct tevent_context *wrap_ev,
+				   void *private_data,
+				   struct tevent_context *main_ev,
+				   const char *location)
+{
+	struct test_wrapper_state *state =
+		talloc_get_type_abort(private_data,
+		struct test_wrapper_state);
+
+	torture_comment(state->tctx, "%s\n", __func__);
+	state->num_wrap_handlers++;
+}
+
+static void test_wrapper_before_fd_handler(struct tevent_context *wrap_ev,
+					   void *private_data,
+					   struct tevent_context *main_ev,
+					   struct tevent_fd *fde,
+					   uint16_t flags,
+					   const char *handler_name,
+					   const char *location)
+{
+	struct test_wrapper_state *state =
+		talloc_get_type_abort(private_data,
+		struct test_wrapper_state);
+
+	torture_comment(state->tctx, "%s\n", __func__);
+	state->num_wrap_handlers++;
+}
+
+static void test_wrapper_after_fd_handler(struct tevent_context *wrap_ev,
+					  void *private_data,
+					  struct tevent_context *main_ev,
+					  struct tevent_fd *fde,
+					  uint16_t flags,
+					  const char *handler_name,
+					  const char *location)
+{
+	struct test_wrapper_state *state =
+		talloc_get_type_abort(private_data,
+		struct test_wrapper_state);
+
+	torture_comment(state->tctx, "%s\n", __func__);
+	state->num_wrap_handlers++;
+}
+
+static void test_wrapper_before_timer_handler(struct tevent_context *wrap_ev,
+					      void *private_data,
+					      struct tevent_context *main_ev,
+					      struct tevent_timer *te,
+					      struct timeval requested_time,
+					      struct timeval trigger_time,
+					      const char *handler_name,
+					      const char *location)
+{
+	struct test_wrapper_state *state =
+		talloc_get_type_abort(private_data,
+		struct test_wrapper_state);
+
+	torture_comment(state->tctx, "%s\n", __func__);
+	state->num_wrap_handlers++;
+}
+
+static void test_wrapper_after_timer_handler(struct tevent_context *wrap_ev,
+					     void *private_data,
+					     struct tevent_context *main_ev,
+					     struct tevent_timer *te,
+					     struct timeval requested_time,
+					     struct timeval trigger_time,
+					     const char *handler_name,
+					     const char *location)
+{
+	struct test_wrapper_state *state =
+		talloc_get_type_abort(private_data,
+		struct test_wrapper_state);
+
+	torture_comment(state->tctx, "%s\n", __func__);
+	state->num_wrap_handlers++;
+}
+
+static void test_wrapper_before_immediate_handler(struct tevent_context *wrap_ev,
+						  void *private_data,
+						  struct tevent_context *main_ev,
+						  struct tevent_immediate *im,
+						  const char *handler_name,
+						  const char *location)
+{
+	struct test_wrapper_state *state =
+		talloc_get_type_abort(private_data,
+		struct test_wrapper_state);
+
+	torture_comment(state->tctx, "%s\n", __func__);
+	state->num_wrap_handlers++;
+}
+
+static void test_wrapper_after_immediate_handler(struct tevent_context *wrap_ev,
+						 void *private_data,
+						 struct tevent_context *main_ev,
+						 struct tevent_immediate *im,
+						 const char *handler_name,
+						 const char *location)
+{
+	struct test_wrapper_state *state =
+		talloc_get_type_abort(private_data,
+		struct test_wrapper_state);
+
+	torture_comment(state->tctx, "%s\n", __func__);
+	state->num_wrap_handlers++;
+}
+
+static void test_wrapper_before_signal_handler(struct tevent_context *wrap_ev,
+					       void *private_data,
+					       struct tevent_context *main_ev,
+					       struct tevent_signal *se,
+					       int signum,
+					       int count,
+					       void *siginfo,
+					       const char *handler_name,
+					       const char *location)
+{
+	struct test_wrapper_state *state =
+		talloc_get_type_abort(private_data,
+		struct test_wrapper_state);
+
+	torture_comment(state->tctx, "%s\n", __func__);
+	state->num_wrap_handlers++;
+}
+
+static void test_wrapper_after_signal_handler(struct tevent_context *wrap_ev,
+					      void *private_data,
+					      struct tevent_context *main_ev,
+					      struct tevent_signal *se,
+					      int signum,
+					      int count,
+					      void *siginfo,
+					      const char *handler_name,
+					      const char *location)
+{
+	struct test_wrapper_state *state =
+		talloc_get_type_abort(private_data,
+		struct test_wrapper_state);
+
+	torture_comment(state->tctx, "%s\n", __func__);
+	state->num_wrap_handlers++;
+}
+
+static const struct tevent_wrapper_ops test_wrapper_ops = {
+	.name				= "test_wrapper",
+	.before_use			= test_wrapper_before_use,
+	.after_use			= test_wrapper_after_use,
+	.before_fd_handler		= test_wrapper_before_fd_handler,
+	.after_fd_handler		= test_wrapper_after_fd_handler,
+	.before_timer_handler		= test_wrapper_before_timer_handler,
+	.after_timer_handler		= test_wrapper_after_timer_handler,
+	.before_immediate_handler	= test_wrapper_before_immediate_handler,
+	.after_immediate_handler	= test_wrapper_after_immediate_handler,
+	.before_signal_handler		= test_wrapper_before_signal_handler,
+	.after_signal_handler		= test_wrapper_after_signal_handler,
+};
+
+static void test_wrapper_timer_handler(struct tevent_context *ev,
+				       struct tevent_timer *te,
+				       struct timeval tv,
+				       void *private_data)
+{
+	struct test_wrapper_state *state =
+		(struct test_wrapper_state *)private_data;
+
+
+	torture_comment(state->tctx, "timer handler\n");
+
+	state->num_events++;
+	talloc_free(te);
+	return;
+}
+
+static void test_wrapper_fd_handler(struct tevent_context *ev,
+				    struct tevent_fd *fde,
+				    unsigned short fd_flags,
+				    void *private_data)
+{
+	struct test_wrapper_state *state =
+		(struct test_wrapper_state *)private_data;
+
+	torture_comment(state->tctx, "fd handler\n");
+
+	state->num_events++;
+	talloc_free(fde);
+	return;
+}
+
+static void test_wrapper_immediate_handler(struct tevent_context *ev,
+					   struct tevent_immediate *im,
+					   void *private_data)
+{
+	struct test_wrapper_state *state =
+		(struct test_wrapper_state *)private_data;
+
+	state->num_events++;
+	talloc_free(im);
+
+	torture_comment(state->tctx, "immediate handler\n");
+	return;
+}
+
+static void test_wrapper_signal_handler(struct tevent_context *ev,
+					struct tevent_signal *se,
+					int signum,
+					int count,
+					void *siginfo,
+					void *private_data)
+{
+	struct test_wrapper_state *state =
+		(struct test_wrapper_state *)private_data;
+
+	torture_comment(state->tctx, "signal handler\n");
+
+	state->num_events++;
+	talloc_free(se);
+	return;
+}
+
+static bool test_wrapper(struct torture_context *tctx,
+			 const void *test_data)
+{
+	struct test_wrapper_state *state = NULL;
+	int sock[2] = { -1, -1};
+	uint8_t c = 0;
+	const int num_events = 4;
+	const char *backend = (const char *)test_data;
+	struct tevent_context *ev = NULL;
+	struct tevent_context *wrap_ev = NULL;
+	struct tevent_fd *fde = NULL;
+	struct tevent_timer *te = NULL;
+	struct tevent_signal *se = NULL;
+	struct tevent_immediate *im = NULL;
+	int ret;
+	bool ok = false;
+	bool ret2;
+
+	ev = tevent_context_init_byname(tctx, backend);
+	if (ev == NULL) {
+		torture_skip(tctx, talloc_asprintf(tctx,
+			     "event backend '%s' not supported\n",
+			     backend));
+		return true;
+	}
+
+	tevent_set_debug_stderr(ev);
+	torture_comment(tctx, "tevent backend '%s'\n", backend);
+
+	wrap_ev = tevent_context_wrapper_create(
+		ev, ev,	&test_wrapper_ops, &state, struct test_wrapper_state);
+	torture_assert_not_null_goto(tctx, wrap_ev, ok, done,
+				     "tevent_context_wrapper_create failed\n");
+	*state = (struct test_wrapper_state) {
+		.tctx = tctx,
+	};
+
+	ret = socketpair(AF_UNIX, SOCK_STREAM, 0, sock);
+	torture_assert_goto(tctx, ret == 0, ok, done, "socketpair failed\n");
+
+	te = tevent_add_timer(wrap_ev, wrap_ev,
+			      timeval_current_ofs(0, 0),
+			      test_wrapper_timer_handler, state);
+	torture_assert_not_null_goto(tctx, te, ok, done,
+				     "tevent_add_timer failed\n");
+
+	fde = tevent_add_fd(wrap_ev, wrap_ev,
+			    sock[1],
+			    TEVENT_FD_READ,
+			    test_wrapper_fd_handler,
+			    state);
+	torture_assert_not_null_goto(tctx, fde, ok, done,
+				     "tevent_add_fd failed\n");
+
+	im = tevent_create_immediate(wrap_ev);
+	torture_assert_not_null_goto(tctx, im, ok, done,
+				     "tevent_create_immediate failed\n");
+
+	se = tevent_add_signal(wrap_ev, wrap_ev,
+			       SIGUSR1,
+			       0,
+			       test_wrapper_signal_handler,
+			       state);
+	torture_assert_not_null_goto(tctx, se, ok, done,
+				     "tevent_add_signal failed\n");
+
+	do_write(sock[0], &c, 1);
+	kill(getpid(), SIGUSR1);
+	tevent_schedule_immediate(im,
+				  wrap_ev,
+				  test_wrapper_immediate_handler,
+				  state);
+
+	ret2 = tevent_context_push_use(wrap_ev);
+	torture_assert_goto(tctx, ret2, ok, done, "tevent_context_push_use(wrap_ev) failed\n");
+	ret2 = tevent_context_push_use(ev);
+	torture_assert_goto(tctx, ret2, ok, pop_use, "tevent_context_push_use(ev) failed\n");
+	tevent_context_pop_use(ev);
+	tevent_context_pop_use(wrap_ev);
+
+	ret = tevent_loop_wait(ev);
+	torture_assert_int_equal_goto(tctx, ret, 0, ok, done, "tevent_loop_wait failed\n");
+
+	torture_comment(tctx, "Num events: %d\n", state->num_events);
+	torture_comment(tctx, "Num wrap handlers: %d\n",
+			state->num_wrap_handlers);
+
+	torture_assert_int_equal_goto(tctx, state->num_events, num_events, ok, done,
+				      "Wrong event count\n");
+	torture_assert_int_equal_goto(tctx, state->num_wrap_handlers,
+				      num_events*2+2,
+				      ok, done, "Wrong wrapper count\n");
+
+	ok = true;
+
+done:
+	TALLOC_FREE(wrap_ev);
+	TALLOC_FREE(ev);
+
+	if (sock[0] != -1) {
+		close(sock[0]);
+	}
+	if (sock[1] != -1) {
+		close(sock[1]);
+	}
+	return ok;
+pop_use:
+	tevent_context_pop_use(wrap_ev);
+	goto done;
+}
+
+static void test_free_wrapper_signal_handler(struct tevent_context *ev,
+					struct tevent_signal *se,
+					int signum,
+					int count,
+					void *siginfo,
+					void *private_data)
+{
+	struct torture_context *tctx =
+		talloc_get_type_abort(private_data,
+		struct torture_context);
+
+	torture_comment(tctx, "signal handler\n");
+
+	talloc_free(se);
+
+	/*
+	 * signal handlers have highest priority in tevent, so this signal
+	 * handler will always be started before the other handlers
+	 * below. Freeing the (wrapper) event context here tests that the
+	 * wrapper implementation correclty handles the wrapper ev going away
+	 * with pending events.
+	 */
+	talloc_free(ev);
+	return;
+}
+
+static void test_free_wrapper_fd_handler(struct tevent_context *ev,
+					 struct tevent_fd *fde,
+					 unsigned short fd_flags,
+					 void *private_data)
+{
+	/*
+	 * This should never be called as
+	 * test_free_wrapper_signal_handler()
+	 * already destroyed the wrapper tevent_context.
+	 */
+	abort();
+}
+
+static void test_free_wrapper_immediate_handler(struct tevent_context *ev,
+					   struct tevent_immediate *im,
+					   void *private_data)
+{
+	/*
+	 * This should never be called as
+	 * test_free_wrapper_signal_handler()
+	 * already destroyed the wrapper tevent_context.
+	 */
+	abort();
+}
+
+static void test_free_wrapper_timer_handler(struct tevent_context *ev,
+				       struct tevent_timer *te,
+				       struct timeval tv,
+				       void *private_data)
+{
+	/*
+	 * This should never be called as
+	 * test_free_wrapper_signal_handler()
+	 * already destroyed the wrapper tevent_context.
+	 */
+	abort();
+}
+
+static bool test_free_wrapper(struct torture_context *tctx,
+			      const void *test_data)
+{
+	struct test_wrapper_state *state = NULL;
+	int sock[2] = { -1, -1};
+	uint8_t c = 0;
+	const char *backend = (const char *)test_data;
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct tevent_context *ev = NULL;
+	struct tevent_context *wrap_ev = NULL;
+	struct tevent_fd *fde = NULL;
+	struct tevent_timer *te = NULL;
+	struct tevent_signal *se = NULL;
+	struct tevent_immediate *im = NULL;
+	int ret;
+	bool ok = false;
+
+	ev = tevent_context_init_byname(frame, backend);
+	if (ev == NULL) {
+		torture_skip(tctx, talloc_asprintf(tctx,
+			     "event backend '%s' not supported\n",
+			     backend));
+		return true;
+	}
+
+	tevent_set_debug_stderr(ev);
+	torture_comment(tctx, "tevent backend '%s'\n", backend);
+
+	wrap_ev = tevent_context_wrapper_create(
+		ev, ev,	&test_wrapper_ops, &state, struct test_wrapper_state);
+	torture_assert_not_null_goto(tctx, wrap_ev, ok, done,
+				     "tevent_context_wrapper_create failed\n");
+	*state = (struct test_wrapper_state) {
+		.tctx = tctx,
+	};
+
+	ret = socketpair(AF_UNIX, SOCK_STREAM, 0, sock);
+	torture_assert_goto(tctx, ret == 0, ok, done, "socketpair failed\n");
+
+	fde = tevent_add_fd(wrap_ev, frame,
+			    sock[1],
+			    TEVENT_FD_READ,
+			    test_free_wrapper_fd_handler,
+			    NULL);
+	torture_assert_not_null_goto(tctx, fde, ok, done,
+				     "tevent_add_fd failed\n");
+
+	te = tevent_add_timer(wrap_ev, frame,
+			      timeval_current_ofs(0, 0),
+			      test_free_wrapper_timer_handler, NULL);
+	torture_assert_not_null_goto(tctx, te, ok, done,
+				     "tevent_add_timer failed\n");
+
+	im = tevent_create_immediate(frame);
+	torture_assert_not_null_goto(tctx, im, ok, done,
+				     "tevent_create_immediate failed\n");
+
+	se = tevent_add_signal(wrap_ev, frame,
+			       SIGUSR1,
+			       0,
+			       test_free_wrapper_signal_handler,
+			       tctx);
+	torture_assert_not_null_goto(tctx, se, ok, done,
+				     "tevent_add_signal failed\n");
+
+	do_write(sock[0], &c, 1);
+	kill(getpid(), SIGUSR1);
+	tevent_schedule_immediate(im,
+				  wrap_ev,
+				  test_free_wrapper_immediate_handler,
+				  NULL);
+
+	ret = tevent_loop_wait(ev);
+	torture_assert_goto(tctx, ret == 0, ok, done, "tevent_loop_wait failed\n");
+
+	ok = true;
+
+done:
+	TALLOC_FREE(frame);
+
+	if (sock[0] != -1) {
+		close(sock[0]);
+	}
+	if (sock[1] != -1) {
+		close(sock[1]);
+	}
+	return ok;
 }
 
 #ifdef HAVE_PTHREAD
@@ -1279,6 +1788,14 @@ struct torture_suite *torture_local_event(TALLOC_CTX *mem_ctx)
 		torture_suite_add_simple_tcase_const(backend_suite,
 					       "fd2",
 					       test_event_fd2,
+					       (const void *)list[i]);
+		torture_suite_add_simple_tcase_const(backend_suite,
+					       "wrapper",
+					       test_wrapper,
+					       (const void *)list[i]);
+		torture_suite_add_simple_tcase_const(backend_suite,
+					       "free_wrapper",
+					       test_free_wrapper,
 					       (const void *)list[i]);
 
 		torture_suite_add_suite(suite, backend_suite);

@@ -32,6 +32,9 @@
 #include "auth.h"
 #include "lib/crypto/sha512.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_SMB2
+
 static void smbd_smb2_connection_handler(struct tevent_context *ev,
 					 struct tevent_fd *fde,
 					 uint16_t flags,
@@ -224,7 +227,8 @@ static NTSTATUS smbd_initialize_smb2(struct smbXsrv_connection *xconn,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	xconn->transport.fde = tevent_add_fd(xconn->ev_ctx,
+	xconn->transport.fde = tevent_add_fd(
+					xconn->client->raw_ev_ctx,
 					xconn,
 					xconn->transport.sock,
 					TEVENT_FD_READ,
@@ -275,6 +279,12 @@ static int smbd_smb2_request_destructor(struct smbd_smb2_request *req)
 		data_blob_clear_free(&req->last_key);
 	}
 	return 0;
+}
+
+void smb2_request_set_async_internal(struct smbd_smb2_request *req,
+				     bool async_internal)
+{
+	req->async_internal = async_internal;
 }
 
 static struct smbd_smb2_request *smbd_smb2_request_allocate(TALLOC_CTX *mem_ctx)
@@ -607,34 +617,37 @@ static bool smb2_validate_sequence_number(struct smbXsrv_connection *xconn,
 
 	seq_tmp = xconn->smb2.credits.seq_low;
 	if (seq_id < seq_tmp) {
-		DEBUG(0,("smb2_validate_sequence_number: bad message_id "
+		DBGC_ERR(DBGC_SMB2_CREDITS,
+			"smb2_validate_sequence_number: bad message_id "
 			"%llu (sequence id %llu) "
 			"(granted = %u, low = %llu, range = %u)\n",
 			(unsigned long long)message_id,
 			(unsigned long long)seq_id,
 			(unsigned int)xconn->smb2.credits.granted,
 			(unsigned long long)xconn->smb2.credits.seq_low,
-			(unsigned int)xconn->smb2.credits.seq_range));
+			(unsigned int)xconn->smb2.credits.seq_range);
 		return false;
 	}
 
 	seq_tmp += xconn->smb2.credits.seq_range;
 	if (seq_id >= seq_tmp) {
-		DEBUG(0,("smb2_validate_sequence_number: bad message_id "
+		DBGC_ERR(DBGC_SMB2_CREDITS,
+			"smb2_validate_sequence_number: bad message_id "
 			"%llu (sequence id %llu) "
 			"(granted = %u, low = %llu, range = %u)\n",
 			(unsigned long long)message_id,
 			(unsigned long long)seq_id,
 			(unsigned int)xconn->smb2.credits.granted,
 			(unsigned long long)xconn->smb2.credits.seq_low,
-			(unsigned int)xconn->smb2.credits.seq_range));
+			(unsigned int)xconn->smb2.credits.seq_range);
 		return false;
 	}
 
 	offset = seq_id % xconn->smb2.credits.max;
 
 	if (bitmap_query(credits_bm, offset)) {
-		DEBUG(0,("smb2_validate_sequence_number: duplicate message_id "
+		DBGC_ERR(DBGC_SMB2_CREDITS,
+			"smb2_validate_sequence_number: duplicate message_id "
 			"%llu (sequence id %llu) "
 			"(granted = %u, low = %llu, range = %u) "
 			"(bm offset %u)\n",
@@ -643,7 +656,7 @@ static bool smb2_validate_sequence_number(struct smbXsrv_connection *xconn,
 			(unsigned int)xconn->smb2.credits.granted,
 			(unsigned long long)xconn->smb2.credits.seq_low,
 			(unsigned int)xconn->smb2.credits.seq_range,
-			offset));
+			offset);
 		return false;
 	}
 
@@ -659,10 +672,11 @@ static bool smb2_validate_sequence_number(struct smbXsrv_connection *xconn,
 	 * already seen.
 	 */
 	while (bitmap_query(credits_bm, offset)) {
-		DEBUG(10,("smb2_validate_sequence_number: clearing "
+		DBGC_DEBUG(DBGC_SMB2_CREDITS,
+			  "smb2_validate_sequence_number: clearing "
 			  "id %llu (position %u) from bitmap\n",
 			  (unsigned long long)(xconn->smb2.credits.seq_low),
-			  offset));
+			  offset);
 		bitmap_clear(credits_bm, offset);
 
 		xconn->smb2.credits.seq_low += 1;
@@ -691,7 +705,9 @@ static bool smb2_validate_message_id(struct smbXsrv_connection *xconn,
 		credit_charge = MAX(credit_charge, 1);
 	}
 
-	DEBUG(11, ("smb2_validate_message_id: mid %llu (charge %llu), "
+	DEBUGC(11,
+		   DBGC_SMB2_CREDITS,
+		   ("smb2_validate_message_id: mid %llu (charge %llu), "
 		   "credits_granted %llu, "
 		   "seqnum low/range: %llu/%llu\n",
 		   (unsigned long long) message_id,
@@ -701,7 +717,8 @@ static bool smb2_validate_message_id(struct smbXsrv_connection *xconn,
 		   (unsigned long long) xconn->smb2.credits.seq_range));
 
 	if (xconn->smb2.credits.granted < credit_charge) {
-		DEBUG(0, ("smb2_validate_message_id: client used more "
+		DBGC_ERR(DBGC_SMB2_CREDITS,
+			  "smb2_validate_message_id: client used more "
 			  "credits than granted, mid %llu, charge %llu, "
 			  "credits_granted %llu, "
 			  "seqnum low/range: %llu/%llu\n",
@@ -709,7 +726,7 @@ static bool smb2_validate_message_id(struct smbXsrv_connection *xconn,
 			  (unsigned long long) credit_charge,
 			  (unsigned long long) xconn->smb2.credits.granted,
 			  (unsigned long long) xconn->smb2.credits.seq_low,
-			  (unsigned long long) xconn->smb2.credits.seq_range));
+			  (unsigned long long) xconn->smb2.credits.seq_range);
 		return false;
 	}
 
@@ -725,7 +742,9 @@ static bool smb2_validate_message_id(struct smbXsrv_connection *xconn,
 		uint64_t id = message_id + i;
 		bool ok;
 
-		DEBUG(11, ("Iterating mid %llu charge %u (sequence %llu)\n",
+		DEBUGC(11,
+			   DBGC_SMB2_CREDITS,
+			   ("Iterating mid %llu charge %u (sequence %llu)\n",
 			   (unsigned long long)message_id,
 			   credit_charge,
 			   (unsigned long long)id));
@@ -903,7 +922,8 @@ static void smb2_set_operation_credit(struct smbXsrv_connection *xconn,
 	xconn->smb2.credits.granted += credits_granted;
 	xconn->smb2.credits.seq_range += credits_granted;
 
-	DEBUG(10,("smb2_set_operation_credit: requested %u, charge %u, "
+	DBGC_DEBUG(DBGC_SMB2_CREDITS,
+		"smb2_set_operation_credit: requested %u, charge %u, "
 		"granted %u, current possible/max %u/%u, "
 		"total granted/max/low/range %u/%u/%llu/%u\n",
 		(unsigned int)credits_requested,
@@ -914,7 +934,7 @@ static void smb2_set_operation_credit(struct smbXsrv_connection *xconn,
 		(unsigned int)xconn->smb2.credits.granted,
 		(unsigned int)xconn->smb2.credits.max,
 		(unsigned long long)xconn->smb2.credits.seq_low,
-		(unsigned int)xconn->smb2.credits.seq_range));
+		(unsigned int)xconn->smb2.credits.seq_range);
 }
 
 static void smb2_calculate_credits(const struct smbd_smb2_request *inreq,
@@ -1370,6 +1390,17 @@ NTSTATUS smbd_smb2_request_pending_queue(struct smbd_smb2_request *req,
 		return NT_STATUS_OK;
 	}
 
+	if (req->async_internal) {
+		/*
+		 * An SMB2 request implementation wants to handle the request
+		 * asynchronously "internally" while keeping synchronous
+		 * behaviour for the SMB2 request. This means we don't send an
+		 * interim response and we can allow processing of compound SMB2
+		 * requests (cf the subsequent check) for all cases.
+		 */
+		return NT_STATUS_OK;
+	}
+
 	if (req->in.vector_count > req->current_idx + SMBD_SMB2_NUM_IOV_PER_REQ) {
 		/*
 		 * We're trying to go async in a compound request
@@ -1451,8 +1482,14 @@ NTSTATUS smbd_smb2_request_pending_queue(struct smbd_smb2_request *req,
 		data_blob_clear_free(&req->last_key);
 	}
 
+	/*
+	 * smbd_smb2_request_pending_timer() just send a packet
+	 * to the client and doesn't need any impersonation.
+	 * So we use req->xconn->client->raw_ev_ctx instead
+	 * of req->ev_ctx here.
+	 */
 	defer_endtime = timeval_current_ofs_usec(defer_time);
-	req->async_te = tevent_add_timer(req->sconn->ev_ctx,
+	req->async_te = tevent_add_timer(req->xconn->client->raw_ev_ctx,
 					 req, defer_endtime,
 					 smbd_smb2_request_pending_timer,
 					 req);
@@ -1816,10 +1853,6 @@ static NTSTATUS smbd_smb2_request_check_tcon(struct smbd_smb2_request *req)
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
-	if (!set_current_service(tcon->compat, 0, true)) {
-		return NT_STATUS_ACCESS_DENIED;
-	}
-
 	req->tcon = tcon;
 	req->last_tid = in_tid;
 
@@ -1934,13 +1967,6 @@ static NTSTATUS smbd_smb2_request_check_session(struct smbd_smb2_request *req)
 		return NT_STATUS_INVALID_HANDLE;
 	}
 
-	if (in_session_id != req->xconn->client->last_session_id) {
-		req->xconn->client->last_session_id = in_session_id;
-		set_current_user_info(session_info->unix_info->sanitized_username,
-				      session_info->unix_info->unix_name,
-				      session_info->info->domain_name);
-	}
-
 	return NT_STATUS_OK;
 }
 
@@ -1961,13 +1987,15 @@ NTSTATUS smbd_smb2_request_verify_creditcharge(struct smbd_smb2_request *req,
 
 	needed_charge = (data_length - 1)/ 65536 + 1;
 
-	DEBUG(10, ("mid %llu, CreditCharge: %d, NeededCharge: %d\n",
+	DBGC_DEBUG(DBGC_SMB2_CREDITS,
+		   "mid %llu, CreditCharge: %d, NeededCharge: %d\n",
 		   (unsigned long long) BVAL(inhdr, SMB2_HDR_MESSAGE_ID),
-		   credit_charge, needed_charge));
+		   credit_charge, needed_charge);
 
 	if (needed_charge > credit_charge) {
-		DEBUG(2, ("CreditCharge too low, given %d, needed %d\n",
-			  credit_charge, needed_charge));
+		DBGC_WARNING(DBGC_SMB2_CREDITS,
+			  "CreditCharge too low, given %d, needed %d\n",
+			  credit_charge, needed_charge);
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
@@ -2315,9 +2343,7 @@ NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 	}
 
 	/*
-	 * Check if the client provided a valid session id,
-	 * if so smbd_smb2_request_check_session() calls
-	 * set_current_user_info().
+	 * Check if the client provided a valid session id.
 	 *
 	 * As some command don't require a valid session id
 	 * we defer the check of the session_status
@@ -2330,6 +2356,7 @@ NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 		encryption_required = x->global->encryption_flags & SMBXSRV_ENCRYPTION_REQUIRED;
 	}
 
+	req->async_internal = false;
 	req->do_signing = false;
 	req->do_encryption = false;
 	req->was_encrypted = false;
@@ -2481,6 +2508,8 @@ NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 		 *
 		 * smbd_smb2_request_check_tcon()
 		 * calls change_to_user() on success.
+		 * Which implies set_current_user_info()
+		 * and chdir_current_service().
 		 */
 		status = smbd_smb2_request_check_tcon(req);
 		if (!NT_STATUS_IS_OK(status)) {
@@ -2496,6 +2525,22 @@ NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 			return smbd_smb2_request_error(req,
 				NT_STATUS_ACCESS_DENIED);
 		}
+	} else if (call->need_session) {
+		struct auth_session_info *session_info = NULL;
+
+		/*
+		 * Unless we also have need_tcon (see above),
+		 * we still need to call set_current_user_info().
+		 */
+
+		session_info = req->session->global->auth_session_info;
+		if (session_info == NULL) {
+			return NT_STATUS_INVALID_HANDLE;
+		}
+
+		set_current_user_info(session_info->unix_info->sanitized_username,
+				      session_info->unix_info->unix_name,
+				      session_info->info->domain_name);
 	}
 
 	if (req->was_encrypted || encryption_desired) {
@@ -2569,8 +2614,10 @@ NTSTATUS smbd_smb2_request_dispatch(struct smbd_smb2_request *req)
 		SMB_ASSERT(call->fileid_ofs == 0);
 		/* This call needs to be run as root */
 		change_to_root_user();
+		req->ev_ctx = req->sconn->root_ev_ctx;
 	} else {
 		SMB_ASSERT(call->need_tcon);
+		req->ev_ctx = req->tcon->compat->user_ev_ctx;
 	}
 
 #define _INBYTES(_r) \
@@ -2877,8 +2924,13 @@ static NTSTATUS smbd_smb2_request_reply(struct smbd_smb2_request *req)
 			}
 		}
 
+		/*
+		 * smbd_smb2_request_dispatch() will redo the impersonation.
+		 * So we use req->xconn->client->raw_ev_ctx instead
+		 * of req->ev_ctx here.
+		 */
 		tevent_schedule_immediate(im,
-					req->sconn->ev_ctx,
+					req->xconn->client->raw_ev_ctx,
 					smbd_smb2_request_dispatch_immediate,
 					req);
 		return NT_STATUS_OK;

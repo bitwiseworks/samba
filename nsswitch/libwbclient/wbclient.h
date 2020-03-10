@@ -74,9 +74,11 @@ const char *wbcErrorString(wbcErr error);
  *  0.11: Extended wbcAuthenticateUserEx to provide PAC parsing
  *  0.12: Added wbcCtxCreate and friends
  *  0.13: Added wbcCtxUnixIdsToSids and wbcUnixIdsToSids
+ *  0.14: Added "authoritative" to wbcAuthErrorInfo
+ *        Added WBC_SID_NAME_LABEL
  **/
 #define WBCLIENT_MAJOR_VERSION 0
-#define WBCLIENT_MINOR_VERSION 13
+#define WBCLIENT_MINOR_VERSION 14
 #define WBCLIENT_VENDOR_VERSION "Samba libwbclient"
 struct wbcLibraryDetails {
 	uint16_t major_version;
@@ -138,7 +140,8 @@ enum wbcSidType {
 	WBC_SID_NAME_DELETED=6,
 	WBC_SID_NAME_INVALID=7,
 	WBC_SID_NAME_UNKNOWN=8,
-	WBC_SID_NAME_COMPUTER=9
+	WBC_SID_NAME_COMPUTER=9,
+	WBC_SID_NAME_LABEL=10
 };
 
 /**
@@ -184,6 +187,7 @@ struct wbcDomainInfo {
 	uint32_t domain_flags;
 	uint32_t trust_flags;
 	uint32_t trust_type;
+	char *trust_routing;
 };
 
 /* wbcDomainInfo->domain_flags */
@@ -206,6 +210,12 @@ struct wbcDomainInfo {
 #define WBC_DOMINFO_TRUSTTYPE_FOREST     0x00000001
 #define WBC_DOMINFO_TRUSTTYPE_IN_FOREST  0x00000002
 #define WBC_DOMINFO_TRUSTTYPE_EXTERNAL   0x00000003
+#define WBC_DOMINFO_TRUSTTYPE_LOCAL      0x00000004
+#define WBC_DOMINFO_TRUSTTYPE_WKSTA      0x00000005
+#define WBC_DOMINFO_TRUSTTYPE_RWDC       0x00000006
+#define WBC_DOMINFO_TRUSTTYPE_RODC       0x00000007
+#define WBC_DOMINFO_TRUSTTYPE_PDC        0x00000008
+
 
 /**
  * @brief Generic Blob
@@ -419,6 +429,7 @@ struct wbcAuthErrorInfo {
 	char *nt_string;
 	int32_t pam_error;
 	char *display_string;
+	uint8_t authoritative;
 };
 
 /**

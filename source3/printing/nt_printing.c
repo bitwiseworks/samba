@@ -80,6 +80,11 @@ static bool print_driver_directories_init(void)
 	char *driver_path;
 	bool ok;
 	TALLOC_CTX *mem_ctx = talloc_stackframe();
+	const char *dir_list[] = {
+		"W32X86/PCC",
+		"x64/PCC",
+		"color"
+	};
 
 	service = lp_servicenumber("print$");
 	if (service < 0) {
@@ -123,6 +128,67 @@ static bool print_driver_directories_init(void)
 			talloc_free(mem_ctx);
 			return false;
 		}
+	}
+
+	for (i = 0; i < ARRAY_SIZE(dir_list); i++) {
+		const char *path;
+
+		path = talloc_asprintf(mem_ctx,
+				       "%s/%s",
+				       driver_path,
+				       dir_list[i]);
+		if (path == NULL) {
+			talloc_free(mem_ctx);
+			return false;
+		}
+
+		ok = directory_create_or_exist(path, 0755);
+		if (!ok) {
+			DEBUG(1, ("Failed to create printer driver "
+				  "architecture directory %s\n",
+				  path));
+			talloc_free(mem_ctx);
+			return false;
+		}
+	}
+
+	driver_path = state_path("DriverStore");
+	if (driver_path == NULL) {
+		talloc_free(mem_ctx);
+		return false;
+	}
+
+	ok = directory_create_or_exist(driver_path, 0755);
+	if (!ok) {
+		DEBUG(1,("failed to create path %s\n", driver_path));
+		talloc_free(mem_ctx);
+		return false;
+	}
+
+	driver_path = state_path("DriverStore/FileRepository");
+	if (driver_path == NULL) {
+		talloc_free(mem_ctx);
+		return false;
+	}
+
+	ok = directory_create_or_exist(driver_path, 0755);
+	if (!ok) {
+		DEBUG(1,("failed to create path %s\n", driver_path));
+		talloc_free(mem_ctx);
+		return false;
+	}
+
+	driver_path = state_path("DriverStore/Temp");
+	if (driver_path == NULL) {
+		talloc_free(mem_ctx);
+		return false;
+	}
+
+	ok = directory_create_or_exist(driver_path, 0755);
+	if (!ok) {
+		DEBUG(1,("failed to create path %s\n", driver_path));
+		talloc_free(mem_ctx);
+		return false;
 	}
 
 	talloc_free(mem_ctx);
@@ -176,10 +242,6 @@ bool nt_printing_init(struct messaging_context *msg_ctx)
 	 */
 	messaging_register(msg_ctx, NULL, MSG_PRINTER_DRVUPGRADE,
 			forward_drv_upgrade_printer_msg);
-
-	/* of course, none of the message callbacks matter if you don't
-	   tell messages.c that you interested in receiving PRINT_GENERAL
-	   msgs.  This is done in serverid_register() */
 
 	if ( lp_security() == SEC_ADS ) {
 		win_rc = check_published_printers(msg_ctx);
@@ -250,6 +312,393 @@ const char *get_short_archi(const char *long_archi)
 }
 
 /****************************************************************************
+ Read data from fsp on the vfs.
+****************************************************************************/
+
+static ssize_t printing_pread_data(files_struct *fsp,
+				char *buf,
+				off_t *poff,
+				size_t byte_count)
+{
+	size_t total=0;
+	off_t in_pos = *poff;
+
+	/* Don't allow integer wrap on read. */
+	if (in_pos + byte_count < in_pos) {
+		return -1;
+	}
+
+	while (total < byte_count) {
+		ssize_t ret = read_file(fsp,
+					buf + total,
+					in_pos,
+					byte_count - total);
+
+		if (ret == 0) {
+			*poff = in_pos;
+			return total;
+		}
+		if (ret == -1) {
+			if (errno == EINTR) {
+				continue;
+			} else {
+				return -1;
+			}
+		}
+		in_pos += ret;
+		total += ret;
+	}
+	*poff = in_pos;
+	return (ssize_t)total;
+}
+
+/****************************************************************************
+ Detect the major and minor version of a PE file.
+ Returns:
+
+ 1 if file is a PE file and we got version numbers,
+ 0 if this file is a PE file and we couldn't get the version numbers,
+ -1 on error.
+
+ NB. buf is passed into and freed inside this function. This is a
+ bad API design, but fixing this is a task for another day.
+****************************************************************************/
+
+static int handle_pe_file(files_struct *fsp,
+				off_t in_pos,
+				char *fname,
+				char *buf,
+				uint32_t *major,
+				uint32_t *minor)
+{
+	unsigned int i;
+	unsigned int num_sections;
+	unsigned int section_table_bytes;
+	ssize_t byte_count;
+	off_t rel_pos;
+	int ret = -1;
+
+	/* Just skip over optional header to get to section table */
+	rel_pos = SVAL(buf,PE_HEADER_OPTIONAL_HEADER_SIZE)-
+		(NE_HEADER_SIZE-PE_HEADER_SIZE);
+
+	if (in_pos + rel_pos < in_pos) {
+		/* Integer wrap. */
+		goto out;
+	}
+	in_pos = rel_pos + in_pos;
+
+	/* get the section table */
+	num_sections        = SVAL(buf,PE_HEADER_NUMBER_OF_SECTIONS);
+
+	if (num_sections >= (UINT_MAX / PE_HEADER_SECT_HEADER_SIZE)) {
+		/* Integer wrap. */
+		goto out;
+	}
+
+	section_table_bytes = num_sections * PE_HEADER_SECT_HEADER_SIZE;
+	if (section_table_bytes == 0) {
+		goto out;
+	}
+
+	SAFE_FREE(buf);
+	buf = (char *)SMB_MALLOC(section_table_bytes);
+	if (buf == NULL) {
+		DBG_ERR("PE file [%s] section table malloc "
+			"failed bytes = %d\n",
+			fname,
+			section_table_bytes);
+		goto out;
+	}
+
+	byte_count = printing_pread_data(fsp, buf, &in_pos, section_table_bytes);
+	if (byte_count < section_table_bytes) {
+		DBG_NOTICE("PE file [%s] Section header too short, "
+			"bytes read = %lu\n",
+			fname,
+			(unsigned long)byte_count);
+		goto out;
+	}
+
+	/*
+	 * Iterate the section table looking for
+	 * the resource section ".rsrc"
+	 */
+	for (i = 0; i < num_sections; i++) {
+		int sec_offset = i * PE_HEADER_SECT_HEADER_SIZE;
+
+		if (strcmp(".rsrc",
+			&buf[sec_offset+ PE_HEADER_SECT_NAME_OFFSET]) == 0) {
+			unsigned int section_pos = IVAL(buf,
+					sec_offset+
+					PE_HEADER_SECT_PTR_DATA_OFFSET);
+			unsigned int section_bytes = IVAL(buf,
+					sec_offset+
+					PE_HEADER_SECT_SIZE_DATA_OFFSET);
+
+			if (section_bytes == 0) {
+				goto out;
+			}
+
+			SAFE_FREE(buf);
+			buf=(char *)SMB_MALLOC(section_bytes);
+			if (buf == NULL) {
+				DBG_ERR("PE file [%s] version malloc "
+					"failed bytes = %d\n",
+					fname,
+					section_bytes);
+				goto out;
+			}
+
+			/*
+			 * Read from the start of the .rsrc
+			 * section info
+			 */
+			in_pos = section_pos;
+
+			byte_count = printing_pread_data(fsp,
+						buf,
+						&in_pos,
+						section_bytes);
+			if (byte_count < section_bytes) {
+				DBG_NOTICE("PE file "
+					"[%s] .rsrc section too short, "
+					"bytes read = %lu\n",
+					 fname,
+					(unsigned long)byte_count);
+				goto out;
+			}
+
+			if (section_bytes < VS_VERSION_INFO_UNICODE_SIZE) {
+				goto out;
+			}
+
+			for (i=0;
+				i< section_bytes - VS_VERSION_INFO_UNICODE_SIZE;
+					i++) {
+				/*
+				 * Scan for 1st 3 unicoded bytes
+				 * followed by word aligned magic
+				 * value.
+				 */
+				int mpos;
+				bool magic_match = false;
+
+				if (buf[i] == 'V' &&
+						buf[i+1] == '\0' &&
+						buf[i+2] == 'S') {
+					magic_match = true;
+				}
+
+				if (magic_match == false) {
+					continue;
+				}
+
+				/* Align to next long address */
+				mpos = (i + sizeof(VS_SIGNATURE)*2 +
+					3) & 0xfffffffc;
+
+				if (IVAL(buf,mpos) == VS_MAGIC_VALUE) {
+					*major = IVAL(buf,
+							mpos+ VS_MAJOR_OFFSET);
+					*minor = IVAL(buf,
+							mpos+ VS_MINOR_OFFSET);
+
+					DBG_INFO("PE file [%s] Version = "
+						"%08x:%08x (%d.%d.%d.%d)\n",
+						fname,
+						*major,
+						*minor,
+						(*major>>16)&0xffff,
+						*major&0xffff,
+						(*minor>>16)&0xffff,
+						*minor&0xffff);
+					ret = 1;
+					goto out;
+				}
+			}
+		}
+	}
+
+	/* Version info not found, fall back to origin date/time */
+	DBG_DEBUG("PE file [%s] has no version info\n", fname);
+	ret = 0;
+
+  out:
+
+	SAFE_FREE(buf);
+	return ret;
+}
+
+/****************************************************************************
+ Detect the major and minor version of an NE file.
+ Returns:
+
+ 1 if file is an NE file and we got version numbers,
+ 0 if this file is an NE file and we couldn't get the version numbers,
+ -1 on error.
+
+ NB. buf is passed into and freed inside this function. This is a
+ bad API design, but fixing this is a task for another day.
+****************************************************************************/
+
+static int handle_ne_file(files_struct *fsp,
+				off_t in_pos,
+				char *fname,
+				char *buf,
+				uint32_t *major,
+				uint32_t *minor)
+{
+	unsigned int i;
+	ssize_t byte_count;
+	int ret = -1;
+
+	if (CVAL(buf,NE_HEADER_TARGET_OS_OFFSET) != NE_HEADER_TARGOS_WIN ) {
+		DBG_NOTICE("NE file [%s] wrong target OS = 0x%x\n",
+			fname,
+			CVAL(buf,NE_HEADER_TARGET_OS_OFFSET));
+		/*
+		 * At this point, we assume the file is in error.
+		 * It still could be something else besides a NE file,
+		 * but it unlikely at this point.
+		 */
+		goto out;
+	}
+
+	/* Allocate a bit more space to speed up things */
+	SAFE_FREE(buf);
+	buf=(char *)SMB_MALLOC(VS_NE_BUF_SIZE);
+	if (buf == NULL) {
+		DBG_ERR("NE file [%s] malloc failed bytes  = %d\n",
+			fname,
+			PE_HEADER_SIZE);
+		goto out;
+	}
+
+	/*
+	 * This is a HACK! I got tired of trying to sort through the
+	 * messy 'NE' file format. If anyone wants to clean this up
+	 * please have at it, but this works. 'NE' files will
+	 * eventually fade away. JRR
+	 */
+	byte_count = printing_pread_data(fsp, buf, &in_pos, VS_NE_BUF_SIZE);
+	while (byte_count > 0) {
+		/*
+		 * Cover case that should not occur in a well
+		 * formed 'NE' .dll file
+		 */
+		if (byte_count-VS_VERSION_INFO_SIZE <= 0) {
+			break;
+		}
+
+		for(i=0; i<byte_count; i++) {
+			/*
+			 * Fast skip past data that can't
+			 * possibly match
+			 */
+			if (buf[i] != 'V') {
+				byte_count = printing_pread_data(fsp,
+						buf,
+						&in_pos,
+						VS_NE_BUF_SIZE);
+				continue;
+			}
+
+			/*
+			 * Potential match data crosses buf boundry,
+			 * move it to beginning of buf, and fill the
+			 * buf with as much as it will hold.
+			 */
+			if (i>byte_count-VS_VERSION_INFO_SIZE) {
+				ssize_t amount_read;
+				ssize_t amount_unused = byte_count-i;
+
+				memmove(buf, &buf[i], amount_unused);
+				amount_read = printing_pread_data(fsp,
+						&buf[amount_unused],
+						&in_pos,
+						VS_NE_BUF_SIZE- amount_unused);
+				if (amount_read < 0) {
+					DBG_ERR("NE file [%s] Read "
+						"error, errno=%d\n",
+						fname,
+						errno);
+					goto out;
+				}
+
+				if (amount_read + amount_unused <
+						amount_read) {
+					/* Check for integer wrap. */
+					break;
+				}
+
+				byte_count = amount_read +
+					     amount_unused;
+				if (byte_count < VS_VERSION_INFO_SIZE) {
+					break;
+				}
+
+				i = 0;
+			}
+
+			/*
+			 * Check that the full signature string and
+			 * the magic number that follows exist (not
+			 * a perfect solution, but the chances that this
+			 * occurs in code is, well, remote. Yes I know
+			 * I'm comparing the 'V' twice, as it is
+			 * simpler to read the code.
+			 */
+			if (strcmp(&buf[i], VS_SIGNATURE) == 0) {
+				/*
+				 * Compute skip alignment to next
+				 * long address.
+				 */
+				off_t cpos = in_pos;
+				int skip = -(cpos - (byte_count - i) +
+					 sizeof(VS_SIGNATURE)) & 3;
+				if (IVAL(buf,
+					i+sizeof(VS_SIGNATURE)+skip)
+						!= 0xfeef04bd) {
+					byte_count = printing_pread_data(fsp,
+							buf,
+							&in_pos,
+							VS_NE_BUF_SIZE);
+					continue;
+				}
+
+				*major = IVAL(buf,
+					i+sizeof(VS_SIGNATURE)+
+					skip+VS_MAJOR_OFFSET);
+				*minor = IVAL(buf,
+					i+sizeof(VS_SIGNATURE)+
+					skip+VS_MINOR_OFFSET);
+				DBG_INFO("NE file [%s] Version "
+					"= %08x:%08x (%d.%d.%d.%d)\n",
+					fname,
+					*major,
+					*minor,
+					(*major>>16)&0xffff,
+					*major&0xffff,
+					(*minor>>16)&0xffff,
+					*minor&0xffff);
+				ret = 1;
+				goto out;
+			}
+		}
+	}
+
+	/* Version info not found, fall back to origin date/time */
+	DBG_ERR("NE file [%s] Version info not found\n", fname);
+	ret = 0;
+
+  out:
+
+	SAFE_FREE(buf);
+	return ret;
+}
+
+/****************************************************************************
  Version information in Microsoft files is held in a VS_VERSION_INFO structure.
  There are two case to be covered here: PE (Portable Executable) and NE (New
  Executable) files. Both files support the same INFO structure, but PE files
@@ -257,220 +706,88 @@ const char *get_short_archi(const char *long_archi)
  returns -1 on error, 1 on version info found, and 0 on no version info found.
 ****************************************************************************/
 
-static int get_file_version(files_struct *fsp, char *fname,uint32_t *major, uint32_t *minor)
+static int get_file_version(files_struct *fsp,
+				char *fname,
+				uint32_t *major,
+				uint32_t *minor)
 {
-	int     i;
 	char    *buf = NULL;
 	ssize_t byte_count;
+	off_t in_pos = fsp->fh->pos;
 
-	if ((buf=(char *)SMB_MALLOC(DOS_HEADER_SIZE)) == NULL) {
-		DEBUG(0,("get_file_version: PE file [%s] DOS Header malloc failed bytes = %d\n",
-				fname, DOS_HEADER_SIZE));
+	buf=(char *)SMB_MALLOC(DOS_HEADER_SIZE);
+	if (buf == NULL) {
+		DBG_ERR("PE file [%s] DOS Header malloc failed bytes = %d\n",
+			fname,
+			DOS_HEADER_SIZE);
 		goto error_exit;
 	}
 
-	if ((byte_count = vfs_read_data(fsp, buf, DOS_HEADER_SIZE)) < DOS_HEADER_SIZE) {
-		DEBUG(3,("get_file_version: File [%s] DOS header too short, bytes read = %lu\n",
-			 fname, (unsigned long)byte_count));
+	byte_count = printing_pread_data(fsp, buf, &in_pos, DOS_HEADER_SIZE);
+	if (byte_count < DOS_HEADER_SIZE) {
+		DBG_NOTICE("File [%s] DOS header too short, bytes read = %lu\n",
+			 fname,
+			(unsigned long)byte_count);
 		goto no_version_info;
 	}
 
 	/* Is this really a DOS header? */
 	if (SVAL(buf,DOS_HEADER_MAGIC_OFFSET) != DOS_HEADER_MAGIC) {
-		DEBUG(6,("get_file_version: File [%s] bad DOS magic = 0x%x\n",
-				fname, SVAL(buf,DOS_HEADER_MAGIC_OFFSET)));
+		DBG_INFO("File [%s] bad DOS magic = 0x%x\n",
+			fname,
+			SVAL(buf,DOS_HEADER_MAGIC_OFFSET));
 		goto no_version_info;
 	}
 
-	/* Skip OEM header (if any) and the DOS stub to start of Windows header */
-	if (SMB_VFS_LSEEK(fsp, SVAL(buf,DOS_HEADER_LFANEW_OFFSET), SEEK_SET) == (off_t)-1) {
-		DEBUG(3,("get_file_version: File [%s] too short, errno = %d\n",
-				fname, errno));
-		/* Assume this isn't an error... the file just looks sort of like a PE/NE file */
-		goto no_version_info;
-	}
+	/*
+	 * Skip OEM header (if any) and the
+	 * DOS stub to start of Windows header.
+	 */
+	in_pos = SVAL(buf,DOS_HEADER_LFANEW_OFFSET);
 
 	/* Note: DOS_HEADER_SIZE and NE_HEADER_SIZE are incidentally same */
-	if ((byte_count = vfs_read_data(fsp, buf, NE_HEADER_SIZE)) < NE_HEADER_SIZE) {
-		DEBUG(3,("get_file_version: File [%s] Windows header too short, bytes read = %lu\n",
-			 fname, (unsigned long)byte_count));
-		/* Assume this isn't an error... the file just looks sort of like a PE/NE file */
+	byte_count = printing_pread_data(fsp, buf, &in_pos, NE_HEADER_SIZE);
+	if (byte_count < NE_HEADER_SIZE) {
+		DBG_NOTICE("File [%s] Windows header too short, "
+			"bytes read = %lu\n",
+			fname,
+			(unsigned long)byte_count);
+		/*
+		 * Assume this isn't an error...
+		 * the file just looks sort of like a PE/NE file
+		 */
 		goto no_version_info;
 	}
 
-	/* The header may be a PE (Portable Executable) or an NE (New Executable) */
+	/*
+	 * The header may be a PE (Portable Executable)
+	 * or an NE (New Executable).
+	 */
 	if (IVAL(buf,PE_HEADER_SIGNATURE_OFFSET) == PE_HEADER_SIGNATURE) {
-		unsigned int num_sections;
-		unsigned int section_table_bytes;
-
-		/* Just skip over optional header to get to section table */
-		if (SMB_VFS_LSEEK(fsp,
-				SVAL(buf,PE_HEADER_OPTIONAL_HEADER_SIZE)-(NE_HEADER_SIZE-PE_HEADER_SIZE),
-				SEEK_CUR) == (off_t)-1) {
-			DEBUG(3,("get_file_version: File [%s] Windows optional header too short, errno = %d\n",
-				fname, errno));
-			goto error_exit;
-		}
-
-		/* get the section table */
-		num_sections        = SVAL(buf,PE_HEADER_NUMBER_OF_SECTIONS);
-		section_table_bytes = num_sections * PE_HEADER_SECT_HEADER_SIZE;
-		if (section_table_bytes == 0)
-			goto error_exit;
-
-		SAFE_FREE(buf);
-		if ((buf=(char *)SMB_MALLOC(section_table_bytes)) == NULL) {
-			DEBUG(0,("get_file_version: PE file [%s] section table malloc failed bytes = %d\n",
-					fname, section_table_bytes));
-			goto error_exit;
-		}
-
-		if ((byte_count = vfs_read_data(fsp, buf, section_table_bytes)) < section_table_bytes) {
-			DEBUG(3,("get_file_version: PE file [%s] Section header too short, bytes read = %lu\n",
-				 fname, (unsigned long)byte_count));
-			goto error_exit;
-		}
-
-		/* Iterate the section table looking for the resource section ".rsrc" */
-		for (i = 0; i < num_sections; i++) {
-			int sec_offset = i * PE_HEADER_SECT_HEADER_SIZE;
-
-			if (strcmp(".rsrc", &buf[sec_offset+PE_HEADER_SECT_NAME_OFFSET]) == 0) {
-				unsigned int section_pos   = IVAL(buf,sec_offset+PE_HEADER_SECT_PTR_DATA_OFFSET);
-				unsigned int section_bytes = IVAL(buf,sec_offset+PE_HEADER_SECT_SIZE_DATA_OFFSET);
-
-				if (section_bytes == 0)
-					goto error_exit;
-
-				SAFE_FREE(buf);
-				if ((buf=(char *)SMB_MALLOC(section_bytes)) == NULL) {
-					DEBUG(0,("get_file_version: PE file [%s] version malloc failed bytes = %d\n",
-							fname, section_bytes));
-					goto error_exit;
-				}
-
-				/* Seek to the start of the .rsrc section info */
-				if (SMB_VFS_LSEEK(fsp, section_pos, SEEK_SET) == (off_t)-1) {
-					DEBUG(3,("get_file_version: PE file [%s] too short for section info, errno = %d\n",
-							fname, errno));
-					goto error_exit;
-				}
-
-				if ((byte_count = vfs_read_data(fsp, buf, section_bytes)) < section_bytes) {
-					DEBUG(3,("get_file_version: PE file [%s] .rsrc section too short, bytes read = %lu\n",
-						 fname, (unsigned long)byte_count));
-					goto error_exit;
-				}
-
-				if (section_bytes < VS_VERSION_INFO_UNICODE_SIZE)
-					goto error_exit;
-
-				for (i=0; i<section_bytes-VS_VERSION_INFO_UNICODE_SIZE; i++) {
-					/* Scan for 1st 3 unicoded bytes followed by word aligned magic value */
-					if (buf[i] == 'V' && buf[i+1] == '\0' && buf[i+2] == 'S') {
-						/* Align to next long address */
-						int pos = (i + sizeof(VS_SIGNATURE)*2 + 3) & 0xfffffffc;
-
-						if (IVAL(buf,pos) == VS_MAGIC_VALUE) {
-							*major = IVAL(buf,pos+VS_MAJOR_OFFSET);
-							*minor = IVAL(buf,pos+VS_MINOR_OFFSET);
-
-							DEBUG(6,("get_file_version: PE file [%s] Version = %08x:%08x (%d.%d.%d.%d)\n",
-									  fname, *major, *minor,
-									  (*major>>16)&0xffff, *major&0xffff,
-									  (*minor>>16)&0xffff, *minor&0xffff));
-							SAFE_FREE(buf);
-							return 1;
-						}
-					}
-				}
-			}
-		}
-
-		/* Version info not found, fall back to origin date/time */
-		DEBUG(10,("get_file_version: PE file [%s] has no version info\n", fname));
-		SAFE_FREE(buf);
-		return 0;
-
-	} else if (SVAL(buf,NE_HEADER_SIGNATURE_OFFSET) == NE_HEADER_SIGNATURE) {
-		if (CVAL(buf,NE_HEADER_TARGET_OS_OFFSET) != NE_HEADER_TARGOS_WIN ) {
-			DEBUG(3,("get_file_version: NE file [%s] wrong target OS = 0x%x\n",
-					fname, CVAL(buf,NE_HEADER_TARGET_OS_OFFSET)));
-			/* At this point, we assume the file is in error. It still could be somthing
-			 * else besides a NE file, but it unlikely at this point. */
-			goto error_exit;
-		}
-
-		/* Allocate a bit more space to speed up things */
-		SAFE_FREE(buf);
-		if ((buf=(char *)SMB_MALLOC(VS_NE_BUF_SIZE)) == NULL) {
-			DEBUG(0,("get_file_version: NE file [%s] malloc failed bytes  = %d\n",
-					fname, PE_HEADER_SIZE));
-			goto error_exit;
-		}
-
-		/* This is a HACK! I got tired of trying to sort through the messy
-		 * 'NE' file format. If anyone wants to clean this up please have at
-		 * it, but this works. 'NE' files will eventually fade away. JRR */
-		while((byte_count = vfs_read_data(fsp, buf, VS_NE_BUF_SIZE)) > 0) {
-			/* Cover case that should not occur in a well formed 'NE' .dll file */
-			if (byte_count-VS_VERSION_INFO_SIZE <= 0) break;
-
-			for(i=0; i<byte_count; i++) {
-				/* Fast skip past data that can't possibly match */
-				if (buf[i] != 'V') continue;
-
-				/* Potential match data crosses buf boundry, move it to beginning
-				 * of buf, and fill the buf with as much as it will hold. */
-				if (i>byte_count-VS_VERSION_INFO_SIZE) {
-					int bc;
-
-					memcpy(buf, &buf[i], byte_count-i);
-					if ((bc = vfs_read_data(fsp, &buf[byte_count-i], VS_NE_BUF_SIZE-
-								   (byte_count-i))) < 0) {
-
-						DEBUG(0,("get_file_version: NE file [%s] Read error, errno=%d\n",
-								 fname, errno));
-						goto error_exit;
-					}
-
-					byte_count = bc + (byte_count - i);
-					if (byte_count<VS_VERSION_INFO_SIZE) break;
-
-					i = 0;
-				}
-
-				/* Check that the full signature string and the magic number that
-				 * follows exist (not a perfect solution, but the chances that this
-				 * occurs in code is, well, remote. Yes I know I'm comparing the 'V'
-				 * twice, as it is simpler to read the code. */
-				if (strcmp(&buf[i], VS_SIGNATURE) == 0) {
-					/* Compute skip alignment to next long address */
-					int skip = -(SMB_VFS_LSEEK(fsp, 0, SEEK_CUR) - (byte_count - i) +
-								 sizeof(VS_SIGNATURE)) & 3;
-					if (IVAL(buf,i+sizeof(VS_SIGNATURE)+skip) != 0xfeef04bd) continue;
-
-					*major = IVAL(buf,i+sizeof(VS_SIGNATURE)+skip+VS_MAJOR_OFFSET);
-					*minor = IVAL(buf,i+sizeof(VS_SIGNATURE)+skip+VS_MINOR_OFFSET);
-					DEBUG(6,("get_file_version: NE file [%s] Version = %08x:%08x (%d.%d.%d.%d)\n",
-							  fname, *major, *minor,
-							  (*major>>16)&0xffff, *major&0xffff,
-							  (*minor>>16)&0xffff, *minor&0xffff));
-					SAFE_FREE(buf);
-					return 1;
-				}
-			}
-		}
-
-		/* Version info not found, fall back to origin date/time */
-		DEBUG(0,("get_file_version: NE file [%s] Version info not found\n", fname));
-		SAFE_FREE(buf);
-		return 0;
-
-	} else
-		/* Assume this isn't an error... the file just looks sort of like a PE/NE file */
-		DEBUG(3,("get_file_version: File [%s] unknown file format, signature = 0x%x\n",
-				fname, IVAL(buf,PE_HEADER_SIGNATURE_OFFSET)));
+		return handle_pe_file(fsp,
+					in_pos,
+					fname,
+					buf,
+					major,
+					minor);
+	} else if (SVAL(buf,NE_HEADER_SIGNATURE_OFFSET) ==
+			NE_HEADER_SIGNATURE) {
+		return handle_ne_file(fsp,
+					in_pos,
+					fname,
+					buf,
+					major,
+					minor);
+	} else {
+		/*
+		 * Assume this isn't an error... the file just
+		 * looks sort of like a PE/NE file.
+		 */
+		DBG_NOTICE("File [%s] unknown file format, signature = 0x%x\n",
+			fname,
+			IVAL(buf,PE_HEADER_SIGNATURE_OFFSET));
+		/* Fallthrough into no_version_info: */
+	}
 
 	no_version_info:
 		SAFE_FREE(buf);
@@ -663,19 +980,22 @@ static int file_version_is_newer(connection_struct *conn, fstring new_file, fstr
 /****************************************************************************
 Determine the correct cVersion associated with an architecture and driver
 ****************************************************************************/
-static uint32_t get_correct_cversion(struct auth_session_info *session_info,
+static uint32_t get_correct_cversion(const struct auth_session_info *session_info,
 				   const char *architecture,
 				   const char *driverpath_in,
+				   const char *driver_directory,
 				   WERROR *perr)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	int cversion = -1;
 	NTSTATUS          nt_status;
 	struct smb_filename *smb_fname = NULL;
-	char *driverpath = NULL;
 	files_struct      *fsp = NULL;
+	struct conn_struct_tos *c = NULL;
 	connection_struct *conn = NULL;
-	char *oldcwd;
 	char *printdollar = NULL;
+	char *printdollar_path = NULL;
+	char *working_dir = NULL;
 	int printdollar_snum;
 
 	*perr = WERR_INVALID_PARAMETER;
@@ -684,6 +1004,7 @@ static uint32_t get_correct_cversion(struct auth_session_info *session_info,
 	if (strcmp(architecture, SPL_ARCH_WIN40) == 0) {
 		DEBUG(10,("get_correct_cversion: Driver is Win9x, cversion = 0\n"));
 		*perr = WERR_OK;
+		TALLOC_FREE(frame);
 		return 0;
 	}
 
@@ -691,32 +1012,57 @@ static uint32_t get_correct_cversion(struct auth_session_info *session_info,
 	if (strcmp(architecture, SPL_ARCH_X64) == 0) {
 		DEBUG(10,("get_correct_cversion: Driver is x64, cversion = 3\n"));
 		*perr = WERR_OK;
+		TALLOC_FREE(frame);
 		return 3;
 	}
 
-	printdollar_snum = find_service(talloc_tos(), "print$", &printdollar);
+	printdollar_snum = find_service(frame, "print$", &printdollar);
 	if (!printdollar) {
 		*perr = WERR_NOT_ENOUGH_MEMORY;
+		TALLOC_FREE(frame);
 		return -1;
 	}
 	if (printdollar_snum == -1) {
 		*perr = WERR_BAD_NET_NAME;
+		TALLOC_FREE(frame);
 		return -1;
 	}
 
-	nt_status = create_conn_struct_cwd(talloc_tos(),
-					   server_event_context(),
-					   server_messaging_context(),
-					   &conn,
-					   printdollar_snum,
-					   lp_path(talloc_tos(), printdollar_snum),
-					   session_info, &oldcwd);
+	printdollar_path = lp_path(frame, printdollar_snum);
+	if (printdollar_path == NULL) {
+		*perr = WERR_NOT_ENOUGH_MEMORY;
+		TALLOC_FREE(frame);
+		return -1;
+	}
+
+	working_dir = talloc_asprintf(frame,
+				      "%s/%s",
+				      printdollar_path,
+				      architecture);
+	/*
+	 * If the driver has been uploaded into a temorpary driver
+	 * directory, switch to the driver directory.
+	 */
+	if (driver_directory != NULL) {
+		working_dir = talloc_asprintf(frame, "%s/%s/%s",
+					      printdollar_path,
+					      architecture,
+					      driver_directory);
+	}
+
+	nt_status = create_conn_struct_tos_cwd(server_messaging_context(),
+					       printdollar_snum,
+					       working_dir,
+					       session_info,
+					       &c);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		DEBUG(0,("get_correct_cversion: create_conn_struct "
 			 "returned %s\n", nt_errstr(nt_status)));
 		*perr = ntstatus_to_werror(nt_status);
+		TALLOC_FREE(frame);
 		return -1;
 	}
+	conn = c->conn;
 
 	nt_status = set_conn_force_user_group(conn, printdollar_snum);
 	if (!NT_STATUS_IS_OK(nt_status)) {
@@ -731,18 +1077,11 @@ static uint32_t get_correct_cversion(struct auth_session_info *session_info,
 		goto error_free_conn;
 	}
 
-	/* Open the driver file (Portable Executable format) and determine the
-	 * deriver the cversion. */
-	driverpath = talloc_asprintf(talloc_tos(),
-					"%s/%s",
-					architecture,
-					driverpath_in);
-	if (!driverpath) {
-		*perr = WERR_NOT_ENOUGH_MEMORY;
-		goto error_exit;
-	}
-
-	nt_status = driver_unix_convert(conn, driverpath, &smb_fname);
+	/*
+	 * We switch to the directory where the driver files are located,
+	 * so only work on the file names
+	 */
+	nt_status = driver_unix_convert(conn, driverpath_in, &smb_fname);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		*perr = ntstatus_to_werror(nt_status);
 		goto error_exit;
@@ -830,19 +1169,14 @@ static uint32_t get_correct_cversion(struct auth_session_info *session_info,
  error_exit:
 	unbecome_user();
  error_free_conn:
-	TALLOC_FREE(smb_fname);
 	if (fsp != NULL) {
 		close_file(NULL, fsp, NORMAL_CLOSE);
-	}
-	if (conn != NULL) {
-		vfs_ChDir(conn, oldcwd);
-		SMB_VFS_DISCONNECT(conn);
-		conn_free(conn);
 	}
 	if (!W_ERROR_IS_OK(*perr)) {
 		cversion = -1;
 	}
 
+	TALLOC_FREE(frame);
 	return cversion;
 }
 
@@ -857,7 +1191,7 @@ static uint32_t get_correct_cversion(struct auth_session_info *session_info,
 } while (0);
 
 static WERROR clean_up_driver_struct_level(TALLOC_CTX *mem_ctx,
-					   struct auth_session_info *session_info,
+					   const struct auth_session_info *session_info,
 					   const char *architecture,
 					   const char **driver_path,
 					   const char **data_file,
@@ -956,8 +1290,11 @@ static WERROR clean_up_driver_struct_level(TALLOC_CTX *mem_ctx,
 	 *	NT2K: cversion=3
 	 */
 
-	*version = get_correct_cversion(session_info, short_architecture,
-					*driver_path, &err);
+	*version = get_correct_cversion(session_info,
+					short_architecture,
+					*driver_path,
+					*driver_directory,
+					&err);
 	if (*version == -1) {
 		return err;
 	}
@@ -969,8 +1306,8 @@ static WERROR clean_up_driver_struct_level(TALLOC_CTX *mem_ctx,
 ****************************************************************************/
 
 WERROR clean_up_driver_struct(TALLOC_CTX *mem_ctx,
-			      struct auth_session_info *session_info,
-			      struct spoolss_AddDriverInfoCtr *r,
+			      const struct auth_session_info *session_info,
+			      const struct spoolss_AddDriverInfoCtr *r,
 			      uint32_t flags,
 			      const char **driver_directory)
 {
@@ -1123,7 +1460,7 @@ static WERROR move_driver_file_to_download_area(TALLOC_CTX *mem_ctx,
 				 "to rename [%s] to [%s]: %s\n",
 				 smb_fname_old->base_name, new_name,
 				 nt_errstr(status)));
-			ret = WERR_ACCESS_DENIED;
+			ret = WERR_APP_INIT_FAILURE;
 			goto out;
 		}
 	}
@@ -1135,21 +1472,21 @@ static WERROR move_driver_file_to_download_area(TALLOC_CTX *mem_ctx,
 	return ret;
 }
 
-WERROR move_driver_to_download_area(struct auth_session_info *session_info,
-				    struct spoolss_AddDriverInfoCtr *r,
+WERROR move_driver_to_download_area(const struct auth_session_info *session_info,
+				    const struct spoolss_AddDriverInfoCtr *r,
 				    const char *driver_directory)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	struct spoolss_AddDriverInfo3 *driver;
 	struct spoolss_AddDriverInfo3 converted_driver;
 	const char *short_architecture;
 	struct smb_filename *smb_dname = NULL;
 	char *new_dir = NULL;
+	struct conn_struct_tos *c = NULL;
 	connection_struct *conn = NULL;
 	NTSTATUS nt_status;
 	int i;
-	TALLOC_CTX *ctx = talloc_tos();
 	int ver = 0;
-	char *oldcwd;
 	char *printdollar = NULL;
 	int printdollar_snum;
 	WERROR err = WERR_OK;
@@ -1168,35 +1505,39 @@ WERROR move_driver_to_download_area(struct auth_session_info *session_info,
 		break;
 	default:
 		DEBUG(0,("move_driver_to_download_area: Unknown info level (%u)\n", (unsigned int)r->level));
+		TALLOC_FREE(frame);
 		return WERR_INVALID_LEVEL;
 	}
 
 	short_architecture = get_short_archi(driver->architecture);
 	if (!short_architecture) {
+		TALLOC_FREE(frame);
 		return WERR_UNKNOWN_PRINTER_DRIVER;
 	}
 
-	printdollar_snum = find_service(ctx, "print$", &printdollar);
+	printdollar_snum = find_service(frame, "print$", &printdollar);
 	if (!printdollar) {
+		TALLOC_FREE(frame);
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
 	if (printdollar_snum == -1) {
+		TALLOC_FREE(frame);
 		return WERR_BAD_NET_NAME;
 	}
 
-	nt_status = create_conn_struct_cwd(talloc_tos(),
-					   server_event_context(),
-					   server_messaging_context(),
-					   &conn,
-					   printdollar_snum,
-					   lp_path(talloc_tos(), printdollar_snum),
-					   session_info, &oldcwd);
+	nt_status = create_conn_struct_tos_cwd(server_messaging_context(),
+					       printdollar_snum,
+					       lp_path(frame, printdollar_snum),
+					       session_info,
+					       &c);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		DEBUG(0,("move_driver_to_download_area: create_conn_struct "
 			 "returned %s\n", nt_errstr(nt_status)));
 		err = ntstatus_to_werror(nt_status);
+		TALLOC_FREE(frame);
 		return err;
 	}
+	conn = c->conn;
 
 	nt_status = set_conn_force_user_group(conn, printdollar_snum);
 	if (!NT_STATUS_IS_OK(nt_status)) {
@@ -1211,7 +1552,7 @@ WERROR move_driver_to_download_area(struct auth_session_info *session_info,
 		goto err_free_conn;
 	}
 
-	new_dir = talloc_asprintf(ctx,
+	new_dir = talloc_asprintf(frame,
 				"%s/%d",
 				short_architecture,
 				driver->version);
@@ -1257,7 +1598,7 @@ WERROR move_driver_to_download_area(struct auth_session_info *session_info,
 
 	if (driver->driver_path && strlen(driver->driver_path)) {
 
-		err = move_driver_file_to_download_area(ctx,
+		err = move_driver_file_to_download_area(frame,
 							conn,
 							driver->driver_path,
 							short_architecture,
@@ -1272,7 +1613,7 @@ WERROR move_driver_to_download_area(struct auth_session_info *session_info,
 	if (driver->data_file && strlen(driver->data_file)) {
 		if (!strequal(driver->data_file, driver->driver_path)) {
 
-			err = move_driver_file_to_download_area(ctx,
+			err = move_driver_file_to_download_area(frame,
 								conn,
 								driver->data_file,
 								short_architecture,
@@ -1289,7 +1630,7 @@ WERROR move_driver_to_download_area(struct auth_session_info *session_info,
 		if (!strequal(driver->config_file, driver->driver_path) &&
 		    !strequal(driver->config_file, driver->data_file)) {
 
-			err = move_driver_file_to_download_area(ctx,
+			err = move_driver_file_to_download_area(frame,
 								conn,
 								driver->config_file,
 								short_architecture,
@@ -1307,7 +1648,7 @@ WERROR move_driver_to_download_area(struct auth_session_info *session_info,
 		    !strequal(driver->help_file, driver->data_file) &&
 		    !strequal(driver->help_file, driver->config_file)) {
 
-			err = move_driver_file_to_download_area(ctx,
+			err = move_driver_file_to_download_area(frame,
 								conn,
 								driver->help_file,
 								short_architecture,
@@ -1333,7 +1674,7 @@ WERROR move_driver_to_download_area(struct auth_session_info *session_info,
 					}
 				}
 
-				err = move_driver_file_to_download_area(ctx,
+				err = move_driver_file_to_download_area(frame,
 									conn,
 									driver->dependent_files->string[i],
 									short_architecture,
@@ -1352,14 +1693,7 @@ WERROR move_driver_to_download_area(struct auth_session_info *session_info,
  err_exit:
 	unbecome_user();
  err_free_conn:
-	TALLOC_FREE(smb_dname);
-
-	if (conn != NULL) {
-		vfs_ChDir(conn, oldcwd);
-		SMB_VFS_DISCONNECT(conn);
-		conn_free(conn);
-	}
-
+	TALLOC_FREE(frame);
 	return err;
 }
 
@@ -1374,7 +1708,7 @@ bool printer_driver_in_use(TALLOC_CTX *mem_ctx,
 {
 	int snum;
 	int n_services = lp_numservices();
-	bool in_use = False;
+	bool in_use = false;
 	struct spoolss_PrinterInfo2 *pinfo2 = NULL;
 	WERROR result;
 
@@ -1399,7 +1733,7 @@ bool printer_driver_in_use(TALLOC_CTX *mem_ctx,
 		}
 
 		if (strequal(r->driver_name, pinfo2->drivername)) {
-			in_use = True;
+			in_use = true;
 		}
 
 		TALLOC_FREE(pinfo2);
@@ -1416,26 +1750,31 @@ bool printer_driver_in_use(TALLOC_CTX *mem_ctx,
 		/* we can still remove the driver if there is one of
 		   "Windows NT x86" version 2 or 3 left */
 
-		if (!strequal("Windows NT x86", r->architecture)) {
+		if (strequal(SPOOLSS_ARCHITECTURE_NT_X86, r->architecture)) {
+			if (r->version == 2) {
+				werr = winreg_get_driver(mem_ctx, b,
+							 r->architecture,
+							 r->driver_name,
+							 3, &driver);
+			} else if (r->version == 3) {
+				werr = winreg_get_driver(mem_ctx, b,
+							 r->architecture,
+							 r->driver_name,
+							 2, &driver);
+			} else {
+				DBG_ERR("Unknown driver version (%d)\n",
+					r->version);
+				werr = WERR_UNKNOWN_PRINTER_DRIVER;
+			}
+		} else if (strequal(SPOOLSS_ARCHITECTURE_x64, r->architecture)) {
 			werr = winreg_get_driver(mem_ctx, b,
-						 "Windows NT x86",
+						 SPOOLSS_ARCHITECTURE_NT_X86,
 						 r->driver_name,
 						 DRIVER_ANY_VERSION,
 						 &driver);
-		} else if (r->version == 2) {
-			werr = winreg_get_driver(mem_ctx, b,
-						 "Windows NT x86",
-						 r->driver_name,
-						 3, &driver);
-		} else if (r->version == 3) {
-			werr = winreg_get_driver(mem_ctx, b,
-						 "Windows NT x86",
-						 r->driver_name,
-						 2, &driver);
 		} else {
-			DEBUG(0, ("printer_driver_in_use: ERROR!"
-				  " unknown driver version (%d)\n",
-				  r->version));
+			DBG_ERR("Unknown driver architecture: %s\n",
+				r->architecture);
 			werr = WERR_UNKNOWN_PRINTER_DRIVER;
 		}
 
@@ -1443,7 +1782,7 @@ bool printer_driver_in_use(TALLOC_CTX *mem_ctx,
 
 		if ( W_ERROR_IS_OK(werr) ) {
 			/* it's ok to remove the driver, we have other architctures left */
-			in_use = False;
+			in_use = false;
 			talloc_free(driver);
 		}
 	}
@@ -1701,41 +2040,45 @@ err_out:
 bool delete_driver_files(const struct auth_session_info *session_info,
 			 const struct spoolss_DriverInfo8 *r)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	const char *short_arch;
-	connection_struct *conn;
+	struct conn_struct_tos *c = NULL;
+	connection_struct *conn = NULL;
 	NTSTATUS nt_status;
-	char *oldcwd;
 	char *printdollar = NULL;
 	int printdollar_snum;
 	bool ret = false;
 
 	if (!r) {
+		TALLOC_FREE(frame);
 		return false;
 	}
 
 	DEBUG(6,("delete_driver_files: deleting driver [%s] - version [%d]\n",
 		r->driver_name, r->version));
 
-	printdollar_snum = find_service(talloc_tos(), "print$", &printdollar);
+	printdollar_snum = find_service(frame, "print$", &printdollar);
 	if (!printdollar) {
+		TALLOC_FREE(frame);
 		return false;
 	}
 	if (printdollar_snum == -1) {
+		TALLOC_FREE(frame);
 		return false;
 	}
 
-	nt_status = create_conn_struct_cwd(talloc_tos(),
-					   server_event_context(),
-					   server_messaging_context(),
-					   &conn,
-					   printdollar_snum,
-					   lp_path(talloc_tos(), printdollar_snum),
-					   session_info, &oldcwd);
+	nt_status = create_conn_struct_tos_cwd(server_messaging_context(),
+					       printdollar_snum,
+					       lp_path(frame, printdollar_snum),
+					       session_info,
+					       &c);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		DEBUG(0,("delete_driver_files: create_conn_struct "
 			 "returned %s\n", nt_errstr(nt_status)));
+		TALLOC_FREE(frame);
 		return false;
 	}
+	conn = c->conn;
 
 	nt_status = set_conn_force_user_group(conn, printdollar_snum);
 	if (!NT_STATUS_IS_OK(nt_status)) {
@@ -1798,11 +2141,7 @@ bool delete_driver_files(const struct auth_session_info *session_info,
  err_out:
 	unbecome_user();
  err_free_conn:
-	if (conn != NULL) {
-		vfs_ChDir(conn, oldcwd);
-		SMB_VFS_DISCONNECT(conn);
-		conn_free(conn);
-	}
+	TALLOC_FREE(frame);
 	return ret;
 }
 

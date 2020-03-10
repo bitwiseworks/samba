@@ -22,6 +22,7 @@
 #include "librpc/gen_ndr/messaging.h"
 #include "lib/dbwrap/dbwrap.h"
 #include "lib/dbwrap/dbwrap_rbt.h"
+#include "lib/util/server_id.h"
 #include "messages.h"
 #include "proto.h"
 #include "globals.h"
@@ -47,7 +48,6 @@ static int notify_context_destructor(struct notify_context *ctx);
 
 struct notify_context *notify_init(
 	TALLOC_CTX *mem_ctx, struct messaging_context *msg,
-	struct tevent_context *ev,
 	struct smbd_server_connection *sconn,
 	void (*callback)(struct smbd_server_connection *sconn,
 			 void *, struct timespec,

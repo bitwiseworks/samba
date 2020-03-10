@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 
+from __future__ import print_function
 import optparse
 import sys
 import os
@@ -71,7 +72,8 @@ class DescriptorTests(samba.tests.TestCase):
             class_dn = "CN=%s,%s" % (class_name, self.schema_dn)
             try:
                 self.ldb_admin.search(base=class_dn, attrs=["name"])
-            except LdbError, (num, _):
+            except LdbError as e:
+                (num, _) = e.args
                 self.assertEquals(num, ERR_NO_SUCH_OBJECT)
                 break
 
@@ -94,7 +96,7 @@ systemOnly: FALSE
             if isinstance(desc, str):
                 ldif += "nTSecurityDescriptor: %s" % desc
             elif isinstance(desc, security.descriptor):
-                ldif += "nTSecurityDescriptor:: %s" % base64.b64encode(ndr_pack(desc))
+                ldif += "nTSecurityDescriptor:: %s" % base64.b64encode(ndr_pack(desc)).decode('utf8')
         _ldb.add_ldif(ldif)
         return class_dn
 
@@ -111,7 +113,7 @@ instanceType: 4
             if isinstance(desc, str):
                 ldif += "nTSecurityDescriptor: %s" % desc
             elif isinstance(desc, security.descriptor):
-                ldif += "nTSecurityDescriptor:: %s" % base64.b64encode(ndr_pack(desc))
+                ldif += "nTSecurityDescriptor:: %s" % base64.b64encode(ndr_pack(desc)).decode('utf8')
         _ldb.add_ldif(ldif)
 
     def create_configuration_specifier(self, _ldb, object_dn, desc=None):
@@ -125,7 +127,7 @@ showInAdvancedViewOnly: TRUE
             if isinstance(desc, str):
                 ldif += "nTSecurityDescriptor: %s" % desc
             elif isinstance(desc, security.descriptor):
-                ldif += "nTSecurityDescriptor:: %s" % base64.b64encode(ndr_pack(desc))
+                ldif += "nTSecurityDescriptor:: %s" % base64.b64encode(ndr_pack(desc)).decode('utf8')
         _ldb.add_ldif(ldif)
 
     def get_ldb_connection(self, target_username, target_password):
@@ -150,7 +152,12 @@ showInAdvancedViewOnly: TRUE
         self.schema_dn = self.ldb_admin.get_schema_basedn().get_linearized()
         self.domain_sid = security.dom_sid(self.ldb_admin.get_domain_sid())
         self.sd_utils = sd_utils.SDUtils(self.ldb_admin)
-        print "baseDN: %s" % self.base_dn
+        self.addCleanup(self.delete_admin_connection)
+        print("baseDN: %s" % self.base_dn)
+
+    def delete_admin_connection(self):
+        del self.sd_utils
+        del self.ldb_admin
 
     ################################################################################################
 
@@ -358,7 +365,7 @@ class OwnerGroupDescriptorTests(DescriptorTests):
         self.assertTrue(ace in desc_sddl)
         # Make sure we have identical result for both "add" and "modify"
         res = re.search("(O:.*G:.*?)D:", desc_sddl).group(1)
-        print self._testMethodName
+        print(self._testMethodName)
         test_number = self._testMethodName[5:]
         self.assertEqual(self.results[self.DS_BEHAVIOR][test_number], res)
 
@@ -1965,7 +1972,7 @@ class RightsAttributesTests(DescriptorTests):
         object_dn = "OU=test_domain_ou1," + self.base_dn
         delete_force(self.ldb_admin, object_dn)
         self.ldb_admin.create_ou(object_dn)
-        print self.get_users_domain_dn("testuser_attr")
+        print(self.get_users_domain_dn("testuser_attr"))
         user_sid = self.sd_utils.get_object_sid(self.get_users_domain_dn("testuser_attr"))
         #give testuser1 read access so attributes can be retrieved
         mod = "(A;CI;RP;;;%s)" % str(user_sid)
@@ -2115,12 +2122,12 @@ class SdAutoInheritTests(DescriptorTests):
         self.assertFalse(sub_sddl2 == sub_sddl0)
 
         if ace not in ou_sddl2:
-            print "ou0: %s" % ou_sddl0
-            print "ou2: %s" % ou_sddl2
+            print("ou0: %s" % ou_sddl0)
+            print("ou2: %s" % ou_sddl2)
 
         if sub_ace not in sub_sddl2:
-            print "sub0: %s" % sub_sddl0
-            print "sub2: %s" % sub_sddl2
+            print("sub0: %s" % sub_sddl0)
+            print("sub2: %s" % sub_sddl2)
 
         self.assertTrue(ace in ou_sddl2)
         self.assertTrue(sub_ace in sub_sddl2)

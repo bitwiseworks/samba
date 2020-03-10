@@ -2,6 +2,7 @@
 # and for SAMBA_ macros for building libraries, binaries etc
 
 import os, sys, re, fnmatch, shlex
+from optparse import SUPPRESS_HELP
 import Build, Options, Utils, Task, Logs, Configure
 from TaskGen import feature, before, after
 from Configure import conf, ConfigurationContext
@@ -474,6 +475,7 @@ def CHECK_MAKEFLAGS(bld):
     if makeflags is None:
         return
     jobs_set = False
+    jobs = None
     # we need to use shlex.split to cope with the escaping of spaces
     # in makeflags
     for opt in shlex.split(makeflags):
@@ -496,17 +498,21 @@ def CHECK_MAKEFLAGS(bld):
             setattr(Options.options, opt[0:loc], opt[loc+1:])
         elif opt[0] != '-':
             for v in opt:
-                if v == 'j':
+                if re.search(r'j[0-9]*$', v):
                     jobs_set = True
+                    jobs = opt.strip('j')
                 elif v == 'k':
                     Options.options.keep = True
-        elif opt == '-j':
+        elif re.search(r'-j[0-9]*$', opt):
             jobs_set = True
+            jobs = opt.strip('-j')
         elif opt == '-k':
             Options.options.keep = True
     if not jobs_set:
         # default to one job
         Options.options.jobs = 1
+    elif jobs_set and jobs:
+        Options.options.jobs = int(jobs)
 
 Build.BuildContext.CHECK_MAKEFLAGS = CHECK_MAKEFLAGS
 
@@ -677,3 +683,27 @@ def samba_before_apply_obj_vars(self):
         if is_standard_libpath(v, i):
             v['LIBPATH'].remove(i)
 
+def samba_add_onoff_option(opt, option, help=(), dest=None, default=True,
+                           with_name="with", without_name="without"):
+    if default is None:
+        default_str = "auto"
+    elif default is True:
+        default_str = "yes"
+    elif default is False:
+        default_str = "no"
+    else:
+        default_str = str(default)
+
+    if help == ():
+        help = ("Build with %s support (default=%s)" % (option, default_str))
+    if dest is None:
+        dest = "with_%s" % option.replace('-', '_')
+
+    with_val = "--%s-%s" % (with_name, option)
+    without_val = "--%s-%s" % (without_name, option)
+
+    opt.add_option(with_val, help=help, action="store_true", dest=dest,
+                   default=default)
+    opt.add_option(without_val, help=SUPPRESS_HELP, action="store_false",
+                   dest=dest)
+Options.Handler.samba_add_onoff_option = samba_add_onoff_option

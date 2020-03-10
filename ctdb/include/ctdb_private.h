@@ -23,6 +23,8 @@
 #include "ctdb_client.h"
 #include <sys/socket.h>
 
+#include "common/db_hash.h"
+
 /*
   array of tcp connections
  */
@@ -287,6 +289,7 @@ struct ctdb_context {
 	void *private_data; /* private to transport */
 	struct ctdb_db_context *db_list;
 	struct srvid_context *srv;
+	struct srvid_context *tunnels;
 	struct ctdb_daemon_data daemon;
 	struct ctdb_statistics statistics;
 	struct ctdb_statistics statistics_current;
@@ -300,7 +303,6 @@ struct ctdb_context {
 	bool do_setsched;
 	const char *event_script_dir;
 	const char *notification_script;
-	const char *default_public_interface;
 	pid_t ctdbd_pid;
 	pid_t recoverd_pid;
 	enum ctdb_runstate runstate;
@@ -342,9 +344,7 @@ struct ctdb_db_context {
 	struct ctdb_db_context *next, *prev;
 	struct ctdb_context *ctdb;
 	uint32_t db_id;
-	bool persistent;
-	bool readonly; /* Do we support read-only delegations ? */
-	bool sticky; /* Do we support sticky records ? */
+	uint8_t db_flags;
 	const char *db_name;
 	const char *db_path;
 	struct tdb_wrap *ltdb;
@@ -376,6 +376,7 @@ struct ctdb_db_context {
 	struct lock_context *lock_current;
 	struct lock_context *lock_pending;
 	int lock_num_current;
+	struct db_hash_context *lock_log;
 
 	struct ctdb_call_state *pending_calls;
 
@@ -387,6 +388,8 @@ struct ctdb_db_context {
 
 	bool push_started;
 	void *push_state;
+
+	struct hash_count_context *migratedb;
 };
 
 
@@ -509,8 +512,6 @@ struct ctdb_call_state *ctdb_daemon_call_send_remote(
 int ctdb_daemon_call_recv(struct ctdb_call_state *state,
 			  struct ctdb_call *call);
 
-void ctdb_send_keepalive(struct ctdb_context *ctdb, uint32_t destnode);
-
 int ctdb_start_revoke_ro_record(struct ctdb_context *ctdb,
 				struct ctdb_db_context *ctdb_db,
 				TDB_DATA key, struct ctdb_ltdb_header *header,
@@ -520,6 +521,8 @@ int ctdb_add_revoke_deferred_call(struct ctdb_context *ctdb,
 				  struct ctdb_db_context *ctdb_db,
 				  TDB_DATA key, struct ctdb_req_header *hdr,
 				  deferred_requeue_fn fn, void *call_context);
+
+int ctdb_migration_init(struct ctdb_db_context *ctdb_db);
 
 /* from server/ctdb_control.c */
 
@@ -548,8 +551,9 @@ int daemon_register_message_handler(struct ctdb_context *ctdb,
 				    uint32_t client_id, uint64_t srvid);
 int daemon_deregister_message_handler(struct ctdb_context *ctdb,
 				      uint32_t client_id, uint64_t srvid);
-int daemon_check_srvids(struct ctdb_context *ctdb, TDB_DATA indata,
-			TDB_DATA *outdata);
+
+void daemon_tunnel_handler(uint64_t tunnel_id, TDB_DATA data,
+			   void *private_data);
 
 int ctdb_start_daemon(struct ctdb_context *ctdb, bool do_fork);
 
@@ -581,6 +585,8 @@ struct ctdb_client *ctdb_find_client_by_pid(struct ctdb_context *ctdb,
 					    pid_t pid);
 
 int32_t ctdb_control_process_exists(struct ctdb_context *ctdb, pid_t pid);
+int32_t ctdb_control_check_pid_srvid(struct ctdb_context *ctdb,
+				     TDB_DATA indata);
 
 int ctdb_control_getnodesfile(struct ctdb_context *ctdb, uint32_t opcode,
 			      TDB_DATA indata, TDB_DATA *outdata);
@@ -632,6 +638,9 @@ bool ctdb_db_allow_access(struct ctdb_db_context *ctdb_db);
 
 void ctdb_start_keepalive(struct ctdb_context *ctdb);
 void ctdb_stop_keepalive(struct ctdb_context *ctdb);
+
+void ctdb_request_keepalive(struct ctdb_context *ctdb,
+			    struct ctdb_req_header *hdr);
 
 /* from server/ctdb_lock.c */
 
@@ -716,9 +725,12 @@ int ctdb_set_db_readonly(struct ctdb_context *ctdb,
 
 int ctdb_process_deferred_attach(struct ctdb_context *ctdb);
 
-int32_t ctdb_control_db_attach(struct ctdb_context *ctdb, TDB_DATA indata,
-			       TDB_DATA *outdata, uint64_t tdb_flags,
-			       bool persistent, uint32_t client_id,
+int32_t ctdb_control_db_attach(struct ctdb_context *ctdb,
+			       TDB_DATA indata,
+			       TDB_DATA *outdata,
+			       uint8_t db_flags,
+			       uint32_t srcnode,
+			       uint32_t client_id,
 			       struct ctdb_req_control_old *c,
 			       bool *async_reply);
 int32_t ctdb_control_db_detach(struct ctdb_context *ctdb, TDB_DATA indata,
@@ -740,19 +752,13 @@ int32_t ctdb_control_get_db_statistics(struct ctdb_context *ctdb,
 
 /* from ctdb_monitor.c */
 
-int ctdb_set_notification_script(struct ctdb_context *ctdb, const char *script);
 void ctdb_run_notification_script(struct ctdb_context *ctdb, const char *event);
 
-void ctdb_disable_monitoring(struct ctdb_context *ctdb);
-void ctdb_enable_monitoring(struct ctdb_context *ctdb);
 void ctdb_stop_monitoring(struct ctdb_context *ctdb);
 
 void ctdb_wait_for_first_recovery(struct ctdb_context *ctdb);
 
 int32_t ctdb_control_modflags(struct ctdb_context *ctdb, TDB_DATA indata);
-
-int32_t ctdb_monitoring_mode(struct ctdb_context *ctdb);
-bool ctdb_stopped_monitoring(struct ctdb_context *ctdb);
 
 /* from ctdb_persistent.c */
 
@@ -959,6 +965,20 @@ int32_t ctdb_control_get_tunable(struct ctdb_context *ctdb, TDB_DATA indata,
 int32_t ctdb_control_set_tunable(struct ctdb_context *ctdb, TDB_DATA indata);
 int32_t ctdb_control_list_tunables(struct ctdb_context *ctdb,
 				   TDB_DATA *outdata);
+
+/* from ctdb_tunnel.c */
+
+int32_t ctdb_control_tunnel_register(struct ctdb_context *ctdb,
+				     uint32_t client_id, uint64_t tunnel_id);
+int32_t ctdb_control_tunnel_deregister(struct ctdb_context *ctdb,
+				       uint32_t client_id, uint64_t tunnel_id);
+
+int ctdb_daemon_send_tunnel(struct ctdb_context *ctdb, uint32_t destnode,
+			    uint64_t tunnel_id, uint32_t client_id,
+			    TDB_DATA data);
+
+void ctdb_request_tunnel(struct ctdb_context *ctdb,
+			 struct ctdb_req_header *hdr);
 
 /* from ctdb_update_record.c */
 

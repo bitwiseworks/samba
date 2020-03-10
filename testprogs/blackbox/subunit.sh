@@ -28,14 +28,14 @@ timestamp() {
 subunit_start_test () {
   # emit the current protocol start-marker for test $1
   timestamp
-  echo "test: $1"
+  printf 'test: %s\n' "$1"
 }
 
 
 subunit_pass_test () {
   # emit the current protocol test passed marker for test $1
   timestamp
-  echo "success: $1"
+  printf 'success: %s\n' "$1"
 }
 
 # This is just a hack as we have some broken scripts
@@ -48,7 +48,7 @@ subunit_fail_test () {
   # we use stdin because the failure message can be arbitrarily long, and this
   # makes it convenient to write in scripts (using <<END syntax.
   timestamp
-  echo "failure: $1 ["
+  printf 'failure: %s [\n' "$1"
   cat -
   echo "]"
 }
@@ -60,7 +60,7 @@ subunit_error_test () {
   # we use stdin because the failure message can be arbitrarily long, and this
   # makes it convenient to write in scripts (using <<END syntax.
   timestamp
-  echo "error: $1 ["
+  printf 'error: %s [\n' "$1"
   cat -
   echo "]"
 }
@@ -70,7 +70,7 @@ subunit_skip_test () {
   # the error text.
   # we use stdin because the failure message can be arbitrarily long, and this
   # makes it convenient to write in scripts (using <<END syntax.
-  echo "skip: $1 ["
+  printf 'skip: %s [\n' "$1"
   cat -
   echo "]"
 }
@@ -90,6 +90,31 @@ testit () {
 	return $status
 }
 
+# This returns 0 if the command gave success and the grep value was found
+# all other cases return != 0
+testit_grep () {
+	name="$1"
+	shift
+	grep="$1"
+	shift
+	cmdline="$@"
+	subunit_start_test "$name"
+	output=`$cmdline 2>&1`
+	status=$?
+	if [ x$status != x0 ]; then
+		printf '%s' "$output" | subunit_fail_test "$name"
+		return $status
+	fi
+	printf '%s' "$output" | grep -q "$grep"
+	gstatus=$?
+	if [ x$gstatus = x0 ]; then
+		subunit_pass_test "$name"
+	else
+		printf 'GREP: "%s" not found in output:\n%s' "$grep" "$output" | subunit_fail_test "$name"
+	fi
+	return $status
+}
+
 testit_expect_failure () {
 	name="$1"
 	shift
@@ -101,6 +126,31 @@ testit_expect_failure () {
 		echo "$output" | subunit_fail_test "$name"
 	else
 		subunit_pass_test "$name"
+	fi
+	return $status
+}
+
+# This returns 0 if the command gave a failure and the grep value was found
+# all other cases return != 0
+testit_expect_failure_grep () {
+	name="$1"
+	shift
+	grep="$1"
+	shift
+	cmdline="$@"
+	subunit_start_test "$name"
+	output=`$cmdline 2>&1`
+	status=$?
+	if [ x$status = x0 ]; then
+		printf '%s' "$output" | subunit_fail_test "$name"
+		return 1
+	fi
+	printf '%s' "$output" | grep -q "$grep"
+	gstatus=$?
+	if [ x$gstatus = x0 ]; then
+		subunit_pass_test "$name"
+	else
+		printf 'GREP: "%s" not found in output:\n%s' "$grep" "$output" | subunit_fail_test "$name"
 	fi
 	return $status
 }

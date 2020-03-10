@@ -538,7 +538,7 @@ static bool setup_clusapi_connection(struct torture_context *tctx,
 	torture_assert_ntstatus_ok(tctx,
 		dcerpc_pipe_connect_b(tctx, &s->clusapi.p, binding,
 				      &ndr_table_clusapi,
-				      cmdline_credentials,
+				      popt_get_cmdline_credentials(),
 				      tctx->ev, tctx->lp_ctx),
 		"failed to connect dcerpc pipe");
 
@@ -790,9 +790,9 @@ static void torture_subunit_report_time(struct torture_context *tctx)
 		return;
 	}
 
-	tmp = localtime(&tp.tv_sec);
+	tmp = gmtime(&tp.tv_sec);
 	if (!tmp) {
-		torture_comment(tctx, "failed to call localtime");
+		torture_comment(tctx, "failed to call gmtime");
 		return;
 	}
 

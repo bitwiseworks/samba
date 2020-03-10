@@ -1,5 +1,56 @@
 #!/usr/bin/env python
 
+bld.SAMBA_SUBSYSTEM('DSDB_MODULE_HELPERS_AUDIT',
+	            source='audit_util.c',
+	            autoproto='audit_util_proto.h',
+	            deps='DSDB_MODULE_HELPERS audit_logging')
+
+#
+# These tests require JANSSON, so we only build them if we are doing a
+# build on the AD DC (where Jansson is required).
+#
+
+bld.SAMBA_BINARY('test_audit_util',
+                 source='tests/test_audit_util.c',
+                 deps='''
+                 talloc
+                 samba-util
+                 samdb-common
+                 samdb
+                 cmocka
+                 audit_logging
+                 DSDB_MODULE_HELPERS
+                 ''',
+                 install=False)
+
+bld.SAMBA_BINARY('test_audit_log',
+                 source='tests/test_audit_log.c',
+                 deps='''
+                 talloc
+                 samba-util
+                 samdb-common
+                 samdb
+                 cmocka
+                 audit_logging
+                 DSDB_MODULE_HELPERS
+                 DSDB_MODULE_HELPERS_AUDIT
+                 ''',
+                 install=False)
+
+bld.SAMBA_BINARY('test_group_audit',
+                 source='tests/test_group_audit.c',
+                 deps='''
+                 talloc
+                 samba-util
+                 samdb-common
+                 samdb
+                 cmocka
+                 audit_logging
+                 DSDB_MODULE_HELPERS
+                 DSDB_MODULE_HELPERS_AUDIT
+                 ''',
+                 install=False)
+
 bld.SAMBA_MODULE('ldb_samba_dsdb',
 	source='samba_dsdb.c',
 	subsystem='ldb',
@@ -224,7 +275,7 @@ bld.SAMBA_MODULE('ldb_objectclass_attrs',
 	subsystem='ldb',
 	init_function='ldb_objectclass_attrs_module_init',
 	module_init_name='ldb_init_module',
-	deps='talloc samdb samba-util',
+	deps='talloc samdb DSDB_MODULE_HELPERS samba-util',
 	internal_module=False,
 	)
 
@@ -399,4 +450,61 @@ bld.SAMBA_MODULE('ldb_vlv',
 	internal_module=False,
 	deps='samdb-common',
 	subsystem='ldb'
+	)
+
+bld.SAMBA_MODULE('ldb_unique_object_sids',
+	'unique_object_sids.c',
+	init_function='ldb_unique_object_sids_init',
+	module_init_name='ldb_init_module',
+	internal_module=False,
+	deps='samdb-common DSDB_MODULE_HELPERS',
+	subsystem='ldb'
+	)
+
+bld.SAMBA_MODULE('ldb_encrypted_secrets',
+	source='encrypted_secrets.c',
+	subsystem='ldb',
+	init_function='ldb_encrypted_secrets_module_init',
+	module_init_name='ldb_init_module',
+	internal_module=False,
+	deps='''
+            talloc
+            samba-util
+            samdb-common
+            DSDB_MODULE_HELPERS
+            samdb
+            gnutls
+        '''
+	)
+
+bld.SAMBA_MODULE('ldb_audit_log',
+	source='audit_log.c',
+	subsystem='ldb',
+	init_function='ldb_audit_log_module_init',
+	module_init_name='ldb_init_module',
+	internal_module=False,
+	deps='''
+            audit_logging
+            talloc
+            samba-util
+            samdb-common
+            DSDB_MODULE_HELPERS_AUDIT
+            samdb
+        '''
+	)
+
+bld.SAMBA_MODULE('ldb_group_audit_log',
+	source='group_audit.c',
+	subsystem='ldb',
+	init_function='ldb_group_audit_log_module_init',
+	module_init_name='ldb_init_module',
+	internal_module=False,
+	deps='''
+            audit_logging
+            talloc
+            samba-util
+            samdb-common
+            DSDB_MODULE_HELPERS_AUDIT
+            samdb
+        '''
 	)

@@ -1,4 +1,4 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    Winbind Utility functions
 
@@ -71,16 +71,16 @@ bool winbind_lookup_name(const char *dom_name, const char *name, struct dom_sid 
 {
 	struct wbcDomainSid dom_sid;
 	wbcErr result;
-	enum wbcSidType type;	
+	enum wbcSidType type;
 
 	result = wbcLookupName(dom_name, name, &dom_sid, &type);
 	if (result != WBC_ERR_SUCCESS)
 		return false;
 
 	memcpy(sid, &dom_sid, sizeof(struct dom_sid));
-	*name_type = (enum lsa_SidType)type;	
+	*name_type = (enum lsa_SidType)type;
 
-	return true;	
+	return true;
 }
 
 /* Call winbindd to convert sid to name */
@@ -95,7 +95,7 @@ bool winbind_lookup_sid(TALLOC_CTX *mem_ctx, const struct dom_sid *sid,
 	char *domain_name = NULL;
 	char *account_name = NULL;
 
-	memcpy(&dom_sid, sid, sizeof(dom_sid));	
+	memcpy(&dom_sid, sid, sizeof(dom_sid));
 
 	result = wbcLookupSid(&dom_sid, &domain_name, &account_name, &type);
 	if (result != WBC_ERR_SUCCESS)
@@ -103,7 +103,7 @@ bool winbind_lookup_sid(TALLOC_CTX *mem_ctx, const struct dom_sid *sid,
 
 	/* Copy out result */
 
-	if (domain) {		
+	if (domain) {
 		*domain = talloc_strdup(mem_ctx, domain_name);
 	}
 	if (name) {
@@ -111,16 +111,16 @@ bool winbind_lookup_sid(TALLOC_CTX *mem_ctx, const struct dom_sid *sid,
 	}
 	*name_type = (enum lsa_SidType)type;
 
-	DEBUG(10, ("winbind_lookup_sid: SUCCESS: SID %s -> %s %s\n", 
+	DEBUG(10, ("winbind_lookup_sid: SUCCESS: SID %s -> %s %s\n",
 		   sid_string_dbg(sid), domain_name, account_name));
 
 	wbcFreeMemory(domain_name);
 	wbcFreeMemory(account_name);
 
-	if ((domain && !*domain) || (name && !*name)) {		
+	if ((domain && !*domain) || (name && !*name)) {
 		DEBUG(0,("winbind_lookup_sid: talloc() failed!\n"));
 		return false;
-	}	
+	}
 
 
 	return true;
@@ -142,11 +142,11 @@ bool winbind_sid_to_uid(uid_t *puid, const struct dom_sid *sid)
 	struct wbcDomainSid dom_sid;
 	wbcErr result;
 
-	memcpy(&dom_sid, sid, sizeof(dom_sid));	
+	memcpy(&dom_sid, sid, sizeof(dom_sid));
 
-	result = wbcSidToUid(&dom_sid, puid);	
+	result = wbcSidToUid(&dom_sid, puid);
 
-	return (result == WBC_ERR_SUCCESS);	
+	return (result == WBC_ERR_SUCCESS);
 }
 
 /* Call winbindd to convert uid to sid */
@@ -173,11 +173,11 @@ bool winbind_sid_to_gid(gid_t *pgid, const struct dom_sid *sid)
 	struct wbcDomainSid dom_sid;
 	wbcErr result;
 
-	memcpy(&dom_sid, sid, sizeof(dom_sid));	
+	memcpy(&dom_sid, sid, sizeof(dom_sid));
 
-	result = wbcSidToGid(&dom_sid, pgid);	
+	result = wbcSidToGid(&dom_sid, pgid);
 
-	return (result == WBC_ERR_SUCCESS);	
+	return (result == WBC_ERR_SUCCESS);
 }
 
 /* Call winbindd to convert gid to sid */
@@ -210,7 +210,7 @@ wbcErr wb_is_trusted_domain(const char *domain)
 		wbcFreeMemory(info);
 	}
 
-	return result;	
+	return result;
 }
 
 /* Lookup a set of rids in a given domain */
@@ -226,15 +226,15 @@ bool winbind_lookup_rids(TALLOC_CTX *mem_ctx,
 	enum wbcSidType *name_types = NULL;
 	struct wbcDomainSid dom_sid;
 	wbcErr ret;
-	int i;	
+	int i;
 
 	memcpy(&dom_sid, domain_sid, sizeof(struct wbcDomainSid));
 
 	ret = wbcLookupRids(&dom_sid, num_rids, rids,
 			    &dom_name, &namelist, &name_types);
-	if (ret != WBC_ERR_SUCCESS) {		
+	if (ret != WBC_ERR_SUCCESS) {
 		return false;
-	}	
+	}
 
 	*domain_name = talloc_strdup(mem_ctx, dom_name);
 	*names       = talloc_array(mem_ctx, const char*, num_rids);
@@ -249,7 +249,7 @@ bool winbind_lookup_rids(TALLOC_CTX *mem_ctx,
 	wbcFreeMemory(namelist);
 	wbcFreeMemory(name_types);
 
-	return true;	
+	return true;
 }
 
 /* Ask Winbind to allocate a new uid for us */
@@ -272,74 +272,6 @@ bool winbind_allocate_gid(gid_t *gid)
 	ret = wbcAllocateGid(gid);
 
 	return (ret == WBC_ERR_SUCCESS);
-}
-
-bool winbind_get_groups(TALLOC_CTX * mem_ctx, const char *account, uint32_t *num_groups, gid_t **_groups)
-{
-	wbcErr ret;
-	uint32_t ngroups;
-	gid_t *group_list = NULL;
-
-	ret = wbcGetGroups(account, &ngroups, &group_list);
-	if (ret != WBC_ERR_SUCCESS)
-		return false;
-
-	*_groups = talloc_array(mem_ctx, gid_t, ngroups);
-	if (*_groups == NULL) {
-	    wbcFreeMemory(group_list);
-	    return false;
-	}
-
-	memcpy(*_groups, group_list, ngroups* sizeof(gid_t));
-	*num_groups = ngroups;
-
-	wbcFreeMemory(group_list);
-	return true;
-}
-
-bool winbind_get_sid_aliases(TALLOC_CTX *mem_ctx,
-			     const struct dom_sid *dom_sid,
-			     const struct dom_sid *members,
-			     size_t num_members,
-			     uint32_t **pp_alias_rids,
-			     size_t *p_num_alias_rids)
-{
-	wbcErr ret;
-	struct wbcDomainSid domain_sid;
-	struct wbcDomainSid *sid_list = NULL;
-	size_t i;
-	uint32_t * rids;
-	uint32_t num_rids;
-
-	memcpy(&domain_sid, dom_sid, sizeof(*dom_sid));
-
-	sid_list = talloc_array(mem_ctx, struct wbcDomainSid, num_members);
-
-	for (i=0; i < num_members; i++) {
-	    memcpy(&sid_list[i], &members[i], sizeof(sid_list[i]));
-	}
-
-	ret = wbcGetSidAliases(&domain_sid,
-			       sid_list,
-			       num_members,
-			       &rids,
-			       &num_rids);
-	if (ret != WBC_ERR_SUCCESS) {
-		return false;
-	}
-
-	*pp_alias_rids = talloc_array(mem_ctx, uint32_t, num_rids);
-	if (*pp_alias_rids == NULL) {
-		wbcFreeMemory(rids);
-		return false;
-	}
-
-	memcpy(*pp_alias_rids, rids, sizeof(uint32_t) * num_rids);
-
-	*p_num_alias_rids = num_rids;
-	wbcFreeMemory(rids);
-
-	return true;
 }
 
 bool winbind_lookup_usersids(TALLOC_CTX *mem_ctx,
@@ -428,7 +360,7 @@ bool winbind_uid_to_sid(struct dom_sid *sid, uid_t uid)
 
 bool winbind_sid_to_gid(gid_t *pgid, const struct dom_sid *sid)
 {
-	return false;	
+	return false;
 }
 
 /* Call winbindd to convert gid to sid */
@@ -466,21 +398,6 @@ bool winbind_allocate_uid(uid_t *uid)
 /* Ask Winbind to allocate a new gid for us */
 
 bool winbind_allocate_gid(gid_t *gid)
-{
-	return false;
-}
-
-bool winbind_get_groups(TALLOC_CTX *mem_ctx, const char *account, uint32_t *num_groups, gid_t **_groups)
-{
-	return false;
-}
-
-bool winbind_get_sid_aliases(TALLOC_CTX *mem_ctx,
-			     const struct dom_sid *dom_sid,
-			     const struct dom_sid *members,
-			     size_t num_members,
-			     uint32_t **pp_alias_rids,
-			     size_t *p_num_alias_rids)
 {
 	return false;
 }

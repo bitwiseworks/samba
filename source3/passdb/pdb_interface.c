@@ -51,7 +51,7 @@ static void lazy_initialize_passdb(void)
 	if(initialized) {
 		return;
 	}
-	static_init_pdb;
+	static_init_pdb(NULL);
 	initialized = True;
 }
 
@@ -648,11 +648,10 @@ NTSTATUS pdb_delete_user(TALLOC_CTX *mem_ctx, struct samu *sam_acct)
 		 * just return */
 		return status;
 	}
-	message_send_all(server_messaging_context(),
-			 ID_CACHE_DELETE,
-			 msg_data,
-			 strlen(msg_data) + 1,
-			 NULL);
+	messaging_send_all(server_messaging_context(),
+			   ID_CACHE_DELETE,
+			   msg_data,
+			   strlen(msg_data) + 1);
 
 	TALLOC_FREE(msg_data);
 	return status;

@@ -5,6 +5,7 @@
    Copyright (C) Simo Sorce  2004-2008
    Copyright (C) Matthias Dieter Wallnöfer 2009-2011
    Copyright (C) Matthieu Patou 2012
+   Copyright (C) Catalyst.Net Ltd 2017
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -43,6 +44,7 @@
 #include "param/param.h"
 #include "libds/common/flag_mapping.h"
 #include "system/network.h"
+#include "librpc/gen_ndr/irpc.h"
 
 struct samldb_ctx;
 enum samldb_add_type {
@@ -272,9 +274,286 @@ static int samldb_schema_ldapdisplayname_valid_check(struct samldb_ctx *ac)
 	return ret;
 }
 
+static int samldb_check_linkid_used(struct samldb_ctx *ac,
+				    struct dsdb_schema *schema,
+				    struct ldb_dn *schema_dn,
+				    struct ldb_context *ldb,
+				    int32_t linkID,
+				    bool *found)
+{
+	int ret;
+	struct ldb_result *ldb_res;
+
+	if (dsdb_attribute_by_linkID(schema, linkID)) {
+		*found = true;
+		return LDB_SUCCESS;
+	}
+
+	ret = dsdb_module_search(ac->module, ac,
+				 &ldb_res,
+				 schema_dn, LDB_SCOPE_ONELEVEL, NULL,
+				 DSDB_FLAG_NEXT_MODULE,
+				 ac->req,
+				 "(linkID=%d)", linkID);
+	if (ret != LDB_SUCCESS) {
+		ldb_debug_set(ldb, LDB_DEBUG_ERROR,
+			      __location__": Searching for linkID=%d failed - %s\n",
+			      linkID,
+			      ldb_errstring(ldb));
+		return ldb_operr(ldb);
+	}
+
+	*found = (ldb_res->count != 0);
+	talloc_free(ldb_res);
+
+	return LDB_SUCCESS;
+}
+
+/* Find the next open forward linkID in the schema. */
+static int samldb_generate_next_linkid(struct samldb_ctx *ac,
+				       struct dsdb_schema *schema,
+				       int32_t *next_linkID)
+{
+	int ret;
+	struct ldb_context *ldb;
+	struct ldb_dn *schema_dn;
+	bool linkID_used = true;
+
+	/*
+	 * Windows starts at about 0xB0000000 in order to stop potential
+	 * collisions with future additions to the schema. We pass this
+	 * around as a signed int sometimes, but this should be sufficient.
+	 */
+	*next_linkID = 0x40000000;
+
+	ldb = ldb_module_get_ctx(ac->module);
+	schema_dn = ldb_get_schema_basedn(ldb);
+
+	while (linkID_used) {
+		*next_linkID += 2;
+		ret = samldb_check_linkid_used(ac, schema,
+					       schema_dn, ldb,
+					       *next_linkID, &linkID_used);
+		if (ret != LDB_SUCCESS) {
+			return ret;
+		}
+	}
+
+	return LDB_SUCCESS;
+}
+
+static int samldb_schema_add_handle_linkid(struct samldb_ctx *ac)
+{
+	int ret;
+	bool ok, found = false;
+	struct ldb_message_element *el;
+	const char *enc_str;
+	const struct dsdb_attribute *attr;
+	struct ldb_context *ldb;
+	struct ldb_dn *schema_dn;
+	struct dsdb_schema *schema;
+	int32_t new_linkID = 0;
+
+	ldb = ldb_module_get_ctx(ac->module);
+	schema = dsdb_get_schema(ldb, ac);
+	schema_dn = ldb_get_schema_basedn(ldb);
+
+	el = dsdb_get_single_valued_attr(ac->msg, "linkID",
+					 ac->req->operation);
+	if (el == NULL) {
+		return LDB_SUCCESS;
+	}
+
+	enc_str = ldb_binary_encode(ac, el->values[0]);
+	if (enc_str == NULL) {
+		return ldb_module_oom(ac->module);
+	}
+
+	ok = (strcmp(enc_str, "0") == 0);
+	if (ok) {
+		return LDB_SUCCESS;
+	}
+
+	/*
+	 * This OID indicates that the caller wants the linkID
+	 * to be automatically generated. We therefore assign
+	 * it the next open linkID.
+	 */
+	ok = (strcmp(enc_str, "1.2.840.113556.1.2.50") == 0);
+	if (ok) {
+		ret = samldb_generate_next_linkid(ac, schema, &new_linkID);
+		if (ret != LDB_SUCCESS) {
+			return ret;
+		}
+
+		ldb_msg_remove_element(ac->msg, el);
+		ret = samdb_msg_add_int(ldb, ac->msg, ac->msg, "linkID",
+					new_linkID);
+		return ret;
+	}
+
+	/*
+	 * Using either the attributeID or lDAPDisplayName of
+	 * another attribute in the linkID field indicates that
+	 * we should make this the backlink of that attribute.
+	 */
+	attr = dsdb_attribute_by_attributeID_oid(schema, enc_str);
+	if (attr == NULL) {
+		attr = dsdb_attribute_by_lDAPDisplayName(schema, enc_str);
+	}
+
+	if (attr != NULL) {
+		/*
+		 * The attribute we're adding this as a backlink of must
+		 * be a forward link.
+		 */
+		if (attr->linkID % 2 != 0) {
+			return LDB_ERR_UNWILLING_TO_PERFORM;
+		}
+
+		new_linkID = attr->linkID + 1;
+
+		/* Make sure that this backlink doesn't already exist. */
+		ret = samldb_check_linkid_used(ac, schema,
+					       schema_dn, ldb,
+					       new_linkID, &found);
+		if (ret != LDB_SUCCESS) {
+			return ret;
+		}
+
+		if (found) {
+			return LDB_ERR_UNWILLING_TO_PERFORM;
+		}
+
+		ldb_msg_remove_element(ac->msg, el);
+		ret = samdb_msg_add_int(ldb, ac->msg, ac->msg, "linkID",
+					new_linkID);
+		return ret;
+	}
+
+	schema_dn = ldb_get_schema_basedn(ldb_module_get_ctx(ac->module));
+	ret = samldb_unique_attr_check(ac, "linkID", NULL, schema_dn);
+	if (ret == LDB_ERR_ENTRY_ALREADY_EXISTS) {
+		return LDB_ERR_UNWILLING_TO_PERFORM;
+	} else {
+		return ret;
+	}
+}
+
+static int samldb_check_mapiid_used(struct samldb_ctx *ac,
+				    struct dsdb_schema *schema,
+				    struct ldb_dn *schema_dn,
+				    struct ldb_context *ldb,
+				    int32_t mapiid,
+				    bool *found)
+{
+	int ret;
+	struct ldb_result *ldb_res;
+
+	ret = dsdb_module_search(ac->module, ac,
+				 &ldb_res,
+				 schema_dn, LDB_SCOPE_ONELEVEL, NULL,
+				 DSDB_FLAG_NEXT_MODULE,
+				 ac->req,
+				 "(mAPIID=%d)", mapiid);
+	if (ret != LDB_SUCCESS) {
+		ldb_debug_set(ldb, LDB_DEBUG_ERROR,
+			      __location__": Searching for mAPIID=%d failed - %s\n",
+			      mapiid,
+			      ldb_errstring(ldb));
+		return ldb_operr(ldb);
+	}
+
+	*found = (ldb_res->count != 0);
+	talloc_free(ldb_res);
+
+	return LDB_SUCCESS;
+}
+
+static int samldb_generate_next_mapiid(struct samldb_ctx *ac,
+				       struct dsdb_schema *schema,
+				       int32_t *next_mapiid)
+{
+	int ret;
+	struct ldb_context *ldb;
+	struct ldb_dn *schema_dn;
+	bool mapiid_used = true;
+
+	/* Windows' generation seems to start about here */
+	*next_mapiid = 60000;
+
+	ldb = ldb_module_get_ctx(ac->module);
+	schema_dn = ldb_get_schema_basedn(ldb);
+
+	while (mapiid_used) {
+		*next_mapiid += 1;
+		ret = samldb_check_mapiid_used(ac, schema,
+					       schema_dn, ldb,
+					       *next_mapiid, &mapiid_used);
+		if (ret != LDB_SUCCESS) {
+			return ret;
+		}
+	}
+
+	return LDB_SUCCESS;
+}
+
+static int samldb_schema_add_handle_mapiid(struct samldb_ctx *ac)
+{
+	int ret;
+	bool ok;
+	struct ldb_message_element *el;
+	const char *enc_str;
+	struct ldb_context *ldb;
+	struct ldb_dn *schema_dn;
+	struct dsdb_schema *schema;
+	int32_t new_mapiid = 0;
+
+	/*
+	 * The mAPIID of a new attribute should be automatically generated
+	 * if a specific OID is put as the mAPIID, as according to
+	 * [MS-ADTS] 3.1.1.2.3.2.
+	 */
+
+	ldb = ldb_module_get_ctx(ac->module);
+	schema = dsdb_get_schema(ldb, ac);
+	schema_dn = ldb_get_schema_basedn(ldb);
+
+	el = dsdb_get_single_valued_attr(ac->msg, "mAPIID",
+					 ac->req->operation);
+	if (el == NULL) {
+		return LDB_SUCCESS;
+	}
+
+	enc_str = ldb_binary_encode(ac, el->values[0]);
+	if (enc_str == NULL) {
+		return ldb_module_oom(ac->module);
+	}
+
+	ok = (strcmp(enc_str, "1.2.840.113556.1.2.49") == 0);
+	if (ok) {
+		ret = samldb_generate_next_mapiid(ac, schema,
+						  &new_mapiid);
+		if (ret != LDB_SUCCESS) {
+			return ret;
+		}
+
+		ldb_msg_remove_element(ac->msg, el);
+		ret = samdb_msg_add_int(ldb, ac->msg, ac->msg,
+					"mAPIID", new_mapiid);
+		return ret;
+	}
+
+	schema_dn = ldb_get_schema_basedn(ldb_module_get_ctx(ac->module));
+	ret = samldb_unique_attr_check(ac, "mAPIID", NULL, schema_dn);
+	if (ret == LDB_ERR_ENTRY_ALREADY_EXISTS) {
+		return LDB_ERR_UNWILLING_TO_PERFORM;
+	} else {
+		return ret;
+	}
+}
 
 /* sAMAccountName handling */
-
 static int samldb_generate_sAMAccountName(struct ldb_context *ldb,
 					  struct ldb_message *msg)
 {
@@ -596,6 +875,7 @@ static int samldb_add_handle_msDS_IntId(struct samldb_ctx *ac)
 		 * order to be sure.
 		 */
 		if (dsdb_attribute_by_attributeID_id(schema, msds_intid)) {
+			id_exists = true;
 			msds_intid = generate_random() % 0X3FFFFFFF;
 			msds_intid += 0x80000000;
 			continue;
@@ -970,14 +1250,52 @@ static int samldb_fill_object(struct samldb_ctx *ac)
 
 static int samldb_fill_foreignSecurityPrincipal_object(struct samldb_ctx *ac)
 {
-	struct ldb_context *ldb;
-	const struct ldb_val *rdn_value;
-	struct dom_sid *sid;
+	struct ldb_context *ldb = NULL;
+	const struct ldb_val *rdn_value = NULL;
+	struct ldb_message_element *sid_el = NULL;
+	struct dom_sid *sid = NULL;
+	struct ldb_control *as_system = NULL;
+	struct ldb_control *provision = NULL;
+	bool allowed = false;
 	int ret;
 
 	ldb = ldb_module_get_ctx(ac->module);
 
-	sid = samdb_result_dom_sid(ac->msg, ac->msg, "objectSid");
+	as_system = ldb_request_get_control(ac->req, LDB_CONTROL_AS_SYSTEM_OID);
+	if (as_system != NULL) {
+		allowed = true;
+	}
+
+	provision = ldb_request_get_control(ac->req, LDB_CONTROL_PROVISION_OID);
+	if (provision != NULL) {
+		allowed = true;
+	}
+
+	sid_el = ldb_msg_find_element(ac->msg, "objectSid");
+
+	if (!allowed && sid_el == NULL) {
+		return dsdb_module_werror(ac->module,
+				LDB_ERR_OBJECT_CLASS_VIOLATION,
+				WERR_DS_MISSING_REQUIRED_ATT,
+				"objectSid missing on foreignSecurityPrincipal");
+	}
+
+	if (!allowed) {
+		return dsdb_module_werror(ac->module,
+				LDB_ERR_UNWILLING_TO_PERFORM,
+				WERR_DS_ILLEGAL_MOD_OPERATION,
+				"foreignSecurityPrincipal object not allowed");
+	}
+
+	if (sid_el != NULL) {
+		sid = samdb_result_dom_sid(ac->msg, ac->msg, "objectSid");
+		if (sid == NULL) {
+			ldb_set_errstring(ldb,
+					  "samldb: invalid objectSid!");
+			return LDB_ERR_CONSTRAINT_VIOLATION;
+		}
+	}
+
 	if (sid == NULL) {
 		rdn_value = ldb_dn_get_rdn_val(ac->msg->dn);
 		if (rdn_value == NULL) {
@@ -2572,12 +2890,12 @@ static int samldb_service_principal_names_change(struct samldb_ctx *ac)
 		if (ret != LDB_SUCCESS) {
 			return ret;
 		}
-		dns_hostname = talloc_strdup(ac, 
+		dns_hostname = talloc_strdup(ac,
 					     ldb_msg_find_attr_as_string(msg, "dNSHostName", NULL));
 		if (dns_hostname == NULL) {
 			return ldb_module_oom(ac->module);
 		}
-			
+
 		talloc_free(msg);
 
 		ret = dsdb_module_search_dn(ac->module, ac, &res, ac->msg->dn,
@@ -3102,6 +3420,58 @@ static int samldb_verify_subnet(struct samldb_ctx *ac, struct ldb_dn *dn)
 	return LDB_SUCCESS;
 }
 
+static char *refer_if_rodc(struct ldb_context *ldb, struct ldb_request *req,
+			   struct ldb_dn *dn)
+{
+	bool rodc = false;
+	struct loadparm_context *lp_ctx;
+	char *referral;
+	int ret;
+	WERROR err;
+
+	if (ldb_request_get_control(req, DSDB_CONTROL_REPLICATED_UPDATE_OID) ||
+	    ldb_request_get_control(req, DSDB_CONTROL_DBCHECK_MODIFY_RO_REPLICA)) {
+		return NULL;
+	}
+
+	ret = samdb_rodc(ldb, &rodc);
+	if (ret != LDB_SUCCESS) {
+		DEBUG(4, (__location__ ": unable to tell if we are an RODC\n"));
+		return NULL;
+	}
+
+	if (rodc) {
+		const char *domain = NULL;
+		struct ldb_dn *fsmo_role_dn;
+		struct ldb_dn *role_owner_dn;
+		ldb_set_errstring(ldb, "RODC modify is forbidden!");
+		lp_ctx = talloc_get_type(ldb_get_opaque(ldb, "loadparm"),
+					 struct loadparm_context);
+
+		err = dsdb_get_fsmo_role_info(req, ldb, DREPL_PDC_MASTER,
+					      &fsmo_role_dn, &role_owner_dn);
+		if (W_ERROR_IS_OK(err)) {
+			struct ldb_dn *server_dn = ldb_dn_copy(req, role_owner_dn);
+			if (server_dn != NULL) {
+				ldb_dn_remove_child_components(server_dn, 1);
+
+				domain = samdb_dn_to_dnshostname(ldb, req,
+								 server_dn);
+			}
+		}
+		if (domain == NULL) {
+			domain = lpcfg_dnsdomain(lp_ctx);
+		}
+		referral = talloc_asprintf(req,
+					   "ldap://%s/%s",
+					   domain,
+					   ldb_dn_get_linearized(dn));
+		return referral;
+	}
+
+	return NULL;
+}
+
 
 /* add */
 static int samldb_add(struct ldb_module *module, struct ldb_request *req)
@@ -3110,6 +3480,7 @@ static int samldb_add(struct ldb_module *module, struct ldb_request *req)
 	struct samldb_ctx *ac;
 	struct ldb_message_element *el;
 	int ret;
+	char *referral = NULL;
 
 	ldb = ldb_module_get_ctx(module);
 	ldb_debug(ldb, LDB_DEBUG_TRACE, "samldb_add\n");
@@ -3117,6 +3488,12 @@ static int samldb_add(struct ldb_module *module, struct ldb_request *req)
 	/* do not manipulate our control entries */
 	if (ldb_dn_is_special(req->op.add.message->dn)) {
 		return ldb_next_request(module, req);
+	}
+
+	referral = refer_if_rodc(ldb, req, req->op.add.message->dn);
+	if (referral != NULL) {
+		ret = ldb_module_send_referral(req, referral);
+		return ret;
 	}
 
 	el = ldb_msg_find_element(req->op.add.message, "userParameters");
@@ -3219,6 +3596,16 @@ static int samldb_add(struct ldb_module *module, struct ldb_request *req)
 		/* If in provision, these checks are too slow to do */
 		if (!ldb_request_get_control(req, DSDB_CONTROL_SKIP_DUPLICATES_CHECK_OID)) {
 			ret = samldb_schema_attributeid_valid_check(ac);
+			if (ret != LDB_SUCCESS) {
+				return ret;
+			}
+
+			ret = samldb_schema_add_handle_linkid(ac);
+			if (ret != LDB_SUCCESS) {
+				return ret;
+			}
+
+			ret = samldb_schema_add_handle_mapiid(ac);
 			if (ret != LDB_SUCCESS) {
 				return ret;
 			}
@@ -3485,7 +3872,8 @@ static int samldb_prim_group_users_check(struct samldb_ctx *ac)
 	uint32_t rid;
 	NTSTATUS status;
 	int ret;
-	struct ldb_result *res;
+	struct ldb_result *res = NULL;
+	struct ldb_result *res_users = NULL;
 	const char * const attrs[] = { "objectSid", "isDeleted", NULL };
 	const char * const noattrs[] = { NULL };
 
@@ -3524,7 +3912,7 @@ static int samldb_prim_group_users_check(struct samldb_ctx *ac)
 	}
 
 	/* Deny delete requests from groups which are primary ones */
-	ret = dsdb_module_search(ac->module, ac, &res,
+	ret = dsdb_module_search(ac->module, ac, &res_users,
 				 ldb_get_default_basedn(ldb),
 				 LDB_SCOPE_SUBTREE, noattrs,
 				 DSDB_FLAG_NEXT_MODULE,
@@ -3533,7 +3921,18 @@ static int samldb_prim_group_users_check(struct samldb_ctx *ac)
 	if (ret != LDB_SUCCESS) {
 		return ret;
 	}
-	if (res->count > 0) {
+	if (res_users->count > 0) {
+		ldb_asprintf_errstring(ldb_module_get_ctx(ac->module),
+				       "Refusing to delete %s, as it "
+				       "is still the primaryGroupID "
+				       "for %u users",
+				       ldb_dn_get_linearized(res->msgs[0]->dn),
+				       res_users->count);
+
+		/*
+		 * Yes, this seems very wrong, but we have a test
+		 * for this exact error code in sam.py
+		 */
 		return LDB_ERR_ENTRY_ALREADY_EXISTS;
 	}
 
@@ -3543,11 +3942,21 @@ static int samldb_prim_group_users_check(struct samldb_ctx *ac)
 static int samldb_delete(struct ldb_module *module, struct ldb_request *req)
 {
 	struct samldb_ctx *ac;
+	char *referral = NULL;
 	int ret;
+	struct ldb_context *ldb;
 
 	if (ldb_dn_is_special(req->op.del.dn)) {
 		/* do not manipulate our control entries */
 		return ldb_next_request(module, req);
+	}
+
+	ldb = ldb_module_get_ctx(module);
+
+	referral = refer_if_rodc(ldb, req, req->op.del.dn);
+	if (referral != NULL) {
+		ret = ldb_module_send_referral(req, referral);
+		return ret;
 	}
 
 	ac = samldb_ctx_init(module, req);

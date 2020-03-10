@@ -31,6 +31,7 @@
 #include "lib/param/param.h"
 #include "lib/param/loadparm.h"
 #include "lib/param/param_global.h"
+#include "libcli/auth/ntlm_check.h"
 #include "libcli/smb/smb_constants.h"
 #include "libds/common/roles.h"
 #include "source4/lib/tls/tls.h"
@@ -123,6 +124,12 @@ static const struct enum_list enum_smb_signing_vals[] = {
 	{SMB_SIGNING_REQUIRED, "force"},
 	{SMB_SIGNING_REQUIRED, "forced"},
 	{SMB_SIGNING_REQUIRED, "enforced"},
+	{-1, NULL}
+};
+
+static const struct enum_list enum_mdns_name_values[] = {
+	{MDNS_NAME_NETBIOS, "netbios"},
+	{MDNS_NAME_MDNS, "mdns"},
 	{-1, NULL}
 };
 
@@ -318,6 +325,31 @@ static const struct enum_list enum_inherit_owner_vals[] = {
     {INHERIT_OWNER_WINDOWS_AND_UNIX, "yes"},
     {INHERIT_OWNER_UNIX_ONLY, "unix only"},
     {-1, NULL}};
+
+static const struct enum_list enum_mangled_names[] = {
+	{MANGLED_NAMES_NO, "no"},
+	{MANGLED_NAMES_NO, "false"},
+	{MANGLED_NAMES_NO, "0"},
+	{MANGLED_NAMES_ILLEGAL, "illegal"},
+	{MANGLED_NAMES_YES, "yes"},
+	{MANGLED_NAMES_YES, "true"},
+	{MANGLED_NAMES_YES, "1"},
+	{-1, NULL}
+};
+
+static const struct enum_list enum_ntlm_auth[] = {
+	{NTLM_AUTH_DISABLED, "disabled"},
+	{NTLM_AUTH_NTLMV2_ONLY, "ntlmv2-only"},
+	{NTLM_AUTH_NTLMV2_ONLY, "no"},
+	{NTLM_AUTH_NTLMV2_ONLY, "false"},
+	{NTLM_AUTH_NTLMV2_ONLY, "0"},
+	{NTLM_AUTH_ON, "ntlmv1-permitted"},
+	{NTLM_AUTH_ON, "yes"},
+	{NTLM_AUTH_ON, "true"},
+	{NTLM_AUTH_ON, "1"},
+	{NTLM_AUTH_MSCHAPv2_NTLMV2_ONLY, "mschapv2-and-ntlmv2-only"},
+	{-1, NULL}
+};
 
 /* Note: We do not initialise the defaults union - it is not allowed in ANSI C
  *

@@ -75,8 +75,11 @@ static NTSTATUS refuse_symlink(connection_struct *conn,
 		int ret = vfs_stat_smb_basename(conn,
 				smb_fname,
 				&sbuf);
-		if (ret == -1) {
+		if (ret == -1 && errno != ENOENT) {
 			return map_nt_error_from_unix(errno);
+		} else if (ret == -1) {
+			/* it's not a symlink.. */
+			return NT_STATUS_OK;
 		}
 		pst = &sbuf;
 	}
@@ -200,9 +203,12 @@ bool samba_private_attr_name(const char *unix_ea_name)
  Get one EA value. Fill in a struct ea_struct.
 ****************************************************************************/
 
-NTSTATUS get_ea_value(TALLOC_CTX *mem_ctx, connection_struct *conn,
-		      files_struct *fsp, const char *fname,
-		      const char *ea_name, struct ea_struct *pea)
+NTSTATUS get_ea_value(TALLOC_CTX *mem_ctx,
+			connection_struct *conn,
+			files_struct *fsp,
+			const struct smb_filename *smb_fname,
+			const char *ea_name,
+			struct ea_struct *pea)
 {
 	/* Get the value of this xattr. Max size is 64k. */
 	size_t attr_size = 256;
@@ -219,7 +225,8 @@ NTSTATUS get_ea_value(TALLOC_CTX *mem_ctx, connection_struct *conn,
 	if (fsp && fsp->fh->fd != -1) {
 		sizeret = SMB_VFS_FGETXATTR(fsp, ea_name, val, attr_size);
 	} else {
-		sizeret = SMB_VFS_GETXATTR(conn, fname, ea_name, val, attr_size);
+		sizeret = SMB_VFS_GETXATTR(conn, smb_fname,
+				ea_name, val, attr_size);
 	}
 
 	if (sizeret == -1 && errno == ERANGE && attr_size != 65536) {
@@ -256,12 +263,14 @@ NTSTATUS get_ea_names_from_file(TALLOC_CTX *mem_ctx,
 				char ***pnames,
 				size_t *pnum_names)
 {
+	char smallbuf[1024];
 	/* Get a list of all xattrs. Max namesize is 64k. */
 	size_t ea_namelist_size = 1024;
-	char *ea_namelist = NULL;
+	char *ea_namelist = smallbuf;
+	char *to_free = NULL;
 
 	char *p;
-	char **names, **tmp;
+	char **names;
 	size_t num_names;
 	ssize_t sizeret = -1;
 	NTSTATUS status;
@@ -271,10 +280,6 @@ NTSTATUS get_ea_names_from_file(TALLOC_CTX *mem_ctx,
 	}
 	*pnum_names = 0;
 
-	if (!lp_ea_support(SNUM(conn))) {
-		return NT_STATUS_OK;
-	}
-
 	status = refuse_symlink(conn, fsp, smb_fname);
 	if (!NT_STATUS_IS_OK(status)) {
 		/*
@@ -283,54 +288,45 @@ NTSTATUS get_ea_names_from_file(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_OK;
 	}
 
-	/*
-	 * TALLOC the result early to get the talloc hierarchy right.
-	 */
-
-	names = talloc_array(mem_ctx, char *, 1);
-	if (names == NULL) {
-		DEBUG(0, ("talloc failed\n"));
-		return NT_STATUS_NO_MEMORY;
+	if (fsp && fsp->fh->fd != -1) {
+		sizeret = SMB_VFS_FLISTXATTR(fsp, ea_namelist,
+					     ea_namelist_size);
+	} else {
+		sizeret = SMB_VFS_LISTXATTR(conn,
+					    smb_fname,
+					    ea_namelist,
+					    ea_namelist_size);
 	}
 
-	while (ea_namelist_size <= 65536) {
-
-		ea_namelist = talloc_realloc(
-			names, ea_namelist, char, ea_namelist_size);
+	if ((sizeret == -1) && (errno == ERANGE)) {
+		ea_namelist_size = 65536;
+		ea_namelist = talloc_array(mem_ctx, char, ea_namelist_size);
 		if (ea_namelist == NULL) {
-			DEBUG(0, ("talloc failed\n"));
-			TALLOC_FREE(names);
 			return NT_STATUS_NO_MEMORY;
 		}
+		to_free = ea_namelist;
 
 		if (fsp && fsp->fh->fd != -1) {
 			sizeret = SMB_VFS_FLISTXATTR(fsp, ea_namelist,
 						     ea_namelist_size);
 		} else {
 			sizeret = SMB_VFS_LISTXATTR(conn,
-					smb_fname->base_name,
-					ea_namelist,
-					ea_namelist_size);
-		}
-
-		if ((sizeret == -1) && (errno == ERANGE)) {
-			ea_namelist_size *= 2;
-		}
-		else {
-			break;
+						    smb_fname,
+						    ea_namelist,
+						    ea_namelist_size);
 		}
 	}
 
 	if (sizeret == -1) {
-		TALLOC_FREE(names);
-		return map_nt_error_from_unix(errno);
+		status = map_nt_error_from_unix(errno);
+		TALLOC_FREE(to_free);
+		return status;
 	}
 
-	DEBUG(10, ("%s: ea_namelist size = %u\n",
-		   __func__, (unsigned int)sizeret));
+	DBG_DEBUG("ea_namelist size = %zd\n", sizeret);
 
 	if (sizeret == 0) {
-		TALLOC_FREE(names);
+		TALLOC_FREE(to_free);
 		return NT_STATUS_OK;
 	}
 
@@ -339,7 +335,7 @@ NTSTATUS get_ea_names_from_file(TALLOC_CTX *mem_ctx,
 	 */
 
 	if (ea_namelist[sizeret-1] != '\0') {
-		TALLOC_FREE(names);
+		TALLOC_FREE(to_free);
 		return NT_STATUS_INTERNAL_ERROR;
 	}
 
@@ -352,26 +348,45 @@ NTSTATUS get_ea_names_from_file(TALLOC_CTX *mem_ctx,
 		num_names += 1;
 	}
 
-	tmp = talloc_realloc(mem_ctx, names, char *, num_names);
-	if (tmp == NULL) {
+	*pnum_names = num_names;
+
+	if (pnames == NULL) {
+		TALLOC_FREE(to_free);
+		return NT_STATUS_OK;
+	}
+
+	names = talloc_array(mem_ctx, char *, num_names);
+	if (names == NULL) {
 		DEBUG(0, ("talloc failed\n"));
-		TALLOC_FREE(names);
+		TALLOC_FREE(to_free);
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	names = tmp;
+	if (ea_namelist == smallbuf) {
+		ea_namelist = talloc_memdup(names, smallbuf, sizeret);
+		if (ea_namelist == NULL) {
+			TALLOC_FREE(names);
+			return NT_STATUS_NO_MEMORY;
+		}
+	} else {
+		talloc_steal(names, ea_namelist);
+
+		ea_namelist = talloc_realloc(names, ea_namelist, char,
+					     sizeret);
+		if (ea_namelist == NULL) {
+			TALLOC_FREE(names);
+			return NT_STATUS_NO_MEMORY;
+		}
+	}
+
 	num_names = 0;
 
 	for (p = ea_namelist; p - ea_namelist < sizeret; p += strlen(p)+1) {
 		names[num_names++] = p;
 	}
 
-	if (pnames) {
-		*pnames = names;
-	} else {
-		TALLOC_FREE(names);
-	}
-	*pnum_names = num_names;
+	*pnames = names;
+
 	return NT_STATUS_OK;
 }
 
@@ -396,6 +411,10 @@ static NTSTATUS get_ea_list_from_file_path(TALLOC_CTX *mem_ctx,
 	*pea_total_len = 0;
 	*ea_list = NULL;
 
+	if (!lp_ea_support(SNUM(conn))) {
+		return NT_STATUS_OK;
+	}
+
 	if (fsp) {
 		posix_pathnames =
 			(fsp->fsp_name->flags & SMB_FILENAME_POSIX_PATH);
@@ -415,7 +434,6 @@ static NTSTATUS get_ea_list_from_file_path(TALLOC_CTX *mem_ctx,
 	}
 
 	if (num_names == 0) {
-		*ea_list = NULL;
 		return NT_STATUS_OK;
 	}
 
@@ -444,7 +462,7 @@ static NTSTATUS get_ea_list_from_file_path(TALLOC_CTX *mem_ctx,
 		status = get_ea_value(listp,
 					conn,
 					fsp,
-					smb_fname->base_name,
+					smb_fname,
 					names[i],
 					&listp->ea);
 
@@ -786,7 +804,7 @@ NTSTATUS set_ea(connection_struct *conn, files_struct *fsp,
 				DEBUG(10,("set_ea: deleting ea name %s on file %s.\n",
 					unix_ea_name, smb_fname->base_name));
 				ret = SMB_VFS_REMOVEXATTR(conn,
-						smb_fname->base_name,
+						smb_fname,
 						unix_ea_name);
 			}
 #ifdef ENOATTR
@@ -808,7 +826,7 @@ NTSTATUS set_ea(connection_struct *conn, files_struct *fsp,
 				DEBUG(10,("set_ea: setting ea name %s on file %s.\n",
 					unix_ea_name, smb_fname->base_name));
 				ret = SMB_VFS_SETXATTR(conn,
-						smb_fname->base_name,
+						smb_fname,
 						unix_ea_name,
 						ea_list->ea.value.data,
 						ea_list->ea.value.length,
@@ -1211,7 +1229,7 @@ static void call_trans2open(connection_struct *conn,
 	uint32_t create_disposition;
 	uint32_t create_options = 0;
 	uint32_t private_flags = 0;
-	uint32_t ucf_flags = (req->posix_pathnames ? UCF_POSIX_PATHNAMES : 0);
+	uint32_t ucf_flags = ucf_flags_from_smb_request(req);
 	TALLOC_CTX *ctx = talloc_tos();
 
 	/*
@@ -1275,7 +1293,6 @@ static void call_trans2open(connection_struct *conn,
 
 	status = filename_convert(ctx,
 				conn,
-				req->flags2 & FLAGS2_DFS_PATHNAMES,
 				fname,
 				ucf_flags,
 				NULL,
@@ -1560,18 +1577,18 @@ static NTSTATUS unix_perms_from_wire( connection_struct *conn,
 ****************************************************************************/
 
 static bool check_msdfs_link(connection_struct *conn,
-				const char *pathname,
-				SMB_STRUCT_STAT *psbuf)
+				struct smb_filename *smb_fname)
 {
 	int saved_errno = errno;
 	if(lp_host_msdfs() &&
 		lp_msdfs_root(SNUM(conn)) &&
-		is_msdfs_link(conn, pathname, psbuf)) {
+		is_msdfs_link(conn, smb_fname)) {
 
 		DEBUG(5,("check_msdfs_link: Masquerading msdfs link %s "
 			"as a directory\n",
-			pathname));
-		psbuf->st_ex_mode = (psbuf->st_ex_mode & 0xFFF) | S_IFDIR;
+			smb_fname->base_name));
+		smb_fname->st.st_ex_mode =
+			(smb_fname->st.st_ex_mode & 0xFFF) | S_IFDIR;
 		errno = saved_errno;
 		return true;
 	}
@@ -1712,8 +1729,7 @@ static bool smbd_dirptr_lanman2_mode_fn(TALLOC_CTX *ctx,
 		 * directories */
 
 		ms_dfs_link = check_msdfs_link(state->conn,
-					       smb_fname->base_name,
-					       &smb_fname->st);
+					       smb_fname);
 		if (!ms_dfs_link) {
 			DEBUG(5,("smbd_dirptr_lanman2_mode_fn: "
 				 "Couldn't stat [%s] (%s)\n",
@@ -2442,7 +2458,8 @@ NTSTATUS smbd_dirptr_lanman2_entry(TALLOC_CTX *ctx,
 			       int space_remaining,
 			       bool *got_exact_match,
 			       int *_last_entry_off,
-			       struct ea_list *name_list)
+			       struct ea_list *name_list,
+			       struct file_id *file_id)
 {
 	const char *p;
 	const char *mask = NULL;
@@ -2454,11 +2471,17 @@ NTSTATUS smbd_dirptr_lanman2_entry(TALLOC_CTX *ctx,
 	bool ok;
 	uint64_t last_entry_off = 0;
 	NTSTATUS status;
+	enum mangled_names_options mangled_names;
+	bool marshall_with_83_names;
+
+	mangled_names = lp_mangled_names(conn->params);
 
 	ZERO_STRUCT(state);
 	state.conn = conn;
 	state.info_level = info_level;
-	state.check_mangled_names = lp_mangled_names(conn->params);
+	if (mangled_names != MANGLED_NAMES_NO) {
+		state.check_mangled_names = true;
+	}
 	state.has_wild = dptr_has_wild(dirptr);
 	state.got_exact_match = false;
 
@@ -2494,12 +2517,14 @@ NTSTATUS smbd_dirptr_lanman2_entry(TALLOC_CTX *ctx,
 
 	*got_exact_match = state.got_exact_match;
 
+	marshall_with_83_names = (mangled_names == MANGLED_NAMES_YES);
+
 	status = smbd_marshall_dir_entry(ctx,
 				     conn,
 				     flags2,
 				     info_level,
 				     name_list,
-				     state.check_mangled_names,
+				     marshall_with_83_names,
 				     requires_resume_key,
 				     mode,
 				     fname,
@@ -2515,6 +2540,11 @@ NTSTATUS smbd_dirptr_lanman2_entry(TALLOC_CTX *ctx,
 		DEBUG(1,("Conversion error: illegal character: %s\n",
 			 smb_fname_str_dbg(smb_fname)));
 	}
+
+	if (file_id != NULL) {
+		*file_id = vfs_file_id_from_sbuf(conn, &smb_fname->st);
+	}
+
 	TALLOC_FREE(fname);
 	TALLOC_FREE(smb_fname);
 	if (NT_STATUS_EQUAL(status, STATUS_MORE_ENTRIES)) {
@@ -2562,7 +2592,7 @@ static NTSTATUS get_lanman2_dir_entry(TALLOC_CTX *ctx,
 					 ppdata, base_data, end_data,
 					 space_remaining,
 					 got_exact_match,
-					 last_entry_off, name_list);
+					 last_entry_off, name_list, NULL);
 }
 
 /****************************************************************************
@@ -2609,7 +2639,7 @@ static void call_trans2findfirst(connection_struct *conn,
 	struct dptr_struct *dirptr = NULL;
 	struct smbd_server_connection *sconn = req->sconn;
 	uint32_t ucf_flags = UCF_SAVE_LCOMP | UCF_ALWAYS_ALLOW_WCARD_LCOMP |
-			(req->posix_pathnames ? UCF_POSIX_PATHNAMES : 0);
+			ucf_flags_from_smb_request(req);
 	bool backup_priv = false;
 	bool as_root = false;
 
@@ -2705,7 +2735,6 @@ close_if_end = %d requires_resume_key = %d backup_priv = %d level = 0x%x, max_da
 				&smb_dname);
 	} else {
 		ntstatus = filename_convert(talloc_tos(), conn,
-				    req->flags2 & FLAGS2_DFS_PATHNAMES,
 				    directory,
 				    ucf_flags,
 				    &mask_contains_wcard,
@@ -2837,9 +2866,6 @@ total_data=%u (should be %u)\n", (unsigned int)total_data, (unsigned int)IVAL(pd
 
 	dptr_num = dptr_dnum(dirptr);
 	DEBUG(4,("dptr_num is %d, wcard = %s, attr = %d\n", dptr_num, mask, dirtype));
-
-	/* Initialize per TRANS2_FIND_FIRST operation data */
-	dptr_init_search_op(dirptr);
 
 	/* We don't need to check for VOL here as this is returned by
 		a different TRANS2 call. */
@@ -3208,9 +3234,6 @@ total_data=%u (should be %u)\n", (unsigned int)total_data, (unsigned int)IVAL(pd
 		dptr_TellDir(dirptr),
 		(int)backup_priv));
 
-	/* Initialize per TRANS2_FIND_NEXT operation data */
-	dptr_init_search_op(dirptr);
-
 	/* We don't need to check for VOL here as this is returned by
 		a different TRANS2 call. */
 
@@ -3429,7 +3452,8 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 	ZERO_STRUCT(smb_fname);
 	smb_fname.base_name = discard_const_p(char, filename);
 
-	if(SMB_VFS_STAT(conn, &smb_fname) != 0) {
+	if(info_level != SMB_FS_QUOTA_INFORMATION
+	   && SMB_VFS_STAT(conn, &smb_fname) != 0) {
 		DEBUG(2,("stat of . failed (%s)\n", strerror(errno)));
 		return map_nt_error_from_unix(errno);
 	}
@@ -3481,6 +3505,12 @@ NTSTATUS smbd_do_qfsinfo(struct smbXsrv_connection *xconn,
 			DEBUG(5,("smbd_do_qfsinfo : SMB_INFO_ALLOCATION id=%x, bsize=%u, cSectorUnit=%u, \
 cBytesSector=%u, cUnitTotal=%u, cUnitAvail=%d\n", (unsigned int)st.st_ex_dev, (unsigned int)bsize, (unsigned int)sectors_per_unit,
 				(unsigned int)bytes_per_sector, (unsigned int)dsize, (unsigned int)dfree));
+
+			/*
+			 * For large drives, return max values and not modulo.
+			 */
+			dsize = MIN(dsize, UINT32_MAX);
+			dfree = MIN(dfree, UINT32_MAX);
 
 			SIVAL(pdata,l1_idFileSystem,st.st_ex_dev);
 			SIVAL(pdata,l1_cSectorUnit,sectors_per_unit);
@@ -3869,7 +3899,7 @@ cBytesSector=%u, cUnitTotal=%u, cUnitAvail=%d\n", (unsigned int)bsize, (unsigned
 				return NT_STATUS_INVALID_LEVEL;
 			}
 
-			rc = SMB_VFS_STATVFS(conn, filename, &svfs);
+			rc = SMB_VFS_STATVFS(conn, &smb_fname, &svfs);
 
 			if (!rc) {
 				data_len = 56;
@@ -4003,7 +4033,8 @@ cBytesSector=%u, cUnitTotal=%u, cUnitAvail=%d\n", (unsigned int)bsize, (unsigned
 				SIVAL(pdata,84,0x100); /* Don't support mac... */
 				break;
 			}
-			/* drop through */
+
+			FALL_THROUGH;
 		default:
 			return NT_STATUS_INVALID_LEVEL;
 	}
@@ -5447,7 +5478,7 @@ NTSTATUS smbd_do_qfilepathinfo(connection_struct *conn,
 				return NT_STATUS_DOS(ERRDOS, ERRbadlink);
 #endif
 				link_len = SMB_VFS_READLINK(conn,
-						       smb_fname->base_name,
+						       smb_fname,
 						       buffer, PATH_MAX);
 				if (link_len == -1) {
 					return map_nt_error_from_unix(errno);
@@ -5487,7 +5518,7 @@ NTSTATUS smbd_do_qfilepathinfo(connection_struct *conn,
 				} else {
 					file_acl =
 					    SMB_VFS_SYS_ACL_GET_FILE(conn,
-						smb_fname->base_name,
+						smb_fname,
 						SMB_ACL_TYPE_ACCESS,
 						talloc_tos());
 				}
@@ -5505,14 +5536,14 @@ NTSTATUS smbd_do_qfilepathinfo(connection_struct *conn,
 						def_acl =
 						    SMB_VFS_SYS_ACL_GET_FILE(
 							    conn,
-							    fsp->fsp_name->base_name,
+							    fsp->fsp_name,
 							    SMB_ACL_TYPE_DEFAULT,
 							    talloc_tos());
 					} else {
 						def_acl =
 						    SMB_VFS_SYS_ACL_GET_FILE(
 							    conn,
-							    smb_fname->base_name,
+							    smb_fname,
 							    SMB_ACL_TYPE_DEFAULT,
 							    talloc_tos());
 					}
@@ -5766,8 +5797,7 @@ static void call_trans2qfilepathinfo(connection_struct *conn,
 	} else {
 		uint32_t name_hash;
 		char *fname = NULL;
-		uint32_t ucf_flags = (req->posix_pathnames ?
-				UCF_POSIX_PATHNAMES : 0);
+		uint32_t ucf_flags = ucf_flags_from_smb_request(req);
 
 		/* qpathinfo */
 		if (total_params < 7) {
@@ -5818,7 +5848,6 @@ static void call_trans2qfilepathinfo(connection_struct *conn,
 
 		status = filename_convert(req,
 					conn,
-					req->flags2 & FLAGS2_DFS_PATHNAMES,
 					fname,
 					ucf_flags,
 					NULL,
@@ -6115,8 +6144,7 @@ NTSTATUS hardlink_internals(TALLOC_CTX *ctx,
 	DEBUG(10,("hardlink_internals: doing hard link %s -> %s\n",
 		  smb_fname_old->base_name, smb_fname_new->base_name));
 
-	if (SMB_VFS_LINK(conn, smb_fname_old->base_name,
-			 smb_fname_new->base_name) != 0) {
+	if (SMB_VFS_LINK(conn, smb_fname_old, smb_fname_new) != 0) {
 		status = map_nt_error_from_unix(errno);
 		DEBUG(3,("hardlink_internals: Error %s hard link %s -> %s\n",
 			 nt_errstr(status), smb_fname_old->base_name,
@@ -6575,10 +6603,9 @@ static NTSTATUS smb_set_file_unix_link(connection_struct *conn,
 				       struct smb_request *req,
 				       const char *pdata,
 				       int total_data,
-				       const struct smb_filename *smb_fname)
+				       const struct smb_filename *new_smb_fname)
 {
 	char *link_target = NULL;
-	const char *newname = smb_fname->base_name;
 	TALLOC_CTX *ctx = talloc_tos();
 
 	/* Set a symbolic link. */
@@ -6600,9 +6627,9 @@ static NTSTATUS smb_set_file_unix_link(connection_struct *conn,
 	}
 
 	DEBUG(10,("smb_set_file_unix_link: SMB_SET_FILE_UNIX_LINK doing symlink %s -> %s\n",
-			newname, link_target ));
+			new_smb_fname->base_name, link_target ));
 
-	if (SMB_VFS_SYMLINK(conn,link_target,newname) != 0) {
+	if (SMB_VFS_SYMLINK(conn,link_target,new_smb_fname) != 0) {
 		return map_nt_error_from_unix(errno);
 	}
 
@@ -6620,7 +6647,7 @@ static NTSTATUS smb_set_file_unix_hlink(connection_struct *conn,
 {
 	char *oldname = NULL;
 	struct smb_filename *smb_fname_old = NULL;
-	uint32_t ucf_flags = (req->posix_pathnames ? UCF_POSIX_PATHNAMES : 0);
+	uint32_t ucf_flags = ucf_flags_from_smb_request(req);
 	TALLOC_CTX *ctx = talloc_tos();
 	NTSTATUS status = NT_STATUS_OK;
 
@@ -6657,7 +6684,6 @@ static NTSTATUS smb_set_file_unix_hlink(connection_struct *conn,
 
 	status = filename_convert(ctx,
 				conn,
-				req->flags2 & FLAGS2_DFS_PATHNAMES,
 				oldname,
 				ucf_flags,
 				NULL,
@@ -6686,7 +6712,7 @@ static NTSTATUS smb2_file_rename_information(connection_struct *conn,
 	char *newname = NULL;
 	struct smb_filename *smb_fname_dst = NULL;
 	uint32_t ucf_flags = UCF_SAVE_LCOMP |
-		(req->posix_pathnames ? UCF_POSIX_PATHNAMES : 0);
+		ucf_flags_from_smb_request(req);
 	NTSTATUS status = NT_STATUS_OK;
 	TALLOC_CTX *ctx = talloc_tos();
 
@@ -6733,7 +6759,6 @@ static NTSTATUS smb2_file_rename_information(connection_struct *conn,
 
 	status = filename_convert(ctx,
 				conn,
-				req->flags2 & FLAGS2_DFS_PATHNAMES,
 				newname,
 				ucf_flags,
 				NULL,
@@ -6798,7 +6823,7 @@ static NTSTATUS smb_file_link_information(connection_struct *conn,
 	struct smb_filename *smb_fname_dst = NULL;
 	NTSTATUS status = NT_STATUS_OK;
 	uint32_t ucf_flags = UCF_SAVE_LCOMP |
-		(req->posix_pathnames ? UCF_POSIX_PATHNAMES : 0);
+		ucf_flags_from_smb_request(req);
 	TALLOC_CTX *ctx = talloc_tos();
 
 	if (!fsp) {
@@ -6844,7 +6869,6 @@ static NTSTATUS smb_file_link_information(connection_struct *conn,
 
 	status = filename_convert(ctx,
 				conn,
-				req->flags2 & FLAGS2_DFS_PATHNAMES,
 				newname,
 				ucf_flags,
 				NULL,
@@ -6934,15 +6958,16 @@ static NTSTATUS smb_file_rename_information(connection_struct *conn,
 	DEBUG(10,("smb_file_rename_information: got name |%s|\n",
 				newname));
 
-	status = resolve_dfspath_wcard(ctx, conn,
-				       req->flags2 & FLAGS2_DFS_PATHNAMES,
+	if (req->flags2 & FLAGS2_DFS_PATHNAMES) {
+		status = resolve_dfspath_wcard(ctx, conn,
 				       newname,
 				       UCF_COND_ALLOW_WCARD_LCOMP,
 				       !conn->sconn->using_smb2,
 				       &newname,
 				       &dest_has_wcard);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
 	}
 
 	/* Check the new name has no '/' characters. */
@@ -6985,6 +7010,12 @@ static NTSTATUS smb_file_rename_information(connection_struct *conn,
 		 * the newname instead.
 		 */
 		char *base_name = NULL;
+		uint32_t ucf_flags = UCF_SAVE_LCOMP |
+			ucf_flags_from_smb_request(req);
+
+		if (dest_has_wcard) {
+			ucf_flags |= UCF_ALWAYS_ALLOW_WCARD_LCOMP;
+		}
 
 		/* newname must *not* be a stream name. */
 		if (newname[0] == ':') {
@@ -7017,10 +7048,7 @@ static NTSTATUS smb_file_rename_information(connection_struct *conn,
 		}
 
 		status = unix_convert(ctx, conn, base_name, &smb_fname_dst,
-				      (UCF_SAVE_LCOMP |
-					  (dest_has_wcard ?
-					      UCF_ALWAYS_ALLOW_WCARD_LCOMP :
-					      0)));
+					ucf_flags);
 
 		/* If an error we expect this to be
 		 * NT_STATUS_OBJECT_PATH_NOT_FOUND */
@@ -7120,13 +7148,13 @@ static NTSTATUS smb_set_posix_acl(connection_struct *conn,
 		(unsigned int)num_def_acls));
 
 	if (valid_file_acls && !set_unix_posix_acl(conn, fsp,
-		smb_fname->base_name, num_file_acls,
+		smb_fname, num_file_acls,
 		pdata + SMB_POSIX_ACL_HEADER_SIZE)) {
 		return map_nt_error_from_unix(errno);
 	}
 
 	if (valid_def_acls && !set_unix_posix_default_acl(conn,
-		smb_fname->base_name, &smb_fname->st, num_def_acls,
+		smb_fname, num_def_acls,
 		pdata + SMB_POSIX_ACL_HEADER_SIZE +
 		(num_file_acls*SMB_POSIX_ACL_ENTRY_SIZE))) {
 		return map_nt_error_from_unix(errno);
@@ -7545,7 +7573,7 @@ static NTSTATUS smb_unix_mknod(connection_struct *conn,
 		  (unsigned int)unixmode, smb_fname_str_dbg(smb_fname)));
 
 	/* Ok - do the mknod. */
-	if (SMB_VFS_MKNOD(conn, smb_fname->base_name, unixmode, dev) != 0) {
+	if (SMB_VFS_MKNOD(conn, smb_fname, unixmode, dev) != 0) {
 		return map_nt_error_from_unix(errno);
 	}
 
@@ -7559,7 +7587,7 @@ static NTSTATUS smb_unix_mknod(connection_struct *conn,
 				    &parent, NULL)) {
 			return NT_STATUS_NO_MEMORY;
 		}
-		inherit_access_posix_acl(conn, parent, smb_fname->base_name,
+		inherit_access_posix_acl(conn, parent, smb_fname,
 					 unixmode);
 		TALLOC_FREE(parent);
 	}
@@ -7870,7 +7898,7 @@ static NTSTATUS smb_set_file_unix_info2(connection_struct *conn,
 			/* XXX: we should be  using SMB_VFS_FCHFLAGS here. */
 			return NT_STATUS_NOT_SUPPORTED;
 		} else {
-			if (SMB_VFS_CHFLAGS(conn, smb_fname->base_name,
+			if (SMB_VFS_CHFLAGS(conn, smb_fname,
 					    stat_fflags) != 0) {
 				return map_nt_error_from_unix(errno);
 			}
@@ -8515,6 +8543,11 @@ NTSTATUS smbd_do_setfilepathinfo(connection_struct *conn,
 			break;
 		}
 
+		/* [MS-SMB2] 3.3.5.21.1 states we MUST fail with STATUS_NOT_SUPPORTED. */
+		case SMB_FILE_VALID_DATA_LENGTH_INFORMATION:
+		case SMB_FILE_SHORT_NAME_INFORMATION:
+			return NT_STATUS_NOT_SUPPORTED;
+
 		/*
 		 * CIFS UNIX extensions.
 		 */
@@ -8755,8 +8788,7 @@ static void call_trans2setfilepathinfo(connection_struct *conn,
 		}
 	} else {
 		char *fname = NULL;
-		uint32_t ucf_flags = (req->posix_pathnames ?
-			UCF_POSIX_PATHNAMES : 0);
+		uint32_t ucf_flags = ucf_flags_from_smb_request(req);
 
 		/* set path info */
 		if (total_params < 7) {
@@ -8797,7 +8829,6 @@ static void call_trans2setfilepathinfo(connection_struct *conn,
 		}
 
 		status = filename_convert(req, conn,
-					 req->flags2 & FLAGS2_DFS_PATHNAMES,
 					 fname,
 					 ucf_flags,
 					 NULL,
@@ -8906,7 +8937,7 @@ static void call_trans2mkdir(connection_struct *conn, struct smb_request *req,
 	char *directory = NULL;
 	NTSTATUS status = NT_STATUS_OK;
 	struct ea_list *ea_list = NULL;
-	uint32_t ucf_flags = (req->posix_pathnames ? UCF_POSIX_PATHNAMES : 0);
+	uint32_t ucf_flags = ucf_flags_from_smb_request(req);
 	TALLOC_CTX *ctx = talloc_tos();
 
 	if (!CAN_WRITE(conn)) {
@@ -8947,7 +8978,6 @@ static void call_trans2mkdir(connection_struct *conn, struct smb_request *req,
 
 	status = filename_convert(ctx,
 				conn,
-				req->flags2 & FLAGS2_DFS_PATHNAMES,
 				directory,
 				ucf_flags,
 				NULL,

@@ -2924,7 +2924,7 @@ static bool test_delayed_write_update7(struct torture_context *tctx, struct smbc
 
 	if (finfo2.basic_info.out.write_time != finfo3.basic_info.out.write_time) {
 		torture_result(tctx, TORTURE_FAIL, 
-			"qpathinfo time doens't match fileinfo time");
+			"qpathinfo time doesn't match fileinfo time");
 		ret = false;
 	}
 
@@ -3068,9 +3068,9 @@ static bool test_directory_update8(struct torture_context *tctx, struct smbcli_s
 /*
    testing of delayed update of write_time
 */
-struct torture_suite *torture_delay_write(void)
+struct torture_suite *torture_delay_write(TALLOC_CTX *ctx)
 {
-	struct torture_suite *suite = torture_suite_create(talloc_autofree_context(), "delaywrite");
+	struct torture_suite *suite = torture_suite_create(ctx, "delaywrite");
 
 	torture_suite_add_2smb_test(suite, "finfo update on close", test_finfo_after_write);
 	torture_suite_add_1smb_test(suite, "delayed update of write time", test_delayed_write_update);
@@ -3087,7 +3087,6 @@ struct torture_suite *torture_delay_write(void)
 	torture_suite_add_2smb_test(suite, "delayed update of write time 5", test_delayed_write_update5);
 	torture_suite_add_2smb_test(suite, "delayed update of write time 5b", test_delayed_write_update5b);
 	torture_suite_add_2smb_test(suite, "delayed update of write time 6", test_delayed_write_update6);
-	torture_suite_add_1smb_test(suite, "timestamp resolution test", test_delayed_write_update7);
 	torture_suite_add_1smb_test(suite, "timestamp resolution test", test_delayed_write_update7);
 	torture_suite_add_1smb_test(suite, "directory timestamp update test", test_directory_update8);
 

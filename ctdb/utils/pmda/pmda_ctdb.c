@@ -30,10 +30,19 @@
 #include "lib/util/blocking.h"
 
 #include "client/client.h"
+#include "client/client_sync.h"
 
 #include <pcp/pmapi.h>
-#include <pcp/impl.h>
 #include <pcp/pmda.h>
+
+#ifdef HAVE___PMID_INT
+#include <pcp/impl.h>
+
+#define pmID_cluster(id)	id->cluster
+#define pmID_item(id)		id->item
+#define pmGetProgname()		pmProgname
+#define pmSetProgname(a)	__pmSetProgname(a)
+#endif
 
 #include "domain.h"
 
@@ -293,7 +302,7 @@ fill_base(unsigned int item, pmAtomValue *atom)
 		atom->d = stats->childwrite_latency.max;
 		break;
 	case 22:
-		atom->d = stats->num_recoveries;
+		atom->ul = stats->num_recoveries;
 		break;
 	default:
 		return PM_ERR_PMID;
@@ -385,7 +394,11 @@ static int
 pmda_ctdb_fetch_cb(pmdaMetric *mdesc, unsigned int inst, pmAtomValue *atom)
 {
 	int ret;
+#ifdef HAVE___PMID_INT
 	__pmID_int *id = (__pmID_int *)&(mdesc->m_desc.pmid);
+#else
+	pmID id = *(pmID *)&(mdesc->m_desc.pmid);
+#endif
 
 	if (inst != PM_IN_NULL) {
 		return PM_ERR_INST;
@@ -398,27 +411,27 @@ pmda_ctdb_fetch_cb(pmdaMetric *mdesc, unsigned int inst, pmAtomValue *atom)
 	}
 
 
-	switch (id->cluster) {
+	switch (pmID_cluster(id)) {
 	case 0:
-		ret = fill_base(id->item, atom);
+		ret = fill_base(pmID_item(id), atom);
 		if (ret) {
 			goto err_out;
 		}
 		break;
 	case 1:
-		ret = fill_node(id->item, atom);
+		ret = fill_node(pmID_item(id), atom);
 		if (ret) {
 			goto err_out;
 		}
 		break;
 	case 2:
-		ret = fill_client(id->item, atom);
+		ret = fill_client(pmID_item(id), atom);
 		if (ret) {
 			goto err_out;
 		}
 		break;
 	case 3:
-		ret = fill_timeout(id->item, atom);
+		ret = fill_timeout(pmID_item(id), atom);
 		if (ret) {
 			goto err_out;
 		}
@@ -501,7 +514,7 @@ helpfile(void)
 static void
 usage(void)
 {
-	fprintf(stderr, "Usage: %s [options]\n\n", pmProgname);
+	fprintf(stderr, "Usage: %s [options]\n\n", pmGetProgname());
 	fputs("Options:\n"
 	  "  -d domain        use domain (numeric) for metrics domain of PMDA\n"
 	  "  -l logfile       write log into logfile rather than using default log name\n"
@@ -523,9 +536,9 @@ main(int argc, char **argv)
 	char log_file[] = "pmda_ctdb.log";
 	pmdaInterface dispatch;
 
-	__pmSetProgname(argv[0]);
+	pmSetProgname(argv[0]);
 
-	pmdaDaemon(&dispatch, PMDA_INTERFACE_2, pmProgname, CTDB,
+	pmdaDaemon(&dispatch, PMDA_INTERFACE_2, argv[0], CTDB,
 		   log_file, helpfile());
 
 	if (pmdaGetOpt(argc, argv, "d:i:l:pu:?", &dispatch, &err) != EOF) {

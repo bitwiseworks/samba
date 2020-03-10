@@ -4,28 +4,28 @@
 
 # Invalid path
 ok <<EOF
-Process exited with error 2
+Process exited with error $(errcode ENOENT)
 EOF
-unit_test run_proc_test 0 /a/b/c
+unit_test run_proc_test 0 -1 /a/b/c
 
 # Non-executable path
-prog=$(mktemp --tmpdir="$TEST_VAR_DIR")
+prog=$(TMPDIR="$TEST_VAR_DIR" mktemp)
 cat > "$prog" <<EOF
 echo hello
 EOF
 
 ok <<EOF
-Process exited with error 13
+Process exited with error $(errcode EACCES)
 EOF
-unit_test run_proc_test 0 "$prog"
+unit_test run_proc_test 0 -1 "$prog"
 
 # Executable path
 chmod +x "$prog"
 
 ok <<EOF
-Process exited with error 8
+Process exited with error $(errcode ENOEXEC)
 EOF
-unit_test run_proc_test 0 "$prog"
+unit_test run_proc_test 0 -1 "$prog"
 
 # Capture output
 cat > "$prog" <<EOF
@@ -38,7 +38,7 @@ Process exited with status 0
 Output = (hello
 )
 EOF
-unit_test run_proc_test 0 "$prog"
+unit_test run_proc_test 0 -1 "$prog"
 
 # Specify timeout
 ok <<EOF
@@ -46,10 +46,10 @@ Process exited with status 0
 Output = (hello
 )
 EOF
-unit_test run_proc_test 5 "$prog"
+unit_test run_proc_test 5 -1 "$prog"
 
 # Redirected output
-output=$(mktemp --tmpdir="$TEST_VAR_DIR")
+output=$(TMPDIR="$TEST_VAR_DIR" mktemp)
 cat > "$prog" <<EOF
 #!/bin/sh
 exec >"$output" 2>&1
@@ -59,7 +59,7 @@ EOF
 ok <<EOF
 Process exited with status 0
 EOF
-unit_test run_proc_test 0 "$prog"
+unit_test run_proc_test 0 -1 "$prog"
 
 ok <<EOF
 hello
@@ -75,7 +75,7 @@ EOF
 ok <<EOF
 Process exited with status 1
 EOF
-unit_test run_proc_test 0 "$prog"
+unit_test run_proc_test 0 -1 "$prog"
 
 # Exit with signal
 cat > "$prog" <<EOF
@@ -86,7 +86,7 @@ EOF
 ok <<EOF
 Process exited with signal 15
 EOF
-unit_test run_proc_test 0 "$prog"
+unit_test run_proc_test 0 -1 "$prog"
 
 # Exit with timeout
 cat > "$prog" <<EOF
@@ -102,15 +102,15 @@ result_filter ()
 }
 
 ok <<EOF
-Process exited with error 62
+Process exited with error $(errcode ETIMEDOUT)
 Child = PID
 Output = (Sleeping for 5 seconds
 )
 EOF
-unit_test run_proc_test 1 "$prog"
+unit_test run_proc_test 1 -1 "$prog"
 
 # No zombie processes
-pidfile=$(mktemp --tmpdir="$TEST_VAR_DIR")
+pidfile=$(TMPDIR="$TEST_VAR_DIR" mktemp)
 
 cat > "$prog" <<EOF
 #!/bin/sh
@@ -119,15 +119,16 @@ sleep 10
 EOF
 
 ok <<EOF
-Process exited with error 62
+Process exited with error $(errcode ETIMEDOUT)
 Child = PID
 EOF
-unit_test run_proc_test 1 "$prog"
+unit_test run_proc_test 1 -1 "$prog"
 
 result_filter ()
 {
 	_header="  *PID  *TTY  *TIME  *CMD"
-	sed -e "s|^${_header}|HEADER|"
+	_header2=" *PID  *TT  *STAT  *TIME  *COMMAND"
+	sed -e "s|^${_header}|HEADER|" -e "s|^${_header2}|HEADER|"
 }
 
 pid=$(cat "$pidfile")
@@ -136,5 +137,23 @@ HEADER
 EOF
 unit_test ps -p "$pid"
 
+# Redirect stdin
+cat > "$prog" <<EOF
+#!/bin/sh
+cat -
+EOF
+
+cat > "$output" <<EOF
+this is sample input
+EOF
+
+ok <<EOF
+Process exited with status 0
+Output = (this is sample input
+)
+EOF
+(unit_test run_proc_test 0 4 "$prog") 4<"$output"
+
 rm -f "$pidfile"
+rm -f "$output"
 rm -f "$prog"

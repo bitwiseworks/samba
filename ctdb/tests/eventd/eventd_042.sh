@@ -2,47 +2,28 @@
 
 . "${TEST_SCRIPTS_DIR}/unit.sh"
 
-define_test "releaseip event"
-
-cat > "$eventd_scriptdir/01.test" <<EOF
-#!/bin/sh
-
-echo \$*
-if [ \$# -ne 4 ] ; then
-    echo "Wrong number of arguments"
-    exit 2
-fi
-exit 0
-EOF
-chmod +x "$eventd_scriptdir/01.test"
+define_test "multiple components with failure"
 
 setup_eventd
 
+ok_null
+simple_test_background run 10 multi monitor
+
+required_error ENOEXEC <<EOF
+Event failure in random failed
+EOF
+simple_test run 10 random failure
+
+ok <<EOF
+01.test              OK         DURATION DATETIME
+02.test              OK         DURATION DATETIME
+03.test              OK         DURATION DATETIME
+EOF
+simple_test status multi monitor
+
 required_result 1 <<EOF
-Insufficient arguments for event releaseip
+01.disabled          DISABLED  
+02.enabled           ERROR      DURATION DATETIME
+  OUTPUT: 
 EOF
-simple_test run releaseip 30
-
-required_result 0 <<EOF
-Event releaseip has never run
-EOF
-simple_test status releaseip lastrun
-
-required_result 0 <<EOF
-EOF
-simple_test run releaseip 30 eth0 192.168.1.1 24
-
-required_result 0 <<EOF
-01.test              OK         DURATION DATETIME
-EOF
-simple_test status releaseip lastrun
-
-required_result 0 <<EOF
-01.test              OK         DURATION DATETIME
-EOF
-simple_test status releaseip lastpass
-
-required_result 0 <<EOF
-Event releaseip has never failed
-EOF
-simple_test status releaseip lastfail
+simple_test status random failure

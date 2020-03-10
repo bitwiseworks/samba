@@ -143,43 +143,55 @@ struct torture_test *torture_suite_add_2smb2_test(struct torture_suite *suite,
 	return test;
 }
 
-NTSTATUS torture_smb2_init(void)
+NTSTATUS torture_smb2_init(TALLOC_CTX *ctx)
 {
-	struct torture_suite *suite = torture_suite_create(talloc_autofree_context(), "smb2");
+	struct torture_suite *suite = torture_suite_create(ctx, "smb2");
 	torture_suite_add_simple_test(suite, "connect", torture_smb2_connect);
-	torture_suite_add_suite(suite, torture_smb2_scan_init());
-	torture_suite_add_suite(suite, torture_smb2_getinfo_init());
+	torture_suite_add_suite(suite, torture_smb2_scan_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_getinfo_init(suite));
 	torture_suite_add_simple_test(suite, "setinfo", torture_smb2_setinfo);
-	torture_suite_add_suite(suite, torture_smb2_lock_init());
-	torture_suite_add_suite(suite, torture_smb2_read_init());
-	torture_suite_add_suite(suite, torture_smb2_create_init());
-	torture_suite_add_suite(suite, torture_smb2_acls_init());
-	torture_suite_add_suite(suite, torture_smb2_notify_init());
-	torture_suite_add_suite(suite, torture_smb2_notify_inotify_init());
-	torture_suite_add_suite(suite, torture_smb2_notify_disabled_init());
-	torture_suite_add_suite(suite, torture_smb2_durable_open_init());
-	torture_suite_add_suite(suite, torture_smb2_durable_open_disconnect_init());
-	torture_suite_add_suite(suite, torture_smb2_durable_v2_open_init());
-	torture_suite_add_suite(suite, torture_smb2_dir_init());
-	torture_suite_add_suite(suite, torture_smb2_lease_init());
-	torture_suite_add_suite(suite, torture_smb2_compound_init());
-	torture_suite_add_suite(suite, torture_smb2_oplocks_init());
-	torture_suite_add_suite(suite, torture_smb2_kernel_oplocks_init());
-	torture_suite_add_suite(suite, torture_smb2_streams_init());
-	torture_suite_add_suite(suite, torture_smb2_ioctl_init());
-	torture_suite_add_suite(suite, torture_smb2_rename_init());
+	torture_suite_add_suite(suite, torture_smb2_lock_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_read_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_create_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_acls_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_notify_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_notify_inotify_init(suite));
+	torture_suite_add_suite(suite,
+		torture_smb2_notify_disabled_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_durable_open_init(suite));
+	torture_suite_add_suite(suite,
+		torture_smb2_durable_open_disconnect_init(suite));
+	torture_suite_add_suite(suite,
+		torture_smb2_durable_v2_open_init(suite));
+	torture_suite_add_suite(suite,
+		torture_smb2_durable_v2_delay_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_dir_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_lease_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_compound_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_compound_find_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_oplocks_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_kernel_oplocks_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_streams_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_ioctl_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_rename_init(suite));
 	torture_suite_add_1smb2_test(suite, "bench-oplock", test_smb2_bench_oplock);
+	torture_suite_add_suite(suite, torture_smb2_sharemode_init(suite));
 	torture_suite_add_1smb2_test(suite, "hold-oplock", test_smb2_hold_oplock);
-	torture_suite_add_suite(suite, torture_smb2_session_init());
-	torture_suite_add_suite(suite, torture_smb2_replay_init());
+	torture_suite_add_suite(suite, torture_smb2_session_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_replay_init(suite));
 	torture_suite_add_simple_test(suite, "dosmode", torture_smb2_dosmode);
 	torture_suite_add_simple_test(suite, "maxfid", torture_smb2_maxfid);
+	torture_suite_add_simple_test(suite, "hold-sharemode",
+				      torture_smb2_hold_sharemode);
+	torture_suite_add_simple_test(suite, "check-sharemode",
+				      torture_smb2_check_sharemode);
+	torture_suite_add_suite(suite, torture_smb2_crediting_init(suite));
 
-	torture_suite_add_suite(suite, torture_smb2_doc_init());
+	torture_suite_add_suite(suite, torture_smb2_doc_init(suite));
 
 	suite->description = talloc_strdup(suite, "SMB2-specific tests");
 
-	torture_register_suite(suite);
+	torture_register_suite(ctx, suite);
 
 	return NT_STATUS_OK;
 }

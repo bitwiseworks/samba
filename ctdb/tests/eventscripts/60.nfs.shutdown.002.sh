@@ -4,9 +4,11 @@
 
 define_test "callout is 'false', causes shutdown to fail"
 
-setup_nfs
+setup
 
-export CTDB_NFS_CALLOUT="echo shutdown ; false"
+setup_script_options <<EOF
+CTDB_NFS_CALLOUT="echo shutdown ; false"
+EOF
 
 required_result 1 "shutdown"
 simple_test

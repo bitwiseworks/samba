@@ -157,4 +157,34 @@ WERROR winreg_enum_printer_key_internal(TALLOC_CTX *mem_ctx,
 					const char *key,
 					uint32_t *pnum_subkeys,
 					const char ***psubkeys);
+WERROR winreg_get_core_driver_internal(TALLOC_CTX *mem_ctx,
+				       const struct auth_session_info *session_info,
+				       struct messaging_context *msg_ctx,
+				       const char *architecture,
+				       const struct GUID *core_driver_guid,
+				       struct spoolss_CorePrinterDriver **core_printer_driver);
+WERROR winreg_add_core_driver_internal(TALLOC_CTX *mem_ctx,
+				       const struct auth_session_info *session_info,
+				       struct messaging_context *msg_ctx,
+				       const char *architecture,
+				       const struct spoolss_CorePrinterDriver *core_printer_driver);
+WERROR winreg_add_driver_package_internal(TALLOC_CTX *mem_ctx,
+				          const struct auth_session_info *session_info,
+				          struct messaging_context *msg_ctx,
+					  const char *package_id,
+					  const char *architecture,
+					  const char *driver_store_path,
+					  const char *cab_path);
+WERROR winreg_get_driver_package_internal(TALLOC_CTX *mem_ctx,
+				          const struct auth_session_info *session_info,
+				          struct messaging_context *msg_ctx,
+					  const char *package_id,
+					  const char *architecture,
+					  const char **driver_store_path,
+					  const char **cab_path);
+WERROR winreg_del_driver_package_internal(TALLOC_CTX *mem_ctx,
+				          const struct auth_session_info *session_info,
+				          struct messaging_context *msg_ctx,
+					  const char *package_id,
+					  const char *architecture);
 #endif /* _SRV_SPOOLSS_UITL_H */

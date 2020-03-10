@@ -36,7 +36,7 @@ char *line;
 TDB_DATA iterate_kbuf;
 char cmdline[1024];
 static int disable_mmap;
-static int disable_lock;
+static int _disable_lock;
 
 enum commands {
 	CMD_CREATE_TDB,
@@ -48,6 +48,7 @@ enum commands {
 	CMD_DUMP,
 	CMD_INSERT,
 	CMD_MOVE,
+	CMD_STOREHEX,
 	CMD_STORE,
 	CMD_SHOW,
 	CMD_KEYS,
@@ -83,6 +84,7 @@ COMMAND_TABLE cmd_table[] = {
 	{"dump",	CMD_DUMP},
 	{"insert",	CMD_INSERT},
 	{"move",	CMD_MOVE},
+	{"storehex",	CMD_STOREHEX},
 	{"store",	CMD_STORE},
 	{"show",	CMD_SHOW},
 	{"keys",	CMD_KEYS},
@@ -229,6 +231,7 @@ static void help(void)
 "  info                 : print summary info about the database\n"
 "  insert    key  data  : insert a record\n"
 "  move      key  file  : move a record to a destination tdb\n"
+"  storehex  key  data  : store a record (replace), key/value in hex format\n"
 "  store     key  data  : store a record (replace)\n"
 "  show      key        : show a record by key\n"
 "  delete    key        : delete a record by key\n"
@@ -260,7 +263,7 @@ static void create_tdb(const char *tdbname)
 	tdb = tdb_open_ex(tdbname, 0,
 			  TDB_CLEAR_IF_FIRST |
 			  (disable_mmap?TDB_NOMMAP:0) |
-			  (disable_lock?TDB_NOLOCK:0),
+			  (_disable_lock?TDB_NOLOCK:0),
 			  O_RDWR | O_CREAT | O_TRUNC, 0600, &log_ctx, NULL);
 	if (!tdb) {
 		printf("Could not create %s: %s\n", tdbname, strerror(errno));
@@ -275,7 +278,7 @@ static void open_tdb(const char *tdbname)
 	if (tdb) tdb_close(tdb);
 	tdb = tdb_open_ex(tdbname, 0,
 			  (disable_mmap?TDB_NOMMAP:0) |
-			  (disable_lock?TDB_NOLOCK:0),
+			  (_disable_lock?TDB_NOLOCK:0),
 			  O_RDWR, 0600,
 			  &log_ctx, NULL);
 
@@ -343,6 +346,86 @@ static void store_tdb(char *keyname, size_t keylen, char* data, size_t datalen)
 
 	if (tdb_store(tdb, key, dbuf, TDB_REPLACE) != 0) {
 		terror("store failed");
+	}
+}
+
+static bool hexchar(char c, uint8_t *v)
+{
+	if ((c >= '0') && (c <= '9')) {
+		*v = (c - '0');
+		return true;
+	}
+	if ((c >= 'A') && (c <= 'F')) {
+		*v = (c - 'A' + 10);
+		return true;
+	}
+	if ((c >= 'a') && (c <= 'f')) {
+		*v = (c - 'a' + 10);
+		return true;
+	}
+	return false;
+}
+
+static bool parse_hex(const char *src, size_t srclen, uint8_t *dst)
+{
+	size_t i=0;
+
+	if ((srclen % 2) != 0) {
+		return false;
+	}
+
+	while (i<srclen) {
+		bool ok;
+		uint8_t hi,lo;
+
+		ok = (hexchar(src[i++], &hi) && hexchar(src[i++], &lo));
+		if (!ok) {
+			return false;
+		}
+		*dst = (hi<<4)|lo;
+		dst += 1;
+	}
+
+	return true;
+}
+
+static void store_hex_tdb(char *keystr, size_t keylen,
+			  char *datastr, size_t datalen)
+{
+	if ((keystr == NULL) || (keylen == 0)) {
+		terror("need key");
+		return;
+	}
+	if ((datastr == NULL) || (datalen == 0)) {
+		terror("need data");
+		return;
+	}
+
+	{
+		uint8_t keybuf[keylen/2];
+		TDB_DATA key = { .dptr = keybuf, .dsize = sizeof(keybuf) };
+		uint8_t databuf[datalen/2];
+		TDB_DATA data = { .dptr = databuf, .dsize = sizeof(databuf) };
+		bool ok;
+
+		ok = parse_hex(keystr, keylen, keybuf);
+		if (!ok) {
+			terror("need hex key");
+			return;
+		}
+		ok = parse_hex(datastr, datalen, databuf);
+		if (!ok) {
+			terror("need hex data");
+			return;
+		}
+
+		printf("storing key/data:\n");
+		print_data((char *)key.dptr, key.dsize);
+		print_data((char *)data.dptr, data.dsize);
+
+		if (tdb_store(tdb, key, data, TDB_REPLACE) != 0) {
+			terror("store failed");
+		}
 	}
 }
 
@@ -564,12 +647,6 @@ static char *tdb_getline(const char *prompt)
 	return p?thisline:NULL;
 }
 
-static int do_delete_fn(TDB_CONTEXT *the_tdb, TDB_DATA key, TDB_DATA dbuf,
-                     void *state)
-{
-    return tdb_delete(the_tdb, key);
-}
-
 static void first_record(TDB_CONTEXT *the_tdb, TDB_DATA *pkey)
 {
 	TDB_DATA dbuf;
@@ -675,7 +752,7 @@ static int do_command(void)
 			return 0;
 		case CMD_ERASE:
 			bIterate = 0;
-			tdb_traverse(tdb, do_delete_fn, NULL);
+			tdb_wipe_all(tdb);
 			return 0;
 		case CMD_DUMP:
 			bIterate = 0;
@@ -692,6 +769,10 @@ static int do_command(void)
 		case CMD_STORE:
 			bIterate = 0;
 			store_tdb(arg1,arg1len,arg2,arg2len);
+			return 0;
+		case CMD_STOREHEX:
+			bIterate = 0;
+			store_hex_tdb(arg1,arg1len,arg2,arg2len);
 			return 0;
 		case CMD_SHOW:
 			bIterate = 0;
@@ -803,7 +884,7 @@ int main(int argc, char *argv[])
 	arg2len = 0;
 
 	if (argv[1] && (strcmp(argv[1], "-l") == 0)) {
-		disable_lock = 1;
+		_disable_lock = 1;
 		argv[1] = argv[0];
 		argv += 1;
 		argc -= 1;
@@ -843,10 +924,13 @@ int main(int argc, char *argv[])
 		break;
 	case 5:
 		arg2 = tdb_convert_string(argv[4],&arg2len);
+		FALL_THROUGH;
 	case 4:
 		arg1 = tdb_convert_string(argv[3],&arg1len);
+		FALL_THROUGH;
 	case 3:
 		cmdname = argv[2];
+		FALL_THROUGH;
 	default:
 		do_command();
 		break;

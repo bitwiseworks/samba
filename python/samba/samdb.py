@@ -27,13 +27,19 @@ import ldb
 import time
 import base64
 import os
+import re
 from samba import dsdb, dsdb_dns
 from samba.ndr import ndr_unpack, ndr_pack
 from samba.dcerpc import drsblobs, misc
 from samba.common import normalise_int32
+from samba.compat import text_type
+from samba.dcerpc import security
 
 __docformat__ = "restructuredText"
 
+
+def get_default_backend_store():
+    return "tdb"
 
 class SamDB(samba.Ldb):
     """The SAM database."""
@@ -42,7 +48,8 @@ class SamDB(samba.Ldb):
     hash_well_known = {}
 
     def __init__(self, url=None, lp=None, modules_dir=None, session_info=None,
-                 credentials=None, flags=0, options=None, global_schema=True,
+                 credentials=None, flags=ldb.FLG_DONT_CREATE_DB,
+                 options=None, global_schema=True,
                  auto_connect=True, am_rodc=None):
         self.lp = lp
         if not auto_connect:
@@ -82,6 +89,10 @@ class SamDB(samba.Ldb):
     def domain_dn(self):
         '''return the domain DN'''
         return str(self.get_default_basedn())
+
+    def schema_dn(self):
+        '''return the schema partition dn'''
+        return str(self.get_schema_basedn())
 
     def disable_account(self, search_filter):
         """Disables an account
@@ -266,24 +277,42 @@ changetype: modify
 """ % (str(targetgroup[0].dn))
 
             for member in members:
-                targetmember = self.search(base=self.domain_dn(), scope=ldb.SCOPE_SUBTREE,
-                                    expression="(|(sAMAccountName=%s)(CN=%s))" % (
-                    ldb.binary_encode(member), ldb.binary_encode(member)), attrs=[])
+                filter = ('(&(sAMAccountName=%s)(|(objectclass=user)'
+                          '(objectclass=group)))' % ldb.binary_encode(member))
+                foreign_msg = None
+                try:
+                    membersid = security.dom_sid(member)
+                except TypeError as e:
+                    membersid = None
 
+                if membersid is not None:
+                    filter = '(objectSid=%s)' % str(membersid)
+                    dn_str = "<SID=%s>" % str(membersid)
+                    foreign_msg = ldb.Message()
+                    foreign_msg.dn = ldb.Dn(self, dn_str)
+
+                targetmember = self.search(base=self.domain_dn(),
+                                           scope=ldb.SCOPE_SUBTREE,
+                                           expression="%s" % filter,
+                                           attrs=[])
+
+                if len(targetmember) == 0 and foreign_msg is not None:
+                    targetmember = [foreign_msg]
                 if len(targetmember) != 1:
                     raise Exception('Unable to find "%s". Operation cancelled.' % member)
+                targetmember_dn = targetmember[0].dn.extended_str(1)
 
-                if add_members_operation is True and (targetgroup[0].get('member') is None or str(targetmember[0].dn) not in targetgroup[0]['member']):
+                if add_members_operation is True and (targetgroup[0].get('member') is None or str(targetmember_dn) not in targetgroup[0]['member']):
                     modified = True
                     addtargettogroup += """add: member
 member: %s
-""" % (str(targetmember[0].dn))
+""" % (str(targetmember_dn))
 
-                elif add_members_operation is False and (targetgroup[0].get('member') is not None and str(targetmember[0].dn) in targetgroup[0]['member']):
+                elif add_members_operation is False and (targetgroup[0].get('member') is not None and targetmember_dn in targetgroup[0]['member']):
                     modified = True
                     addtargettogroup += """delete: member
 member: %s
-""" % (str(targetmember[0].dn))
+""" % (str(targetmember_dn))
 
             if modified is True:
                 self.modify_ldif(addtargettogroup)
@@ -455,7 +484,9 @@ member: %s
 
             # Sets the password for it
             if setpassword:
-                self.setpassword("(samAccountName=%s)" % ldb.binary_encode(username), password,
+                self.setpassword(("(distinguishedName=%s)" %
+                                  ldb.binary_encode(user_dn)),
+                                 password,
                                  force_password_change_at_next_login_req)
         except:
             self.transaction_cancel()
@@ -463,6 +494,65 @@ member: %s
         else:
             self.transaction_commit()
 
+    def newcomputer(self, computername, computerou=None, description=None,
+                    prepare_oldjoin=False, ip_address_list=None,
+                    service_principal_name_list=None):
+        """Adds a new user with additional parameters
+
+        :param computername: Name of the new computer
+        :param computerou: Object container for new computer
+        :param description: Description of the new computer
+        :param prepare_oldjoin: Preset computer password for oldjoin mechanism
+        :param ip_address_list: ip address list for DNS A or AAAA record
+        :param service_principal_name_list: string list of servicePincipalName
+        """
+
+        cn = re.sub(r"\$$", "", computername)
+        if cn.count('$'):
+            raise Exception('Illegal computername "%s"' % computername)
+        samaccountname = "%s$" % cn
+
+        computercontainer_dn = "CN=Computers,%s" % self.domain_dn()
+        if computerou:
+            computercontainer_dn = self.normalize_dn_in_domain(computerou)
+
+        computer_dn = "CN=%s,%s" % (cn, computercontainer_dn)
+
+        ldbmessage = {"dn": computer_dn,
+                      "sAMAccountName": samaccountname,
+                      "objectClass": "computer",
+                      }
+
+        if description is not None:
+            ldbmessage["description"] = description
+
+        if service_principal_name_list:
+            ldbmessage["servicePrincipalName"] = service_principal_name_list
+
+        accountcontrol = str(dsdb.UF_WORKSTATION_TRUST_ACCOUNT |
+                             dsdb.UF_ACCOUNTDISABLE)
+        if prepare_oldjoin:
+            accountcontrol = str(dsdb.UF_WORKSTATION_TRUST_ACCOUNT)
+        ldbmessage["userAccountControl"] = accountcontrol
+
+        if ip_address_list:
+            ldbmessage['dNSHostName'] = '{}.{}'.format(
+                cn, self.domain_dns_name())
+
+        self.transaction_start()
+        try:
+            self.add(ldbmessage)
+
+            if prepare_oldjoin:
+                password = cn.lower()
+                self.setpassword(("(distinguishedName=%s)" %
+                                  ldb.binary_encode(computer_dn)),
+                                 password, False)
+        except:
+            self.transaction_cancel()
+            raise
+        else:
+            self.transaction_commit()
 
     def deleteuser(self, username):
         """Deletes a user
@@ -503,13 +593,17 @@ member: %s
             if len(res) > 1:
                 raise Exception('Matched %u multiple users with filter "%s"' % (len(res), search_filter))
             user_dn = res[0].dn
-            pw = unicode('"' + password.encode('utf-8') + '"', 'utf-8').encode('utf-16-le')
+            if not isinstance(password, text_type):
+                pw = password.decode('utf-8')
+            else:
+                pw = password
+            pw = ('"' + pw + '"').encode('utf-16-le')
             setpw = """
 dn: %s
 changetype: modify
 replace: unicodePwd
 unicodePwd:: %s
-""" % (user_dn, base64.b64encode(pw))
+""" % (user_dn, base64.b64encode(pw).decode('utf-8'))
 
             self.modify_ldif(setpw)
 
@@ -668,6 +762,15 @@ accountExpires: %u
     def set_schema_from_ldb(self, ldb_conn, write_indices_and_attributes=True):
         dsdb._dsdb_set_schema_from_ldb(self, ldb_conn, write_indices_and_attributes)
 
+    def set_schema_update_now(self):
+        ldif = """
+dn:
+changetype: modify
+add: schemaUpdateNow
+schemaUpdateNow: 1
+"""
+        self.modify_ldif(ldif)
+
     def dsdb_DsReplicaAttribute(self, ldb, ldap_display_name, ldif_elements):
         '''convert a list of attribute values to a DRSUAPI DsReplicaAttribute'''
         return dsdb._dsdb_DsReplicaAttribute(ldb, ldap_display_name, ldif_elements)
@@ -684,7 +787,7 @@ accountExpires: %u
         """
         if len(self.hash_oid_name.keys()) == 0:
             self._populate_oid_attid()
-        if self.hash_oid_name.has_key(self.get_oid_from_attid(attid)):
+        if self.get_oid_from_attid(attid) in self.hash_oid_name:
             return self.hash_oid_name[self.get_oid_from_attid(attid)]
         else:
             return None
@@ -723,14 +826,14 @@ accountExpires: %u
             return None
 
         repl = ndr_unpack(drsblobs.replPropertyMetaDataBlob,
-                            str(res[0]["replPropertyMetaData"]))
+                          res[0]["replPropertyMetaData"][0])
         ctr = repl.ctr
         if len(self.hash_oid_name.keys()) == 0:
             self._populate_oid_attid()
         for o in ctr.array:
             # Search for Description
             att_oid = self.get_oid_from_attid(o.attid)
-            if self.hash_oid_name.has_key(att_oid) and\
+            if att_oid in self.hash_oid_name and\
                att.lower() == self.hash_oid_name[att_oid].lower():
                 return o.version
         return None
@@ -745,7 +848,7 @@ accountExpires: %u
             return None
 
         repl = ndr_unpack(drsblobs.replPropertyMetaDataBlob,
-                            str(res[0]["replPropertyMetaData"]))
+                          res[0]["replPropertyMetaData"][0])
         ctr = repl.ctr
         now = samba.unix2nttime(int(time.time()))
         found = False
@@ -754,7 +857,7 @@ accountExpires: %u
         for o in ctr.array:
             # Search for Description
             att_oid = self.get_oid_from_attid(o.attid)
-            if self.hash_oid_name.has_key(att_oid) and\
+            if att_oid in self.hash_oid_name and\
                att.lower() == self.hash_oid_name[att_oid].lower():
                 found = True
                 seq = self.sequence_number(ldb.SEQ_NEXT)
@@ -827,6 +930,24 @@ accountExpires: %u
             return None
         else:
             return res[0]["minPwdAge"][0]
+
+    def set_maxPwdAge(self, value):
+        m = ldb.Message()
+        m.dn = ldb.Dn(self, self.domain_dn())
+        m["maxPwdAge"] = ldb.MessageElement(value, ldb.FLAG_MOD_REPLACE, "maxPwdAge")
+        self.modify(m)
+
+
+    def get_maxPwdAge(self):
+        res = self.search(self.domain_dn(), scope=ldb.SCOPE_BASE, attrs=["maxPwdAge"])
+        if len(res) == 0:
+            return None
+        elif not "maxPwdAge" in res[0]:
+            return None
+        else:
+            return res[0]["maxPwdAge"][0]
+
+
 
     def set_minPwdLength(self, value):
         m = ldb.Message()
@@ -927,13 +1048,17 @@ accountExpires: %u
         res = self.search(base="", scope=ldb.SCOPE_BASE, attrs=["serverName"])
         return res[0]["serverName"][0]
 
-    def dns_lookup(self, dns_name):
+    def dns_lookup(self, dns_name, dns_partition=None):
         '''Do a DNS lookup in the database, returns the NDR database structures'''
-        return dsdb_dns.lookup(self, dns_name)
+        if dns_partition is None:
+            return dsdb_dns.lookup(self, dns_name)
+        else:
+            return dsdb_dns.lookup(self, dns_name,
+                                   dns_partition=dns_partition)
 
     def dns_extract(self, el):
         '''Return the NDR database structures from a dnsRecord element'''
-        return dsdb_dns.extract(el)
+        return dsdb_dns.extract(self, el)
 
     def dns_replace(self, dns_name, new_records):
         '''Do a DNS modification on the database, sets the NDR database
@@ -971,3 +1096,21 @@ accountExpires: %u
     def allocate_rid(self):
         '''return a new RID from the RID Pool on this DSA'''
         return dsdb._dsdb_allocate_rid(self)
+
+    def normalize_dn_in_domain(self, dn):
+        '''return a new DN expanded by adding the domain DN
+
+        If the dn is already a child of the domain DN, just
+        return it as-is.
+
+        :param dn: relative dn
+        '''
+        domain_dn = ldb.Dn(self, self.domain_dn())
+
+        if isinstance(dn, ldb.Dn):
+            dn = str(dn)
+
+        full_dn = ldb.Dn(self, dn)
+        if not full_dn.is_child_of(domain_dn):
+            full_dn.add_base(domain_dn)
+        return full_dn

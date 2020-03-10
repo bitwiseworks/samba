@@ -32,6 +32,8 @@ class GensecTests(samba.tests.TestCase):
         self.settings = {}
         self.settings["lp_ctx"] = self.lp_ctx = samba.tests.env_loadparm()
         self.settings["target_hostname"] = self.lp_ctx.get("netbios name")
+        self.lp_ctx.set("spnego:simulate_w2k", "no")
+
         """This is just for the API tests"""
         self.gensec = gensec.Security.start_client(self.settings)
 
@@ -44,7 +46,7 @@ class GensecTests(samba.tests.TestCase):
     def test_info_uninitialized(self):
         self.assertRaises(RuntimeError, self.gensec.session_info)
 
-    def test_update(self):
+    def _test_update(self, mech, client_mech=None):
         """Test GENSEC by doing an exchange with ourselves using GSSAPI against a KDC"""
 
         """Start up a client and server GENSEC instance to test things with"""
@@ -52,7 +54,10 @@ class GensecTests(samba.tests.TestCase):
         self.gensec_client = gensec.Security.start_client(self.settings)
         self.gensec_client.set_credentials(self.get_credentials())
         self.gensec_client.want_feature(gensec.FEATURE_SEAL)
-        self.gensec_client.start_mech_by_sasl_name("GSSAPI")
+        if client_mech is not None:
+            self.gensec_client.start_mech_by_name(client_mech)
+        else:
+            self.gensec_client.start_mech_by_sasl_name(mech)
 
         self.gensec_server = gensec.Security.start_server(settings=self.settings,
                                                           auth_context=auth.AuthContext(lp_ctx=self.lp_ctx))
@@ -62,34 +67,87 @@ class GensecTests(samba.tests.TestCase):
         self.gensec_server.set_credentials(creds)
 
         self.gensec_server.want_feature(gensec.FEATURE_SEAL)
-        self.gensec_server.start_mech_by_sasl_name("GSSAPI")
+        self.gensec_server.start_mech_by_sasl_name(mech)
 
         client_finished = False
         server_finished = False
-        server_to_client = ""
+        server_to_client = b""
+        client_to_server = b""
 
         """Run the actual call loop"""
-        while not client_finished and not server_finished:
+        while True:
             if not client_finished:
-                print "running client gensec_update"
+                print("running client gensec_update")
                 (client_finished, client_to_server) = self.gensec_client.update(server_to_client)
             if not server_finished:
-                print "running server gensec_update"
+                print("running server gensec_update")
                 (server_finished, server_to_client) = self.gensec_server.update(client_to_server)
+
+            if client_finished and server_finished:
+                break
+
+        self.assertTrue(server_finished)
+        self.assertTrue(client_finished)
+
         session_info = self.gensec_server.session_info()
 
-        test_string = "Hello Server"
-        test_wrapped = self.gensec_client.wrap(test_string)
-        test_unwrapped = self.gensec_server.unwrap(test_wrapped)
-        self.assertEqual(test_string, test_unwrapped)
-        test_string = "Hello Client"
-        test_wrapped = self.gensec_server.wrap(test_string)
+        test_bytes = b"Hello Server"
+        try:
+            test_wrapped = self.gensec_client.wrap(test_bytes)
+            test_unwrapped = self.gensec_server.unwrap(test_wrapped)
+        except samba.NTSTATUSError as e:
+            self.fail(str(e))
+
+        self.assertEqual(test_bytes, test_unwrapped)
+        test_bytes = b"Hello Client"
+        test_wrapped = self.gensec_server.wrap(test_bytes)
         test_unwrapped = self.gensec_client.unwrap(test_wrapped)
-        self.assertEqual(test_string, test_unwrapped)
+        self.assertEqual(test_bytes, test_unwrapped)
 
         client_session_key = self.gensec_client.session_key()
         server_session_key = self.gensec_server.session_key()
         self.assertEqual(client_session_key, server_session_key)
+
+    def test_update(self):
+        self._test_update("GSSAPI")
+
+    def test_update_spnego(self):
+        self._test_update("GSS-SPNEGO")
+
+    def test_update_w2k_spnego_client(self):
+        self.lp_ctx.set("spnego:simulate_w2k", "yes")
+
+        # Re-start the client with this set
+        self.gensec = gensec.Security.start_client(self.settings)
+
+        # Unset it for the server
+        self.lp_ctx.set("spnego:simulate_w2k", "no")
+
+        self._test_update("GSS-SPNEGO")
+
+    def test_update_w2k_spnego_server(self):
+        # Re-start the client with this set
+        self.gensec = gensec.Security.start_client(self.settings)
+
+        # Unset it for the server
+        self.lp_ctx.set("spnego:simulate_w2k", "yes")
+
+        self._test_update("GSS-SPNEGO")
+
+    def test_update_w2k_spnego(self):
+        self.lp_ctx.set("spnego:simulate_w2k", "no")
+
+        # Re-start the client with this set
+        self.gensec = gensec.Security.start_client(self.settings)
+
+        self._test_update("GSS-SPNEGO")
+
+    def test_update_gss_krb5_to_spnego(self):
+        self._test_update("GSS-SPNEGO", "gssapi_krb5")
+
+    def test_update_ntlmssp_to_spnego(self):
+        self._test_update("GSS-SPNEGO", "ntlmssp")
+
 
     def test_max_update_size(self):
         """Test GENSEC by doing an exchange with ourselves using GSSAPI against a KDC"""
@@ -114,17 +172,17 @@ class GensecTests(samba.tests.TestCase):
 
         client_finished = False
         server_finished = False
-        server_to_client = ""
+        server_to_client = b""
 
         """Run the actual call loop"""
         i = 0
         while not client_finished or not server_finished:
             i += 1
             if not client_finished:
-                print "running client gensec_update: %d: %r" % (len(server_to_client), server_to_client)
+                print("running client gensec_update: %d: %r" % (len(server_to_client), server_to_client))
                 (client_finished, client_to_server) = self.gensec_client.update(server_to_client)
             if not server_finished:
-                print "running server gensec_update: %d: %r" % (len(client_to_server), client_to_server)
+                print("running server gensec_update: %d: %r" % (len(client_to_server), client_to_server))
                 (server_finished, server_to_client) = self.gensec_server.update(client_to_server)
 
         """Here we expect a lot more than the typical 1 or 2 roundtrips"""
@@ -132,14 +190,14 @@ class GensecTests(samba.tests.TestCase):
 
         session_info = self.gensec_server.session_info()
 
-        test_string = "Hello Server"
-        test_wrapped = self.gensec_client.wrap(test_string)
+        test_bytes = b"Hello Server"
+        test_wrapped = self.gensec_client.wrap(test_bytes)
         test_unwrapped = self.gensec_server.unwrap(test_wrapped)
-        self.assertEqual(test_string, test_unwrapped)
-        test_string = "Hello Client"
-        test_wrapped = self.gensec_server.wrap(test_string)
+        self.assertEqual(test_bytes, test_unwrapped)
+        test_bytes = b"Hello Client"
+        test_wrapped = self.gensec_server.wrap(test_bytes)
         test_unwrapped = self.gensec_client.unwrap(test_wrapped)
-        self.assertEqual(test_string, test_unwrapped)
+        self.assertEqual(test_bytes, test_unwrapped)
 
         client_session_key = self.gensec_client.session_key()
         server_session_key = self.gensec_server.session_key()

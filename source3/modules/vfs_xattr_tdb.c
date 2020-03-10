@@ -57,8 +57,10 @@ static int xattr_tdb_get_file_id(struct vfs_handle_struct *handle,
 }
 
 static ssize_t xattr_tdb_getxattr(struct vfs_handle_struct *handle,
-				  const char *path, const char *name,
-				  void *value, size_t size)
+				const struct smb_filename *smb_fname,
+				const char *name,
+				void *value,
+				size_t size)
 {
 	struct file_id id;
 	struct db_context *db;
@@ -73,7 +75,7 @@ static ssize_t xattr_tdb_getxattr(struct vfs_handle_struct *handle,
 					TALLOC_FREE(frame); return -1;
 				});
 
-	ret = xattr_tdb_get_file_id(handle, path, &id);
+	ret = xattr_tdb_get_file_id(handle, smb_fname->base_name, &id);
 	if (ret == -1) {
 		TALLOC_FREE(frame);
 		return -1;
@@ -148,8 +150,11 @@ static ssize_t xattr_tdb_fgetxattr(struct vfs_handle_struct *handle,
 }
 
 static int xattr_tdb_setxattr(struct vfs_handle_struct *handle,
-			      const char *path, const char *name,
-			      const void *value, size_t size, int flags)
+				const struct smb_filename *smb_fname,
+				const char *name,
+				const void *value,
+				size_t size,
+				int flags)
 {
 	struct file_id id;
 	struct db_context *db;
@@ -162,7 +167,7 @@ static int xattr_tdb_setxattr(struct vfs_handle_struct *handle,
 					TALLOC_FREE(frame); return -1;
 				});
 
-	ret = xattr_tdb_get_file_id(handle, path, &id);
+	ret = xattr_tdb_get_file_id(handle, smb_fname->base_name, &id);
 	if (ret == -1) {
 		TALLOC_FREE(frame);
 		return -1;
@@ -204,7 +209,9 @@ static int xattr_tdb_fsetxattr(struct vfs_handle_struct *handle,
 }
 
 static ssize_t xattr_tdb_listxattr(struct vfs_handle_struct *handle,
-				   const char *path, char *list, size_t size)
+				const struct smb_filename *smb_fname,
+				char *list,
+				size_t size)
 {
 	struct file_id id;
 	struct db_context *db;
@@ -217,7 +224,7 @@ static ssize_t xattr_tdb_listxattr(struct vfs_handle_struct *handle,
 					TALLOC_FREE(frame); return -1;
 				});
 
-	ret = xattr_tdb_get_file_id(handle, path, &id);
+	ret = xattr_tdb_get_file_id(handle, smb_fname->base_name, &id);
 	if (ret == -1) {
 		TALLOC_FREE(frame);
 		return -1;
@@ -258,7 +265,8 @@ static ssize_t xattr_tdb_flistxattr(struct vfs_handle_struct *handle,
 }
 
 static int xattr_tdb_removexattr(struct vfs_handle_struct *handle,
-				 const char *path, const char *name)
+				const struct smb_filename *smb_fname,
+				const char *name)
 {
 	struct file_id id;
 	struct db_context *db;
@@ -271,7 +279,7 @@ static int xattr_tdb_removexattr(struct vfs_handle_struct *handle,
 					TALLOC_FREE(frame); return -1;
 				});
 
-	ret = xattr_tdb_get_file_id(handle, path, &id);
+	ret = xattr_tdb_get_file_id(handle, smb_fname->base_name, &id);
 	if (ret == -1) {
 		TALLOC_FREE(frame);
 		return ret;
@@ -608,8 +616,8 @@ static struct vfs_fn_pointers vfs_xattr_tdb_fns = {
 	.connect_fn = xattr_tdb_connect,
 };
 
-NTSTATUS vfs_xattr_tdb_init(void);
-NTSTATUS vfs_xattr_tdb_init(void)
+static_decl_vfs;
+NTSTATUS vfs_xattr_tdb_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "xattr_tdb",
 				&vfs_xattr_tdb_fns);

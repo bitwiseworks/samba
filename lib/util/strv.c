@@ -62,54 +62,61 @@ int strv_append(TALLOC_CTX *mem_ctx, char **strv, const char *src)
 	return _strv_append(mem_ctx, strv, src, talloc_array_length(src));
 }
 
-static bool strv_valid_entry(const char *strv, const char *entry,
-			     size_t *strv_len, size_t *entry_len)
+static bool strv_valid_entry(const char *strv, size_t strv_len,
+			     const char *entry, size_t *entry_len)
 {
-	size_t len;
-
-	len = talloc_array_length(strv);
-	if (len == 0) {
+	if (strv_len == 0) {
 		return false;
 	}
-	if (strv[len-1] != '\0') {
+	if (strv[strv_len-1] != '\0') {
 		return false;
 	}
 
 	if (entry < strv) {
 		return false;
 	}
-	if (entry >= (strv+len)) {
+	if (entry >= (strv+strv_len)) {
 		return false;
 	}
 
-	*strv_len = len;
-	*entry_len = strlen(entry);
+	if (entry_len != NULL) {
+		*entry_len = strlen(entry);
+	}
 
 	return true;
 }
 
-char *strv_next(char *strv, const char *entry)
+const char *strv_len_next(const char *strv, size_t strv_len,
+			  const char *entry)
 {
-	size_t len, entry_len;
-	char *result;
+	size_t entry_len;
 
 	if (entry == NULL) {
-		if (strv_valid_entry(strv, strv, &len, &entry_len)) {
+		if (strv_valid_entry(strv, strv_len, strv, NULL)) {
 			return strv;
 		}
 		return NULL;
 	}
 
-	if (!strv_valid_entry(strv, entry, &len, &entry_len)) {
+	if (!strv_valid_entry(strv, strv_len, entry, &entry_len)) {
 		return NULL;
 	}
-	result = &strv[entry - strv]; /* avoid const problems with this stmt */
-	result += entry_len + 1;
 
-	if (result >= (strv + len)) {
+	entry += entry_len+1;
+
+	if (entry >= (strv + strv_len)) {
 		return NULL;
 	}
-	return result;
+	return entry;
+}
+
+char *strv_next(char *strv, const char *entry)
+{
+	size_t len = talloc_array_length(strv);
+	const char *result;
+
+	result = strv_len_next(strv, len, entry);
+	return discard_const_p(char, result);
 }
 
 size_t strv_count(char *strv)
@@ -139,13 +146,14 @@ char *strv_find(char *strv, const char *entry)
 
 void strv_delete(char **strv, char *entry)
 {
-	size_t len, entry_len;
+	size_t len = talloc_array_length(*strv);
+	size_t entry_len;
 
 	if (entry == NULL) {
 		return;
 	}
 
-	if (!strv_valid_entry(*strv, entry, &len, &entry_len)) {
+	if (!strv_valid_entry(*strv, len, entry, &entry_len)) {
 		return;
 	}
 	entry_len += 1;

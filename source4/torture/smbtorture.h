@@ -34,13 +34,15 @@ extern int torture_failures;
 extern int torture_numasync;
 
 struct torture_test;
-int torture_init(void);
-bool torture_register_suite(struct torture_suite *suite);
+int torture_init(TALLOC_CTX *);
+bool torture_register_suite(TALLOC_CTX *, struct torture_suite *suite);
 void torture_shell(struct torture_context *tctx);
 void torture_print_testsuites(bool structured);
 bool torture_run_named_tests(struct torture_context *torture, const char *name,
 			    const char **restricted);
-bool torture_parse_target(struct loadparm_context *lp_ctx, const char *target);
+bool torture_parse_target(TALLOC_CTX *ctx,
+			struct loadparm_context *lp_ctx,
+			const char *target);
 
 /* Server Functionality Support */
 

@@ -16,6 +16,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import print_function
 from samba import sites, subnets
 from samba.samdb import SamDB
 import samba.getopt as options
@@ -57,7 +58,7 @@ class cmd_sites_create(Command):
         try:
             sites.create_site(samdb, samdb.get_config_basedn(), sitename)
             samdb.transaction_commit()
-        except sites.SiteAlreadyExistsException, e:
+        except sites.SiteAlreadyExistsException as e:
             samdb.transaction_cancel()
             raise CommandError("Error while creating site %s, error: %s" %
                                (sitename, str(e)))
@@ -94,7 +95,7 @@ class cmd_sites_delete(Command):
         try:
             sites.delete_site(samdb, samdb.get_config_basedn(), sitename)
             samdb.transaction_commit()
-        except sites.SiteException, e:
+        except sites.SiteException as e:
             samdb.transaction_cancel()
             raise CommandError(
                 "Error while removing site %s, error: %s" % (sitename, str(e)))
@@ -130,7 +131,7 @@ class cmd_sites_subnet_create(Command):
             subnets.create_subnet(samdb, samdb.get_config_basedn(), subnetname,
                                   site_of_subnet)
             samdb.transaction_commit()
-        except subnets.SubnetException, e:
+        except subnets.SubnetException as e:
             samdb.transaction_cancel()
             raise CommandError("Error while creating subnet %s: %s" %
                                (subnetname, e))
@@ -167,7 +168,7 @@ class cmd_sites_subnet_delete(Command):
         try:
             subnets.delete_subnet(samdb, samdb.get_config_basedn(), subnetname)
             samdb.transaction_commit()
-        except subnets.SubnetException, e:
+        except subnets.SubnetException as e:
             samdb.transaction_cancel()
             raise CommandError("Error while removing subnet %s, error: %s" %
                                (subnetname, e))
@@ -203,13 +204,13 @@ class cmd_sites_subnet_set_site(Command):
             subnets.set_subnet_site(samdb, samdb.get_config_basedn(),
                                     subnetname, site_of_subnet)
             samdb.transaction_commit()
-        except subnets.SubnetException, e:
+        except subnets.SubnetException as e:
             samdb.transaction_cancel()
             raise CommandError("Error assigning subnet %s to site %s: %s" %
                                (subnetname, site_of_subnet, e))
 
-        print >> self.outf, ("Subnet %s shifted to site %s" %
-                             (subnet_name, site_of_subnet))
+        print(("Subnet %s shifted to site %s" %
+                             (subnetname, site_of_subnet)), file=self.outf)
 
 
 class cmd_sites_subnet(SuperCommand):

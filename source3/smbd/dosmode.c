@@ -278,7 +278,7 @@ NTSTATUS get_ea_dos_attribute(connection_struct *conn,
 	/* Don't reset pattr to zero as we may already have filename-based attributes we
 	   need to preserve. */
 
-	sizeret = SMB_VFS_GETXATTR(conn, smb_fname->base_name,
+	sizeret = SMB_VFS_GETXATTR(conn, smb_fname,
 				   SAMBA_XATTR_DOS_ATTRIB, attrstr,
 				   sizeof(attrstr));
 	if (sizeret == -1 && errno == EACCES) {
@@ -304,7 +304,7 @@ NTSTATUS get_ea_dos_attribute(connection_struct *conn,
 		}
 
 		become_root();
-		sizeret = SMB_VFS_GETXATTR(conn, smb_fname->base_name,
+		sizeret = SMB_VFS_GETXATTR(conn, smb_fname,
 					   SAMBA_XATTR_DOS_ATTRIB,
 					   attrstr,
 					   sizeof(attrstr));
@@ -457,9 +457,9 @@ NTSTATUS set_ea_dos_attribute(connection_struct *conn,
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	ret = SMB_VFS_SETXATTR(conn, smb_fname->base_name,
-			     SAMBA_XATTR_DOS_ATTRIB, blob.data, blob.length,
-			     0);
+	ret = SMB_VFS_SETXATTR(conn, smb_fname,
+			       SAMBA_XATTR_DOS_ATTRIB,
+			       blob.data, blob.length, 0);
 	if (ret != 0) {
 		NTSTATUS status = NT_STATUS_OK;
 		bool need_close = false;
@@ -681,6 +681,28 @@ uint32_t dos_mode(connection_struct *conn, struct smb_filename *smb_fname)
 		}
 	}
 
+	/*
+	 * According to MS-FSA a stream name does not have
+	 * separate DOS attribute metadata, so we must return
+	 * the DOS attribute from the base filename. With one caveat,
+	 * a non-default stream name can never be a directory.
+	 *
+	 * As this is common to all streams data stores, we handle
+	 * it here instead of inside all stream VFS modules.
+	 *
+	 * BUG: https://bugzilla.samba.org/show_bug.cgi?id=13380
+	 */
+
+	if (is_ntfs_stream_smb_fname(smb_fname)) {
+		/* is_ntfs_stream_smb_fname() returns false for a POSIX path. */
+		if (!is_ntfs_default_stream_smb_fname(smb_fname)) {
+			/*
+			 * Non-default stream name, not a posix path.
+			 */
+			result &= ~(FILE_ATTRIBUTE_DIRECTORY);
+		}
+	}
+
 	if (conn->fs_capabilities & FILE_FILE_COMPRESSION) {
 		bool compressed = false;
 		status = dos_mode_check_compressed(conn, smb_fname,
@@ -735,8 +757,8 @@ int file_set_dosmode(connection_struct *conn, struct smb_filename *smb_fname,
 
 	unixmode = smb_fname->st.st_ex_mode;
 
-	get_acl_group_bits(conn, smb_fname->base_name,
-			   &smb_fname->st.st_ex_mode);
+	get_acl_group_bits(conn, smb_fname,
+			&smb_fname->st.st_ex_mode);
 
 	if (S_ISDIR(smb_fname->st.st_ex_mode))
 		dosmode |= FILE_ATTRIBUTE_DIRECTORY;

@@ -19,6 +19,7 @@
 */
 
 #include "includes.h"
+#include "libsmb/namequery.h"
 #include "../lib/util/tevent_ntstatus.h"
 #include "libads/sitename_cache.h"
 #include "../lib/addns/dnsquery.h"
@@ -26,6 +27,7 @@
 #include "lib/async_req/async_sock.h"
 #include "lib/tsocket/tsocket.h"
 #include "libsmb/nmblib.h"
+#include "libsmb/unexpected.h"
 #include "../libcli/nbt/libnbt.h"
 #include "libads/kerberos_proto.h"
 
@@ -308,7 +310,6 @@ struct sock_packet_read_state {
 	struct packet_struct *packet;
 };
 
-static int sock_packet_read_state_destructor(struct sock_packet_read_state *s);
 static void sock_packet_read_got_packet(struct tevent_req *subreq);
 static void sock_packet_read_got_socket(struct tevent_req *subreq);
 
@@ -330,7 +331,6 @@ static struct tevent_req *sock_packet_read_send(
 	if (req == NULL) {
 		return NULL;
 	}
-	talloc_set_destructor(state, sock_packet_read_state_destructor);
 	state->ev = ev;
 	state->reader = reader;
 	state->sock = sock;
@@ -358,15 +358,6 @@ static struct tevent_req *sock_packet_read_send(
 	return req;
 }
 
-static int sock_packet_read_state_destructor(struct sock_packet_read_state *s)
-{
-	if (s->packet != NULL) {
-		free_packet(s->packet);
-		s->packet = NULL;
-	}
-	return 0;
-}
-
 static void sock_packet_read_got_packet(struct tevent_req *subreq)
 {
 	struct tevent_req *req = tevent_req_callback_data(
@@ -375,7 +366,7 @@ static void sock_packet_read_got_packet(struct tevent_req *subreq)
 		req, struct sock_packet_read_state);
 	NTSTATUS status;
 
-	status = nb_packet_read_recv(subreq, &state->packet);
+	status = nb_packet_read_recv(subreq, state, &state->packet);
 
 	TALLOC_FREE(state->reader_req);
 
@@ -397,8 +388,7 @@ static void sock_packet_read_got_packet(struct tevent_req *subreq)
 	    !state->validator(state->packet, state->private_data)) {
 		DEBUG(10, ("validator failed\n"));
 
-		free_packet(state->packet);
-		state->packet = NULL;
+		TALLOC_FREE(state->packet);
 
 		state->reader_req = nb_packet_read_send(state, state->ev,
 							state->reader);
@@ -459,8 +449,9 @@ static void sock_packet_read_got_socket(struct tevent_req *subreq)
 		return;
 	}
 
-	state->packet = parse_packet((char *)state->buf, received, state->type,
-				     addr.sin.sin_addr, addr.sin.sin_port);
+	state->packet = parse_packet_talloc(
+		state, (char *)state->buf, received, state->type,
+		addr.sin.sin_addr, addr.sin.sin_port);
 	if (state->packet == NULL) {
 		DEBUG(10, ("parse_packet failed\n"));
 		goto retry;
@@ -482,10 +473,7 @@ static void sock_packet_read_got_socket(struct tevent_req *subreq)
 	return;
 
 retry:
-	if (state->packet != NULL) {
-		free_packet(state->packet);
-		state->packet = NULL;
-	}
+	TALLOC_FREE(state->packet);
 	TALLOC_FREE(state->buf);
 	TALLOC_FREE(state->addr);
 
@@ -498,6 +486,7 @@ retry:
 }
 
 static NTSTATUS sock_packet_read_recv(struct tevent_req *req,
+				      TALLOC_CTX *mem_ctx,
 				      struct packet_struct **ppacket)
 {
 	struct sock_packet_read_state *state = tevent_req_data(
@@ -507,8 +496,7 @@ static NTSTATUS sock_packet_read_recv(struct tevent_req *req,
 	if (tevent_req_is_nterror(req, &status)) {
 		return status;
 	}
-	*ppacket = state->packet;
-	state->packet = NULL;
+	*ppacket = talloc_move(mem_ctx, &state->packet);
 	return NT_STATUS_OK;
 }
 
@@ -531,7 +519,6 @@ struct nb_trans_state {
 	struct packet_struct *packet;
 };
 
-static int nb_trans_state_destructor(struct nb_trans_state *s);
 static void nb_trans_got_reader(struct tevent_req *subreq);
 static void nb_trans_done(struct tevent_req *subreq);
 static void nb_trans_sent(struct tevent_req *subreq);
@@ -563,7 +550,6 @@ static struct tevent_req *nb_trans_send(
 	if (req == NULL) {
 		return NULL;
 	}
-	talloc_set_destructor(state, nb_trans_state_destructor);
 	state->ev = ev;
 	state->buf = buf;
 	state->buflen = buflen;
@@ -601,15 +587,6 @@ static struct tevent_req *nb_trans_send(
 	}
 	tevent_req_set_callback(subreq, nb_trans_got_reader, req);
 	return req;
-}
-
-static int nb_trans_state_destructor(struct nb_trans_state *s)
-{
-	if (s->packet != NULL) {
-		free_packet(s->packet);
-		s->packet = NULL;
-	}
-	return 0;
 }
 
 static void nb_trans_got_reader(struct tevent_req *subreq)
@@ -703,7 +680,7 @@ static void nb_trans_done(struct tevent_req *subreq)
 		req, struct nb_trans_state);
 	NTSTATUS status;
 
-	status = sock_packet_read_recv(subreq, &state->packet);
+	status = sock_packet_read_recv(subreq, state, &state->packet);
 	TALLOC_FREE(subreq);
 	if (tevent_req_nterror(req, status)) {
 		return;
@@ -711,7 +688,7 @@ static void nb_trans_done(struct tevent_req *subreq)
 	tevent_req_done(req);
 }
 
-static NTSTATUS nb_trans_recv(struct tevent_req *req,
+static NTSTATUS nb_trans_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
 			      struct packet_struct **ppacket)
 {
 	struct nb_trans_state *state = tevent_req_data(
@@ -721,8 +698,7 @@ static NTSTATUS nb_trans_recv(struct tevent_req *req,
 	if (tevent_req_is_nterror(req, &status)) {
 		return status;
 	}
-	*ppacket = state->packet;
-	state->packet = NULL;
+	*ppacket = talloc_move(mem_ctx, &state->packet);
 	return NT_STATUS_OK;
 }
 
@@ -739,8 +715,6 @@ struct node_status_query_state {
 	struct packet_struct *packet;
 };
 
-static int node_status_query_state_destructor(
-	struct node_status_query_state *s);
 static bool node_status_query_validator(struct packet_struct *p,
 					void *private_data);
 static void node_status_query_done(struct tevent_req *subreq);
@@ -761,7 +735,6 @@ struct tevent_req *node_status_query_send(TALLOC_CTX *mem_ctx,
 	if (req == NULL) {
 		return NULL;
 	}
-	talloc_set_destructor(state, node_status_query_state_destructor);
 
 	if (addr->ss_family != AF_INET) {
 		/* Can't do node status to IPv6 */
@@ -836,16 +809,6 @@ static bool node_status_query_validator(struct packet_struct *p,
 	return true;
 }
 
-static int node_status_query_state_destructor(
-	struct node_status_query_state *s)
-{
-	if (s->packet != NULL) {
-		free_packet(s->packet);
-		s->packet = NULL;
-	}
-	return 0;
-}
-
 static void node_status_query_done(struct tevent_req *subreq)
 {
 	struct tevent_req *req = tevent_req_callback_data(
@@ -854,7 +817,7 @@ static void node_status_query_done(struct tevent_req *subreq)
 		req, struct node_status_query_state);
 	NTSTATUS status;
 
-	status = nb_trans_recv(subreq, &state->packet);
+	status = nb_trans_recv(subreq, state, &state->packet);
 	TALLOC_FREE(subreq);
 	if (tevent_req_nterror(req, status)) {
 		return;
@@ -1500,7 +1463,7 @@ static void name_query_done(struct tevent_req *subreq)
 	NTSTATUS status;
 	struct packet_struct *p = NULL;
 
-	status = nb_trans_recv(subreq, &p);
+	status = nb_trans_recv(subreq, state, &p);
 	TALLOC_FREE(subreq);
 	if (tevent_req_nterror(req, status)) {
 		return;
@@ -1508,13 +1471,6 @@ static void name_query_done(struct tevent_req *subreq)
 	if (!NT_STATUS_IS_OK(state->validate_error)) {
 		tevent_req_nterror(req, state->validate_error);
 		return;
-	}
-	if (p != NULL) {
-		/*
-		 * Free the packet here, we've collected the response in the
-		 * validator
-		 */
-		free_packet(p);
 	}
 	tevent_req_done(req);
 }
@@ -1710,7 +1666,6 @@ static struct tevent_req *name_queries_send(
 	if (!tevent_req_set_endtime(
 		    subreq, state->ev,
 		    timeval_current_ofs(0, state->timeout_msec * 1000))) {
-		tevent_req_oom(req);
 		return tevent_req_post(req, ev);
 	}
 	tevent_req_set_callback(subreq, name_queries_done, req);
@@ -1793,7 +1748,6 @@ static void name_queries_next(struct tevent_req *subreq)
 	if (!tevent_req_set_endtime(
 		    subreq, state->ev,
 		    timeval_current_ofs(0, state->timeout_msec * 1000))) {
-		tevent_req_oom(req);
 		return;
 	}
 	state->subreqs[state->num_sent] = subreq;
@@ -2030,7 +1984,6 @@ static struct tevent_req *query_wins_list_send(
 	}
 	if (!tevent_req_set_endtime(subreq, state->ev,
 				    timeval_current_ofs(2, 0))) {
-		tevent_req_oom(req);
 		return tevent_req_post(req, ev);
 	}
 	tevent_req_set_callback(subreq, query_wins_list_done, req);
@@ -2077,7 +2030,6 @@ static void query_wins_list_done(struct tevent_req *subreq)
 	}
 	if (!tevent_req_set_endtime(subreq, state->ev,
 				    timeval_current_ofs(2, 0))) {
-		tevent_req_oom(req);
 		return;
 	}
 	tevent_req_set_callback(subreq, query_wins_list_done, req);
@@ -2556,7 +2508,7 @@ static NTSTATUS resolve_ads(const char *name,
 				freeaddrinfo(res);
 			}
 		} else {
-			/* use all the IP addresses from the SRV sresponse */
+			/* use all the IP addresses from the SRV response */
 			int j;
 			for (j = 0; j < dcs[i].num_ips; j++) {
 				(*return_iplist)[*return_count].port = dcs[i].port;
@@ -2862,12 +2814,15 @@ bool resolve_name(const char *name,
 	char *sitename = NULL;
 	int count = 0;
 	NTSTATUS status;
+	TALLOC_CTX *frame = NULL;
 
 	if (is_ipaddress(name)) {
 		return interpret_string_addr(return_ss, name, AI_NUMERICHOST);
 	}
 
-	sitename = sitename_fetch(talloc_tos(), lp_realm()); /* wild guess */
+	frame = talloc_stackframe();
+
+	sitename = sitename_fetch(frame, lp_realm()); /* wild guess */
 
 	status = internal_resolve_name(name, name_type, sitename,
 				       &ss_list, &count,
@@ -2882,7 +2837,7 @@ bool resolve_name(const char *name,
 						(ss_list[i].ss.ss_family == AF_INET)) {
 					*return_ss = ss_list[i].ss;
 					SAFE_FREE(ss_list);
-					TALLOC_FREE(sitename);
+					TALLOC_FREE(frame);
 					return True;
 				}
 			}
@@ -2894,14 +2849,14 @@ bool resolve_name(const char *name,
 			    !is_broadcast_addr((struct sockaddr *)(void *)&ss_list[i].ss)) {
 				*return_ss = ss_list[i].ss;
 				SAFE_FREE(ss_list);
-				TALLOC_FREE(sitename);
+				TALLOC_FREE(frame);
 				return True;
 			}
 		}
 	}
 
 	SAFE_FREE(ss_list);
-	TALLOC_FREE(sitename);
+	TALLOC_FREE(frame);
 	return False;
 }
 
@@ -3092,15 +3047,11 @@ static NTSTATUS get_dc_list(const char *domain,
 	bool done_auto_lookup = false;
 	int auto_count = 0;
 	NTSTATUS status;
-	TALLOC_CTX *ctx = talloc_init("get_dc_list");
+	TALLOC_CTX *ctx = talloc_stackframe();
 	int auto_name_type = 0x1C;
 
 	*ip_list = NULL;
 	*count = 0;
-
-	if (!ctx) {
-		return NT_STATUS_NO_MEMORY;
-	}
 
 	*ordered = False;
 

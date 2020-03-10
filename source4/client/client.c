@@ -174,7 +174,11 @@ static void send_message(struct smbcli_state *cli, const char *desthost)
 	int total_len = 0;
 	int grp_id;
 
-	if (!smbcli_message_start(cli->tree, desthost, cli_credentials_get_username(cmdline_credentials), &grp_id)) {
+	if (!smbcli_message_start(cli->tree,
+			desthost,
+			cli_credentials_get_username(
+				popt_get_cmdline_credentials()),
+			&grp_id)) {
 		d_printf("message start: %s\n", smbcli_errstr(cli->tree));
 		return;
 	}
@@ -302,25 +306,17 @@ static int cmd_cd(struct smbclient_context *ctx, const char **args)
 static bool mask_match(struct smbcli_state *c, const char *string, 
 		const char *pattern, bool is_case_sensitive)
 {
-	char *p2, *s2;
-	bool ret;
+	int ret;
 
 	if (ISDOTDOT(string))
 		string = ".";
 	if (ISDOT(pattern))
 		return false;
-	
-	if (is_case_sensitive)
-		return ms_fnmatch_protocol(pattern, string, 
-				  c->transport->negotiate.protocol) == 0;
 
-	p2 = strlower_talloc(NULL, pattern);
-	s2 = strlower_talloc(NULL, string);
-	ret = ms_fnmatch_protocol(p2, s2, c->transport->negotiate.protocol) == 0;
-	talloc_free(p2);
-	talloc_free(s2);
-
-	return ret;
+	ret = ms_fnmatch_protocol(pattern, string,
+				  c->transport->negotiate.protocol,
+				  is_case_sensitive);
+	return (ret == 0);
 }
 
 
@@ -2710,7 +2706,7 @@ static bool browse_host(struct loadparm_context *lp_ctx,
 
 	status = dcerpc_pipe_connect(mem_ctx, &p, binding, 
 					 &ndr_table_srvsvc,
-				     cmdline_credentials, ev_ctx,
+				     popt_get_cmdline_credentials(), ev_ctx,
 				     lp_ctx);
 	if (!NT_STATUS_IS_OK(status)) {
 		d_printf("Failed to connect to %s - %s\n", 
@@ -2853,10 +2849,10 @@ static struct
   ******************************************************************/
 static int process_tok(const char *tok)
 {
-	int i = 0, matches = 0;
-	int cmd=0;
-	int tok_len = strlen(tok);
-	
+	size_t i = 0, matches = 0;
+	size_t cmd=0;
+	size_t tok_len = strlen(tok);
+
 	while (commands[i].fn != NULL) {
 		if (strequal(commands[i].name,tok)) {
 			matches = 1;
@@ -3057,7 +3053,7 @@ static char **completion_fn(const char *text, int start, int end)
 			return NULL;
 	} else {
 		char **matches;
-		int i, len, samelen = 0, count=1;
+		size_t i, len, samelen = 0, count=1;
 
 		matches = malloc_array_p(char *, MAX_COMPLETIONS);
 		if (!matches) return NULL;
@@ -3096,10 +3092,8 @@ static char **completion_fn(const char *text, int start, int end)
 		return matches;
 
 cleanup:
-		count--;
-		while (count >= 0) {
-			free(matches[count]);
-			count--;
+		for (i = 0; i < count; i++) {
+			free(matches[i]);
 		}
 		free(matches);
 		return NULL;
@@ -3403,7 +3397,8 @@ static int do_message_op(const char *netbios_name, const char *desthost,
 	}
 
 	if (poptPeekArg(pc)) { 
-		cli_credentials_set_password(cmdline_credentials, poptGetArg(pc), CRED_SPECIFIED);
+		cli_credentials_set_password(popt_get_cmdline_credentials(),
+			poptGetArg(pc), CRED_SPECIFIED);
 	}
 
 	/*init_names(); */
@@ -3418,7 +3413,7 @@ static int do_message_op(const char *netbios_name, const char *desthost,
 	lpcfg_smbcli_options(cmdline_lp_ctx, &smb_options);
 	lpcfg_smbcli_session_options(cmdline_lp_ctx, &smb_session_options);
 
-	ev_ctx = s4_event_context_init(talloc_autofree_context());
+	ev_ctx = s4_event_context_init(ctx);
 
 	DEBUG( 3, ( "Client started (version %s).\n", SAMBA_VERSION_STRING ) );
 
@@ -3447,7 +3442,8 @@ static int do_message_op(const char *netbios_name, const char *desthost,
 	if (!do_connect(ctx, ev_ctx, lpcfg_resolve_context(cmdline_lp_ctx),
 			desthost, lpcfg_smb_ports(cmdline_lp_ctx), service,
 			lpcfg_socket_options(cmdline_lp_ctx),
-			cmdline_credentials, &smb_options, &smb_session_options,
+			popt_get_cmdline_credentials(),
+			&smb_options, &smb_session_options,
 			lpcfg_gensec_settings(ctx, cmdline_lp_ctx)))
 		return 1;
 

@@ -43,8 +43,6 @@ static int recover_timeout = 30;
 
 #define TIMEOUT()	timeval_current_ofs(recover_timeout, 0)
 
-#define LOG(...)	DEBUG(DEBUG_NOTICE, (__VA_ARGS__))
-
 /*
  * Utility functions
  */
@@ -119,7 +117,7 @@ static struct recdb_context *recdb_create(TALLOC_CTX *mem_ctx, uint32_t db_id,
 				  tdb_flags, O_RDWR|O_CREAT|O_EXCL, 0600);
 	if (recdb->db == NULL) {
 		talloc_free(recdb);
-		LOG("failed to create recovery db %s\n", recdb->db_path);
+		D_ERR("failed to create recovery db %s\n", recdb->db_path);
 		return NULL;
 	}
 
@@ -222,37 +220,8 @@ static int recbuf_filter_add(struct ctdb_rec_buffer *recbuf, bool persistent,
 	struct ctdb_ltdb_header *header;
 	int ret;
 
-	/*
-	 * skip empty records - but NOT for persistent databases:
-	 *
-	 * The record-by-record mode of recovery deletes empty records.
-	 * For persistent databases, this can lead to data corruption
-	 * by deleting records that should be there:
-	 *
-	 * - Assume the cluster has been running for a while.
-	 *
-	 * - A record R in a persistent database has been created and
-	 *   deleted a couple of times, the last operation being deletion,
-	 *   leaving an empty record with a high RSN, say 10.
-	 *
-	 * - Now a node N is turned off.
-	 *
-	 * - This leaves the local database copy of D on N with the empty
-	 *   copy of R and RSN 10. On all other nodes, the recovery has deleted
-	 *   the copy of record R.
-	 *
-	 * - Now the record is created again while node N is turned off.
-	 *   This creates R with RSN = 1 on all nodes except for N.
-	 *
-	 * - Now node N is turned on again. The following recovery will chose
-	 *   the older empty copy of R due to RSN 10 > RSN 1.
-	 *
-	 * ==> Hence the record is gone after the recovery.
-	 *
-	 * On databases like Samba's registry, this can damage the higher-level
-	 * data structures built from the various tdb-level records.
-	 */
-	if (!persistent && data.dsize <= sizeof(struct ctdb_ltdb_header)) {
+	/* Skip empty records */
+	if (data.dsize <= sizeof(struct ctdb_ltdb_header)) {
 		return 0;
 	}
 
@@ -316,8 +285,8 @@ static struct ctdb_rec_buffer *recdb_records(struct recdb_context *recdb,
 	ret = tdb_traverse_read(recdb_tdb(recdb), recdb_records_traverse,
 				&state);
 	if (ret == -1 || state.failed) {
-		LOG("Failed to marshall recovery records for %s\n",
-		    recdb_name(recdb));
+		D_ERR("Failed to marshall recovery records for %s\n",
+		      recdb_name(recdb));
 		TALLOC_FREE(state.recbuf);
 		return NULL;
 	}
@@ -356,8 +325,8 @@ static int recdb_file_traverse(struct tdb_context *tdb,
 	if (ctdb_rec_buffer_len(state->recbuf) > state->max_size) {
 		ret = ctdb_rec_buffer_write(state->recbuf, state->fd);
 		if (ret != 0) {
-			LOG("Failed to collect recovery records for %s\n",
-			    recdb_name(state->recdb));
+			D_ERR("Failed to collect recovery records for %s\n",
+			      recdb_name(state->recdb));
 			state->failed = true;
 			return ret;
 		}
@@ -404,15 +373,15 @@ static int recdb_file(struct recdb_context *recdb, TALLOC_CTX *mem_ctx,
 
 	ret = ctdb_rec_buffer_write(state.recbuf, fd);
 	if (ret != 0) {
-		LOG("Failed to collect recovery records for %s\n",
-		    recdb_name(recdb));
+		D_ERR("Failed to collect recovery records for %s\n",
+		      recdb_name(recdb));
 		TALLOC_FREE(state.recbuf);
 		return -1;
 	}
 	state.num_buffers += 1;
 
-	LOG("Wrote %d buffers of recovery records for %s\n",
-	    state.num_buffers, recdb_name(recdb));
+	D_DEBUG("Wrote %d buffers of recovery records for %s\n",
+		state.num_buffers, recdb_name(recdb));
 
 	return state.num_buffers;
 }
@@ -500,6 +469,7 @@ static void pull_database_handler(uint64_t srvid, TDB_DATA data,
 	struct pull_database_state *state = tevent_req_data(
 		req, struct pull_database_state);
 	struct ctdb_rec_buffer *recbuf;
+	size_t np;
 	int ret;
 	bool status;
 
@@ -507,16 +477,16 @@ static void pull_database_handler(uint64_t srvid, TDB_DATA data,
 		return;
 	}
 
-	ret = ctdb_rec_buffer_pull(data.dptr, data.dsize, state, &recbuf);
+	ret = ctdb_rec_buffer_pull(data.dptr, data.dsize, state, &recbuf, &np);
 	if (ret != 0) {
-		LOG("Invalid data received for DB_PULL messages\n");
+		D_ERR("Invalid data received for DB_PULL messages\n");
 		return;
 	}
 
 	if (recbuf->db_id != recdb_id(state->recdb)) {
 		talloc_free(recbuf);
-		LOG("Invalid dbid:%08x for DB_PULL messages for %s\n",
-		    recbuf->db_id, recdb_name(state->recdb));
+		D_ERR("Invalid dbid:%08x for DB_PULL messages for %s\n",
+		      recbuf->db_id, recdb_name(state->recdb));
 		return;
 	}
 
@@ -524,8 +494,8 @@ static void pull_database_handler(uint64_t srvid, TDB_DATA data,
 			   recbuf);
 	if (! status) {
 		talloc_free(recbuf);
-		LOG("Failed to add records to recdb for %s\n",
-		    recdb_name(state->recdb));
+		D_ERR("Failed to add records to recdb for %s\n",
+		      recdb_name(state->recdb));
 		return;
 	}
 
@@ -547,8 +517,8 @@ static void pull_database_register_done(struct tevent_req *subreq)
 	status = ctdb_client_set_message_handler_recv(subreq, &ret);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		LOG("failed to set message handler for DB_PULL for %s\n",
-		    recdb_name(state->recdb));
+		D_ERR("Failed to set message handler for DB_PULL for %s\n",
+		      recdb_name(state->recdb));
 		tevent_req_error(req, ret);
 		return;
 	}
@@ -580,8 +550,8 @@ static void pull_database_old_done(struct tevent_req *subreq)
 	status = ctdb_client_control_recv(subreq, &ret, state, &reply);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		LOG("control PULL_DB failed for %s on node %u, ret=%d\n",
-		    recdb_name(state->recdb), state->pnn, ret);
+		D_ERR("control PULL_DB failed for %s on node %u, ret=%d\n",
+		      recdb_name(state->recdb), state->pnn, ret);
 		tevent_req_error(req, ret);
 		return;
 	}
@@ -604,8 +574,8 @@ static void pull_database_old_done(struct tevent_req *subreq)
 	state->num_records = recbuf->count;
 	talloc_free(recbuf);
 
-	LOG("Pulled %d records for db %s from node %d\n",
-	    state->num_records, recdb_name(state->recdb), state->pnn);
+	D_INFO("Pulled %d records for db %s from node %d\n",
+	       state->num_records, recdb_name(state->recdb), state->pnn);
 
 	tevent_req_done(req);
 }
@@ -624,8 +594,8 @@ static void pull_database_new_done(struct tevent_req *subreq)
 	status = ctdb_client_control_recv(subreq, &ret, state, &reply);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		LOG("control DB_PULL failed for %s on node %u, ret=%d\n",
-		    recdb_name(state->recdb), state->pnn, ret);
+		D_ERR("control DB_PULL failed for %s on node %u, ret=%d\n",
+		      recdb_name(state->recdb), state->pnn, ret);
 		state->result = ret;
 		goto unregister;
 	}
@@ -633,14 +603,17 @@ static void pull_database_new_done(struct tevent_req *subreq)
 	ret = ctdb_reply_control_db_pull(reply, &num_records);
 	talloc_free(reply);
 	if (num_records != state->num_records) {
-		LOG("mismatch (%u != %u) in DB_PULL records for %s\n",
-		    num_records, state->num_records, recdb_name(state->recdb));
+		D_ERR("mismatch (%u != %u) in DB_PULL records for db %s\n",
+		      num_records, state->num_records,
+		      recdb_name(state->recdb));
 		state->result = EIO;
 		goto unregister;
 	}
 
-	LOG("Pulled %d records for db %s from node %d\n",
-	    state->num_records, recdb_name(state->recdb), state->pnn);
+	D_INFO("Pulled %d records for db %s from node %d\n",
+	       state->num_records, recdb_name(state->recdb), state->pnn);
+
+unregister:
 
 unregister:
 
@@ -665,8 +638,8 @@ static void pull_database_unregister_done(struct tevent_req *subreq)
 	status = ctdb_client_remove_message_handler_recv(subreq, &ret);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		LOG("failed to remove message handler for DB_PULL for %s\n",
-		    recdb_name(state->recdb));
+		D_ERR("failed to remove message handler for DB_PULL for db %s\n",
+		      recdb_name(state->recdb));
 		tevent_req_error(req, ret);
 		return;
 	}
@@ -758,9 +731,9 @@ static void push_database_old_push_done(struct tevent_req *subreq)
 	status = ctdb_client_control_recv(subreq, &ret, NULL, NULL);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		LOG("control PUSH_DB failed for db %s on node %u, ret=%d\n",
-		    recdb_name(state->recdb), state->pnn_list[state->index],
-		    ret);
+		D_ERR("control PUSH_DB failed for db %s on node %u, ret=%d\n",
+		      recdb_name(state->recdb), state->pnn_list[state->index],
+		      ret);
 		tevent_req_error(req, ret);
 		return;
 	}
@@ -905,12 +878,13 @@ static void push_database_new_started(struct tevent_req *subreq)
 						       state->count,
 						       err_list, &pnn);
 		if (ret2 != 0) {
-			LOG("control DB_PUSH_START failed for db %s "
-			    "on node %u, ret=%d\n",
-			    recdb_name(state->recdb), pnn, ret2);
+			D_ERR("control DB_PUSH_START failed for db %s"
+			      " on node %u, ret=%d\n",
+			      recdb_name(state->recdb), pnn, ret2);
 		} else {
-			LOG("control DB_PUSH_START failed for db %s, ret=%d\n",
-			    recdb_name(state->recdb), ret);
+			D_ERR("control DB_PUSH_START failed for db %s,"
+			      " ret=%d\n",
+			      recdb_name(state->recdb), ret);
 		}
 		talloc_free(err_list);
 
@@ -929,6 +903,7 @@ static void push_database_new_send_msg(struct tevent_req *req)
 	struct ctdb_rec_buffer *recbuf;
 	struct ctdb_req_message message;
 	TDB_DATA data;
+	size_t np;
 	int ret;
 
 	if (state->num_buffers_sent == state->num_buffers) {
@@ -961,13 +936,14 @@ static void push_database_new_send_msg(struct tevent_req *req)
 		return;
 	}
 
-	ctdb_rec_buffer_push(recbuf, data.dptr);
+	ctdb_rec_buffer_push(recbuf, data.dptr, &np);
 
 	message.srvid = state->srvid;
 	message.data.data = data;
 
-	LOG("Pushing buffer %d with %d records for %s\n",
-	    state->num_buffers_sent, recbuf->count, recdb_name(state->recdb));
+	D_DEBUG("Pushing buffer %d with %d records for db %s\n",
+		state->num_buffers_sent, recbuf->count,
+		recdb_name(state->recdb));
 
 	subreq = ctdb_client_message_multi_send(state, state->ev,
 						state->client,
@@ -996,8 +972,8 @@ static void push_database_new_send_done(struct tevent_req *subreq)
 	status = ctdb_client_message_multi_recv(subreq, &ret, NULL, NULL);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		LOG("Sending recovery records failed for %s\n",
-		    recdb_name(state->recdb));
+		D_ERR("Sending recovery records failed for %s\n",
+		      recdb_name(state->recdb));
 		tevent_req_error(req, ret);
 		return;
 	}
@@ -1030,11 +1006,13 @@ static void push_database_new_confirmed(struct tevent_req *subreq)
 						       state->count, err_list,
 						       &pnn);
 		if (ret2 != 0) {
-			LOG("control DB_PUSH_CONFIRM failed for %s on node %u,"
-			    " ret=%d\n", recdb_name(state->recdb), pnn, ret2);
+			D_ERR("control DB_PUSH_CONFIRM failed for db %s"
+			      " on node %u, ret=%d\n",
+			      recdb_name(state->recdb), pnn, ret2);
 		} else {
-			LOG("control DB_PUSH_CONFIRM failed for %s, ret=%d\n",
-			    recdb_name(state->recdb), ret);
+			D_ERR("control DB_PUSH_CONFIRM failed for db %s,"
+			      " ret=%d\n",
+			      recdb_name(state->recdb), ret);
 		}
 		tevent_req_error(req, ret);
 		return;
@@ -1049,9 +1027,9 @@ static void push_database_new_confirmed(struct tevent_req *subreq)
 		}
 
 		if (num_records != state->num_records) {
-			LOG("Node %u received %d of %d records for %s\n",
-			    state->pnn_list[i], num_records,
-			    state->num_records, recdb_name(state->recdb));
+			D_ERR("Node %u received %d of %d records for %s\n",
+			      state->pnn_list[i], num_records,
+			      state->num_records, recdb_name(state->recdb));
 			tevent_req_error(req, EPROTO);
 			return;
 		}
@@ -1059,8 +1037,8 @@ static void push_database_new_confirmed(struct tevent_req *subreq)
 
 	talloc_free(reply);
 
-	LOG("Pushed %d records for db %s\n",
-	    state->num_records, recdb_name(state->recdb));
+	D_INFO("Pushed %d records for db %s\n",
+	       state->num_records, recdb_name(state->recdb));
 
 	tevent_req_done(req);
 }
@@ -1092,7 +1070,7 @@ static struct tevent_req *push_database_send(
 	struct tevent_req *req, *subreq;
 	struct push_database_state *state;
 	uint32_t *old_list, *new_list;
-	int old_count, new_count;
+	unsigned int old_count, new_count;
 	int i;
 
 	req = tevent_req_create(mem_ctx, &state, struct push_database_state);
@@ -1281,11 +1259,13 @@ static void collect_highseqnum_db_seqnum_done(struct tevent_req *subreq)
 						       state->count, err_list,
 						       &pnn);
 		if (ret2 != 0) {
-			LOG("control GET_DB_SEQNUM failed for %s on node %u,"
-			    " ret=%d\n", recdb_name(state->recdb), pnn, ret2);
+			D_ERR("control GET_DB_SEQNUM failed for db %s"
+			      " on node %u, ret=%d\n",
+			      recdb_name(state->recdb), pnn, ret2);
 		} else {
-			LOG("control GET_DB_SEQNUM failed for %s, ret=%d\n",
-			    recdb_name(state->recdb), ret);
+			D_ERR("control GET_DB_SEQNUM failed for db %s,"
+			      " ret=%d\n",
+			      recdb_name(state->recdb), ret);
 		}
 		tevent_req_error(req, ret);
 		return;
@@ -1308,8 +1288,8 @@ static void collect_highseqnum_db_seqnum_done(struct tevent_req *subreq)
 
 	talloc_free(reply);
 
-	LOG("Pull persistent db %s from node %d with seqnum 0x%"PRIx64"\n",
-	    recdb_name(state->recdb), state->max_pnn, max_seqnum);
+	D_INFO("Pull persistent db %s from node %d with seqnum 0x%"PRIx64"\n",
+	       recdb_name(state->recdb), state->max_pnn, max_seqnum);
 
 	subreq = pull_database_send(state, state->ev, state->client,
 				    state->max_pnn,
@@ -1467,7 +1447,7 @@ struct recover_db_state {
 	uint32_t *caps;
 	uint32_t *ban_credits;
 	uint32_t db_id;
-	bool persistent;
+	uint8_t db_flags;
 
 	uint32_t destnode;
 	struct ctdb_transdb transdb;
@@ -1494,7 +1474,7 @@ static struct tevent_req *recover_db_send(TALLOC_CTX *mem_ctx,
 					  uint32_t *caps,
 					  uint32_t *ban_credits,
 					  uint32_t generation,
-					  uint32_t db_id, bool persistent)
+					  uint32_t db_id, uint8_t db_flags)
 {
 	struct tevent_req *req, *subreq;
 	struct recover_db_state *state;
@@ -1513,7 +1493,7 @@ static struct tevent_req *recover_db_send(TALLOC_CTX *mem_ctx,
 	state->caps = caps;
 	state->ban_credits = ban_credits;
 	state->db_id = db_id;
-	state->persistent = persistent;
+	state->db_flags = db_flags;
 
 	state->destnode = ctdb_client_pnn(client);
 	state->transdb.db_id = db_id;
@@ -1544,16 +1524,16 @@ static void recover_db_name_done(struct tevent_req *subreq)
 	status = ctdb_client_control_recv(subreq, &ret, state, &reply);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		LOG("control GET_DBNAME failed for db=0x%x, ret=%d\n",
-		    state->db_id, ret);
+		D_ERR("control GET_DBNAME failed for db=0x%x, ret=%d\n",
+		      state->db_id, ret);
 		tevent_req_error(req, ret);
 		return;
 	}
 
 	ret = ctdb_reply_control_get_dbname(reply, state, &state->db_name);
 	if (ret != 0) {
-		LOG("control GET_DBNAME failed for db=0x%x, ret=%d\n",
-		    state->db_id, ret);
+		D_ERR("control GET_DBNAME failed for db=0x%x, ret=%d\n",
+		      state->db_id, ret);
 		tevent_req_error(req, EPROTO);
 		return;
 	}
@@ -1584,16 +1564,16 @@ static void recover_db_path_done(struct tevent_req *subreq)
 	status = ctdb_client_control_recv(subreq, &ret, state, &reply);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		LOG("control GETDBPATH failed for db %s, ret=%d\n",
-		    state->db_name, ret);
+		D_ERR("control GETDBPATH failed for db %s, ret=%d\n",
+		      state->db_name, ret);
 		tevent_req_error(req, ret);
 		return;
 	}
 
 	ret = ctdb_reply_control_getdbpath(reply, state, &state->db_path);
 	if (ret != 0) {
-		LOG("control GETDBPATH failed for db %s, ret=%d\n",
-		    state->db_name, ret);
+		D_ERR("control GETDBPATH failed for db %s, ret=%d\n",
+		      state->db_name, ret);
 		tevent_req_error(req, EPROTO);
 		return;
 	}
@@ -1633,12 +1613,13 @@ static void recover_db_freeze_done(struct tevent_req *subreq)
 						       state->count, err_list,
 						       &pnn);
 		if (ret2 != 0) {
-			LOG("control FREEZE_DB failed for db %s on node %u,"
-			    " ret=%d\n", state->db_name, pnn, ret2);
+			D_ERR("control FREEZE_DB failed for db %s"
+			      " on node %u, ret=%d\n",
+			      state->db_name, pnn, ret2);
 			state->ban_credits[pnn] += 1;
 		} else {
-			LOG("control FREEZE_DB failed for db %s, ret=%d\n",
-			    state->db_name, ret);
+			D_ERR("control FREEZE_DB failed for db %s, ret=%d\n",
+			      state->db_name, ret);
 		}
 		tevent_req_error(req, ret);
 		return;
@@ -1676,11 +1657,12 @@ static void recover_db_transaction_started(struct tevent_req *subreq)
 						       state->count,
 						       err_list, &pnn);
 		if (ret2 != 0) {
-			LOG("control TRANSACTION_DB failed for db=%s on node %u,"
-			    " ret=%d\n", state->db_name, pnn, ret2);
+			D_ERR("control TRANSACTION_DB failed for db=%s"
+			      " on node %u, ret=%d\n",
+			      state->db_name, pnn, ret2);
 		} else {
-			LOG("control TRANSACTION_DB failed for db=%s,"
-			    " ret=%d\n", state->db_name, ret);
+			D_ERR("control TRANSACTION_DB failed for db=%s,"
+			      " ret=%d\n", state->db_name, ret);
 		}
 		tevent_req_error(req, ret);
 		return;
@@ -1689,12 +1671,13 @@ static void recover_db_transaction_started(struct tevent_req *subreq)
 	state->recdb = recdb_create(state, state->db_id, state->db_name,
 				    state->db_path,
 				    state->tun_list->database_hash_size,
-				    state->persistent);
+				    state->db_flags & CTDB_DB_FLAGS_PERSISTENT);
 	if (tevent_req_nomem(state->recdb, req)) {
 		return;
 	}
 
-	if (state->persistent) {
+	if ((state->db_flags & CTDB_DB_FLAGS_PERSISTENT) ||
+	    (state->db_flags & CTDB_DB_FLAGS_REPLICATED)) {
 		subreq = collect_highseqnum_db_send(
 				state, state->ev, state->client,
 				state->pnn_list, state->count, state->caps,
@@ -1723,7 +1706,8 @@ static void recover_db_collect_done(struct tevent_req *subreq)
 	int ret;
 	bool status;
 
-	if (state->persistent) {
+	if ((state->db_flags & CTDB_DB_FLAGS_PERSISTENT) ||
+	    (state->db_flags & CTDB_DB_FLAGS_REPLICATED)) {
 		status = collect_highseqnum_db_recv(subreq, &ret);
 	} else {
 		status = collect_all_db_recv(subreq, &ret);
@@ -1766,11 +1750,11 @@ static void recover_db_wipedb_done(struct tevent_req *subreq)
 						       state->count,
 						       err_list, &pnn);
 		if (ret2 != 0) {
-			LOG("control WIPEDB failed for db %s on node %u,"
-			    " ret=%d\n", state->db_name, pnn, ret2);
+			D_ERR("control WIPEDB failed for db %s on node %u,"
+			      " ret=%d\n", state->db_name, pnn, ret2);
 		} else {
-			LOG("control WIPEDB failed for db %s, ret=%d\n",
-			    state->db_name, ret);
+			D_ERR("control WIPEDB failed for db %s, ret=%d\n",
+			      state->db_name, ret);
 		}
 		tevent_req_error(req, ret);
 		return;
@@ -1838,11 +1822,12 @@ static void recover_db_transaction_committed(struct tevent_req *subreq)
 						       state->count,
 						       err_list, &pnn);
 		if (ret2 != 0) {
-			LOG("control DB_TRANSACTION_COMMIT failed for db %s"
-			    " on node %u, ret=%d\n", state->db_name, pnn, ret2);
+			D_ERR("control DB_TRANSACTION_COMMIT failed for db %s"
+			      " on node %u, ret=%d\n",
+			      state->db_name, pnn, ret2);
 		} else {
-			LOG("control DB_TRANSACTION_COMMIT failed for db %s,"
-			    " ret=%d\n", state->db_name, ret);
+			D_ERR("control DB_TRANSACTION_COMMIT failed for db %s,"
+			      " ret=%d\n", state->db_name, ret);
 		}
 		tevent_req_error(req, ret);
 		return;
@@ -1880,11 +1865,11 @@ static void recover_db_thaw_done(struct tevent_req *subreq)
 						       state->count,
 						       err_list, &pnn);
 		if (ret2 != 0) {
-			LOG("control DB_THAW failed for db %s on node %u,"
-			    " ret=%d\n", state->db_name, pnn, ret2);
+			D_ERR("control DB_THAW failed for db %s on node %u,"
+			      " ret=%d\n", state->db_name, pnn, ret2);
 		} else {
-			LOG("control DB_THAW failed for db %s, ret=%d\n",
-			    state->db_name, ret);
+			D_ERR("control DB_THAW failed for db %s, ret=%d\n",
+			      state->db_name, ret);
 		}
 		tevent_req_error(req, ret);
 		return;
@@ -1923,7 +1908,7 @@ struct db_recovery_one_state {
 	uint32_t *ban_credits;
 	uint32_t generation;
 	uint32_t db_id;
-	bool persistent;
+	uint8_t db_flags;
 	int num_fails;
 };
 
@@ -1976,19 +1961,18 @@ static struct tevent_req *db_recovery_send(TALLOC_CTX *mem_ctx,
 		substate->ban_credits = ban_credits;
 		substate->generation = generation;
 		substate->db_id = dbmap->dbs[i].db_id;
-		substate->persistent = dbmap->dbs[i].flags &
-				       CTDB_DB_FLAGS_PERSISTENT;
+		substate->db_flags = dbmap->dbs[i].flags;
 
 		subreq = recover_db_send(state, ev, client, tun_list,
 					 pnn_list, count, caps, ban_credits,
 					 generation, substate->db_id,
-					 substate->persistent);
+					 substate->db_flags);
 		if (tevent_req_nomem(subreq, req)) {
 			return tevent_req_post(req, ev);
 		}
 		tevent_req_set_callback(subreq, db_recovery_one_done,
 					substate);
-		LOG("recover database 0x%08x\n", substate->db_id);
+		D_NOTICE("recover database 0x%08x\n", substate->db_id);
 	}
 
 	return req;
@@ -2018,13 +2002,13 @@ static void db_recovery_one_done(struct tevent_req *subreq)
 					 substate->pnn_list, substate->count,
 					 substate->caps, substate->ban_credits,
 					 substate->generation, substate->db_id,
-					 substate->persistent);
+					 substate->db_flags);
 		if (tevent_req_nomem(subreq, req)) {
 			goto failed;
 		}
 		tevent_req_set_callback(subreq, db_recovery_one_done, substate);
-		LOG("recover database 0x%08x, attempt %d\n", substate->db_id,
-		    substate->num_fails+1);
+		D_NOTICE("recover database 0x%08x, attempt %d\n",
+			 substate->db_id, substate->num_fails+1);
 		return;
 	}
 
@@ -2149,7 +2133,7 @@ static void recovery_tunables_done(struct tevent_req *subreq)
 	status = ctdb_client_control_recv(subreq, &ret, state, &reply);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		LOG("control GET_ALL_TUNABLES failed, ret=%d\n", ret);
+		D_ERR("control GET_ALL_TUNABLES failed, ret=%d\n", ret);
 		tevent_req_error(req, ret);
 		return;
 	}
@@ -2157,7 +2141,7 @@ static void recovery_tunables_done(struct tevent_req *subreq)
 	ret = ctdb_reply_control_get_all_tunables(reply, state,
 						  &state->tun_list);
 	if (ret != 0) {
-		LOG("control GET_ALL_TUNABLES failed, ret=%d\n", ret);
+		D_ERR("control GET_ALL_TUNABLES failed, ret=%d\n", ret);
 		tevent_req_error(req, EPROTO);
 		return;
 	}
@@ -2190,15 +2174,15 @@ static void recovery_nodemap_done(struct tevent_req *subreq)
 	status = ctdb_client_control_recv(subreq, &ret, state, &reply);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		LOG("control GET_NODEMAP failed to node %u, ret=%d\n",
-		    state->destnode, ret);
+		D_ERR("control GET_NODEMAP failed to node %u, ret=%d\n",
+		      state->destnode, ret);
 		tevent_req_error(req, ret);
 		return;
 	}
 
 	ret = ctdb_reply_control_get_nodemap(reply, state, &state->nodemap);
 	if (ret != 0) {
-		LOG("control GET_NODEMAP failed, ret=%d\n", ret);
+		D_ERR("control GET_NODEMAP failed, ret=%d\n", ret);
 		tevent_req_error(req, ret);
 		return;
 	}
@@ -2240,15 +2224,15 @@ static void recovery_vnnmap_done(struct tevent_req *subreq)
 	status = ctdb_client_control_recv(subreq, &ret, state, &reply);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		LOG("control GETVNNMAP failed to node %u, ret=%d\n",
-		    state->destnode, ret);
+		D_ERR("control GETVNNMAP failed to node %u, ret=%d\n",
+		      state->destnode, ret);
 		tevent_req_error(req, ret);
 		return;
 	}
 
 	ret = ctdb_reply_control_getvnnmap(reply, state, &state->vnnmap);
 	if (ret != 0) {
-		LOG("control GETVNNMAP failed, ret=%d\n", ret);
+		D_ERR("control GETVNNMAP failed, ret=%d\n", ret);
 		tevent_req_error(req, ret);
 		return;
 	}
@@ -2287,10 +2271,11 @@ static void recovery_capabilities_done(struct tevent_req *subreq)
 						       state->count,
 						       err_list, &pnn);
 		if (ret2 != 0) {
-			LOG("control GET_CAPABILITIES failed on node %u,"
-			    " ret=%d\n", pnn, ret2);
+			D_ERR("control GET_CAPABILITIES failed on node %u,"
+			      " ret=%d\n", pnn, ret2);
 		} else {
-			LOG("control GET_CAPABILITIES failed, ret=%d\n", ret);
+			D_ERR("control GET_CAPABILITIES failed, ret=%d\n",
+			      ret);
 		}
 		tevent_req_error(req, ret);
 		return;
@@ -2310,7 +2295,8 @@ static void recovery_capabilities_done(struct tevent_req *subreq)
 		ret = ctdb_reply_control_get_capabilities(reply[i],
 							  &state->caps[pnn]);
 		if (ret != 0) {
-			LOG("control GET_CAPABILITIES failed on node %u\n", pnn);
+			D_ERR("control GET_CAPABILITIES failed on node %u\n",
+			      pnn);
 			tevent_req_error(req, EPROTO);
 			return;
 		}
@@ -2342,15 +2328,15 @@ static void recovery_dbmap_done(struct tevent_req *subreq)
 	status = ctdb_client_control_recv(subreq, &ret, state, &reply);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		LOG("control GET_DBMAP failed to node %u, ret=%d\n",
-		    state->destnode, ret);
+		D_ERR("control GET_DBMAP failed to node %u, ret=%d\n",
+		      state->destnode, ret);
 		tevent_req_error(req, ret);
 		return;
 	}
 
 	ret = ctdb_reply_control_get_dbmap(reply, state, &state->dbmap);
 	if (ret != 0) {
-		LOG("control GET_DBMAP failed, ret=%d\n", ret);
+		D_ERR("control GET_DBMAP failed, ret=%d\n", ret);
 		tevent_req_error(req, ret);
 		return;
 	}
@@ -2375,7 +2361,8 @@ static void recovery_active_done(struct tevent_req *subreq)
 	struct ctdb_req_control request;
 	struct ctdb_vnn_map *vnnmap;
 	int *err_list;
-	int ret, count, i;
+	int ret, i;
+	unsigned int count;
 	bool status;
 
 	status = ctdb_client_control_multi_recv(subreq, &ret, NULL, &err_list,
@@ -2389,17 +2376,17 @@ static void recovery_active_done(struct tevent_req *subreq)
 						       state->count,
 						       err_list, &pnn);
 		if (ret2 != 0) {
-			LOG("failed to set recovery mode to ACTIVE on node %u,"
-			    " ret=%d\n", pnn, ret2);
+			D_ERR("failed to set recovery mode ACTIVE on node %u,"
+			      " ret=%d\n", pnn, ret2);
 		} else {
-			LOG("failed to set recovery mode to ACTIVE, ret=%d\n",
-			    ret);
+			D_ERR("failed to set recovery mode ACTIVE, ret=%d\n",
+			      ret);
 		}
 		tevent_req_error(req, ret);
 		return;
 	}
 
-	LOG("set recovery mode to ACTIVE\n");
+	D_ERR("Set recovery mode to ACTIVE\n");
 
 	/* Calculate new VNNMAP */
 	count = 0;
@@ -2414,7 +2401,7 @@ static void recovery_active_done(struct tevent_req *subreq)
 	}
 
 	if (count == 0) {
-		LOG("no active lmasters found. Adding recmaster anyway\n");
+		D_WARNING("No active lmasters found. Adding recmaster anyway\n");
 	}
 
 	vnnmap = talloc_zero(state, struct ctdb_vnn_map);
@@ -2484,17 +2471,17 @@ static void recovery_start_recovery_done(struct tevent_req *subreq)
 						       state->count,
 						       err_list, &pnn);
 		if (ret2 != 0) {
-			LOG("failed to run start_recovery event on node %u,"
-			    " ret=%d\n", pnn, ret2);
+			D_ERR("failed to run start_recovery event on node %u,"
+			      " ret=%d\n", pnn, ret2);
 		} else {
-			LOG("failed to run start_recovery event, ret=%d\n",
-			    ret);
+			D_ERR("failed to run start_recovery event, ret=%d\n",
+			      ret);
 		}
 		tevent_req_error(req, ret);
 		return;
 	}
 
-	LOG("start_recovery event finished\n");
+	D_ERR("start_recovery event finished\n");
 
 	ctdb_req_control_setvnnmap(&request, state->vnnmap);
 	subreq = ctdb_client_control_multi_send(state, state->ev,
@@ -2528,16 +2515,16 @@ static void recovery_vnnmap_update_done(struct tevent_req *subreq)
 						       state->count,
 						       err_list, &pnn);
 		if (ret2 != 0) {
-			LOG("failed to update VNNMAP on node %u, ret=%d\n",
-			    pnn, ret2);
+			D_ERR("failed to update VNNMAP on node %u, ret=%d\n",
+			      pnn, ret2);
 		} else {
-			LOG("failed to update VNNMAP, ret=%d\n", ret);
+			D_ERR("failed to update VNNMAP, ret=%d\n", ret);
 		}
 		tevent_req_error(req, ret);
 		return;
 	}
 
-	LOG("updated VNNMAP\n");
+	D_NOTICE("updated VNNMAP\n");
 
 	subreq = db_recovery_send(state, state->ev, state->client,
 				  state->dbmap, state->tun_list,
@@ -2563,7 +2550,7 @@ static void recovery_db_recovery_done(struct tevent_req *subreq)
 	status = db_recovery_recv(subreq, &count);
 	TALLOC_FREE(subreq);
 
-	LOG("%d of %d databases recovered\n", count, state->dbmap->num);
+	D_ERR("%d of %d databases recovered\n", count, state->dbmap->num);
 
 	if (! status) {
 		uint32_t max_pnn = CTDB_UNKNOWN_PNN, max_credits = 0;
@@ -2588,7 +2575,8 @@ static void recovery_db_recovery_done(struct tevent_req *subreq)
 		if (max_credits >= NUM_RETRIES) {
 			struct ctdb_req_message message;
 
-			LOG("Assigning banning credits to node %u\n", max_pnn);
+			D_ERR("Assigning banning credits to node %u\n",
+			      max_pnn);
 
 			message.srvid = CTDB_SRVID_BANNING;
 			message.data.pnn = max_pnn;
@@ -2629,7 +2617,7 @@ static void recovery_failed_done(struct tevent_req *subreq)
 	status = ctdb_client_message_recv(subreq, &ret);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		LOG("failed to assign banning credits, ret=%d\n", ret);
+		D_ERR("failed to assign banning credits, ret=%d\n", ret);
 	}
 
 	tevent_req_error(req, EIO);
@@ -2657,17 +2645,17 @@ static void recovery_normal_done(struct tevent_req *subreq)
 						       state->count,
 						       err_list, &pnn);
 		if (ret2 != 0) {
-			LOG("failed to set recovery mode to NORMAL on node %u,"
-			    " ret=%d\n", pnn, ret2);
+			D_ERR("failed to set recovery mode NORMAL on node %u,"
+			      " ret=%d\n", pnn, ret2);
 		} else {
-			LOG("failed to set recovery mode to NORMAL, ret=%d\n",
-			    ret);
+			D_ERR("failed to set recovery mode NORMAL, ret=%d\n",
+			      ret);
 		}
 		tevent_req_error(req, ret);
 		return;
 	}
 
-	LOG("set recovery mode to NORMAL\n");
+	D_ERR("Set recovery mode to NORMAL\n");
 
 	ctdb_req_control_end_recovery(&request);
 	subreq = ctdb_client_control_multi_send(state, state->ev,
@@ -2701,16 +2689,16 @@ static void recovery_end_recovery_done(struct tevent_req *subreq)
 						       state->count,
 						       err_list, &pnn);
 		if (ret2 != 0) {
-			LOG("failed to run recovered event on node %u,"
-			    " ret=%d\n", pnn, ret2);
+			D_ERR("failed to run recovered event on node %u,"
+			      " ret=%d\n", pnn, ret2);
 		} else {
-			LOG("failed to run recovered event, ret=%d\n", ret);
+			D_ERR("failed to run recovered event, ret=%d\n", ret);
 		}
 		tevent_req_error(req, ret);
 		return;
 	}
 
-	LOG("recovered event finished\n");
+	D_ERR("recovered event finished\n");
 
 	tevent_req_done(req);
 }
@@ -2764,31 +2752,31 @@ int main(int argc, char *argv[])
 
 	ev = tevent_context_init(mem_ctx);
 	if (ev == NULL) {
-		LOG("tevent_context_init() failed\n");
+		D_ERR("tevent_context_init() failed\n");
 		goto failed;
 	}
 
 	ret = ctdb_client_init(mem_ctx, ev, sockpath, &client);
 	if (ret != 0) {
-		LOG("ctdb_client_init() failed, ret=%d\n", ret);
+		D_ERR("ctdb_client_init() failed, ret=%d\n", ret);
 		goto failed;
 	}
 
 	req = recovery_send(mem_ctx, ev, client, generation);
 	if (req == NULL) {
-		LOG("database_recover_send() failed\n");
+		D_ERR("database_recover_send() failed\n");
 		goto failed;
 	}
 
 	if (! tevent_req_poll(req, ev)) {
-		LOG("tevent_req_poll() failed\n");
+		D_ERR("tevent_req_poll() failed\n");
 		goto failed;
 	}
 
 	recovery_recv(req, &ret);
 	TALLOC_FREE(req);
 	if (ret != 0) {
-		LOG("database recovery failed, ret=%d\n", ret);
+		D_ERR("database recovery failed, ret=%d\n", ret);
 		goto failed;
 	}
 

@@ -2,47 +2,28 @@
 
 . "${TEST_SCRIPTS_DIR}/unit.sh"
 
-define_test "updateip event"
-
-cat > "$eventd_scriptdir/01.test" <<EOF
-#!/bin/sh
-
-echo \$*
-if [ \$# -ne 5 ] ; then
-    echo "Wrong number of arguments"
-    exit 2
-fi
-exit 0
-EOF
-chmod +x "$eventd_scriptdir/01.test"
+define_test "multiple components with timeout"
 
 setup_eventd
 
-required_result 1 <<EOF
-Insufficient arguments for event updateip
-EOF
-simple_test run updateip 30
+ok_null
+simple_test_background run 10 multi monitor
 
-required_result 0 <<EOF
-Event updateip has never run
+required_error ETIMEDOUT <<EOF
+Event timeout in random timed out
 EOF
-simple_test status updateip lastrun
+simple_test run 10 random timeout
 
-required_result 0 <<EOF
-EOF
-simple_test run updateip 30 eth0 eth1 192.168.1.1 24
-
-required_result 0 <<EOF
+ok <<EOF
 01.test              OK         DURATION DATETIME
+02.test              OK         DURATION DATETIME
+03.test              OK         DURATION DATETIME
 EOF
-simple_test status updateip lastrun
+simple_test status multi monitor
 
-required_result 0 <<EOF
-01.test              OK         DURATION DATETIME
+required_error ETIMEDOUT <<EOF
+01.disabled          DISABLED  
+02.enabled           TIMEDOUT   DATETIME
+  OUTPUT: 
 EOF
-simple_test status updateip lastpass
-
-required_result 0 <<EOF
-Event updateip has never failed
-EOF
-simple_test status updateip lastfail
+simple_test status random timeout

@@ -7,7 +7,7 @@
 	<manvolnum>8</manvolnum>
 	<refmiscinfo class="source">Samba</refmiscinfo>
 	<refmiscinfo class="manual">System Administration tools</refmiscinfo>
-	<refmiscinfo class="version">4.6</refmiscinfo>
+	<refmiscinfo class="version">&doc.version;</refmiscinfo>
 </refmeta>
 
 
@@ -20,8 +20,7 @@
 	<title>DESCRIPTION</title>
 
 	<para>The idmap_nss plugin provides a means to map Unix users and groups
-	to Windows accounts and obsoletes the &quot;winbind trusted domains only&quot;
-	smb.conf option.  This provides a simple means of ensuring that the SID
+	to Windows accounts. This provides a simple means of ensuring that the SID
 	for a Unix user named jsmith is reported as the one assigned to
 	DOMAIN\jsmith which is necessary for reporting ACLs on files and printers
 	stored on a Samba member server.

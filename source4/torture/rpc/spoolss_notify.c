@@ -72,13 +72,27 @@ static NTSTATUS spoolss__op_ndr_pull(struct dcesrv_call_state *dce_call, TALLOC_
 	return NT_STATUS_OK;
 }
 
-/* Note that received_packets are allocated in talloc_autofree_context(),
+/* Note that received_packets are allocated on the NULL context
  * because no other context appears to stay around long enough. */
 static struct received_packet {
 	uint16_t opnum;
 	void *r;
 	struct received_packet *prev, *next;
 } *received_packets = NULL;
+
+static void free_received_packets(void)
+{
+	struct received_packet *rp;
+	struct received_packet *rp_next;
+
+	for (rp = received_packets; rp; rp = rp_next) {
+		rp_next = rp->next;
+		DLIST_REMOVE(received_packets, rp);
+		talloc_unlink(rp, rp->r);
+		talloc_free(rp);
+	}
+	received_packets = NULL;
+}
 
 static WERROR _spoolss_ReplyOpenPrinter(struct dcesrv_call_state *dce_call,
 					TALLOC_CTX *mem_ctx,
@@ -136,7 +150,7 @@ static NTSTATUS spoolss__op_dispatch(struct dcesrv_call_state *dce_call, TALLOC_
 	uint16_t opnum = dce_call->pkt.u.request.opnum;
 	struct received_packet *rp;
 
-	rp = talloc_zero(talloc_autofree_context(), struct received_packet);
+	rp = talloc_zero(NULL, struct received_packet);
 	rp->opnum = opnum;
 	rp->r = talloc_reference(rp, r);
 
@@ -460,7 +474,9 @@ static bool test_start_dcerpc_server(struct torture_context *tctx,
 	torture_assert_ntstatus_ok(tctx, status,
 				   "unable to initialize process models");
 
-	status = smbsrv_add_socket(tctx, event_ctx, tctx->lp_ctx, process_model_startup("single"), address);
+	status = smbsrv_add_socket(tctx, event_ctx, tctx->lp_ctx,
+				   process_model_startup("single"),
+				   address, NULL);
 	torture_assert_ntstatus_ok(tctx, status, "starting smb server");
 
 	status = dcesrv_init_context(tctx, tctx->lp_ctx, endpoints, &dce_ctx);
@@ -469,7 +485,8 @@ static bool test_start_dcerpc_server(struct torture_context *tctx,
 
 	for (e=dce_ctx->endpoint_list;e;e=e->next) {
 		status = dcesrv_add_ep(dce_ctx, tctx->lp_ctx,
-				       e, tctx->ev, process_model_startup("single"));
+				       e, tctx->ev,
+				       process_model_startup("single"), NULL);
 		torture_assert_ntstatus_ok(tctx, status,
 				"unable listen on dcerpc endpoint server");
 	}
@@ -483,7 +500,8 @@ static bool test_start_dcerpc_server(struct torture_context *tctx,
 static struct received_packet *last_packet(struct received_packet *p)
 {
 	struct received_packet *tmp;
-	for (tmp = p; tmp->next; tmp = tmp->next) ;;
+	for (tmp = p; tmp->next; tmp = tmp->next) {
+	}
 	return tmp;
 }
 
@@ -502,7 +520,7 @@ static bool test_RFFPCNEx(struct torture_context *tctx,
 	const char *printername = NULL;
 	struct spoolss_NotifyInfo *info = NULL;
 
-	received_packets = NULL;
+	free_received_packets();
 
 	/* Start DCE/RPC server */
 	torture_assert(tctx, test_start_dcerpc_server(tctx, tctx->ev, &dce_ctx, &address), "");
@@ -541,6 +559,7 @@ static bool test_RFFPCNEx(struct torture_context *tctx,
 #endif
 	/* Shut down DCE/RPC server */
 	talloc_free(dce_ctx);
+	free_received_packets();
 
 	return true;
 }

@@ -9,14 +9,6 @@ config_h = "../include/config.h"
 
 bld.SAMBA_BLDOPTIONS('smbd/build_options.c')
 
-t = bld.SAMBA_GENERATOR('build_env.h',
-                        source='script/build_env.sh',
-                        target='include/build_env.h',
-                        rule='${SRC} ${SRCDIR} ${BUILDDIR} ${CC} > ${TGT}')
-# todo: work out what is really wanted here
-t.env.SRCDIR = bld.path.abspath()
-t.env.BUILDDIR = bld.path.abspath()
-
 bld.SETUP_BUILD_GROUPS()
 
 ######################## SUBSYSTEMS #################################
@@ -84,25 +76,6 @@ bld.SAMBA3_LIBRARY('msrpc3',
                    ''',
                    private_library=True)
 
-bld.SAMBA3_LIBRARY('gpo',
-                   source='''
-                          ../libgpo/gpo_ldap.c
-                          ../libgpo/gpo_ini.c
-                          ../libgpo/gpo_util.c
-                          ../libgpo/gpo_fetch.c
-                          libgpo/gpo_filesync.c
-                          ../libgpo/gpo_sec.c
-                          libgpo/gpo_reg.c
-                          ''',
-                   deps='''
-                        talloc
-                        ads
-                        TOKEN_UTIL
-                        gpext
-                        auth
-                        ''',
-                   private_library=True)
-
 bld.SAMBA3_SUBSYSTEM('AVAHI',
                     source='''
                            lib/avahi.c
@@ -132,6 +105,17 @@ bld.SAMBA3_SUBSYSTEM('TLDAP',
                          LIBTSOCKET
                          samba3util
                          ''')
+
+bld.SAMBA3_BINARY('test_tldap',
+                  source='lib/test_tldap.c',
+                  deps='''
+                       asn1util
+                       LIBTSOCKET
+                       samba3util
+                       smbconf
+                       cmocka
+                       ''',
+                  install=False)
 
 # libpdb.so should not expose internal symbols that are only usable
 # to the statically linked modules that are merged into libpdb.
@@ -168,7 +152,7 @@ bld.SAMBA3_LIBRARY('samba-passdb',
                                   ''',
                    abi_match=private_pdb_match,
                    abi_directory='passdb/ABI',
-                   vnum='0.26.0')
+                   vnum='0.27.1')
 
 bld.SAMBA3_SUBSYSTEM('pdb',
                    source='''
@@ -312,7 +296,6 @@ bld.SAMBA3_SUBSYSTEM('samba3util',
                           lib/util_tsock.c
                           lib/util_transfer_file.c
                           lib/sys_popen.c
-                          lib/sock_exec.c
                           ''',
                    deps='''
                         CHARSET3
@@ -330,7 +313,8 @@ if bld.env.with_ctdb:
     SAMBA_CLUSTER_SUPPORT_SOURCES='''
                      lib/cluster_support.c
                      lib/dbwrap/dbwrap_ctdb.c
-                     lib/messages_ctdbd.c
+                     lib/messages_ctdb.c
+                     lib/messages_ctdb_ref.c
                      lib/ctdbd_conn.c
                    '''
     SAMBA_CLUSTER_SUPPORT_DEPS='''
@@ -389,7 +373,6 @@ bld.SAMBA3_SUBSYSTEM('samba3core',
                           lib/messages.c
                           lib/util_cluster.c
                           lib/id_cache.c
-                          lib/talloc_dict.c
                           lib/serverid.c
                           lib/server_id_watch.c
                           lib/server_id_db_util.c
@@ -412,15 +395,14 @@ bld.SAMBA3_SUBSYSTEM('samba3core',
                           lib/server_prefork.c
                           lib/server_prefork_util.c
                           lib/ldap_escape.c
-                          lib/fncall.c
                           libads/krb5_errs.c
                           lib/system_smbd.c
                           lib/audit.c
                           lib/tevent_wait.c
                           lib/idmap_cache.c
+                          lib/namemap_cache.c
                           lib/util_ea.c
                           lib/background.c
-                          lib/cleanupdb.c
                           ''',
                    deps='''
                         samba3util
@@ -487,6 +469,7 @@ bld.SAMBA3_LIBRARY('libsmb',
                         LIBTSOCKET
                         KRBCLIENT
                         NDR_IOCTL
+			NDR_QUOTA
                         cli_smb_common
                         util_cmdline
                         tevent
@@ -523,7 +506,7 @@ bld.SAMBA3_LIBRARY('smbldap',
                     abi_directory='lib/ABI',
                     abi_match='smbldap_*',
                     pc_files=[],
-                    vnum='0',
+                    vnum='2',
                     public_headers='include/smbldap.h include/smb_ldap.h')
 
 bld.SAMBA3_LIBRARY('ads',
@@ -541,6 +524,7 @@ bld.SAMBA3_LIBRARY('ads',
                           libads/ldap_schema.c
                           libads/util.c
                           libads/ndr.c
+                          libads/net_ads_setspn.c
                           ''',
                    deps='''
                         cli-ldap-common
@@ -623,7 +607,7 @@ bld.SAMBA3_SUBSYSTEM('sysquotas',
                         lib/sysquotas_nfs.c
                      ''',
                      allow_warnings=True,
-                     deps='samba3-util samba-util')
+                     deps='samba3-util samba-util tirpc')
 
 NOTIFY_SOURCES=''
 NOTIFY_DEPS=''
@@ -678,6 +662,7 @@ bld.SAMBA3_LIBRARY('smbd_base',
                           printing/printspoolss.c
                           lib/sessionid_tdb.c
                           lib/conn_tdb.c
+                          lib/cleanupdb.c
                           smbd/fake_file.c
                           smbd/quotas.c
                           smbd/ntquotas.c
@@ -755,6 +740,8 @@ bld.SAMBA3_LIBRARY('smbd_base',
                         netapi
                         NDR_IOCTL
                         notifyd
+                        vfs_acl_common
+                        NDR_QUOTA
                    ''' +
                    bld.env['dmapi_lib'] +
                    bld.env['legacy_quota_libs'] +
@@ -880,19 +867,6 @@ bld.SAMBA3_SUBSYSTEM('LIBNET_DSSYNC',
                          RPC_NDR_DRSUAPI
                          ''')
 
-bld.SAMBA3_SUBSYSTEM('LIBNET_SAMSYNC',
-                    source='''
-                           libnet/libnet_samsync.c
-                           libnet/libnet_samsync_ldif.c
-                           libnet/libnet_samsync_passdb.c
-                           libnet/libnet_samsync_display.c
-                           libnet/libnet_samsync_keytab.c
-                           ''',
-                    deps='''
-                         LIBNET
-                         LIBCLI_SAMSYNC
-                         ''')
-
 bld.SAMBA3_SUBSYSTEM('LIBEVENTLOG',
                     source='lib/eventlog/eventlog.c',
                     deps='NDR_EVENTLOG tdb')
@@ -958,7 +932,6 @@ bld.SAMBA3_SUBSYSTEM('SLCACHE',
 bld.SAMBA3_SUBSYSTEM('DCUTIL',
                     source='''
                            libsmb/namequery_dc.c
-                           libsmb/trustdom_cache.c
                            libsmb/dsgetdcname.c
                            ''',
                     deps='''
@@ -1203,15 +1176,19 @@ bld.SAMBA3_BINARY('smbtorture' + bld.env.suffix3,
                         torture/test_notify.c
                         lib/tevent_barrier.c
                         torture/test_dbwrap_watch.c
+                        torture/test_dbwrap_do_locked.c
                         torture/test_idmap_tdb_common.c
                         torture/test_dbwrap_ctdb.c
                         torture/test_buffersize.c
                         torture/test_messaging_read.c
                         torture/test_messaging_fd_passing.c
+                        torture/test_messaging_send_all.c
                         torture/test_oplock_cancel.c
                         torture/test_pthreadpool_tevent.c
                         torture/bench_pthreadpool.c
                         torture/wbc_async.c
+                        torture/test_g_lock.c
+                        torture/test_namemap_cache.c
                         ''',
                  deps='''
                       talloc
@@ -1321,23 +1298,31 @@ bld.SAMBA3_BINARY('vlp',
                       ''',
                  install=False)
 
-bld.SAMBA3_PYTHON('pysmbd',
+
+for env in bld.gen_python_environments():
+    pyrpc_util = bld.pyembed_libname('pyrpc_util')
+    pytalloc_util = bld.pyembed_libname('pytalloc-util')
+    bld.SAMBA3_PYTHON('pysmbd',
                   source='smbd/pysmbd.c',
-                  deps='smbd_base pyrpc_util pytalloc-util',
+                  deps=' '.join(['smbd_base', pyrpc_util, pytalloc_util]),
                   realname='samba/samba3/smbd.so'
                   )
 
-bld.SAMBA3_PYTHON('pylibsmb',
+for env in bld.gen_python_environments():
+    pycredentials = 'pycredentials'
+    if bld.env['IS_EXTRA_PYTHON']:
+        pycredentials = 'extra-' + pycredentials
+    bld.SAMBA3_PYTHON('pylibsmb',
                   source='libsmb/pylibsmb.c',
-                  deps='smbclient samba-credentials pycredentials',
+                  deps='smbclient samba-credentials %s' % pycredentials,
                   realname='samba/samba3/libsmb_samba_internal.so'
                   )
 
 bld.SAMBA3_BINARY('spotlight2sparql',
                  source='''
                  rpc_server/mdssvc/sparql_parser_test.c
-                 rpc_server/mdssvc/sparql_parser.c
-                 rpc_server/mdssvc/sparql_lexer.c
+                 rpc_server/mdssvc/sparql_parser.y
+                 rpc_server/mdssvc/sparql_lexer.l
                  rpc_server/mdssvc/sparql_mapping.c''',
                  deps='samba3-util talloc ' + bld.env['libtracker'],
                  enabled=bld.env.with_spotlight,
@@ -1347,7 +1332,6 @@ bld.SAMBA3_BINARY('spotlight2sparql',
 
 bld.RECURSE('auth')
 bld.RECURSE('libgpo/gpext')
-bld.RECURSE('lib/pthreadpool')
 bld.RECURSE('librpc')
 bld.RECURSE('librpc/idl')
 bld.RECURSE('libsmb')

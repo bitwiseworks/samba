@@ -31,6 +31,7 @@
 #include "dsdb/samdb/samdb.h"
 #include "dsdb/common/util.h"
 #include "dns_server/dnsserver_common.h"
+#include "rpc_server/dnsserver/dnsserver.h"
 #include "lib/util/dlinklist.h"
 
 #undef DBGC_CLASS
@@ -69,7 +70,8 @@ uint8_t werr_to_dns_err(WERROR werr)
 	return DNS_RCODE_SERVFAIL;
 }
 
-WERROR dns_common_extract(const struct ldb_message_element *el,
+WERROR dns_common_extract(struct ldb_context *samdb,
+			  const struct ldb_message_element *el,
 			  TALLOC_CTX *mem_ctx,
 			  struct dnsp_DnssrvRpcRecord **records,
 			  uint16_t *num_records)
@@ -86,9 +88,11 @@ WERROR dns_common_extract(const struct ldb_message_element *el,
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
 	for (ri = 0; ri < el->num_values; ri++) {
+		bool am_rodc;
+		int ret;
+		const char *dnsHostName = NULL;
 		struct ldb_val *v = &el->values[ri];
 		enum ndr_err_code ndr_err;
-
 		ndr_err = ndr_pull_struct_blob(v, recs, &recs[ri],
 				(ndr_pull_flags_fn_t)ndr_pull_dnsp_DnssrvRpcRecord);
 		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
@@ -96,12 +100,44 @@ WERROR dns_common_extract(const struct ldb_message_element *el,
 			DEBUG(0, ("Failed to grab dnsp_DnssrvRpcRecord\n"));
 			return DNS_ERR(SERVER_FAILURE);
 		}
+
+		/*
+		 * In AD, except on an RODC (where we should list a random RWDC,
+		 * we should over-stamp the MNAME with our own hostname
+		 */
+		if (recs[ri].wType != DNS_TYPE_SOA) {
+			continue;
+		}
+
+		ret = samdb_rodc(samdb, &am_rodc);
+		if (ret != LDB_SUCCESS) {
+			DEBUG(0, ("Failed to confirm we are not an RODC: %s\n",
+				  ldb_errstring(samdb)));
+			return DNS_ERR(SERVER_FAILURE);
+		}
+
+		if (am_rodc) {
+			continue;
+		}
+
+		ret = samdb_dns_host_name(samdb, &dnsHostName);
+		if (ret != LDB_SUCCESS || dnsHostName == NULL) {
+			DEBUG(0, ("Failed to get dnsHostName from rootDSE"));
+			return DNS_ERR(SERVER_FAILURE);
+		}
+
+		recs[ri].data.soa.mname = talloc_strdup(recs, dnsHostName);
 	}
+
 	*records = recs;
 	*num_records = el->num_values;
 	return WERR_OK;
 }
 
+/*
+ * Lookup a DNS record, performing an exact match.
+ * i.e. DNS wild card records are not considered.
+ */
 WERROR dns_common_lookup(struct ldb_context *samdb,
 			 TALLOC_CTX *mem_ctx,
 			 struct ldb_dn *dn,
@@ -189,7 +225,374 @@ WERROR dns_common_lookup(struct ldb_context *samdb,
 		}
 	}
 
-	werr = dns_common_extract(el, mem_ctx, records, num_records);
+	werr = dns_common_extract(samdb, el, mem_ctx, records, num_records);
+	TALLOC_FREE(msg);
+	if (!W_ERROR_IS_OK(werr)) {
+		return werr;
+	}
+
+	return WERR_OK;
+}
+
+/*
+ * Build an ldb_parse_tree node for an equality check
+ *
+ * Note: name is assumed to have been validated by dns_name_check
+ *       so will be zero terminated and of a reasonable size.
+ */
+static struct ldb_parse_tree *build_equality_operation(
+	TALLOC_CTX *mem_ctx,
+	bool add_asterix,     /* prepend an '*' to the name          */
+	const uint8_t *name,  /* the value being matched             */
+	const char *attr,     /* the attribute to check name against */
+	size_t size)          /* length of name                      */
+{
+
+	struct ldb_parse_tree *el = NULL;  /* Equality node being built */
+	struct ldb_val *value = NULL;      /* Value the attr will be compared
+					      with */
+	size_t length = 0;                 /* calculated length of the value
+	                                      including option '*' prefix and
+					      '\0' string terminator */
+
+	el = talloc(mem_ctx, struct ldb_parse_tree);
+	if (el == NULL) {
+		DBG_ERR("Unable to allocate ldb_parse_tree\n");
+		return NULL;
+	}
+
+	el->operation = LDB_OP_EQUALITY;
+	el->u.equality.attr = talloc_strdup(mem_ctx, attr);
+	value = &el->u.equality.value;
+	length = (add_asterix) ? size + 2 : size + 1;
+	value->data = talloc_zero_array(el, uint8_t, length);
+	if (el == NULL) {
+		DBG_ERR("Unable to allocate value->data\n");
+		TALLOC_FREE(el);
+		return NULL;
+	}
+
+	value->length = length;
+	if (add_asterix) {
+		value->data[0] = '*';
+		memcpy(&value->data[1], name, size);
+	} else {
+		memcpy(value->data, name, size);
+	}
+	return el;
+}
+
+/*
+ * Determine the number of levels in name
+ * essentially the number of '.'s in the name + 1
+ *
+ * name is assumed to have been validated by dns_name_check
+ */
+static unsigned int number_of_labels(const struct ldb_val *name) {
+	int x  = 0;
+	unsigned int labels = 1;
+	for (x = 0; x < name->length; x++) {
+		if (name->data[x] == '.') {
+			labels++;
+		}
+	}
+	return labels;
+}
+/*
+ * Build a query that matches the target name, and any possible
+ * DNS wild card entries
+ *
+ * Builds a parse tree equivalent to the example query.
+ *
+ * x.y.z -> (|(name=x.y.z)(name=\2a.y.z)(name=\2a.z)(name=\2a))
+ *
+ * The attribute 'name' is used as this is what the LDB index is on
+ * (the RDN, being 'dc' in this use case, does not have an index in
+ * the AD schema).
+ *
+ * Returns NULL if unable to build the query.
+ *
+ * The first component of the DN is assumed to be the name being looked up
+ * and also that it has been validated by dns_name_check
+ *
+ */
+#define BASE "(&(objectClass=dnsNode)(!(dNSTombstoned=TRUE))(|(a=b)(c=d)))"
+static struct ldb_parse_tree *build_wildcard_query(
+	TALLOC_CTX *mem_ctx,
+	struct ldb_dn *dn)
+{
+	const struct ldb_val *name = NULL;            /* The DNS name being
+							 queried */
+	const char *attr = "name";                    /* The attribute name */
+	struct ldb_parse_tree *query = NULL;          /* The constructed query
+							 parse tree*/
+	struct ldb_parse_tree *wildcard_query = NULL; /* The parse tree for the
+							 name and wild card
+							 entries */
+	int labels = 0;         /* The number of labels in the name */
+
+	name = ldb_dn_get_rdn_val(dn);
+	if (name == NULL) {
+		DBG_ERR("Unable to get domain name value\n");
+		return NULL;
+	}
+	labels = number_of_labels(name);
+
+	query = ldb_parse_tree(mem_ctx, BASE);
+	if (query == NULL) {
+		DBG_ERR("Unable to parse query %s\n", BASE);
+		return NULL;
+	}
+
+	/*
+	 * The 3rd element of BASE is a place holder which is replaced with
+	 * the actual wild card query
+	 */
+	wildcard_query = query->u.list.elements[2];
+	TALLOC_FREE(wildcard_query->u.list.elements);
+
+	wildcard_query->u.list.num_elements = labels + 1;
+	wildcard_query->u.list.elements = talloc_array(
+		wildcard_query,
+		struct ldb_parse_tree *,
+		labels + 1);
+	/*
+	 * Build the wild card query
+	 */
+	{
+		int x = 0;   /* current character in the name               */
+		int l = 0;   /* current equality operator index in elements */
+		struct ldb_parse_tree *el = NULL; /* Equality operator being
+						     built */
+		bool add_asterix = true;  /* prepend an '*' to the value    */
+		for (l = 0, x = 0; l < labels && x < name->length; l++) {
+			unsigned int size = name->length - x;
+			add_asterix = (name->data[x] == '.');
+			el = build_equality_operation(
+				mem_ctx,
+				add_asterix,
+				&name->data[x],
+				attr,
+				size);
+			if (el == NULL) {
+				return NULL;  /* Reason will have been logged */
+			}
+			wildcard_query->u.list.elements[l] = el;
+
+			/* skip to the start of the next label */
+			x++;
+			for (;x < name->length && name->data[x] != '.'; x++);
+		}
+
+		/* Add the base level "*" only query */
+		el = build_equality_operation(mem_ctx, true, NULL, attr, 0);
+		if (el == NULL) {
+			TALLOC_FREE(query);
+			return NULL;  /* Reason will have been logged */
+		}
+		wildcard_query->u.list.elements[l] = el;
+	}
+	return query;
+}
+
+/*
+ * Scan the list of records matching a dns wildcard query and return the
+ * best match.
+ *
+ * The best match is either an exact name match, or the longest wild card
+ * entry returned
+ *
+ * i.e. name = a.b.c candidates *.b.c, *.c,        - *.b.c would be selected
+ *      name = a.b.c candidates a.b.c, *.b.c, *.c  - a.b.c would be selected
+ */
+static struct ldb_message *get_best_match(struct ldb_dn *dn,
+		                          struct ldb_result *result)
+{
+	int matched = 0;    /* Index of the current best match in result */
+	size_t length = 0;  /* The length of the current candidate       */
+	const struct ldb_val *target = NULL;    /* value we're looking for */
+	const struct ldb_val *candidate = NULL; /* current candidate value */
+	int x = 0;
+
+	target = ldb_dn_get_rdn_val(dn);
+	for(x = 0; x < result->count; x++) {
+		candidate = ldb_dn_get_rdn_val(result->msgs[x]->dn);
+		if (strncasecmp((char *) target->data,
+				(char *) candidate->data,
+				target->length) == 0) {
+			/* Exact match stop searching and return */
+			return result->msgs[x];
+		}
+		if (candidate->length > length) {
+			matched = x;
+			length  = candidate->length;
+		}
+	}
+	return result->msgs[matched];
+}
+
+/*
+ * Look up a DNS entry, if an exact match does not exist, return the
+ * closest matching DNS wildcard entry if available
+ *
+ * Returns: LDB_ERR_NO_SUCH_OBJECT     If no matching record exists
+ *          LDB_ERR_OPERATIONS_ERROR   If the query fails
+ *          LDB_SUCCESS                If a matching record was retrieved
+ *
+ */
+static int dns_wildcard_lookup(struct ldb_context *samdb,
+			       TALLOC_CTX *mem_ctx,
+			       struct ldb_dn *dn,
+			       struct ldb_message **msg)
+{
+	static const char * const attrs[] = {
+		"dnsRecord",
+		"dNSTombstoned",
+		NULL
+	};
+	struct ldb_dn *parent = NULL;     /* The parent dn                    */
+	struct ldb_result *result = NULL; /* Results of the search            */
+	int ret;                          /* Return code                      */
+	struct ldb_parse_tree *query = NULL; /* The query to run              */
+	struct ldb_request *request = NULL;  /* LDB request for the query op  */
+	struct ldb_message *match = NULL;    /* the best matching DNS record  */
+	TALLOC_CTX *frame = talloc_stackframe();
+
+	parent = ldb_dn_get_parent(frame, dn);
+	if (parent == NULL) {
+		DBG_ERR("Unable to extract parent from dn\n");
+		TALLOC_FREE(frame);
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+
+	query = build_wildcard_query(frame, dn);
+	if (query == NULL) {
+		TALLOC_FREE(frame);
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+
+	result = talloc_zero(mem_ctx, struct ldb_result);
+	if (result == NULL) {
+		TALLOC_FREE(frame);
+		DBG_ERR("Unable to allocate ldb_result\n");
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+
+	ret = ldb_build_search_req_ex(&request,
+				      samdb,
+				      frame,
+				      parent,
+				      LDB_SCOPE_ONELEVEL,
+				      query,
+				      attrs,
+				      NULL,
+				      result,
+				      ldb_search_default_callback,
+				      NULL);
+	if (ret != LDB_SUCCESS) {
+		TALLOC_FREE(frame);
+		DBG_ERR("ldb_build_search_req_ex returned %d\n", ret);
+		return ret;
+	}
+
+	ret = ldb_request(samdb, request);
+	if (ret != LDB_SUCCESS) {
+		TALLOC_FREE(frame);
+		return ret;
+	}
+
+	ret = ldb_wait(request->handle, LDB_WAIT_ALL);
+	if (ret != LDB_SUCCESS) {
+		TALLOC_FREE(frame);
+		return ret;
+	}
+
+	if (result->count == 0) {
+		TALLOC_FREE(frame);
+		return LDB_ERR_NO_SUCH_OBJECT;
+	}
+
+	match = get_best_match(dn, result);
+	if (match == NULL) {
+		TALLOC_FREE(frame);
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+
+	*msg = talloc_move(mem_ctx, &match);
+	TALLOC_FREE(frame);
+	return LDB_SUCCESS;
+}
+
+/*
+ * Lookup a DNS record, will match DNS wild card records if an exact match
+ * is not found.
+ */
+WERROR dns_common_wildcard_lookup(struct ldb_context *samdb,
+				  TALLOC_CTX *mem_ctx,
+				  struct ldb_dn *dn,
+				  struct dnsp_DnssrvRpcRecord **records,
+				  uint16_t *num_records)
+{
+	int ret;
+	WERROR werr;
+	struct ldb_message *msg = NULL;
+	struct ldb_message_element *el = NULL;
+	const struct ldb_val *name = NULL;
+
+	*records = NULL;
+	*num_records = 0;
+
+	name = ldb_dn_get_rdn_val(dn);
+	if (name == NULL) {
+		return DNS_ERR(NAME_ERROR);
+	}
+
+	/* Don't look for a wildcard for @ */
+	if (name->length == 1 && name->data[0] == '@') {
+		return dns_common_lookup(samdb,
+					 mem_ctx,
+					 dn,
+					 records,
+					 num_records,
+					 NULL);
+	}
+
+	werr =  dns_name_check(
+			mem_ctx,
+			strlen((const char*)name->data),
+			(const char*) name->data);
+	if (!W_ERROR_IS_OK(werr)) {
+		return werr;
+	}
+
+	/*
+	 * Do a point search first, then fall back to a wildcard
+	 * lookup if it does not exist
+	 */
+	werr = dns_common_lookup(samdb,
+				 mem_ctx,
+				 dn,
+				 records,
+				 num_records,
+				 NULL);
+	if (!W_ERROR_EQUAL(werr, WERR_DNS_ERROR_NAME_DOES_NOT_EXIST)) {
+		return werr;
+	}
+
+	ret = dns_wildcard_lookup(samdb, mem_ctx, dn, &msg);
+	if (ret == LDB_ERR_OPERATIONS_ERROR) {
+		return DNS_ERR(SERVER_FAILURE);
+	}
+	if (ret != LDB_SUCCESS) {
+		return DNS_ERR(NAME_ERROR);
+	}
+
+	el = ldb_msg_find_element(msg, "dnsRecord");
+	if (el == NULL) {
+		return WERR_DNS_ERROR_NAME_DOES_NOT_EXIST;
+	}
+
+	werr = dns_common_extract(samdb, el, mem_ctx, records, num_records);
 	TALLOC_FREE(msg);
 	if (!W_ERROR_IS_OK(werr)) {
 		return werr;
@@ -215,14 +618,29 @@ static int rec_cmp(const struct dnsp_DnssrvRpcRecord *r1,
 }
 
 /*
- * Check for valid DNS names. These are names which are non-empty, do not
- * start with a dot and do not have any empty segments.
+ * Check for valid DNS names. These are names which:
+ *   - are non-empty
+ *   - do not start with a dot
+ *   - do not have any empty labels
+ *   - have no more than 127 labels
+ *   - are no longer than 253 characters
+ *   - none of the labels exceed 63 characters
  */
 WERROR dns_name_check(TALLOC_CTX *mem_ctx, size_t len, const char *name)
 {
 	size_t i;
+	unsigned int labels    = 0;
+	unsigned int label_len = 0;
 
 	if (len == 0) {
+		return WERR_DS_INVALID_DN_SYNTAX;
+	}
+
+	if (len > 1 && name[0] == '.') {
+		return WERR_DS_INVALID_DN_SYNTAX;
+	}
+
+	if ((len - 1) > DNS_MAX_DOMAIN_LENGTH) {
 		return WERR_DS_INVALID_DN_SYNTAX;
 	}
 
@@ -230,10 +648,18 @@ WERROR dns_name_check(TALLOC_CTX *mem_ctx, size_t len, const char *name)
 		if (name[i] == '.' && name[i+1] == '.') {
 			return WERR_DS_INVALID_DN_SYNTAX;
 		}
-	}
-
-	if (len > 1 && name[0] == '.') {
-		return WERR_DS_INVALID_DN_SYNTAX;
+		if (name[i] == '.') {
+			labels++;
+			if (labels > DNS_MAX_LABELS) {
+				return WERR_DS_INVALID_DN_SYNTAX;
+			}
+			label_len = 0;
+		} else {
+			label_len++;
+			if (label_len > DNS_MAX_LABEL_LENGTH) {
+				return WERR_DS_INVALID_DN_SYNTAX;
+			}
+		}
 	}
 
 	return WERR_OK;
@@ -299,6 +725,110 @@ static WERROR check_name_list(TALLOC_CTX *mem_ctx, uint16_t rec_count,
 	return WERR_OK;
 }
 
+bool dns_name_is_static(struct dnsp_DnssrvRpcRecord *records,
+			uint16_t rec_count)
+{
+	int i = 0;
+	for (i = 0; i < rec_count; i++) {
+		if (records[i].wType == DNS_TYPE_TOMBSTONE) {
+			continue;
+		}
+
+		if (records[i].wType == DNS_TYPE_SOA ||
+		    records[i].dwTimeStamp == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+WERROR dns_get_zone_properties(struct ldb_context *samdb,
+			       TALLOC_CTX *mem_ctx,
+			       struct ldb_dn *zone_dn,
+			       struct dnsserver_zoneinfo *zoneinfo)
+{
+
+	int ret, i;
+	struct dnsp_DnsProperty *prop = NULL;
+	struct ldb_message_element *element = NULL;
+	const char *const attrs[] = {"dNSProperty", NULL};
+	struct ldb_result *res = NULL;
+	enum ndr_err_code err;
+
+	ret = ldb_search(samdb,
+			 mem_ctx,
+			 &res,
+			 zone_dn,
+			 LDB_SCOPE_BASE,
+			 attrs,
+			 "(objectClass=dnsZone)");
+	if (ret != LDB_SUCCESS) {
+		DBG_ERR("dnsserver: Failed to find DNS zone: %s\n",
+			ldb_dn_get_linearized(zone_dn));
+		return DNS_ERR(SERVER_FAILURE);
+	}
+
+	element = ldb_msg_find_element(res->msgs[0], "dNSProperty");
+	if (element == NULL) {
+		return DNS_ERR(NOTZONE);
+	}
+
+	for (i = 0; i < element->num_values; i++) {
+		prop = talloc_zero(mem_ctx, struct dnsp_DnsProperty);
+		if (prop == NULL) {
+			return WERR_NOT_ENOUGH_MEMORY;
+		}
+		err = ndr_pull_struct_blob(
+		    &(element->values[i]),
+		    mem_ctx,
+		    prop,
+		    (ndr_pull_flags_fn_t)ndr_pull_dnsp_DnsProperty);
+		if (!NDR_ERR_CODE_IS_SUCCESS(err)) {
+			return DNS_ERR(SERVER_FAILURE);
+		}
+
+		switch (prop->id) {
+		case DSPROPERTY_ZONE_AGING_STATE:
+			zoneinfo->fAging = prop->data.aging_enabled;
+			break;
+		case DSPROPERTY_ZONE_NOREFRESH_INTERVAL:
+			zoneinfo->dwNoRefreshInterval =
+			    prop->data.norefresh_hours;
+			break;
+		case DSPROPERTY_ZONE_REFRESH_INTERVAL:
+			zoneinfo->dwRefreshInterval = prop->data.refresh_hours;
+			break;
+		case DSPROPERTY_ZONE_ALLOW_UPDATE:
+			zoneinfo->fAllowUpdate = prop->data.allow_update_flag;
+			break;
+		case DSPROPERTY_ZONE_AGING_ENABLED_TIME:
+			zoneinfo->dwAvailForScavengeTime =
+			    prop->data.next_scavenging_cycle_hours;
+			break;
+		case DSPROPERTY_ZONE_SCAVENGING_SERVERS:
+			zoneinfo->aipScavengeServers->AddrCount =
+			    prop->data.servers.addrCount;
+			zoneinfo->aipScavengeServers->AddrArray =
+			    prop->data.servers.addr;
+			break;
+		case DSPROPERTY_ZONE_EMPTY:
+		case DSPROPERTY_ZONE_TYPE:
+		case DSPROPERTY_ZONE_SECURE_TIME:
+		case DSPROPERTY_ZONE_DELETED_FROM_HOSTNAME:
+		case DSPROPERTY_ZONE_MASTER_SERVERS:
+		case DSPROPERTY_ZONE_AUTO_NS_SERVERS:
+		case DSPROPERTY_ZONE_DCPROMO_CONVERT:
+		case DSPROPERTY_ZONE_SCAVENGING_SERVERS_DA:
+		case DSPROPERTY_ZONE_MASTER_SERVERS_DA:
+		case DSPROPERTY_ZONE_NS_SERVERS_DA:
+		case DSPROPERTY_ZONE_NODE_DBFLAGS:
+			break;
+		}
+	}
+
+	return WERR_OK;
+}
+
 WERROR dns_common_replace(struct ldb_context *samdb,
 			  TALLOC_CTX *mem_ctx,
 			  struct ldb_dn *dn,
@@ -314,11 +844,36 @@ WERROR dns_common_replace(struct ldb_context *samdb,
 	struct ldb_message *msg = NULL;
 	bool was_tombstoned = false;
 	bool become_tombstoned = false;
+	struct ldb_dn *zone_dn = NULL;
+	struct dnsserver_zoneinfo *zoneinfo = NULL;
+	NTTIME t;
 
 	msg = ldb_msg_new(mem_ctx);
 	W_ERROR_HAVE_NO_MEMORY(msg);
 
 	msg->dn = dn;
+
+	zone_dn = ldb_dn_copy(mem_ctx, dn);
+	if (zone_dn == NULL) {
+		return WERR_NOT_ENOUGH_MEMORY;
+	}
+	if (!ldb_dn_remove_child_components(zone_dn, 1)) {
+		return DNS_ERR(SERVER_FAILURE);
+	}
+	zoneinfo = talloc(mem_ctx, struct dnsserver_zoneinfo);
+	if (zoneinfo == NULL) {
+		return WERR_NOT_ENOUGH_MEMORY;
+	}
+	werr = dns_get_zone_properties(samdb, mem_ctx, zone_dn, zoneinfo);
+	if (W_ERROR_EQUAL(DNS_ERR(NOTZONE), werr)) {
+		/*
+		 * We only got zoneinfo for aging so if we didn't find any
+		 * properties then just disable aging and keep going.
+		 */
+		zoneinfo->fAging = 0;
+	} else if (!W_ERROR_IS_OK(werr)) {
+		return werr;
+	}
 
 	werr = check_name_list(mem_ctx, rec_count, records);
 	if (!W_ERROR_IS_OK(werr)) {
@@ -355,6 +910,16 @@ WERROR dns_common_replace(struct ldb_context *samdb,
 				was_tombstoned = true;
 			}
 			continue;
+		}
+
+		if (zoneinfo->fAging == 1 && records[i].dwTimeStamp != 0) {
+			unix_to_nt_time(&t, time(NULL));
+			t /= 10 * 1000 * 1000;
+			t /= 3600;
+			if (t - records[i].dwTimeStamp >
+			    zoneinfo->dwNoRefreshInterval) {
+				records[i].dwTimeStamp = t;
+			}
 		}
 
 		records[i].dwSerial = serial;
@@ -560,6 +1125,7 @@ static int dns_common_sort_zones(struct ldb_message **m1, struct ldb_message **m
 
 NTSTATUS dns_common_zones(struct ldb_context *samdb,
 			  TALLOC_CTX *mem_ctx,
+			  struct ldb_dn *base_dn,
 			  struct dns_server_zone **zones_ret)
 {
 	int ret;
@@ -569,9 +1135,19 @@ NTSTATUS dns_common_zones(struct ldb_context *samdb,
 	struct dns_server_zone *new_list = NULL;
 	TALLOC_CTX *frame = talloc_stackframe();
 
-	/* TODO: this search does not work against windows */
-	ret = dsdb_search(samdb, frame, &res, NULL, LDB_SCOPE_SUBTREE,
-			  attrs, DSDB_SEARCH_SEARCH_ALL_PARTITIONS, "(objectClass=dnsZone)");
+	if (base_dn) {
+		/* This search will work against windows */
+		ret = dsdb_search(samdb, frame, &res,
+				  base_dn, LDB_SCOPE_SUBTREE,
+				  attrs, 0, "(objectClass=dnsZone)");
+	} else {
+		/* TODO: this search does not work against windows */
+		ret = dsdb_search(samdb, frame, &res, NULL,
+				  LDB_SCOPE_SUBTREE,
+				  attrs,
+				  DSDB_SEARCH_SEARCH_ALL_PARTITIONS,
+				  "(objectClass=dnsZone)");
+	}
 	if (ret != LDB_SUCCESS) {
 		TALLOC_FREE(frame);
 		return NT_STATUS_INTERNAL_DB_CORRUPTION;
@@ -611,4 +1187,24 @@ NTSTATUS dns_common_zones(struct ldb_context *samdb,
 	*zones_ret = new_list;
 	TALLOC_FREE(frame);
 	return NT_STATUS_OK;
+}
+
+/*
+  see if two DNS names are the same
+ */
+bool dns_name_equal(const char *name1, const char *name2)
+{
+	size_t len1 = strlen(name1);
+	size_t len2 = strlen(name2);
+
+	if (len1 > 0 && name1[len1 - 1] == '.') {
+		len1--;
+	}
+	if (len2 > 0 && name2[len2 - 1] == '.') {
+		len2--;
+	}
+	if (len1 != len2) {
+		return false;
+	}
+	return strncasecmp(name1, name2, len1) == 0;
 }

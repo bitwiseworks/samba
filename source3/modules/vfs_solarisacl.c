@@ -63,12 +63,14 @@ static bool solaris_acl_check(SOLARIS_ACL_T solaris_acl, int count);
 /* public functions - the api */
 
 SMB_ACL_T solarisacl_sys_acl_get_file(vfs_handle_struct *handle,
-				      const char *path_p,
-				      SMB_ACL_TYPE_T type, TALLOC_CTX *mem_ctx)
+				const struct smb_filename *smb_fname,
+				SMB_ACL_TYPE_T type,
+				TALLOC_CTX *mem_ctx)
 {
 	SMB_ACL_T result = NULL;
 	int count;
 	SOLARIS_ACL_T solaris_acl = NULL;
+	const char *path_p = smb_fname->base_name;
 	
 	DEBUG(10, ("solarisacl_sys_acl_get_file called for file '%s'.\n", 
 		   path_p));
@@ -134,19 +136,23 @@ SMB_ACL_T solarisacl_sys_acl_get_fd(vfs_handle_struct *handle,
 }
 
 int solarisacl_sys_acl_set_file(vfs_handle_struct *handle,
-				const char *name,
+				const struct smb_filename *smb_fname_in,
 				SMB_ACL_TYPE_T type,
 				SMB_ACL_T theacl)
 {
 	int ret = -1;
 	SOLARIS_ACL_T solaris_acl = NULL;
 	int count;
-	struct smb_filename smb_fname = {
-		.base_name = discard_const_p(char, name)
-	};
+	struct smb_filename *smb_fname = NULL;
+
+	smb_fname = cp_smb_filename_nostream(talloc_tos(), smb_fname_in);
+	if (smb_fname == NULL) {
+		errno = ENOMEM;
+		goto done;
+	}
 
 	DEBUG(10, ("solarisacl_sys_acl_set_file called for file '%s'\n",
-		   name));
+		   smb_fname->base_name));
 
 	if ((type != SMB_ACL_TYPE_ACCESS) && (type != SMB_ACL_TYPE_DEFAULT)) {
 		errno = EINVAL;
@@ -174,12 +180,12 @@ int solarisacl_sys_acl_set_file(vfs_handle_struct *handle,
 	 * For a Windows acl mapped call on a symlink, we want to follow
 	 * it.
 	 */
-	ret = SMB_VFS_STAT(handle->conn, &smb_fname);
+	ret = SMB_VFS_STAT(handle->conn, smb_fname);
 	if (ret != 0) {
 		DEBUG(10, ("Error in stat call: %s\n", strerror(errno)));
 		goto done;
 	}
-	if (S_ISDIR(smb_fname.st.st_ex_mode)) {
+	if (S_ISDIR(smb_fname->st.st_ex_mode)) {
 		SOLARIS_ACL_T other_acl = NULL;
 		int other_count;
 		SMB_ACL_TYPE_T other_type;
@@ -188,7 +194,8 @@ int solarisacl_sys_acl_set_file(vfs_handle_struct *handle,
 			? SMB_ACL_TYPE_DEFAULT
 			: SMB_ACL_TYPE_ACCESS;
 		DEBUGADD(10, ("getting acl from filesystem\n"));
-		if (!solaris_acl_get_file(name, &other_acl, &other_count)) {
+		if (!solaris_acl_get_file(smb_fname->base_name,
+					&other_acl, &other_count)) {
 			DEBUG(10, ("error getting acl from directory\n"));
 			goto done;
 		}
@@ -215,12 +222,13 @@ int solarisacl_sys_acl_set_file(vfs_handle_struct *handle,
 		goto done;
 	}
 
-	ret = acl(name, SETACL, count, solaris_acl);
-	
+	ret = acl(smb_fname->base_name, SETACL, count, solaris_acl);
+
  done:
 	DEBUG(10, ("solarisacl_sys_acl_set_file %s.\n",
 		   ((ret != 0) ? "failed" : "succeeded")));
 	SAFE_FREE(solaris_acl);
+	TALLOC_FREE(smb_fname);
 	return ret;
 }
 
@@ -298,7 +306,7 @@ int solarisacl_sys_acl_set_fd(vfs_handle_struct *handle,
  * check is considered unnecessary. --- Agreed? XXX
  */
 int solarisacl_sys_acl_delete_def_file(vfs_handle_struct *handle,
-				       const char *path)
+				const struct smb_filename *smb_fname)
 {
 	SMB_ACL_T smb_acl;
 	int ret = -1;
@@ -307,7 +315,7 @@ int solarisacl_sys_acl_delete_def_file(vfs_handle_struct *handle,
 
 	DEBUG(10, ("entering solarisacl_sys_acl_delete_def_file.\n"));
 	
-	smb_acl = solarisacl_sys_acl_get_file(handle, path, 
+	smb_acl = solarisacl_sys_acl_get_file(handle, smb_fname->base_name,
 					      SMB_ACL_TYPE_ACCESS, talloc_tos());
 	if (smb_acl == NULL) {
 		DEBUG(10, ("getting file acl failed!\n"));
@@ -323,7 +331,7 @@ int solarisacl_sys_acl_delete_def_file(vfs_handle_struct *handle,
 		DEBUG(10, ("resulting acl is not valid!\n"));
 		goto done;
 	}
-	ret = acl(path, SETACL, count, solaris_acl);
+	ret = acl(smb_fname->base_name, SETACL, count, solaris_acl);
 	if (ret != 0) {
 		DEBUG(10, ("settinge file acl failed!\n"));
 	}
@@ -766,8 +774,8 @@ static struct vfs_fn_pointers solarisacl_fns = {
 	.sys_acl_delete_def_file_fn = solarisacl_sys_acl_delete_def_file,
 };
 
-NTSTATUS vfs_solarisacl_init(void);
-NTSTATUS vfs_solarisacl_init(void)
+static_decl_vfs;
+NTSTATUS vfs_solarisacl_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "solarisacl",
 				&solarisacl_fns);

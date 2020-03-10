@@ -2,53 +2,44 @@
 
 . "${TEST_SCRIPTS_DIR}/unit.sh"
 
-define_test "disabled event script"
+define_test "eventscript directory with random files"
 
 setup_eventd
 
-cat > "$eventd_scriptdir/01.test" <<EOF
-#!/bin/sh
-
-exit 0
+required_error EINVAL <<EOF
+Script README is invalid in random
 EOF
+simple_test script enable random README
 
-required_result 0 <<EOF
-01.test              DISABLED
+required_error EINVAL <<EOF
+Script a is invalid in random
 EOF
-simple_test script list
+simple_test script disable random a
 
-required_result 0 <<EOF
+required_error ENOENT <<EOF
+Script 00.foobar does not exist in random
 EOF
-simple_test script disable 01.test
+simple_test script enable random 00.foobar
 
-required_result 0 <<EOF
+required_error EINVAL <<EOF
+Event monitor has never run in random
 EOF
-simple_test script enable 01.test
+simple_test status random monitor
 
-required_result 0 <<EOF
-01.test             
-EOF
-simple_test script list
+ok_null
+simple_test run 10 random monitor
 
-required_result 0 <<EOF
+ok <<EOF
+01.disabled          DISABLED  
+02.enabled           OK         DURATION DATETIME
 EOF
-simple_test script disable 01.test
+simple_test status random monitor
 
-required_result 0 <<EOF
-EOF
-simple_test run monitor 30
+ok <<EOF
+  01.disabled
+  02.enabled
 
-required_result 0 <<EOF
-01.test              DISABLED  
+  01.disabled
+* 02.enabled
 EOF
-simple_test status monitor lastrun
-
-required_result 0 <<EOF
-01.test              DISABLED  
-EOF
-simple_test status monitor lastpass
-
-required_result 0 <<EOF
-Event monitor has never failed
-EOF
-simple_test status monitor lastfail
+simple_test script list random

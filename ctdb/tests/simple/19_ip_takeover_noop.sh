@@ -5,7 +5,7 @@ test_info()
     cat <<EOF
 Check that CTDB operates correctly if:
 
-* DisableIPFailover is set; or
+* failover is disabled; or
 * there are 0 public IPs configured
 
 This test only does anything with local daemons.  On a real cluster it
@@ -31,34 +31,33 @@ ctdb_restart_when_done
 
 select_test_node_and_ips
 
-echo "Setting DisableIPFailover=1 on all nodes"
-try_command_on_node all $CTDB setvar DisableIPFailover 1
+daemons_stop
 
-echo "Getting \"before\" IP allocation..."
-try_command_on_node -v any $CTDB ip all
-before="$out"
+echo "Starting CTDB with failover disabled..."
+setup_ctdb --disable-failover
+daemons_start
 
-echo "Disabling node ${test_node}..."
-try_command_on_node "$test_node" $CTDB disable
-wait_until_node_has_status $test_node disabled
+wait_until_ready
 
-echo "Getting \"after\" IP allocation..."
-try_command_on_node -v any $CTDB ip all
-after="$out"
+echo "Getting IP allocation..."
+try_command_on_node -v any "$CTDB ip all | tail -n +2"
 
-if [ "$before" == "$after" ] ; then
-	echo "GOOD: IP allocation is unchanged"
-	echo
-else
-	die "BAD: IP allocation changed"
-fi
+while read ip pnn ; do
+	if [ "$pnn" != "-1" ] ; then
+		die "BAD: IP address ${ip} is assigned to node ${pnn}"
+	fi
+done <<EOF
+$out
+EOF
+
+echo "GOOD: All IP addresses are unassigned"
 
 echo "----------------------------------------"
-
 daemons_stop
 
 echo "Starting CTDB with an empty public addresses configuration..."
-CTDB_PUBLIC_ADDRESSES="/dev/null" daemons_start
+setup_ctdb --no-public-addresses
+daemons_start
 
 wait_until_ready
 

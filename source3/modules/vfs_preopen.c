@@ -156,7 +156,7 @@ static bool preopen_helper_open_one(int sock_fd, char **pnamebuf,
 
 	nread = 0;
 
-	while ((nread == 0) || (namebuf[nread-1] != '\0')) {
+	do {
 		ssize_t thistime;
 
 		thistime = read(sock_fd, namebuf + nread,
@@ -176,7 +176,7 @@ static bool preopen_helper_open_one(int sock_fd, char **pnamebuf,
 			}
 			*pnamebuf = namebuf;
 		}
-	}
+	} while (namebuf[nread - 1] != '\0');
 
 	fd = open(namebuf, O_RDONLY);
 	if (fd == -1) {
@@ -408,7 +408,8 @@ static int preopen_open(vfs_handle_struct *handle,
 
 	TALLOC_FREE(state->template_fname);
 	state->template_fname = talloc_asprintf(
-		state, "%s/%s", fsp->conn->cwd, smb_fname->base_name);
+		state, "%s/%s",
+		fsp->conn->cwd_fname->base_name, smb_fname->base_name);
 
 	if (state->template_fname == NULL) {
 		return res;
@@ -449,8 +450,8 @@ static struct vfs_fn_pointers vfs_preopen_fns = {
 	.open_fn = preopen_open
 };
 
-NTSTATUS vfs_preopen_init(void);
-NTSTATUS vfs_preopen_init(void)
+static_decl_vfs;
+NTSTATUS vfs_preopen_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION,
 				"preopen", &vfs_preopen_fns);

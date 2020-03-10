@@ -34,6 +34,10 @@
 #include "auth/kerberos/kerberos_util.h"
 #include "auth/kerberos/pac_utils.h"
 #include "param/param.h"
+#include "../libds/common/flags.h"
+
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_AUTH
 
 static void cli_credentials_invalidate_client_gss_creds(
 					struct cli_credentials *cred,
@@ -61,6 +65,130 @@ static int free_dccache(struct ccache_container *ccc)
 	}
 
 	return 0;
+}
+
+static uint32_t smb_gss_krb5_copy_ccache(uint32_t *min_stat,
+					 gss_cred_id_t cred,
+					 struct ccache_container *ccc)
+{
+#ifndef SAMBA4_USES_HEIMDAL /* MIT 1.10 */
+	krb5_context context = ccc->smb_krb5_context->krb5_context;
+	krb5_ccache dummy_ccache = NULL;
+	krb5_creds creds = {0};
+	krb5_cc_cursor cursor = NULL;
+	krb5_principal princ = NULL;
+	krb5_error_code code;
+	char *dummy_name;
+	uint32_t maj_stat = GSS_S_FAILURE;
+
+	dummy_name = talloc_asprintf(ccc,
+				     "MEMORY:gss_krb5_copy_ccache-%p",
+				     &ccc->ccache);
+	if (dummy_name == NULL) {
+		*min_stat = ENOMEM;
+		return GSS_S_FAILURE;
+	}
+
+	/*
+	 * Create a dummy ccache, so we can iterate over the credentials
+	 * and find the default principal for the ccache we want to
+	 * copy. The new ccache needs to be initialized with this
+	 * principal.
+	 */
+	code = krb5_cc_resolve(context, dummy_name, &dummy_ccache);
+	TALLOC_FREE(dummy_name);
+	if (code != 0) {
+		*min_stat = code;
+		return GSS_S_FAILURE;
+	}
+
+	/*
+	 * We do not need set a default principal on the temporary dummy
+	 * ccache, as we do consume it at all in this function.
+	 */
+	maj_stat = gss_krb5_copy_ccache(min_stat, cred, dummy_ccache);
+	if (maj_stat != 0) {
+		krb5_cc_close(context, dummy_ccache);
+		return maj_stat;
+	}
+
+	code = krb5_cc_start_seq_get(context, dummy_ccache, &cursor);
+	if (code != 0) {
+		krb5_cc_close(context, dummy_ccache);
+		*min_stat = EINVAL;
+		return GSS_S_FAILURE;
+	}
+
+	code = krb5_cc_next_cred(context,
+				 dummy_ccache,
+				 &cursor,
+				 &creds);
+	if (code != 0) {
+		krb5_cc_close(context, dummy_ccache);
+		*min_stat = EINVAL;
+		return GSS_S_FAILURE;
+	}
+
+	do {
+		if (creds.ticket_flags & TKT_FLG_PRE_AUTH) {
+			krb5_data *tgs;
+
+			tgs = krb5_princ_component(context,
+						   creds.server,
+						   0);
+			if (tgs != NULL && tgs->length >= 1) {
+				int cmp;
+
+				cmp = memcmp(tgs->data,
+					     KRB5_TGS_NAME,
+					     tgs->length);
+				if (cmp == 0 && creds.client != NULL) {
+					princ = creds.client;
+					code = KRB5_CC_END;
+					break;
+				}
+			}
+		}
+
+		krb5_free_cred_contents(context, &creds);
+
+		code = krb5_cc_next_cred(context,
+					 dummy_ccache,
+					 &cursor,
+					 &creds);
+	} while (code == 0);
+
+	if (code == KRB5_CC_END) {
+		krb5_cc_end_seq_get(context, dummy_ccache, &cursor);
+		code = 0;
+	}
+	krb5_cc_close(context, dummy_ccache);
+
+	if (code != 0 || princ == NULL) {
+		krb5_free_cred_contents(context, &creds);
+		*min_stat = EINVAL;
+		return GSS_S_FAILURE;
+	}
+
+	/*
+	 * Set the default principal for the cache we copy
+	 * into. This is needed to be able that other calls
+	 * can read it with e.g. gss_acquire_cred() or
+	 * krb5_cc_get_principal().
+	 */
+	code = krb5_cc_initialize(context, ccc->ccache, princ);
+	if (code != 0) {
+		krb5_free_cred_contents(context, &creds);
+		*min_stat = EINVAL;
+		return GSS_S_FAILURE;
+	}
+	krb5_free_cred_contents(context, &creds);
+
+#endif /* SAMBA4_USES_HEIMDAL */
+
+	return gss_krb5_copy_ccache(min_stat,
+				    cred,
+				    ccc->ccache);
 }
 
 _PUBLIC_ int cli_credentials_get_krb5_context(struct cli_credentials *cred, 
@@ -136,11 +264,11 @@ static int cli_credentials_set_from_ccache(struct cli_credentials *cred,
 	}
 
 	ok = cli_credentials_set_principal(cred, name, obtained);
+	krb5_free_unparsed_name(ccache->smb_krb5_context->krb5_context, name);
 	if (!ok) {
 		krb5_free_principal(ccache->smb_krb5_context->krb5_context, princ);
 		return ENOMEM;
 	}
-	free(name);
 
 	realm = smb_krb5_principal_get_realm(ccache->smb_krb5_context->krb5_context,
 					     princ);
@@ -719,8 +847,8 @@ _PUBLIC_ int cli_credentials_get_client_gss_creds(struct cli_credentials *cred,
 {
 	int ret;
 	OM_uint32 maj_stat, min_stat;
-	struct ccache_container *ccc;
-	struct gssapi_creds_container *gcc;
+	struct ccache_container *ccc = NULL;
+	struct gssapi_creds_container *gcc = NULL;
 	if (cred->client_gss_creds_obtained > obtained) {
 		return 0;
 	}
@@ -736,8 +864,9 @@ _PUBLIC_ int cli_credentials_get_client_gss_creds(struct cli_credentials *cred,
 		return ret;
 	}
 
-	maj_stat = gss_krb5_copy_ccache(&min_stat, 
-					gssapi_cred, ccc->ccache);
+	maj_stat = smb_gss_krb5_copy_ccache(&min_stat,
+					    gssapi_cred,
+					    ccc);
 	if (maj_stat) {
 		if (min_stat) {
 			ret = min_stat;
@@ -833,83 +962,6 @@ _PUBLIC_ struct cli_credentials *cli_credentials_shallow_copy(TALLOC_CTX *mem_ct
 	return dst;
 }
 
-static int smb_krb5_create_salt_principal(TALLOC_CTX *mem_ctx,
-					  const char *samAccountName,
-					  const char *realm,
-					  const char **salt_principal,
-					  const char **error_string)
-{
-	char *machine_username;
-	bool is_machine_account = false;
-	char *upper_realm;
-	TALLOC_CTX *tmp_ctx;
-	int rc = -1;
-
-	if (samAccountName == NULL) {
-		*error_string = "Cannot determine salt principal, no "
-				"saltPrincipal or samAccountName specified";
-		return rc;
-	}
-
-	if (realm == NULL) {
-		*error_string = "Cannot make principal without a realm";
-		return rc;
-	}
-
-	tmp_ctx = talloc_new(mem_ctx);
-	if (tmp_ctx == NULL) {
-		*error_string = "Cannot allocate talloc context";
-		return rc;
-	}
-
-	upper_realm = strupper_talloc(tmp_ctx, realm);
-	if (upper_realm == NULL) {
-		*error_string = "Cannot allocate to upper case realm";
-		goto out;
-	}
-
-	machine_username = strlower_talloc(tmp_ctx, samAccountName);
-	if (!machine_username) {
-		*error_string = "Cannot duplicate samAccountName";
-		goto out;
-	}
-
-	if (machine_username[strlen(machine_username) - 1] == '$') {
-		machine_username[strlen(machine_username) - 1] = '\0';
-		is_machine_account = true;
-	}
-
-	if (is_machine_account) {
-		char *lower_realm;
-
-		lower_realm = strlower_talloc(tmp_ctx, realm);
-		if (lower_realm == NULL) {
-			*error_string = "Cannot allocate to lower case realm";
-			goto out;
-		}
-
-		*salt_principal = talloc_asprintf(mem_ctx,
-						  "host/%s.%s@%s",
-						  machine_username,
-						  lower_realm,
-						  upper_realm);
-	} else {
-		*salt_principal = talloc_asprintf(mem_ctx,
-						  "%s@%s",
-						  machine_username,
-						  upper_realm);
-	}
-	if (*salt_principal == NULL) {
-		*error_string = "Cannot create salt principal";
-		goto out;
-	}
-
-	rc = 0;
-out:
-	talloc_free(tmp_ctx);
-	return rc;
-}
-
 /* Get the keytab (actually, a container containing the krb5_keytab)
  * attached to this context.  If this hasn't been done or set before,
  * it will be generated from the password.
@@ -925,9 +977,10 @@ _PUBLIC_ int cli_credentials_get_keytab(struct cli_credentials *cred,
 	krb5_keytab keytab;
 	TALLOC_CTX *mem_ctx;
 	const char *username = cli_credentials_get_username(cred);
+	const char *upn = NULL;
 	const char *realm = cli_credentials_get_realm(cred);
-	const char *error_string;
-	const char *salt_principal;
+	char *salt_principal = NULL;
+	uint32_t uac_flags = 0;
 
 	if (cred->keytab_obtained >= (MAX(cred->principal_obtained, 
 					  cred->username_obtained))) {
@@ -950,16 +1003,34 @@ _PUBLIC_ int cli_credentials_get_keytab(struct cli_credentials *cred,
 		return ENOMEM;
 	}
 
-	/*
-	 * FIXME: Currently there is no better way than to create the correct
-	 * salt principal by checking if the username ends with a '$'. It would
-	 * be better if it is part of the credentials.
-	 */
-	ret = smb_krb5_create_salt_principal(mem_ctx,
-					     username,
-					     realm,
-					     &salt_principal,
-					     &error_string);
+	switch (cred->secure_channel_type) {
+	case SEC_CHAN_WKSTA:
+	case SEC_CHAN_RODC:
+		uac_flags = UF_WORKSTATION_TRUST_ACCOUNT;
+		break;
+	case SEC_CHAN_BDC:
+		uac_flags = UF_SERVER_TRUST_ACCOUNT;
+		break;
+	case SEC_CHAN_DOMAIN:
+	case SEC_CHAN_DNS_DOMAIN:
+		uac_flags = UF_INTERDOMAIN_TRUST_ACCOUNT;
+		break;
+	default:
+		upn = cli_credentials_get_principal(cred, mem_ctx);
+		if (upn == NULL) {
+			TALLOC_FREE(mem_ctx);
+			return ENOMEM;
+		}
+		uac_flags = UF_NORMAL_ACCOUNT;
+		break;
+	}
+
+	ret = smb_krb5_salt_principal(realm,
+				      username, /* sAMAccountName */
+				      upn, /* userPrincipalName */
+				      uac_flags,
+				      mem_ctx,
+				      &salt_principal);
 	if (ret) {
 		talloc_free(mem_ctx);
 		return ret;
@@ -1096,16 +1167,17 @@ _PUBLIC_ int cli_credentials_get_server_gss_creds(struct cli_credentials *cred,
 	}
 
 	if (ktc->password_based || obtained < CRED_SPECIFIED) {
-		/* This creates a GSSAPI cred_id_t for match-by-key with only the keytab set */
-		maj_stat = smb_gss_krb5_import_cred(&min_stat, smb_krb5_context->krb5_context,
-						    NULL, NULL, ktc->keytab,
-						    &gcc->creds);
-	} else {
-		/* This creates a GSSAPI cred_id_t with the principal and keytab set, matching by name */
-		maj_stat = smb_gss_krb5_import_cred(&min_stat, smb_krb5_context->krb5_context,
-						    NULL, princ, ktc->keytab,
-						    &gcc->creds);
+		/*
+		 * This creates a GSSAPI cred_id_t for match-by-key with only
+		 * the keytab set
+		 */
+		princ = NULL;
 	}
+	maj_stat = smb_gss_krb5_import_cred(&min_stat,
+					    smb_krb5_context->krb5_context,
+					    NULL, princ,
+					    ktc->keytab,
+					    &gcc->creds);
 	if (maj_stat) {
 		if (min_stat) {
 			ret = min_stat;

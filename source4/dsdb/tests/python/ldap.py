@@ -17,6 +17,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import print_function
 import optparse
 import sys
 import time
@@ -116,7 +117,8 @@ class BasicTests(samba.tests.TestCase):
                 "dn": "cn=ldaptestuser,cn=users," + self.base_dn,
                 "objectClass": [] })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e1:
+            (num, _) = e1.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         # Invalid objectclass specified
@@ -125,7 +127,8 @@ class BasicTests(samba.tests.TestCase):
                 "dn": "cn=ldaptestuser,cn=users," + self.base_dn,
                 "objectClass": "X" })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e2:
+            (num, _) = e2.args
             self.assertEquals(num, ERR_NO_SUCH_ATTRIBUTE)
 
         # Invalid objectCategory specified
@@ -135,7 +138,8 @@ class BasicTests(samba.tests.TestCase):
                 "objectClass": "person",
                 "objectCategory": self.base_dn })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e3:
+            (num, _) = e3.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         # Multi-valued "systemFlags"
@@ -145,7 +149,8 @@ class BasicTests(samba.tests.TestCase):
                 "objectClass": "person",
                 "systemFlags": ["0", str(SYSTEM_FLAG_DOMAIN_DISALLOW_MOVE)] })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e4:
+            (num, _) = e4.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         # We cannot instanciate from an abstract object class ("connectionPoint"
@@ -159,14 +164,16 @@ class BasicTests(samba.tests.TestCase):
                 "dn": "cn=ldaptestuser,cn=users," + self.base_dn,
                 "objectClass": "connectionPoint" })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e5:
+            (num, _) = e5.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
         try:
             self.ldb.add({
                 "dn": "cn=ldaptestuser,cn=users," + self.base_dn,
                 "objectClass": ["person", "leaf"] })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e6:
+            (num, _) = e6.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         # Objects instanciated using "satisfied" abstract classes (concrete
@@ -183,7 +190,8 @@ class BasicTests(samba.tests.TestCase):
                 "dn": "cn=ldaptestuser,cn=users," + self.base_dn,
                 "objectClass": ["person", "container"] })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e7:
+            (num, _) = e7.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         # Test allowed system flags
@@ -225,7 +233,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e8:
+            (num, _) = e8.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         # We cannot delete classes which weren't specified
@@ -236,7 +245,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e9:
+            (num, _) = e9.args
             self.assertEquals(num, ERR_NO_SUCH_ATTRIBUTE)
 
         # An invalid class cannot be added
@@ -247,7 +257,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e10:
+            (num, _) = e10.args
             self.assertEquals(num, ERR_NO_SUCH_ATTRIBUTE)
 
         # We cannot add a the new top-most structural class "user" here since
@@ -260,7 +271,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e11:
+            (num, _) = e11.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         # An already specified objectclass cannot be added another time
@@ -271,7 +283,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e12:
+            (num, _) = e12.args
             self.assertEquals(num, ERR_ATTRIBUTE_OR_VALUE_EXISTS)
 
         # Auxiliary classes can always be added
@@ -290,7 +303,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e13:
+            (num, _) = e13.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         # Objectclass replace operations can be performed as well
@@ -315,7 +329,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e14:
+            (num, _) = e14.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         # More than one change operation is allowed
@@ -332,7 +347,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e15:
+            (num, _) = e15.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         m = Message()
@@ -342,7 +358,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e16:
+            (num, _) = e16.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         # Classes can be removed unless attributes of them are used.
@@ -379,7 +396,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e17:
+            (num, _) = e17.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         # Remove the previously specified attribute
@@ -411,7 +429,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e18:
+            (num, _) = e18.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         # Add a new top-most structural class "inetOrgPerson" and remove it
@@ -466,7 +485,8 @@ class BasicTests(samba.tests.TestCase):
                 "dn": "cn=ldaptestobject," + self.base_dn,
                 "objectclass": "configuration"})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e19:
+            (num, _) = e19.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         try:
@@ -474,7 +494,8 @@ class BasicTests(samba.tests.TestCase):
                 "dn": "cn=Test Secret,cn=system," + self.base_dn,
                 "objectclass": "secret"})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e20:
+            (num, _) = e20.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         delete_force(self.ldb, "cn=ldaptestobject," + self.base_dn)
@@ -500,7 +521,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e21:
+            (num, _) = e21.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         delete_force(self.ldb, "cn=Test Secret,cn=system," + self.base_dn)
@@ -511,7 +533,8 @@ class BasicTests(samba.tests.TestCase):
                 "objectclass": "container",
                 "isCriticalSystemObject": "TRUE"})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e22:
+            (num, _) = e22.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         self.ldb.add({
@@ -525,7 +548,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e23:
+            (num, _) = e23.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         delete_force(self.ldb, "cn=ldaptestcontainer," + self.base_dn)
@@ -552,7 +576,8 @@ class BasicTests(samba.tests.TestCase):
                    + self.base_dn,
                 "objectclass": "group"})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e24:
+            (num, _) = e24.args
             self.assertEquals(num, ERR_NO_SUCH_OBJECT)
 
         delete_force(self.ldb, "cn=ldaptestgroup,cn=thisdoesnotexist123,"
@@ -563,7 +588,8 @@ class BasicTests(samba.tests.TestCase):
                 "dn": "ou=testou,cn=users," + self.base_dn,
                 "objectclass": "organizationalUnit"})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e25:
+            (num, _) = e25.args
             self.assertEquals(num, ERR_NAMING_VIOLATION)
 
         delete_force(self.ldb, "ou=testou,cn=users," + self.base_dn)
@@ -580,7 +606,8 @@ class BasicTests(samba.tests.TestCase):
                 "objectclass": "group",
                 "thisdoesnotexist": "x"})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e26:
+            (num, _) = e26.args
             self.assertEquals(num, ERR_NO_SUCH_ATTRIBUTE)
 
         self.ldb.add({
@@ -596,8 +623,18 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e27:
+            (num, _) = e27.args
             self.assertEquals(num, ERR_NO_SUCH_ATTRIBUTE)
+
+        #
+        # When searching the unknown attribute should be ignored
+        expr = "(|(cn=ldaptestgroup)(thisdoesnotexist=x))"
+        res = ldb.search(base=self.base_dn,
+                         expression=expr,
+                         scope=SCOPE_SUBTREE)
+        self.assertTrue(len(res) == 1,
+                        "Search including unknown attribute failed")
 
         delete_force(self.ldb, "cn=ldaptestgroup,cn=users," + self.base_dn)
 
@@ -613,7 +650,8 @@ class BasicTests(samba.tests.TestCase):
                 "dn": "cn=ldaptestobject," + self.base_dn,
                 "objectclass": "ipProtocol"})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e28:
+            (num, _) = e28.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         # inadequate but schema-valid attribute specified
@@ -624,7 +662,8 @@ class BasicTests(samba.tests.TestCase):
                 "ipProtocolNumber": "1",
                 "uid" : "0"})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e29:
+            (num, _) = e29.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         self.ldb.add({
@@ -641,7 +680,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e30:
+            (num, _) = e30.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         # mandatory attribute delete trial
@@ -652,7 +692,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e31:
+            (num, _) = e31.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         # mandatory attribute delete trial
@@ -663,7 +704,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e32:
+            (num, _) = e32.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         delete_force(self.ldb, "cn=ldaptestobject," + self.base_dn)
@@ -676,7 +718,8 @@ class BasicTests(samba.tests.TestCase):
                 "objectclass": "group",
                 "sAMAccountName": ["nam1", "nam2"]})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e33:
+            (num, _) = e33.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         self.ldb.add({
@@ -690,7 +733,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e34:
+            (num, _) = e34.args
             self.assertEquals(num, ERR_ATTRIBUTE_OR_VALUE_EXISTS)
 
         m = Message()
@@ -706,10 +750,153 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e35:
+            (num, _) = e35.args
             self.assertEquals(num, ERR_ATTRIBUTE_OR_VALUE_EXISTS)
 
         delete_force(self.ldb, "cn=ldaptestgroup,cn=users," + self.base_dn)
+
+    def test_single_valued_linked_attributes(self):
+        """Test managedBy, a single-valued linked attribute.
+
+        (The single-valuedness of this is enforced differently, in
+        repl_meta_data.c)
+        """
+        ou = 'OU=svla,%s' % (self.base_dn)
+
+        delete_force(self.ldb, ou, controls=['tree_delete:1'])
+
+        self.ldb.add({'objectclass': 'organizationalUnit',
+                      'dn': ou})
+
+
+        managers = []
+        for x in range(3):
+            m = "cn=manager%d,%s" % (x, ou)
+            self.ldb.add({
+                "dn": m,
+                "objectclass": "user"})
+            managers.append(m)
+
+        try:
+            self.ldb.add({
+                "dn": "cn=group1," + ou,
+                "objectclass": "group",
+                "managedBy": managers
+            })
+            self.fail("failed to fail to add multiple managedBy attributes")
+        except LdbError as e36:
+            (num, _) = e36.args
+            self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
+
+        managee = "cn=group2," + ou
+        self.ldb.add({
+            "dn": managee,
+            "objectclass": "group",
+            "managedBy": [managers[0]]})
+
+        m = Message()
+        m.dn = Dn(ldb, managee)
+        m["managedBy"] = MessageElement(managers, FLAG_MOD_REPLACE,
+                                        "managedBy")
+        try:
+            ldb.modify(m)
+            self.fail()
+        except LdbError as e37:
+            (num, _) = e37.args
+            self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
+
+        m = Message()
+        m.dn = Dn(ldb, managee)
+        m["managedBy"] = MessageElement(managers[1], FLAG_MOD_REPLACE,
+                                        "managedBy")
+        ldb.modify(m)
+
+        m = Message()
+        m.dn = Dn(ldb, managee)
+        m["managedBy"] = MessageElement(managers[2], FLAG_MOD_ADD,
+                                        "managedBy")
+        try:
+            ldb.modify(m)
+            self.fail()
+        except LdbError as e38:
+            (num, _) = e38.args
+            self.assertEquals(num, ERR_ATTRIBUTE_OR_VALUE_EXISTS)
+
+        self.ldb.delete(ou, ['tree_delete:1'])
+
+
+    def test_multivalued_attributes(self):
+        """Test multi-valued attributes"""
+        ou = 'OU=mvattr,%s' % (self.base_dn)
+        delete_force(self.ldb, ou, controls=['tree_delete:1'])
+        self.ldb.add({'objectclass': 'organizationalUnit',
+                      'dn': ou})
+
+        # beyond 1210, Win2012r2 gives LDAP_ADMIN_LIMIT_EXCEEDED
+        ranges = (3, 30, 300, 1210)
+
+        for n in ranges:
+            self.ldb.add({
+                "dn": "cn=ldaptestuser%d,%s" % (n, ou),
+                "objectclass": "user",
+                "carLicense": ["car%d" % x for x in range(n)]})
+
+        # add some more
+        for n in ranges:
+            m = Message()
+            m.dn = Dn(ldb, "cn=ldaptestuser%d,%s" % (n, ou))
+            m["carLicense"] = MessageElement(["another"],
+                                             FLAG_MOD_ADD,
+                                             "carLicense")
+            ldb.modify(m)
+
+            m = Message()
+            m.dn = Dn(ldb, "cn=ldaptestuser%d,%s" % (n, ou))
+            m["carLicense"] = MessageElement(["foo%d" % x for x in range(4)],
+                                             FLAG_MOD_ADD,
+                                             "carLicense")
+            ldb.modify(m)
+
+            m = Message()
+            m.dn = Dn(ldb, "cn=ldaptestuser%d,%s" % (n, ou))
+            m["carLicense"] = MessageElement(["bar%d" % x for x in range(40)],
+                                             FLAG_MOD_ADD,
+                                             "carLicense")
+            ldb.modify(m)
+
+        for n in ranges:
+            m = Message()
+            dn = "cn=ldaptestuser%d,%s" % (n, ou)
+            m.dn = Dn(ldb, dn)
+            m["carLicense"] = MessageElement(["replacement"],
+                                             FLAG_MOD_REPLACE,
+                                             "carLicense")
+            ldb.modify(m)
+
+            m = Message()
+            m.dn = Dn(ldb, dn)
+            m["carLicense"] = MessageElement(["replacement%d" % x for x in range(n)],
+                                             FLAG_MOD_REPLACE,
+                                             "carLicense")
+            ldb.modify(m)
+
+            m = Message()
+            m.dn = Dn(ldb, dn)
+            m["carLicense"] = MessageElement(["again%d" % x for x in range(n)],
+                                             FLAG_MOD_REPLACE,
+                                             "carLicense")
+            ldb.modify(m)
+
+            m = Message()
+            m.dn = Dn(ldb, dn)
+            m["carLicense"] = MessageElement(["andagain%d" % x for x in range(n)],
+                                             FLAG_MOD_REPLACE,
+                                             "carLicense")
+            ldb.modify(m)
+
+        self.ldb.delete(ou, ['tree_delete:1'])
+
 
     def test_attribute_ranges(self):
         """Test attribute ranges"""
@@ -720,7 +907,8 @@ class BasicTests(samba.tests.TestCase):
                "objectClass": "person",
                "sn": "" })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e39:
+            (num, _) = e39.args
             self.assertEquals(num, ERR_INVALID_ATTRIBUTE_SYNTAX)
 
         # Too long (max. 64)
@@ -744,7 +932,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e40:
+            (num, _) = e40.args
             self.assertEquals(num, ERR_INVALID_ATTRIBUTE_SYNTAX)
 
         # Too long (max. 64)
@@ -772,13 +961,15 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.add(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e41:
+            (num, _) = e41.args
             self.assertEquals(num, ERR_OBJECT_CLASS_VIOLATION)
 
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e42:
+            (num, _) = e42.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         delete_force(self.ldb, "cn=ldaptestgroup,cn=users," + self.base_dn)
@@ -793,7 +984,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.add(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e43:
+            (num, _) = e43.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         self.ldb.add({
@@ -807,7 +999,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e44:
+            (num, _) = e44.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         m = Message()
@@ -821,7 +1014,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e45:
+            (num, _) = e45.args
             self.assertEquals(num, ERR_NO_SUCH_ATTRIBUTE)
 
         delete_force(self.ldb, "cn=ldaptestgroup,cn=users," + self.base_dn)
@@ -835,7 +1029,8 @@ class BasicTests(samba.tests.TestCase):
                 "objectclass": "group",
                 "instanceType": ["0", "1"]})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e46:
+            (num, _) = e46.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         # The head NC flag cannot be set without the write flag
@@ -845,7 +1040,8 @@ class BasicTests(samba.tests.TestCase):
                 "objectclass": "group",
                 "instanceType": "1" })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e47:
+            (num, _) = e47.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         # We cannot manipulate NCs without the head NC flag
@@ -855,7 +1051,8 @@ class BasicTests(samba.tests.TestCase):
                 "objectclass": "group",
                 "instanceType": "32" })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e48:
+            (num, _) = e48.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         self.ldb.add({
@@ -869,7 +1066,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e49:
+            (num, _) = e49.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         m = Message()
@@ -879,7 +1077,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e50:
+            (num, _) = e50.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         m = Message()
@@ -888,7 +1087,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e51:
+            (num, _) = e51.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         delete_force(self.ldb, "cn=ldaptestgroup,cn=users," + self.base_dn)
@@ -900,7 +1100,8 @@ class BasicTests(samba.tests.TestCase):
                 "objectclass": "user",
                 "instanceType": "3" })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e52:
+            (num, _) = e52.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
         delete_force(self.ldb, "cn=ldaptestuser2,cn=users," + self.base_dn)
 
@@ -915,7 +1116,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.add(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e53:
+            (num, _) = e53.args
             self.assertEquals(num, ERR_NO_SUCH_ATTRIBUTE)
 
         # a wrong "distinguishedName" attribute is obviously tolerated
@@ -941,7 +1143,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e54:
+            (num, _) = e54.args
             self.assertEquals(num, ERR_NO_SUCH_ATTRIBUTE)
 
         m = Message()
@@ -953,7 +1156,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e55:
+            (num, _) = e55.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         m = Message()
@@ -965,7 +1169,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e56:
+            (num, _) = e56.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         m = Message()
@@ -977,7 +1182,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e57:
+            (num, _) = e57.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         delete_force(self.ldb, "cn=ldaptestgroup,cn=users," + self.base_dn)
@@ -990,20 +1196,23 @@ class BasicTests(samba.tests.TestCase):
         try:
             self.ldb.search("=,cn=users," + self.base_dn, scope=SCOPE_BASE)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e58:
+            (num, _) = e58.args
             self.assertEquals(num, ERR_INVALID_DN_SYNTAX)
 
         # empty RDN name
         try:
             self.ldb.search("cn=,cn=users," + self.base_dn, scope=SCOPE_BASE)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e59:
+            (num, _) = e59.args
             self.assertEquals(num, ERR_INVALID_DN_SYNTAX)
 
         try:
             self.ldb.search("=ldaptestgroup,cn=users," + self.base_dn, scope=SCOPE_BASE)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e60:
+            (num, _) = e60.args
             self.assertEquals(num, ERR_INVALID_DN_SYNTAX)
 
         # Add
@@ -1014,7 +1223,8 @@ class BasicTests(samba.tests.TestCase):
                  "dn": "=,cn=users," + self.base_dn,
                  "objectclass": "group"})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e61:
+            (num, _) = e61.args
             self.assertEquals(num, ERR_INVALID_DN_SYNTAX)
 
         # empty RDN name
@@ -1023,7 +1233,8 @@ class BasicTests(samba.tests.TestCase):
                  "dn": "=ldaptestgroup,cn=users," + self.base_dn,
                  "objectclass": "group"})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e62:
+            (num, _) = e62.args
             self.assertEquals(num, ERR_INVALID_DN_SYNTAX)
 
         # empty RDN value
@@ -1032,7 +1243,8 @@ class BasicTests(samba.tests.TestCase):
                  "dn": "cn=,cn=users," + self.base_dn,
                  "objectclass": "group"})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e63:
+            (num, _) = e63.args
             self.assertEquals(num, ERR_INVALID_DN_SYNTAX)
 
         # a wrong RDN candidate
@@ -1041,7 +1253,8 @@ class BasicTests(samba.tests.TestCase):
                  "dn": "description=xyz,cn=users," + self.base_dn,
                  "objectclass": "group"})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e64:
+            (num, _) = e64.args
             self.assertEquals(num, ERR_NAMING_VIOLATION)
 
         delete_force(self.ldb, "description=xyz,cn=users," + self.base_dn)
@@ -1068,7 +1281,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e65:
+            (num, _) = e65.args
             self.assertEquals(num, ERR_INVALID_DN_SYNTAX)
 
         # Delete
@@ -1077,7 +1291,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             self.ldb.delete("cn=,cn=users," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e66:
+            (num, _) = e66.args
             self.assertEquals(num, ERR_INVALID_DN_SYNTAX)
 
         # Rename
@@ -1087,7 +1302,8 @@ class BasicTests(samba.tests.TestCase):
             self.ldb.rename("cn=ldaptestgroup,cn=users," + self.base_dn,
                             "=,cn=users," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e67:
+            (num, _) = e67.args
             self.assertEquals(num, ERR_INVALID_DN_SYNTAX)
 
         # new empty RDN name
@@ -1095,7 +1311,8 @@ class BasicTests(samba.tests.TestCase):
             self.ldb.rename("cn=ldaptestgroup,cn=users," + self.base_dn,
                             "=ldaptestgroup,cn=users," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e68:
+            (num, _) = e68.args
             self.assertEquals(num, ERR_INVALID_DN_SYNTAX)
 
         # new empty RDN value
@@ -1103,7 +1320,8 @@ class BasicTests(samba.tests.TestCase):
             self.ldb.rename("cn=ldaptestgroup,cn=users," + self.base_dn,
                             "cn=,cn=users," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e69:
+            (num, _) = e69.args
             self.assertEquals(num, ERR_NAMING_VIOLATION)
 
         # new wrong RDN candidate
@@ -1111,7 +1329,8 @@ class BasicTests(samba.tests.TestCase):
             self.ldb.rename("cn=ldaptestgroup,cn=users," + self.base_dn,
                             "description=xyz,cn=users," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e70:
+            (num, _) = e70.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         delete_force(self.ldb, "description=xyz,cn=users," + self.base_dn)
@@ -1121,7 +1340,8 @@ class BasicTests(samba.tests.TestCase):
             self.ldb.rename("cn=,cn=users," + self.base_dn,
                             "cn=ldaptestgroup,cn=users," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e71:
+            (num, _) = e71.args
             self.assertEquals(num, ERR_INVALID_DN_SYNTAX)
 
         # names
@@ -1133,7 +1353,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e72:
+            (num, _) = e72.args
             self.assertEquals(num, ERR_NOT_ALLOWED_ON_RDN)
 
         m = Message()
@@ -1143,7 +1364,8 @@ class BasicTests(samba.tests.TestCase):
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e73:
+            (num, _) = e73.args
             self.assertEquals(num, ERR_NOT_ALLOWED_ON_RDN)
 
         delete_force(self.ldb, "cn=ldaptestgroup,cn=users," + self.base_dn)
@@ -1171,7 +1393,8 @@ objectClass: container
 """
             self.ldb.add_ldif(ldif)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e74:
+            (num, _) = e74.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         delete_force(self.ldb, "%s,%s" % (rdn, self.base_dn))
 
@@ -1181,14 +1404,16 @@ objectClass: container
             # cannot rename to be a child of itself
             ldb.rename(self.base_dn, "dc=test," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e75:
+            (num, _) = e75.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         try:
             # inexistent object
             ldb.rename("cn=ldaptestuser2,cn=users," + self.base_dn, "cn=ldaptestuser2,cn=users," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e76:
+            (num, _) = e76.args
             self.assertEquals(num, ERR_NO_SUCH_OBJECT)
 
         self.ldb.add({
@@ -1203,28 +1428,32 @@ objectClass: container
             # containment problem: a user entry cannot contain user entries
             ldb.rename("cn=ldaptestuser3,cn=users," + self.base_dn, "cn=ldaptestuser4,cn=ldaptestuser3,cn=users," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e77:
+            (num, _) = e77.args
             self.assertEquals(num, ERR_NAMING_VIOLATION)
 
         try:
             # invalid parent
             ldb.rename("cn=ldaptestuser3,cn=users," + self.base_dn, "cn=ldaptestuser3,cn=people,cn=users," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e78:
+            (num, _) = e78.args
             self.assertEquals(num, ERR_OTHER)
 
         try:
             # invalid target DN syntax
             ldb.rename("cn=ldaptestuser3,cn=users," + self.base_dn, ",cn=users," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e79:
+            (num, _) = e79.args
             self.assertEquals(num, ERR_INVALID_DN_SYNTAX)
 
         try:
             # invalid RDN name
             ldb.rename("cn=ldaptestuser3,cn=users," + self.base_dn, "ou=ldaptestuser3,cn=users," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e80:
+            (num, _) = e80.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         delete_force(self.ldb, "cn=ldaptestuser3,cn=users," + self.base_dn)
@@ -1235,21 +1464,24 @@ objectClass: container
         try:
             ldb.rename("CN=DisplaySpecifiers," + self.configuration_dn, "CN=DisplaySpecifiers,CN=Services," + self.configuration_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e81:
+            (num, _) = e81.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         # Limited move failing since no "SYSTEM_FLAG_CONFIG_ALLOW_LIMITED_MOVE"
         try:
             ldb.rename("CN=Directory Service,CN=Windows NT,CN=Services," + self.configuration_dn, "CN=Directory Service,CN=RRAS,CN=Services," + self.configuration_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e82:
+            (num, _) = e82.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         # Rename failing since no "SYSTEM_FLAG_CONFIG_ALLOW_RENAME"
         try:
             ldb.rename("CN=DisplaySpecifiers," + self.configuration_dn, "CN=DisplaySpecifiers2," + self.configuration_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e83:
+            (num, _) = e83.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         # It's not really possible to test moves on the schema partition since
@@ -1259,21 +1491,24 @@ objectClass: container
         try:
             ldb.rename("CN=Top," + self.schema_dn, "CN=Top2," + self.schema_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e84:
+            (num, _) = e84.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         # Move failing since "SYSTEM_FLAG_DOMAIN_DISALLOW_MOVE"
         try:
             ldb.rename("CN=Users," + self.base_dn, "CN=Users,CN=Computers," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e85:
+            (num, _) = e85.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         # Rename failing since "SYSTEM_FLAG_DOMAIN_DISALLOW_RENAME"
         try:
             ldb.rename("CN=Users," + self.base_dn, "CN=Users2," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e86:
+            (num, _) = e86.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         # Performs some other constraints testing
@@ -1281,7 +1516,8 @@ objectClass: container
         try:
             ldb.rename("CN=Policies,CN=System," + self.base_dn, "CN=Users2," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e87:
+            (num, _) = e87.args
             self.assertEquals(num, ERR_OTHER)
 
     def test_rename_twice(self):
@@ -1312,7 +1548,8 @@ objectClass: container
 objectGUID: bd3480c9-58af-4cd8-92df-bc4a18b6e44d
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e88:
+            (num, _) = e88.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         self.ldb.add({
@@ -1328,7 +1565,8 @@ replace: objectGUID
 objectGUID: bd3480c9-58af-4cd8-92df-bc4a18b6e44d
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e89:
+            (num, _) = e89.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         delete_force(self.ldb, "cn=ldaptestcontainer," + self.base_dn)
@@ -1587,7 +1825,8 @@ delete: description
                 "dn": "cn=ldaptestuser,cn=users," + self.base_dn,
                 "objectclass": "user",
                 "memberOf": "cn=ldaptestgroup,cn=users," + self.base_dn})
-        except LdbError, (num, _):
+        except LdbError as e90:
+            (num, _) = e90.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         ldb.add({
@@ -1601,7 +1840,8 @@ delete: description
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e91:
+            (num, _) = e91.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         m = Message()
@@ -1617,7 +1857,8 @@ delete: description
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e92:
+            (num, _) = e92.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         m = Message()
@@ -1627,7 +1868,8 @@ delete: description
         try:
             ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e93:
+            (num, _) = e93.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         m = Message()
@@ -1723,7 +1965,8 @@ delete: description
                      "cn": "LDAPtest2COMPUTER"
                      })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e94:
+            (num, _) = e94.args
             self.assertEquals(num, ERR_INVALID_DN_SYNTAX)
 
         try:
@@ -1733,7 +1976,8 @@ delete: description
                      "sAMAccountType": str(ATYPE_NORMAL_ACCOUNT)
                 })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e95:
+            (num, _) = e95.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         ldb.add({"dn": "cn=ldaptestcomputer3,cn=computers," + self.base_dn,
@@ -1773,7 +2017,8 @@ servicePrincipalName: host/ldaptest2computer
 servicePrincipalName: cifs/ldaptest2computer
 """)
             self.fail()
-        except LdbError, (num, msg):
+        except LdbError as e96:
+            (num, msg) = e96.args
             self.assertEquals(num, ERR_ATTRIBUTE_OR_VALUE_EXISTS)
 
         ldb.modify_ldif("""
@@ -1791,7 +2036,8 @@ add: servicePrincipalName
 servicePrincipalName: host/ldaptest2computer
 """)
             self.fail()
-        except LdbError, (num, msg):
+        except LdbError as e97:
+            (num, msg) = e97.args
             self.assertEquals(num, ERR_ATTRIBUTE_OR_VALUE_EXISTS)
 
         # Testing ranged results
@@ -2025,7 +2271,8 @@ servicePrincipalName: host/ldaptest2computer29
                       "objectClass": "user",
                       "cn": "LDAPtestUSER3"})
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e98:
+            (num, _) = e98.args
             self.assertEquals(num, ERR_ENTRY_ALREADY_EXISTS)
 
         # rename back
@@ -2036,7 +2283,8 @@ servicePrincipalName: host/ldaptest2computer29
             ldb.rename("cn=ldaptestuser3,cn=users," + self.base_dn,
                        "cn=ldaptestuser2,cn=users," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e99:
+            (num, _) = e99.args
             self.assertEquals(num, ERR_NO_SUCH_OBJECT)
 
         # ensure can now use that name
@@ -2048,12 +2296,14 @@ servicePrincipalName: host/ldaptest2computer29
         try:
             ldb.rename("cn=ldaptestuser2,cn=users," + self.base_dn, "cn=ldaptestuser3,cn=users," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e100:
+            (num, _) = e100.args
             self.assertEquals(num, ERR_ENTRY_ALREADY_EXISTS)
         try:
             ldb.rename("cn=ldaptestuser3,cn=users,%s" % self.base_dn, "cn=ldaptestuser3,%s" % ldb.get_config_basedn())
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e101:
+            (num, _) = e101.args
             self.assertTrue(num in (71, 64))
 
         ldb.rename("cn=ldaptestuser3,cn=users," + self.base_dn, "cn=ldaptestuser5,cn=users," + self.base_dn)
@@ -2104,7 +2354,8 @@ member: cn=ldaptestuser2,cn=users,""" + self.base_dn + """
                     expression="(&(cn=ldaptestuser4)(objectClass=user))",
                     scope=SCOPE_SUBTREE)
             self.fail(res)
-        except LdbError, (num, _):
+        except LdbError as e102:
+            (num, _) = e102.args
             self.assertEquals(num, ERR_NO_SUCH_OBJECT)
 
         # Testing one-level ldb.search for (&(cn=ldaptestuser4)(objectClass=user)) in (just renamed from) cn=ldaptestcontainer," + self.base_dn
@@ -2112,7 +2363,8 @@ member: cn=ldaptestuser2,cn=users,""" + self.base_dn + """
             res = ldb.search("cn=ldaptestcontainer," + self.base_dn,
                     expression="(&(cn=ldaptestuser4)(objectClass=user))", scope=SCOPE_ONELEVEL)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e103:
+            (num, _) = e103.args
             self.assertEquals(num, ERR_NO_SUCH_OBJECT)
 
         # Testing ldb.search for (&(cn=ldaptestuser4)(objectClass=user)) in renamed container"
@@ -2132,21 +2384,24 @@ member: cn=ldaptestuser2,cn=users,""" + self.base_dn + """
         try:
             ldb.rename("cn=ldaptestcontainer2," + self.base_dn, "cn=ldaptestcontainer,cn=ldaptestcontainer2," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e104:
+            (num, _) = e104.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         # Testing ldb.rename (into non-existent container) of cn=ldaptestcontainer2," + self.base_dn + " to cn=ldaptestcontainer,cn=ldaptestcontainer3," + self.base_dn
         try:
             ldb.rename("cn=ldaptestcontainer2," + self.base_dn, "cn=ldaptestcontainer,cn=ldaptestcontainer3," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e105:
+            (num, _) = e105.args
             self.assertTrue(num in (ERR_UNWILLING_TO_PERFORM, ERR_OTHER))
 
         # Testing delete (should fail, not a leaf node) of renamed cn=ldaptestcontainer2," + self.base_dn
         try:
             ldb.delete("cn=ldaptestcontainer2," + self.base_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e106:
+            (num, _) = e106.args
             self.assertEquals(num, ERR_NOT_ALLOWED_ON_NON_LEAF)
 
         # Testing base ldb.search for CN=ldaptestuser4,CN=ldaptestcontainer2," + self.base_dn
@@ -2339,11 +2594,11 @@ member: cn=ldaptestuser2,cn=users,""" + self.base_dn + """
         res = ldb.search(self.base_dn, expression="(&(cn=ldaptestgroup2)(objectClass=group))", scope=SCOPE_SUBTREE, attrs=attrs, controls=["extended_dn:1:1"])
         self.assertEquals(len(res), 1, "Could not find (&(cn=ldaptestgroup2)(objectClass=group))")
 
-        print res[0]["member"]
+        print(res[0]["member"])
         memberUP = []
         for m in res[0]["member"]:
             memberUP.append(m.upper())
-        print ("<GUID=" + ldb.schema_format_value("objectGUID", ldaptestuser2_guid) + ">;<SID=" + ldb.schema_format_value("objectSid", ldaptestuser2_sid) + ">;CN=ldaptestuser2,CN=Users," + self.base_dn).upper()
+        print(("<GUID=" + ldb.schema_format_value("objectGUID", ldaptestuser2_guid) + ">;<SID=" + ldb.schema_format_value("objectSid", ldaptestuser2_sid) + ">;CN=ldaptestuser2,CN=Users," + self.base_dn).upper())
 
         self.assertTrue(("<GUID=" + ldb.schema_format_value("objectGUID", ldaptestuser2_guid) + ">;<SID=" + ldb.schema_format_value("objectSid", ldaptestuser2_sid) + ">;CN=ldaptestuser2,CN=Users," + self.base_dn).upper() in memberUP)
 
@@ -2578,7 +2833,8 @@ objectClass: posixAccount"""% (self.base_dn))
                            "sAMAccountName": user_name,
                            "nTSecurityDescriptor": [] })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e107:
+            (num, _) = e107.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         finally:
             delete_force(self.ldb, user_dn)
@@ -2606,7 +2862,7 @@ nTSecurityDescriptor: """ + sddl)
             sddl = "O:DUG:DUD:PAI(A;;RPWP;;;AU)S:PAI"
             desc = security.descriptor.from_sddl(sddl, self.domain_sid)
             desc_binary = ndr_pack(desc)
-            desc_base64 = base64.b64encode(desc_binary)
+            desc_base64 = base64.b64encode(desc_binary).decode('utf8')
             self.ldb.add_ldif("""
 dn: """ + user_dn + """
 objectclass: user
@@ -2630,7 +2886,7 @@ nTSecurityDescriptor:: """ + desc_base64)
         try:
             sddl = "O:DUG:DUD:AI(A;;RPWP;;;AU)S:PAI"
             desc = security.descriptor.from_sddl(sddl, security.dom_sid('S-1-5-21'))
-            desc_base64 = base64.b64encode( ndr_pack(desc) )
+            desc_base64 = base64.b64encode( ndr_pack(desc) ).decode('utf8')
             self.ldb.add_ldif("""
 dn: """ + user_dn + """
 objectclass: user
@@ -2664,7 +2920,8 @@ nTSecurityDescriptor:: """ + desc_base64)
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e108:
+            (num, _) = e108.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         m = Message()
@@ -2674,7 +2931,8 @@ nTSecurityDescriptor:: """ + desc_base64)
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e109:
+            (num, _) = e109.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         m = Message()
@@ -2684,7 +2942,8 @@ nTSecurityDescriptor:: """ + desc_base64)
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e110:
+            (num, _) = e110.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         delete_force(self.ldb, user_dn)
@@ -2758,7 +3017,7 @@ sAMAccountName: """ + user_name)
             desc_sddl = desc.as_sddl(self.domain_sid)
             sddl = desc_sddl[:desc_sddl.find("(")] + "(A;;RPWP;;;AU)" + desc_sddl[desc_sddl.find("("):]
             desc = security.descriptor.from_sddl(sddl, self.domain_sid)
-            desc_base64 = base64.b64encode(ndr_pack(desc))
+            desc_base64 = base64.b64encode(ndr_pack(desc)).decode('utf8')
             mod = """
 dn: """ + user_dn + """
 changetype: modify
@@ -2786,7 +3045,7 @@ sAMAccountName: """ + user_name)
             # Modify descriptor
             sddl = "O:DUG:DUD:PAI(A;;RPWP;;;AU)S:PAI"
             desc = security.descriptor.from_sddl(sddl, self.domain_sid)
-            desc_base64 = base64.b64encode(ndr_pack(desc))
+            desc_base64 = base64.b64encode(ndr_pack(desc)).decode('utf8')
             mod = """
 dn: """ + user_dn + """
 changetype: modify
@@ -2823,7 +3082,8 @@ nTSecurityDescriptor:: """ + desc_base64
                     try:
                         self.ldb.set_dsheuristics(dshstr + "x")
                         self.fail()
-                    except LdbError, (num, _):
+                    except LdbError as e:
+                        (num, _) = e.args
                         self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
                     dshstr = dshstr + str(i)
                 else:

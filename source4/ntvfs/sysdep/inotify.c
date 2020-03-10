@@ -390,9 +390,9 @@ static struct sys_notify_backend inotify = {
 /*
   initialialise the inotify module
  */
-NTSTATUS sys_notify_inotify_init(void);
-NTSTATUS sys_notify_inotify_init(void)
+NTSTATUS sys_notify_inotify_init(TALLOC_CTX *);
+NTSTATUS sys_notify_inotify_init(TALLOC_CTX *ctx)
 {
 	/* register ourselves as a system inotify module */
-	return sys_notify_register(&inotify);
+	return sys_notify_register(ctx, &inotify);
 }

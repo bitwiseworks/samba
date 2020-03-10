@@ -69,14 +69,16 @@ fail:
 	return NULL;
 }
 
-NTSTATUS make_internal_rpc_pipe_socketpair(TALLOC_CTX *mem_ctx,
-					   struct tevent_context *ev_ctx,
-					   struct messaging_context *msg_ctx,
-					   const char *pipe_name,
-					   const struct ndr_syntax_id *syntax,
-					   const struct tsocket_address *remote_address,
-					   const struct auth_session_info *session_info,
-					   struct npa_state **pnpa)
+NTSTATUS make_internal_rpc_pipe_socketpair(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev_ctx,
+	struct messaging_context *msg_ctx,
+	const char *pipe_name,
+	const struct ndr_syntax_id *syntax,
+	const struct tsocket_address *remote_address,
+	const struct tsocket_address *local_address,
+	const struct auth_session_info *session_info,
+	struct npa_state **pnpa)
 {
 	TALLOC_CTX *tmp_ctx = talloc_stackframe();
 	struct named_pipe_client *npc;
@@ -123,14 +125,28 @@ NTSTATUS make_internal_rpc_pipe_socketpair(TALLOC_CTX *mem_ctx,
 		goto out;
 	}
 
-	npc->client = tsocket_address_copy(remote_address, npc);
-	if (npc->client == NULL) {
+	npc->remote_client_addr = tsocket_address_copy(remote_address, npc);
+	if (npc->remote_client_addr == NULL) {
 		status = NT_STATUS_NO_MEMORY;
 		goto out;
 	}
 
-	npc->client_name = tsocket_address_inet_addr_string(npc->client, npc);
-	if (npc->client_name == NULL) {
+	npc->remote_client_name = tsocket_address_inet_addr_string(npc->remote_client_addr,
+								   npc);
+	if (npc->remote_client_name == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	npc->local_server_addr = tsocket_address_copy(local_address, npc);
+	if (npc->local_server_addr == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	npc->local_server_name = tsocket_address_inet_addr_string(
+		npc->local_server_addr, npc);
+	if (npc->local_server_name == NULL) {
 		status = NT_STATUS_NO_MEMORY;
 		goto out;
 	}
@@ -145,8 +161,8 @@ NTSTATUS make_internal_rpc_pipe_socketpair(TALLOC_CTX *mem_ctx,
 				      npc->msg_ctx,
 				      npc->pipe_name,
 				      NCACN_NP,
-				      npc->server,
-				      npc->client,
+				      npc->remote_client_addr,
+				      npc->local_server_addr,
 				      npc->session_info,
 				      &npc->p,
 				      &error);
@@ -163,7 +179,7 @@ NTSTATUS make_internal_rpc_pipe_socketpair(TALLOC_CTX *mem_ctx,
 
 	subreq = dcerpc_read_ncacn_packet_send(npc, npc->ev, npc->tstream);
 	if (subreq == NULL) {
-		DEBUG(2, ("Failed to start receving packets\n"));
+		DEBUG(2, ("Failed to start receiving packets\n"));
 		status = NT_STATUS_PIPE_BROKEN;
 		goto out;
 	}
@@ -183,6 +199,7 @@ out:
 struct pipes_struct *make_internal_rpc_pipe_p(TALLOC_CTX *mem_ctx,
 					      const struct ndr_syntax_id *syntax,
 					      const struct tsocket_address *remote_address,
+					      const struct tsocket_address *local_address,
 					      const struct auth_session_info *session_info,
 					      struct messaging_context *msg_ctx)
 {
@@ -204,7 +221,7 @@ struct pipes_struct *make_internal_rpc_pipe_p(TALLOC_CTX *mem_ctx,
 
 	ret = make_base_pipes_struct(mem_ctx, msg_ctx, pipe_name,
 				     NCALRPC, RPC_LITTLE_ENDIAN,
-				     remote_address, NULL, &p);
+				     remote_address, local_address, &p);
 	if (ret) {
 		DEBUG(0,("ERROR! no memory for pipes_struct!\n"));
 		return NULL;
@@ -492,6 +509,7 @@ static NTSTATUS rpcint_binding_handle_ex(TALLOC_CTX *mem_ctx,
 			const struct ndr_syntax_id *abstract_syntax,
 			const struct ndr_interface_table *ndr_table,
 			const struct tsocket_address *remote_address,
+			const struct tsocket_address *local_address,
 			const struct auth_session_info *session_info,
 			struct messaging_context *msg_ctx,
 			struct dcerpc_binding_handle **binding_handle)
@@ -516,6 +534,7 @@ static NTSTATUS rpcint_binding_handle_ex(TALLOC_CTX *mem_ctx,
 	hs->p = make_internal_rpc_pipe_p(hs,
 					 abstract_syntax,
 					 remote_address,
+					 local_address,
 					 session_info,
 					 msg_ctx);
 	if (hs->p == NULL) {
@@ -543,7 +562,7 @@ static NTSTATUS rpcint_binding_handle_ex(TALLOC_CTX *mem_ctx,
  *                             dcerpc_binding_handle
  *
  * @return              NT_STATUS_OK on success, a corresponding NT status if an
- *                      error occured.
+ *                      error occurred.
  *
  * @code
  *   struct dcerpc_binding_handle *winreg_binding;
@@ -560,12 +579,14 @@ static NTSTATUS rpcint_binding_handle_ex(TALLOC_CTX *mem_ctx,
 NTSTATUS rpcint_binding_handle(TALLOC_CTX *mem_ctx,
 			       const struct ndr_interface_table *ndr_table,
 			       const struct tsocket_address *remote_address,
+			       const struct tsocket_address *local_address,
 			       const struct auth_session_info *session_info,
 			       struct messaging_context *msg_ctx,
 			       struct dcerpc_binding_handle **binding_handle)
 {
 	return rpcint_binding_handle_ex(mem_ctx, NULL, ndr_table, remote_address,
-					session_info, msg_ctx, binding_handle);
+					local_address, session_info,
+					msg_ctx, binding_handle);
 }
 
 /**
@@ -590,12 +611,13 @@ NTSTATUS rpcint_binding_handle(TALLOC_CTX *mem_ctx,
  * @param[out] presult  A pointer to store the connected rpc client pipe.
  *
  * @return              NT_STATUS_OK on success, a corresponding NT status if an
- *                      error occured.
+ *                      error occurred.
  */
 NTSTATUS rpc_pipe_open_internal(TALLOC_CTX *mem_ctx,
 				const struct ndr_interface_table *ndr_table,
 				const struct auth_session_info *session_info,
 				const struct tsocket_address *remote_address,
+				const struct tsocket_address *local_address,
 				struct messaging_context *msg_ctx,
 				struct rpc_pipe_client **presult)
 {
@@ -632,6 +654,7 @@ NTSTATUS rpc_pipe_open_internal(TALLOC_CTX *mem_ctx,
 	status = rpcint_binding_handle(result,
 				       ndr_table,
 				       remote_address,
+				       local_address,
 				       session_info,
 				       msg_ctx,
 				       &result->binding_handle);
@@ -650,8 +673,8 @@ NTSTATUS rpc_pipe_open_internal(TALLOC_CTX *mem_ctx,
 
 NTSTATUS make_external_rpc_pipe(TALLOC_CTX *mem_ctx,
 				const char *pipe_name,
-				const struct tsocket_address *local_address,
-				const struct tsocket_address *remote_address,
+				const struct tsocket_address *remote_client_address,
+				const struct tsocket_address *local_server_address,
 				const struct auth_session_info *session_info,
 				struct npa_state **pnpa)
 {
@@ -718,9 +741,9 @@ NTSTATUS make_external_rpc_pipe(TALLOC_CTX *mem_ctx,
 					  ev_ctx,
 					  socket_np_dir,
 					  pipe_name,
-					  remote_address, /* client_addr */
+					  remote_client_address,
 					  NULL, /* client_name */
-					  local_address, /* server_addr */
+					  local_server_address,
 					  NULL, /* server_name */
 					  session_info_t);
 	if (subreq == NULL) {
@@ -782,8 +805,8 @@ out:
 
 struct np_proxy_state *make_external_rpc_pipe_p(TALLOC_CTX *mem_ctx,
 				const char *pipe_name,
-				const struct tsocket_address *local_address,
-				const struct tsocket_address *remote_address,
+				const struct tsocket_address *remote_client_address,
+				const struct tsocket_address *local_server_address,
 				const struct auth_session_info *session_info)
 {
 	struct np_proxy_state *result;
@@ -850,9 +873,9 @@ struct np_proxy_state *make_external_rpc_pipe_p(TALLOC_CTX *mem_ctx,
 	subreq = tstream_npa_connect_send(talloc_tos(), ev,
 					  socket_np_dir,
 					  pipe_name,
-					  remote_address, /* client_addr */
+					  remote_client_address,
 					  NULL, /* client_name */
-					  local_address, /* server_addr */
+					  local_server_address,
 					  NULL, /* server_name */
 					  session_info_t);
 	if (subreq == NULL) {
@@ -902,32 +925,45 @@ struct np_proxy_state *make_external_rpc_pipe_p(TALLOC_CTX *mem_ctx,
 }
 
 static NTSTATUS rpc_pipe_open_external(TALLOC_CTX *mem_ctx,
-				const char *pipe_name,
-				const struct ndr_interface_table *table,
-				const struct auth_session_info *session_info,
-				struct rpc_pipe_client **_result)
+				       const char *pipe_name,
+				       const struct ndr_interface_table *table,
+				       const struct auth_session_info *session_info,
+				       const struct tsocket_address *remote_client_address,
+				       const struct tsocket_address *local_server_address,
+				       struct rpc_pipe_client **_result)
 {
-	struct tsocket_address *local, *remote;
 	struct rpc_pipe_client *result = NULL;
 	struct np_proxy_state *proxy_state = NULL;
 	struct pipe_auth_data *auth;
+	struct tsocket_address *remote_client_addr;
+	struct tsocket_address *local_server_addr;
 	NTSTATUS status;
 	int ret;
 
-	/* this is an internal connection, fake up ip addresses */
-	ret = tsocket_address_inet_from_strings(talloc_tos(), "ip",
-						NULL, 0, &local);
-	if (ret) {
-		return NT_STATUS_NO_MEMORY;
+	if (local_server_address == NULL) {
+		/* this is an internal connection, fake up ip addresses */
+		ret = tsocket_address_inet_from_strings(talloc_tos(), "ip",
+							NULL, 0, &local_server_addr);
+		if (ret) {
+			return NT_STATUS_NO_MEMORY;
+		}
+		local_server_address = local_server_addr;
 	}
-	ret = tsocket_address_inet_from_strings(talloc_tos(), "ip",
-						NULL, 0, &remote);
-	if (ret) {
-		return NT_STATUS_NO_MEMORY;
+
+	if (remote_client_address == NULL) {
+		/* this is an internal connection, fake up ip addresses */
+		ret = tsocket_address_inet_from_strings(talloc_tos(), "ip",
+							NULL, 0, &remote_client_addr);
+		if (ret) {
+			return NT_STATUS_NO_MEMORY;
+		}
+		remote_client_address = remote_client_addr;
 	}
 
 	proxy_state = make_external_rpc_pipe_p(mem_ctx, pipe_name,
-						local, remote, session_info);
+					       remote_client_address,
+					       local_server_address,
+					       session_info);
 	if (!proxy_state) {
 		DEBUG(1, ("Unable to make proxy_state for connection to %s.\n", pipe_name));
 		return NT_STATUS_UNSUCCESSFUL;
@@ -1015,7 +1051,7 @@ done:
  * @param[out] presult  A pointer to store the connected rpc client pipe.
  *
  * @return              NT_STATUS_OK on success, a corresponding NT status if an
- *                      error occured.
+ *                      error occurred.
  *
  * @code
  *   struct rpc_pipe_client *winreg_pipe;
@@ -1033,6 +1069,7 @@ NTSTATUS rpc_pipe_open_interface(TALLOC_CTX *mem_ctx,
 				 const struct ndr_interface_table *table,
 				 const struct auth_session_info *session_info,
 				 const struct tsocket_address *remote_address,
+				 const struct tsocket_address *local_address,
 				 struct messaging_context *msg_ctx,
 				 struct rpc_pipe_client **cli_pipe)
 {
@@ -1074,7 +1111,8 @@ NTSTATUS rpc_pipe_open_interface(TALLOC_CTX *mem_ctx,
 	case RPC_SERVICE_MODE_EMBEDDED:
 		status = rpc_pipe_open_internal(tmp_ctx,
 						table, session_info,
-						remote_address, msg_ctx,
+						remote_address, local_address,
+						msg_ctx,
 						&cli);
 		if (!NT_STATUS_IS_OK(status)) {
 			goto done;
@@ -1088,6 +1126,7 @@ NTSTATUS rpc_pipe_open_interface(TALLOC_CTX *mem_ctx,
 		status = rpc_pipe_open_external(tmp_ctx,
 						pipe_name, table,
 						session_info,
+						remote_address, local_address,
 						&cli);
 		if (!NT_STATUS_IS_OK(status)) {
 			goto done;

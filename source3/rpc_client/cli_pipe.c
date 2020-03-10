@@ -20,6 +20,7 @@
  */
 
 #include "includes.h"
+#include "libsmb/namequery.h"
 #include "../lib/util/tevent_ntstatus.h"
 #include "librpc/gen_ndr/ndr_epmapper_c.h"
 #include "../librpc/gen_ndr/ndr_dssetup.h"
@@ -1952,6 +1953,14 @@ static void rpc_pipe_bind_step_one_done(struct tevent_req *subreq)
 		return;
 	}
 
+	if (pkt->ptype == DCERPC_PKT_BIND_ACK) {
+		if (pkt->pfc_flags & DCERPC_PFC_FLAG_SUPPORT_HEADER_SIGN) {
+			if (pauth->client_hdr_signing) {
+				pauth->hdr_signing = true;
+			}
+		}
+	}
+
 	state->cli->max_xmit_frag = pkt->u.bind_ack.max_xmit_frag;
 
 	switch(pauth->auth_type) {
@@ -2017,13 +2026,6 @@ static void rpc_pipe_bind_step_one_done(struct tevent_req *subreq)
 	default:
 		gensec_security = pauth->auth_ctx;
 
-		if (pkt->pfc_flags & DCERPC_PFC_FLAG_SUPPORT_HEADER_SIGN) {
-			if (pauth->client_hdr_signing) {
-				pauth->hdr_signing = true;
-				gensec_want_feature(gensec_security,
-						    GENSEC_FEATURE_SIGN_PKT_HEADER);
-			}
-		}
 
 		status = gensec_update(gensec_security, state,
 				       auth.credentials, &auth_token);
@@ -2032,6 +2034,11 @@ static void rpc_pipe_bind_step_one_done(struct tevent_req *subreq)
 			status = rpc_bind_next_send(req, state,
 							&auth_token);
 		} else if (NT_STATUS_IS_OK(status)) {
+			if (pauth->hdr_signing) {
+				gensec_want_feature(gensec_security,
+						    GENSEC_FEATURE_SIGN_PKT_HEADER);
+			}
+
 			if (auth_token.length == 0) {
 				/* Bind complete. */
 				tevent_req_done(req);
@@ -3266,37 +3273,35 @@ NTSTATUS cli_rpc_pipe_open_generic_auth(struct cli_state *cli,
 	return status;
 }
 
-NTSTATUS cli_rpc_pipe_open_schannel_with_creds(struct cli_state *cli,
-					       const struct ndr_interface_table *table,
-					       enum dcerpc_transport_t transport,
-					       struct cli_credentials *cli_creds,
-					       struct netlogon_creds_cli_context *netlogon_creds,
-					       struct rpc_pipe_client **_rpccli)
+NTSTATUS cli_rpc_pipe_open_bind_schannel(
+	struct cli_state *cli,
+	const struct ndr_interface_table *table,
+	enum dcerpc_transport_t transport,
+	struct netlogon_creds_cli_context *netlogon_creds,
+	struct rpc_pipe_client **_rpccli)
 {
 	struct rpc_pipe_client *rpccli;
 	struct pipe_auth_data *rpcauth;
 	const char *target_service = table->authservices->names[0];
-	struct netlogon_creds_CredentialState *ncreds = NULL;
+	struct cli_credentials *cli_creds;
 	enum dcerpc_AuthLevel auth_level;
 	NTSTATUS status;
-	int rpc_pipe_bind_dbglvl = 0;
 
 	status = cli_rpc_pipe_open(cli, transport, table, &rpccli);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
 
-	status = netlogon_creds_cli_lock(netlogon_creds, rpccli, &ncreds);
+	auth_level = netlogon_creds_cli_auth_level(netlogon_creds);
+
+	status = netlogon_creds_bind_cli_credentials(
+		netlogon_creds, rpccli, &cli_creds);
 	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0, ("netlogon_creds_cli_get returned %s\n",
-			  nt_errstr(status)));
+		DBG_DEBUG("netlogon_creds_bind_cli_credentials failed: %s\n",
+			  nt_errstr(status));
 		TALLOC_FREE(rpccli);
 		return status;
 	}
-
-	auth_level = netlogon_creds_cli_auth_level(netlogon_creds);
-
-	cli_credentials_set_netlogon_creds(cli_creds, ncreds);
 
 	status = rpccli_generic_bind_data_from_creds(rpccli,
 						     DCERPC_AUTH_TYPE_SCHANNEL,
@@ -3313,40 +3318,75 @@ NTSTATUS cli_rpc_pipe_open_schannel_with_creds(struct cli_state *cli,
 	}
 
 	status = rpc_pipe_bind(rpccli, rpcauth);
-	cli_credentials_set_netlogon_creds(cli_creds, NULL);
+
+	/* No TALLOC_FREE, gensec takes references */
+	talloc_unlink(rpccli, cli_creds);
+	cli_creds = NULL;
+
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("rpc_pipe_bind failed with error %s\n",
+			  nt_errstr(status));
+		TALLOC_FREE(rpccli);
+		return status;
+	}
+
+	*_rpccli = rpccli;
+
+	return NT_STATUS_OK;
+}
+
+NTSTATUS cli_rpc_pipe_open_schannel_with_creds(struct cli_state *cli,
+					       const struct ndr_interface_table *table,
+					       enum dcerpc_transport_t transport,
+					       struct netlogon_creds_cli_context *netlogon_creds,
+					       struct rpc_pipe_client **_rpccli)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct rpc_pipe_client *rpccli;
+	struct netlogon_creds_cli_lck *lck;
+	NTSTATUS status;
+
+	status = netlogon_creds_cli_lck(
+		netlogon_creds, NETLOGON_CREDS_CLI_LCK_EXCLUSIVE,
+		frame, &lck);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("netlogon_creds_cli_lck returned %s\n",
+			    nt_errstr(status));
+		TALLOC_FREE(frame);
+		return status;
+	}
+
+	status = cli_rpc_pipe_open_bind_schannel(
+		cli, table, transport, netlogon_creds, &rpccli);
 	if (NT_STATUS_EQUAL(status, NT_STATUS_NETWORK_ACCESS_DENIED)) {
-		rpc_pipe_bind_dbglvl = 1;
-		netlogon_creds_cli_delete(netlogon_creds, &ncreds);
+		netlogon_creds_cli_delete_lck(netlogon_creds);
 	}
 	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(rpc_pipe_bind_dbglvl,
-		      ("%s: rpc_pipe_bind failed with error %s\n",
-		       __func__, nt_errstr(status)));
-		TALLOC_FREE(rpccli);
+		DBG_DEBUG("cli_rpc_pipe_open_bind_schannel failed: %s\n",
+			  nt_errstr(status));
+		TALLOC_FREE(frame);
 		return status;
 	}
 
-	TALLOC_FREE(ncreds);
-
-	if (!ndr_syntax_id_equal(&table->syntax_id, &ndr_table_netlogon.syntax_id)) {
-		goto done;
+	if (ndr_syntax_id_equal(&table->syntax_id,
+				&ndr_table_netlogon.syntax_id)) {
+		status = netlogon_creds_cli_check(netlogon_creds,
+						  rpccli->binding_handle,
+						  NULL);
+		if (!NT_STATUS_IS_OK(status)) {
+			DEBUG(0, ("netlogon_creds_cli_check failed with %s\n",
+				  nt_errstr(status)));
+			TALLOC_FREE(frame);
+			return status;
+		}
 	}
 
-	status = netlogon_creds_cli_check(netlogon_creds,
-					  rpccli->binding_handle);
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0, ("netlogon_creds_cli_check failed with %s\n",
-			  nt_errstr(status)));
-		TALLOC_FREE(rpccli);
-		return status;
-	}
+	DBG_DEBUG("opened pipe %s to machine %s with key %s "
+		  "and bound using schannel.\n",
+		  table->name, rpccli->desthost,
+		  netlogon_creds_cli_debug_string(netlogon_creds, lck));
 
-
-done:
-	DEBUG(10,("%s: opened pipe %s to machine %s "
-		  "for domain %s and bound using schannel.\n",
-		  __func__, table->name,
-		  rpccli->desthost, cli_credentials_get_domain(cli_creds)));
+	TALLOC_FREE(frame);
 
 	*_rpccli = rpccli;
 	return NT_STATUS_OK;

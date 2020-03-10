@@ -23,10 +23,11 @@
 #include "vfs_aixacl_util.h"
 
 SMB_ACL_T aixacl_sys_acl_get_file(vfs_handle_struct *handle,
-				  const char *path_p,
+				  const struct smb_filename *smb_fname,
 				  SMB_ACL_TYPE_T type,
 				  TALLOC_CTX *mem_ctx)
 {
+	const char *path_p = smb_fname->base_name;
 	struct acl *file_acl = (struct acl *)NULL;
 	struct smb_acl_t *result = (struct smb_acl_t *)NULL;
 	
@@ -133,9 +134,9 @@ SMB_ACL_T aixacl_sys_acl_get_fd(vfs_handle_struct *handle,
 }
 
 int aixacl_sys_acl_set_file(vfs_handle_struct *handle,
-			      const char *name,
-			      SMB_ACL_TYPE_T type,
-			      SMB_ACL_T theacl)
+			const struct smb_filename *smb_fname,
+			SMB_ACL_TYPE_T type,
+			SMB_ACL_T theacl)
 {
 	struct acl *file_acl = NULL;
 	unsigned int rc;
@@ -144,7 +145,7 @@ int aixacl_sys_acl_set_file(vfs_handle_struct *handle,
 	if (!file_acl)
 		return -1;
 
-	rc = chacl((char *)name,file_acl,file_acl->acl_len);
+	rc = chacl((char *)smb_fname->base_name,file_acl,file_acl->acl_len);
 	DEBUG(10,("errno is %d\n",errno));
 	DEBUG(10,("return code is %d\n",rc));
 	SAFE_FREE(file_acl);
@@ -174,7 +175,7 @@ int aixacl_sys_acl_set_fd(vfs_handle_struct *handle,
 }
 
 int aixacl_sys_acl_delete_def_file(vfs_handle_struct *handle,
-				     const char *path)
+				const struct smb_filename *smb_fname)
 {
 	return 0; /* otherwise you can't set acl at upper level */
 }
@@ -189,8 +190,8 @@ static struct vfs_fn_pointers vfs_aixacl_fns = {
 	.sys_acl_delete_def_file_fn = aixacl_sys_acl_delete_def_file,
 };
 
-NTSTATUS vfs_aixacl_init(void);
-NTSTATUS vfs_aixacl_init(void)
+static_decl_vfs;
+NTSTATUS vfs_aixacl_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "aixacl",
 				&vfs_aixacl_fns);

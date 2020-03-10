@@ -18,6 +18,7 @@
 */
 
 #include <Python.h>
+#include "python/py3compat.h"
 #include <tevent.h>
 #include <pytalloc.h>
 #include "includes.h"
@@ -59,21 +60,19 @@ static void dos_format(char *s)
  * Connect to SMB share using smb_full_connection
  */
 static NTSTATUS do_smb_connect(TALLOC_CTX *mem_ctx, struct smb_private_data *spdata,
-			const char *hostname, const char *service, struct smbcli_tree **tree)
+			       const char *hostname, const char *service,
+			       struct smbcli_options *options,
+			       struct smbcli_session_options *session_options,
+			       struct smbcli_tree **tree)
 {
 	struct smbcli_state *smb_state;
 	NTSTATUS status;
-	struct smbcli_options options;
-	struct smbcli_session_options session_options;
 
 	*tree = NULL;
 
 	gensec_init();
 
 	smb_state = smbcli_state_init(mem_ctx);
-
-	lpcfg_smbcli_options(spdata->lp_ctx, &options);
-	lpcfg_smbcli_session_options(spdata->lp_ctx, &session_options);
 
 	status = smbcli_full_connection(mem_ctx, &smb_state, hostname, 
 					lpcfg_smb_ports(spdata->lp_ctx),
@@ -83,8 +82,8 @@ static NTSTATUS do_smb_connect(TALLOC_CTX *mem_ctx, struct smb_private_data *spd
 					spdata->creds,
 					lpcfg_resolve_context(spdata->lp_ctx),
 					spdata->ev_ctx,
-					&options,
-					&session_options,
+					options,
+					session_options,
 					lpcfg_gensec_settings(mem_ctx, spdata->lp_ctx));
 
 	if (NT_STATUS_IS_OK(status)) {
@@ -117,7 +116,7 @@ static PyObject * py_smb_loadfile(PyObject *self, PyObject *args)
 	status = smb_composite_loadfile(spdata->tree, pytalloc_get_mem_ctx(self), &io);
 	PyErr_NTSTATUS_IS_ERR_RAISE(status);
 
-	return Py_BuildValue("s#", io.out.data, io.out.size);
+	return Py_BuildValue(PYARG_BYTES_LEN, io.out.data, io.out.size);
 }
 
 /*
@@ -127,17 +126,18 @@ static PyObject * py_smb_savefile(PyObject *self, PyObject *args)
 {
 	struct smb_composite_savefile io;
 	const char *filename;
-	char *data;
+	char *data = NULL;
+	Py_ssize_t size = 0;
 	NTSTATUS status;
 	struct smb_private_data *spdata;
 
-	if (!PyArg_ParseTuple(args, "ss:savefile", &filename, &data)) {
+	if (!PyArg_ParseTuple(args, "s"PYARG_BYTES_LEN":savefile", &filename, &data, &size )) {
 		return NULL;
 	}
 
 	io.in.fname = filename;
 	io.in.data = (unsigned char *)data;
-	io.in.size = strlen(data);
+	io.in.size = size;
 
 	spdata = pytalloc_get_ptr(self);
 	status = smb_composite_savefile(spdata->tree, &io);
@@ -159,11 +159,11 @@ static void py_smb_list_callback(struct clilist_file_info *f, const char *mask, 
 
 		dict = PyDict_New();
 		if(dict) {
-			PyDict_SetItemString(dict, "name", PyString_FromString(f->name));
+			PyDict_SetItemString(dict, "name", PyStr_FromString(f->name));
 			
 			/* Windows does not always return short_name */
 			if (f->short_name) {
-				PyDict_SetItemString(dict, "short_name", PyString_FromString(f->short_name));
+				PyDict_SetItemString(dict, "short_name", PyStr_FromString(f->short_name));
 			} else {
 				PyDict_SetItemString(dict, "short_name", Py_None);
 			}
@@ -253,6 +253,27 @@ static PyObject *py_smb_rmdir(PyObject *self, PyObject *args)
 
 	spdata = pytalloc_get_ptr(self);
 	status = smbcli_rmdir(spdata->tree, dirname);
+	PyErr_NTSTATUS_IS_ERR_RAISE(status);
+
+	Py_RETURN_NONE;
+}
+
+
+/*
+ * Remove a file
+ */
+static PyObject *py_smb_unlink(PyObject *self, PyObject *args)
+{
+	NTSTATUS status;
+	const char *filename;
+	struct smb_private_data *spdata;
+
+	if (!PyArg_ParseTuple(args, "s:unlink", &filename)) {
+		return NULL;
+	}
+
+	spdata = pytalloc_get_ptr(self);
+	status = smbcli_unlink(spdata->tree, filename);
 	PyErr_NTSTATUS_IS_ERR_RAISE(status);
 
 	Py_RETURN_NONE;
@@ -526,13 +547,19 @@ static PyObject *py_close_file(PyObject *self, PyObject *args, PyObject *kwargs)
 
 static PyMethodDef py_smb_methods[] = {
 	{ "loadfile", py_smb_loadfile, METH_VARARGS,
-		"loadfile(path) -> file contents as a string\n\n \
-		Read contents of a file." },
+		"loadfile(path) -> file contents as a "
+		PY_DESC_PY3_BYTES
+		"\n\n Read contents of a file." },
 	{ "savefile", py_smb_savefile, METH_VARARGS,
-		"savefile(path, str) -> None\n\n \
-		Write string str to file." },
+		"savefile(path, str) -> None\n\n Write "
+		PY_DESC_PY3_BYTES
+		" str to file." },
 	{ "list", (PyCFunction)py_smb_list, METH_VARARGS|METH_KEYWORDS,
-		"list(path) -> directory contents as a dictionary\n\n \
+		"list(path, access_mask='*', attribs=DEFAULT_ATTRS) -> \
+directory contents as a dictionary\n \
+		DEFAULT_ATTRS: FILE_ATTRIBUTE_SYSTEM | \
+FILE_ATTRIBUTE_DIRECTORY | \
+FILE_ATTRIBUTE_ARCHIVE\n\n \
 		List contents of a directory. The keys are, \n \
 		\tname: Long name of the directory item\n \
 		\tshort_name: Short name of the directory item\n \
@@ -545,6 +572,9 @@ static PyMethodDef py_smb_methods[] = {
 	{ "rmdir", py_smb_rmdir, METH_VARARGS,
 		"rmdir(path) -> None\n\n \
 		Delete a directory." },
+	{ "unlink", py_smb_unlink, METH_VARARGS,
+		"unlink(path) -> None\n\n \
+		Delete a file." },
 	{ "deltree", py_smb_deltree, METH_VARARGS,
 		"deltree(path) -> None\n\n \
 		Delete a directory and all its contents." },
@@ -570,17 +600,23 @@ static PyObject *py_smb_new(PyTypeObject *type, PyObject *args, PyObject *kwargs
 {
 	PyObject *py_creds = Py_None;
 	PyObject *py_lp = Py_None;
-	const char *kwnames[] = { "hostname", "service", "creds", "lp", NULL };
+	const char *kwnames[] = { "hostname", "service", "creds", "lp",
+				  "ntlmv2_auth", "use_spnego", NULL };
 	const char *hostname = NULL;
 	const char *service = NULL;
 	PyObject *smb;
 	struct smb_private_data *spdata;
 	NTSTATUS status;
 	TALLOC_CTX *frame = NULL;
+	struct smbcli_options options;
+	struct smbcli_session_options session_options;
+	uint8_t ntlmv2_auth = 0xFF;
+	uint8_t use_spnego = 0xFF;
 
-	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "zz|OO",
-					discard_const_p(char *, kwnames),
-					&hostname, &service, &py_creds, &py_lp)) {
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "zz|OObb",
+					 discard_const_p(char *, kwnames),
+					 &hostname, &service, &py_creds, &py_lp,
+					 &ntlmv2_auth, &use_spnego)) {
 		return NULL;
 	}
 
@@ -595,10 +631,17 @@ static PyObject *py_smb_new(PyTypeObject *type, PyObject *args, PyObject *kwargs
 
 	spdata->lp_ctx = lpcfg_from_py_object(spdata, py_lp);
 	if (spdata->lp_ctx == NULL) {
+		PyErr_SetString(PyExc_TypeError, "Expected loadparm context");
 		TALLOC_FREE(frame);
 		return NULL;
 	}
-	spdata->creds = PyCredentials_AsCliCredentials(py_creds);
+
+	spdata->creds = cli_credentials_from_py_object(py_creds);
+	if (spdata->creds == NULL) {
+		PyErr_SetString(PyExc_TypeError, "Expected credentials");
+		TALLOC_FREE(frame);
+		return NULL;
+	}
 	spdata->ev_ctx = s4_event_context_init(spdata);
 	if (spdata->ev_ctx == NULL) {
 		PyErr_NoMemory();
@@ -606,7 +649,20 @@ static PyObject *py_smb_new(PyTypeObject *type, PyObject *args, PyObject *kwargs
 		return NULL;
 	}
 
-	status = do_smb_connect(spdata, spdata, hostname, service, &spdata->tree);
+	lpcfg_smbcli_options(spdata->lp_ctx, &options);
+	lpcfg_smbcli_session_options(spdata->lp_ctx, &session_options);
+
+	if (ntlmv2_auth != 0xFF) {
+		session_options.ntlmv2_auth = ntlmv2_auth;
+	}
+	if (use_spnego != 0xFF) {
+		options.use_spnego = use_spnego;
+	}
+
+	status = do_smb_connect(spdata, spdata, hostname, service,
+				&options,
+				&session_options,
+				&spdata->tree);
 	PyErr_NTSTATUS_IS_ERR_RAISE(status);
 	if (spdata->tree == NULL) {
 		TALLOC_FREE(frame);
@@ -627,17 +683,27 @@ static PyTypeObject PySMB = {
 
 };
 
-void initsmb(void)
+static struct PyModuleDef moduledef = {
+    PyModuleDef_HEAD_INIT,
+    .m_name = "smb",
+    .m_doc = "SMB File I/O support",
+    .m_size = -1,
+    .m_methods = NULL,
+};
+
+void initsmb(void);
+
+MODULE_INIT_FUNC(smb)
 {
-	PyObject *m;
+	PyObject *m = NULL;
 
 	if (pytalloc_BaseObject_PyType_Ready(&PySMB) < 0) {
-		return;
+		return m;
 	}
 
-	m = Py_InitModule3("smb", NULL, "SMB File I/O support");
+	m = PyModule_Create(&moduledef);
 	if (m == NULL) {
-	    return;
+	    return m;
 	}
 
 	Py_INCREF(&PySMB);
@@ -661,4 +727,5 @@ void initsmb(void)
 	ADD_FLAGS(FILE_ATTRIBUTE_NONINDEXED);
 	ADD_FLAGS(FILE_ATTRIBUTE_ENCRYPTED);
 	ADD_FLAGS(FILE_ATTRIBUTE_ALL_MASK);
+	return m;
 }

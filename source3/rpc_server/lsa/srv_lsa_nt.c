@@ -4157,7 +4157,7 @@ static NTSTATUS make_ft_info(TALLOC_CTX *mem_ctx,
 
 		rec->flags = lrec->flags;
 		rec->timestamp = lrec->time;
-		rec->type = lrec->type;
+		rec->type = (enum ForestTrustInfoRecordType)lrec->type;
 
 		switch (lrec->type) {
 		case LSA_FOREST_TRUST_TOP_LEVEL_NAME:
@@ -4288,11 +4288,13 @@ static NTSTATUS check_ft_info(TALLOC_CTX *mem_ctx,
 					exclusion = true;
 					break;
 				}
-				/* fall through */
+
+				FALL_THROUGH;
 			case DNS_CMP_FIRST_IS_CHILD:
 			case DNS_CMP_SECOND_IS_CHILD:
 				tln_conflict = true;
-				/* fall through */
+
+				FALL_THROUGH;
 			default:
 				break;
 			}
@@ -4412,7 +4414,7 @@ static NTSTATUS own_ft_info(struct pdb_domain_info *dom_info,
 
 	rec->flags = 0;
 	rec->timestamp = 0;
-	rec->type = LSA_FOREST_TRUST_TOP_LEVEL_NAME;
+	rec->type = FOREST_TRUST_TOP_LEVEL_NAME;
 
 	rec->data.name.string = talloc_strdup(fti, dom_info->dns_forest);
 	if (!rec->data.name.string) {
@@ -4425,7 +4427,7 @@ static NTSTATUS own_ft_info(struct pdb_domain_info *dom_info,
 
 	rec->flags = 0;
 	rec->timestamp = 0;
-	rec->type = LSA_FOREST_TRUST_DOMAIN_INFO;
+	rec->type = FOREST_TRUST_DOMAIN_INFO;
 
         info = &rec->data.info;
 

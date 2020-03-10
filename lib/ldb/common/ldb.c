@@ -108,7 +108,7 @@ struct ldb_context *ldb_init(TALLOC_CTX *mem_ctx, struct tevent_context *ev_ctx)
 	}
 
 	/* A new event context so that callers who don't want ldb
-	 * operating on thier global event context can work without
+	 * operating on their global event context can work without
 	 * having to provide their own private one explicitly */
 	if (ev_ctx == NULL) {
 		ev_ctx = tevent_context_init(ldb);
@@ -326,17 +326,19 @@ int ldb_error_at(struct ldb_context *ldb, int ecode,
 
 
 #define FIRST_OP_NOERR(ldb, op) do { \
-	module = ldb->modules;					\
-	while (module && module->ops->op == NULL) module = module->next; \
-	if ((ldb->flags & LDB_FLG_ENABLE_TRACING) && module) { \
+	next_module = ldb->modules;					\
+	while (next_module && next_module->ops->op == NULL) {		\
+		next_module = next_module->next;			    \
+	};							    \
+	if ((ldb->flags & LDB_FLG_ENABLE_TRACING) && next_module) { \
 		ldb_debug(ldb, LDB_DEBUG_TRACE, "ldb_trace_request: (%s)->" #op, \
-			  module->ops->name);				\
+			  next_module->ops->name);				\
 	}								\
 } while (0)
 
 #define FIRST_OP(ldb, op) do { \
 	FIRST_OP_NOERR(ldb, op); \
-	if (module == NULL) {	       				\
+	if (next_module == NULL) {	       				\
 		ldb_asprintf_errstring(ldb, "unable to find module or backend to handle operation: " #op); \
 		return LDB_ERR_OPERATIONS_ERROR;			\
 	} \
@@ -348,7 +350,7 @@ int ldb_error_at(struct ldb_context *ldb, int ecode,
 */
 int ldb_transaction_start(struct ldb_context *ldb)
 {
-	struct ldb_module *module;
+	struct ldb_module *next_module;
 	int status;
 
 	ldb_debug(ldb, LDB_DEBUG_TRACE,
@@ -369,7 +371,7 @@ int ldb_transaction_start(struct ldb_context *ldb)
 
 	ldb_reset_err_string(ldb);
 
-	status = module->ops->start_transaction(module);
+	status = next_module->ops->start_transaction(next_module);
 	if (status != LDB_SUCCESS) {
 		if (ldb->err_string == NULL) {
 			/* no error string was setup by the backend */
@@ -377,14 +379,15 @@ int ldb_transaction_start(struct ldb_context *ldb)
 				"ldb transaction start: %s (%d)",
 				ldb_strerror(status),
 				status);
+		ldb->transaction_active--;
 		}
-		if ((module && module->ldb->flags & LDB_FLG_ENABLE_TRACING)) {
-			ldb_debug(module->ldb, LDB_DEBUG_TRACE, "start ldb transaction error: %s",
-				  ldb_errstring(module->ldb));
+		if ((next_module && next_module->ldb->flags & LDB_FLG_ENABLE_TRACING)) {
+			ldb_debug(next_module->ldb, LDB_DEBUG_TRACE, "start ldb transaction error: %s",
+				  ldb_errstring(next_module->ldb));
 		}
 	} else {
-		if ((module && module->ldb->flags & LDB_FLG_ENABLE_TRACING)) {
-			ldb_debug(module->ldb, LDB_DEBUG_TRACE, "start ldb transaction success");
+		if ((next_module && next_module->ldb->flags & LDB_FLG_ENABLE_TRACING)) {
+			ldb_debug(next_module->ldb, LDB_DEBUG_TRACE, "start ldb transaction success");
 		}
 	}
 	return status;
@@ -395,7 +398,7 @@ int ldb_transaction_start(struct ldb_context *ldb)
 */
 int ldb_transaction_prepare_commit(struct ldb_context *ldb)
 {
-	struct ldb_module *module;
+	struct ldb_module *next_module;
 	int status;
 
 	if (ldb->prepare_commit_done) {
@@ -418,17 +421,19 @@ int ldb_transaction_prepare_commit(struct ldb_context *ldb)
 
 	/* call prepare transaction if available */
 	FIRST_OP_NOERR(ldb, prepare_commit);
-	if (module == NULL) {
+	if (next_module == NULL) {
 		return LDB_SUCCESS;
 	}
 
-	status = module->ops->prepare_commit(module);
+	ldb_reset_err_string(ldb);
+
+	status = next_module->ops->prepare_commit(next_module);
 	if (status != LDB_SUCCESS) {
 		ldb->transaction_active--;
-		/* if a module fails the prepare then we need
+		/* if a next_module fails the prepare then we need
 		   to call the end transaction for everyone */
 		FIRST_OP(ldb, del_transaction);
-		module->ops->del_transaction(module);
+		next_module->ops->del_transaction(next_module);
 		if (ldb->err_string == NULL) {
 			/* no error string was setup by the backend */
 			ldb_asprintf_errstring(ldb,
@@ -436,9 +441,9 @@ int ldb_transaction_prepare_commit(struct ldb_context *ldb)
 					       ldb_strerror(status),
 					       status);
 		}
-		if ((module && module->ldb->flags & LDB_FLG_ENABLE_TRACING)) { 
-			ldb_debug(module->ldb, LDB_DEBUG_TRACE, "prepare commit transaction error: %s", 
-				  ldb_errstring(module->ldb));				
+		if ((next_module && next_module->ldb->flags & LDB_FLG_ENABLE_TRACING)) {
+			ldb_debug(next_module->ldb, LDB_DEBUG_TRACE, "prepare commit transaction error: %s",
+				  ldb_errstring(next_module->ldb));
 		}
 	}
 
@@ -451,7 +456,7 @@ int ldb_transaction_prepare_commit(struct ldb_context *ldb)
 */
 int ldb_transaction_commit(struct ldb_context *ldb)
 {
-	struct ldb_module *module;
+	struct ldb_module *next_module;
 	int status;
 
 	status = ldb_transaction_prepare_commit(ldb);
@@ -480,7 +485,7 @@ int ldb_transaction_commit(struct ldb_context *ldb)
 	ldb_reset_err_string(ldb);
 
 	FIRST_OP(ldb, end_transaction);
-	status = module->ops->end_transaction(module);
+	status = next_module->ops->end_transaction(next_module);
 	if (status != LDB_SUCCESS) {
 		if (ldb->err_string == NULL) {
 			/* no error string was setup by the backend */
@@ -489,13 +494,13 @@ int ldb_transaction_commit(struct ldb_context *ldb)
 				ldb_strerror(status),
 				status);
 		}
-		if ((module && module->ldb->flags & LDB_FLG_ENABLE_TRACING)) { 
-			ldb_debug(module->ldb, LDB_DEBUG_TRACE, "commit ldb transaction error: %s", 
-				  ldb_errstring(module->ldb));				
+		if ((next_module && next_module->ldb->flags & LDB_FLG_ENABLE_TRACING)) {
+			ldb_debug(next_module->ldb, LDB_DEBUG_TRACE, "commit ldb transaction error: %s",
+				  ldb_errstring(next_module->ldb));
 		}
 		/* cancel the transaction */
 		FIRST_OP(ldb, del_transaction);
-		module->ops->del_transaction(module);
+		next_module->ops->del_transaction(next_module);
 	}
 	return status;
 }
@@ -506,7 +511,7 @@ int ldb_transaction_commit(struct ldb_context *ldb)
 */
 int ldb_transaction_cancel(struct ldb_context *ldb)
 {
-	struct ldb_module *module;
+	struct ldb_module *next_module;
 	int status;
 
 	ldb->transaction_active--;
@@ -529,7 +534,7 @@ int ldb_transaction_cancel(struct ldb_context *ldb)
 
 	FIRST_OP(ldb, del_transaction);
 
-	status = module->ops->del_transaction(module);
+	status = next_module->ops->del_transaction(next_module);
 	if (status != LDB_SUCCESS) {
 		if (ldb->err_string == NULL) {
 			/* no error string was setup by the backend */
@@ -538,9 +543,9 @@ int ldb_transaction_cancel(struct ldb_context *ldb)
 				ldb_strerror(status),
 				status);
 		}
-		if ((module && module->ldb->flags & LDB_FLG_ENABLE_TRACING)) { 
-			ldb_debug(module->ldb, LDB_DEBUG_TRACE, "cancel ldb transaction error: %s", 
-				  ldb_errstring(module->ldb));				
+		if ((next_module && next_module->ldb->flags & LDB_FLG_ENABLE_TRACING)) {
+			ldb_debug(next_module->ldb, LDB_DEBUG_TRACE, "cancel ldb transaction error: %s",
+				  ldb_errstring(next_module->ldb));
 		}
 	}
 	return status;
@@ -605,7 +610,7 @@ int ldb_wait(struct ldb_handle *handle, enum ldb_wait_type type)
 		return handle->status;
 	}
 
-	ev = ldb_get_event_context(handle->ldb);
+	ev = ldb_handle_get_event_context(handle);
 	if (NULL == ev) {
 		return ldb_oom(handle->ldb);
 	}
@@ -711,6 +716,62 @@ int ldb_set_timeout_from_prev_req(struct ldb_context *ldb,
 }
 
 
+struct ldb_handle *ldb_handle_new(TALLOC_CTX *mem_ctx, struct ldb_context *ldb)
+{
+	struct ldb_handle *h;
+
+	h = talloc_zero(mem_ctx, struct ldb_handle);
+	if (h == NULL) {
+		ldb_set_errstring(ldb, "Out of Memory");
+		return NULL;
+	}
+
+	h->status = LDB_SUCCESS;
+	h->state = LDB_ASYNC_INIT;
+	h->ldb = ldb;
+	h->flags = 0;
+	h->location = NULL;
+	h->parent = NULL;
+
+	if (h->ldb->require_private_event_context == true) {
+		h->event_context = tevent_context_init(h);
+		if (h->event_context == NULL) {
+			ldb_set_errstring(ldb,
+					  "Out of Memory allocating "
+					  "event context for new handle");
+			return NULL;
+		}
+		tevent_set_debug(h->event_context, ldb_tevent_debug, ldb);
+		tevent_loop_allow_nesting(h->event_context);
+	}
+
+	return h;
+}
+
+static struct ldb_handle *ldb_handle_new_child(TALLOC_CTX *mem_ctx,
+					       struct ldb_request *parent_req)
+{
+	struct ldb_handle *h;
+
+	h = talloc_zero(mem_ctx, struct ldb_handle);
+	if (h == NULL) {
+		ldb_set_errstring(parent_req->handle->ldb,
+				  "Out of Memory");
+		return NULL;
+	}
+
+	h->status = LDB_SUCCESS;
+	h->state = LDB_ASYNC_INIT;
+	h->ldb = parent_req->handle->ldb;
+	h->parent = parent_req;
+	h->nesting = parent_req->handle->nesting + 1;
+	h->flags = parent_req->handle->flags;
+	h->custom_flags = parent_req->handle->custom_flags;
+	h->event_context = parent_req->handle->event_context;
+
+	return h;
+}
+
 /*
    set the permissions for new files to be passed to open() in
    backends that use local files
@@ -745,6 +806,38 @@ int ldb_request_get_status(struct ldb_request *req)
 	return req->handle->status;
 }
 
+/*
+ * This function obtains the private event context for the handle,
+ * which may have been created to avoid nested event loops during
+ * ldb_tdb with the locks held
+ */
+struct tevent_context *ldb_handle_get_event_context(struct ldb_handle *handle)
+{
+	if (handle->event_context != NULL) {
+		return handle->event_context;
+	}
+	return ldb_get_event_context(handle->ldb);
+}
+
+/*
+ * This function forces a specific ldb handle to use the global event
+ * context.  This allows a nested event loop to operate, so any open
+ * transaction also needs to be aborted.
+ *
+ * Any events on this event context will be lost
+ *
+ * This is used in Samba when sending an IRPC to another part of the
+ * same process instead of making a local DB modification.
+ */
+void ldb_handle_use_global_event_context(struct ldb_handle *handle)
+{
+	TALLOC_FREE(handle->event_context);
+}
+
+void ldb_set_require_private_event_context(struct ldb_context *ldb)
+{
+	ldb->require_private_event_context = true;
+}
 
 /*
   trace a ldb request
@@ -876,6 +969,146 @@ static int ldb_msg_check_element_flags(struct ldb_context *ldb,
 	return LDB_SUCCESS;
 }
 
+/*
+ * This context allows us to make the unlock be a talloc destructor
+ *
+ * This ensures that a request started, but not waited on, will still
+ * unlock.
+ */
+struct ldb_db_lock_context {
+	struct ldb_request *req;
+	struct ldb_context *ldb;
+};
+
+/*
+ * We have to have a the unlock on a destructor so that we unlock the
+ * DB if a caller calls talloc_free(req).  We trust that the ldb
+ * context has not already gone away.
+ */
+static int ldb_db_lock_destructor(struct ldb_db_lock_context *lock_context)
+{
+	int ret;
+	struct ldb_module *next_module;
+	FIRST_OP_NOERR(lock_context->ldb, read_unlock);
+	if (next_module != NULL) {
+		ret = next_module->ops->read_unlock(next_module);
+	} else {
+		ret = LDB_SUCCESS;
+	}
+
+	if (ret != LDB_SUCCESS) {
+		ldb_debug(lock_context->ldb,
+			  LDB_DEBUG_FATAL,
+			  "Failed to unlock db: %s / %s",
+			  ldb_errstring(lock_context->ldb),
+			  ldb_strerror(ret));
+	}
+	return 0;
+}
+
+static int ldb_lock_backend_callback(struct ldb_request *req,
+				     struct ldb_reply *ares)
+{
+	struct ldb_db_lock_context *lock_context;
+	int ret;
+
+	lock_context = talloc_get_type(req->context,
+				       struct ldb_db_lock_context);
+
+	if (!ares) {
+		return ldb_module_done(lock_context->req, NULL, NULL,
+					LDB_ERR_OPERATIONS_ERROR);
+	}
+	if (ares->error != LDB_SUCCESS || ares->type == LDB_REPLY_DONE) {
+		ret = ldb_module_done(lock_context->req, ares->controls,
+				      ares->response, ares->error);
+		/*
+		 * If this is a LDB_REPLY_DONE or an error, unlock the
+		 * DB by calling the destructor on this context
+		 */
+		talloc_free(lock_context);
+		return ret;
+	}
+
+	/* Otherwise pass on the callback */
+	switch (ares->type) {
+	case LDB_REPLY_ENTRY:
+		return ldb_module_send_entry(lock_context->req, ares->message,
+					     ares->controls);
+
+	case LDB_REPLY_REFERRAL:
+		return ldb_module_send_referral(lock_context->req,
+						ares->referral);
+	default:
+		/* Can't happen */
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+}
+
+/*
+ * Do an ldb_search() with a lock held, but release it if the request
+ * is freed with talloc_free()
+ */
+static int lock_search(struct ldb_module *lock_module, struct ldb_request *req)
+{
+	/* Used in FIRST_OP_NOERR to find where to send the lock request */
+	struct ldb_module *next_module = NULL;
+	struct ldb_request *down_req = NULL;
+	struct ldb_db_lock_context *lock_context;
+	struct ldb_context *ldb = ldb_module_get_ctx(lock_module);
+	int ret;
+
+	lock_context = talloc(req, struct ldb_db_lock_context);
+	if (lock_context == NULL) {
+		return ldb_oom(ldb);
+	}
+
+	lock_context->ldb = ldb;
+	lock_context->req = req;
+
+	ret = ldb_build_search_req_ex(&down_req, ldb, req,
+				      req->op.search.base,
+				      req->op.search.scope,
+				      req->op.search.tree,
+				      req->op.search.attrs,
+				      req->controls,
+				      lock_context,
+				      ldb_lock_backend_callback,
+				      req);
+	LDB_REQ_SET_LOCATION(down_req);
+	if (ret != LDB_SUCCESS) {
+		return ret;
+	}
+
+	/* call DB lock */
+	FIRST_OP_NOERR(ldb, read_lock);
+	if (next_module != NULL) {
+		ret = next_module->ops->read_lock(next_module);
+	} else {
+		ret = LDB_ERR_UNSUPPORTED_CRITICAL_EXTENSION;
+	}
+
+	if (ret == LDB_ERR_UNSUPPORTED_CRITICAL_EXTENSION) {
+		/* We might be talking LDAP */
+		ldb_reset_err_string(ldb);
+		ret = 0;
+		TALLOC_FREE(lock_context);
+
+		return ldb_next_request(lock_module, req);
+	} else if ((ret != LDB_SUCCESS) && (ldb->err_string == NULL)) {
+		/* if no error string was setup by the backend */
+		ldb_asprintf_errstring(ldb, "Failed to get DB lock: %s (%d)",
+				       ldb_strerror(ret), ret);
+	} else {
+		talloc_set_destructor(lock_context, ldb_db_lock_destructor);
+	}
+
+	if (ret != LDB_SUCCESS) {
+		return ret;
+	}
+
+	return ldb_next_request(lock_module, down_req);
+}
 
 /*
   start an ldb request
@@ -884,7 +1117,7 @@ static int ldb_msg_check_element_flags(struct ldb_context *ldb,
 */
 int ldb_request(struct ldb_context *ldb, struct ldb_request *req)
 {
-	struct ldb_module *module;
+	struct ldb_module *next_module;
 	int ret;
 
 	if (req->callback == NULL) {
@@ -901,15 +1134,32 @@ int ldb_request(struct ldb_context *ldb, struct ldb_request *req)
 	/* call the first module in the chain */
 	switch (req->operation) {
 	case LDB_SEARCH:
+	{
+		/*
+		 * A fake module to allow ldb_next_request() to be
+		 * re-used and to keep the locking out of this function.
+		 */
+		static const struct ldb_module_ops lock_module_ops = {
+			.name = "lock_searches",
+			.search = lock_search
+		};
+		struct ldb_module lock_module = {
+			.ldb = ldb,
+			.next = ldb->modules,
+			.ops = &lock_module_ops
+		};
+		next_module = &lock_module;
+
 		/* due to "ldb_build_search_req" base DN always != NULL */
 		if (!ldb_dn_validate(req->op.search.base)) {
 			ldb_asprintf_errstring(ldb, "ldb_search: invalid basedn '%s'",
 					       ldb_dn_get_linearized(req->op.search.base));
 			return LDB_ERR_INVALID_DN_SYNTAX;
 		}
-		FIRST_OP(ldb, search);
-		ret = module->ops->search(module, req);
+
+		ret = next_module->ops->search(next_module, req);
 		break;
+	}
 	case LDB_ADD:
 		if (!ldb_dn_validate(req->op.add.message->dn)) {
 			ldb_asprintf_errstring(ldb, "ldb_add: invalid dn '%s'",
@@ -936,7 +1186,7 @@ int ldb_request(struct ldb_context *ldb, struct ldb_request *req)
 			 */
 			return ret;
 		}
-		ret = module->ops->add(module, req);
+		ret = next_module->ops->add(next_module, req);
 		break;
 	case LDB_MODIFY:
 		if (!ldb_dn_validate(req->op.mod.message->dn)) {
@@ -953,7 +1203,7 @@ int ldb_request(struct ldb_context *ldb, struct ldb_request *req)
 			 */
 			return ret;
 		}
-		ret = module->ops->modify(module, req);
+		ret = next_module->ops->modify(next_module, req);
 		break;
 	case LDB_DELETE:
 		if (!ldb_dn_validate(req->op.del.dn)) {
@@ -962,7 +1212,7 @@ int ldb_request(struct ldb_context *ldb, struct ldb_request *req)
 			return LDB_ERR_INVALID_DN_SYNTAX;
 		}
 		FIRST_OP(ldb, del);
-		ret = module->ops->del(module, req);
+		ret = next_module->ops->del(next_module, req);
 		break;
 	case LDB_RENAME:
 		if (!ldb_dn_validate(req->op.rename.olddn)) {
@@ -976,15 +1226,15 @@ int ldb_request(struct ldb_context *ldb, struct ldb_request *req)
 			return LDB_ERR_INVALID_DN_SYNTAX;
 		}
 		FIRST_OP(ldb, rename);
-		ret = module->ops->rename(module, req);
+		ret = next_module->ops->rename(next_module, req);
 		break;
 	case LDB_EXTENDED:
 		FIRST_OP(ldb, extended);
-		ret = module->ops->extended(module, req);
+		ret = next_module->ops->extended(next_module, req);
 		break;
 	default:
 		FIRST_OP(ldb, request);
-		ret = module->ops->request(module, req);
+		ret = next_module->ops->request(next_module, req);
 		break;
 	}
 
@@ -1146,6 +1396,42 @@ int ldb_op_default_callback(struct ldb_request *req, struct ldb_reply *ares)
 	return ldb_request_done(req, LDB_SUCCESS);
 }
 
+static struct ldb_request *ldb_build_req_common(TALLOC_CTX *mem_ctx,
+				struct ldb_context *ldb,
+				struct ldb_control **controls,
+				void *context,
+				ldb_request_callback_t callback,
+				struct ldb_request *parent)
+{
+	struct ldb_request *req = NULL;
+
+	req = talloc_zero(mem_ctx, struct ldb_request);
+	if (req == NULL) {
+		return NULL;
+	}
+	req->controls = controls;
+	req->context = context;
+	req->callback = callback;
+
+	ldb_set_timeout_from_prev_req(ldb, parent, req);
+
+	if (parent != NULL) {
+		req->handle = ldb_handle_new_child(req, parent);
+		if (req->handle == NULL) {
+			TALLOC_FREE(req);
+			return NULL;
+		}
+	} else {
+		req->handle = ldb_handle_new(req, ldb);
+		if (req->handle == NULL) {
+			TALLOC_FREE(req);
+			return NULL;
+		}
+	}
+
+	return req;
+}
+
 int ldb_build_search_req_ex(struct ldb_request **ret_req,
 			struct ldb_context *ldb,
 			TALLOC_CTX *mem_ctx,
@@ -1162,7 +1448,8 @@ int ldb_build_search_req_ex(struct ldb_request **ret_req,
 
 	*ret_req = NULL;
 
-	req = talloc(mem_ctx, struct ldb_request);
+	req = ldb_build_req_common(mem_ctx, ldb, controls,
+				   context, callback, parent);
 	if (req == NULL) {
 		ldb_oom(ldb);
 		return LDB_ERR_OPERATIONS_ERROR;
@@ -1184,25 +1471,6 @@ int ldb_build_search_req_ex(struct ldb_request **ret_req,
 	}
 
 	req->op.search.attrs = attrs;
-	req->controls = controls;
-	req->context = context;
-	req->callback = callback;
-
-	ldb_set_timeout_from_prev_req(ldb, parent, req);
-
-	req->handle = ldb_handle_new(req, ldb);
-	if (req->handle == NULL) {
-		ldb_oom(ldb);
-		return LDB_ERR_OPERATIONS_ERROR;
-	}
-
-	if (parent) {
-		req->handle->nesting++;
-		req->handle->parent = parent;
-		req->handle->flags = parent->handle->flags;
-		req->handle->custom_flags = parent->handle->custom_flags;
-	}
-
 	*ret_req = req;
 	return LDB_SUCCESS;
 }
@@ -1250,7 +1518,8 @@ int ldb_build_add_req(struct ldb_request **ret_req,
 
 	*ret_req = NULL;
 
-	req = talloc(mem_ctx, struct ldb_request);
+	req = ldb_build_req_common(mem_ctx, ldb, controls,
+				   context, callback, parent);
 	if (req == NULL) {
 		ldb_set_errstring(ldb, "Out of Memory");
 		return LDB_ERR_OPERATIONS_ERROR;
@@ -1258,27 +1527,7 @@ int ldb_build_add_req(struct ldb_request **ret_req,
 
 	req->operation = LDB_ADD;
 	req->op.add.message = message;
-	req->controls = controls;
-	req->context = context;
-	req->callback = callback;
-
-	ldb_set_timeout_from_prev_req(ldb, parent, req);
-
-	req->handle = ldb_handle_new(req, ldb);
-	if (req->handle == NULL) {
-		ldb_oom(ldb);
-		return LDB_ERR_OPERATIONS_ERROR;
-	}
-
-	if (parent) {
-		req->handle->nesting++;
-		req->handle->parent = parent;
-		req->handle->flags = parent->handle->flags;
-		req->handle->custom_flags = parent->handle->custom_flags;
-	}
-
 	*ret_req = req;
-
 	return LDB_SUCCESS;
 }
 
@@ -1295,7 +1544,8 @@ int ldb_build_mod_req(struct ldb_request **ret_req,
 
 	*ret_req = NULL;
 
-	req = talloc(mem_ctx, struct ldb_request);
+	req = ldb_build_req_common(mem_ctx, ldb, controls,
+				   context, callback, parent);
 	if (req == NULL) {
 		ldb_set_errstring(ldb, "Out of Memory");
 		return LDB_ERR_OPERATIONS_ERROR;
@@ -1303,27 +1553,8 @@ int ldb_build_mod_req(struct ldb_request **ret_req,
 
 	req->operation = LDB_MODIFY;
 	req->op.mod.message = message;
-	req->controls = controls;
-	req->context = context;
-	req->callback = callback;
-
-	ldb_set_timeout_from_prev_req(ldb, parent, req);
-
-	req->handle = ldb_handle_new(req, ldb);
-	if (req->handle == NULL) {
-		ldb_oom(ldb);
-		return LDB_ERR_OPERATIONS_ERROR;
-	}
-
-	if (parent) {
-		req->handle->nesting++;
-		req->handle->parent = parent;
-		req->handle->flags = parent->handle->flags;
-		req->handle->custom_flags = parent->handle->custom_flags;
-	}
 
 	*ret_req = req;
-
 	return LDB_SUCCESS;
 }
 
@@ -1340,7 +1571,8 @@ int ldb_build_del_req(struct ldb_request **ret_req,
 
 	*ret_req = NULL;
 
-	req = talloc(mem_ctx, struct ldb_request);
+	req = ldb_build_req_common(mem_ctx, ldb, controls,
+				   context, callback, parent);
 	if (req == NULL) {
 		ldb_set_errstring(ldb, "Out of Memory");
 		return LDB_ERR_OPERATIONS_ERROR;
@@ -1348,27 +1580,7 @@ int ldb_build_del_req(struct ldb_request **ret_req,
 
 	req->operation = LDB_DELETE;
 	req->op.del.dn = dn;
-	req->controls = controls;
-	req->context = context;
-	req->callback = callback;
-
-	ldb_set_timeout_from_prev_req(ldb, parent, req);
-
-	req->handle = ldb_handle_new(req, ldb);
-	if (req->handle == NULL) {
-		ldb_oom(ldb);
-		return LDB_ERR_OPERATIONS_ERROR;
-	}
-
-	if (parent) {
-		req->handle->nesting++;
-		req->handle->parent = parent;
-		req->handle->flags = parent->handle->flags;
-		req->handle->custom_flags = parent->handle->custom_flags;
-	}
-
 	*ret_req = req;
-
 	return LDB_SUCCESS;
 }
 
@@ -1386,7 +1598,8 @@ int ldb_build_rename_req(struct ldb_request **ret_req,
 
 	*ret_req = NULL;
 
-	req = talloc(mem_ctx, struct ldb_request);
+	req = ldb_build_req_common(mem_ctx, ldb, controls,
+				   context, callback, parent);
 	if (req == NULL) {
 		ldb_set_errstring(ldb, "Out of Memory");
 		return LDB_ERR_OPERATIONS_ERROR;
@@ -1395,27 +1608,7 @@ int ldb_build_rename_req(struct ldb_request **ret_req,
 	req->operation = LDB_RENAME;
 	req->op.rename.olddn = olddn;
 	req->op.rename.newdn = newdn;
-	req->controls = controls;
-	req->context = context;
-	req->callback = callback;
-
-	ldb_set_timeout_from_prev_req(ldb, parent, req);
-
-	req->handle = ldb_handle_new(req, ldb);
-	if (req->handle == NULL) {
-		ldb_oom(ldb);
-		return LDB_ERR_OPERATIONS_ERROR;
-	}
-
-	if (parent) {
-		req->handle->nesting++;
-		req->handle->parent = parent;
-		req->handle->flags = parent->handle->flags;
-		req->handle->custom_flags = parent->handle->custom_flags;
-	}
-
 	*ret_req = req;
-
 	return LDB_SUCCESS;
 }
 
@@ -1462,7 +1655,8 @@ int ldb_build_extended_req(struct ldb_request **ret_req,
 
 	*ret_req = NULL;
 
-	req = talloc(mem_ctx, struct ldb_request);
+	req = ldb_build_req_common(mem_ctx, ldb, controls,
+				   context, callback, parent);
 	if (req == NULL) {
 		ldb_set_errstring(ldb, "Out of Memory");
 		return LDB_ERR_OPERATIONS_ERROR;
@@ -1471,27 +1665,7 @@ int ldb_build_extended_req(struct ldb_request **ret_req,
 	req->operation = LDB_EXTENDED;
 	req->op.extended.oid = oid;
 	req->op.extended.data = data;
-	req->controls = controls;
-	req->context = context;
-	req->callback = callback;
-
-	ldb_set_timeout_from_prev_req(ldb, parent, req);
-
-	req->handle = ldb_handle_new(req, ldb);
-	if (req->handle == NULL) {
-		ldb_oom(ldb);
-		return LDB_ERR_OPERATIONS_ERROR;
-	}
-
-	if (parent) {
-		req->handle->nesting++;
-		req->handle->parent = parent;
-		req->handle->flags = parent->handle->flags;
-		req->handle->custom_flags = parent->handle->custom_flags;
-	}
-
 	*ret_req = req;
-
 	return LDB_SUCCESS;
 }
 

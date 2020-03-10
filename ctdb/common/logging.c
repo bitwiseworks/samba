@@ -25,6 +25,7 @@
 #include "system/time.h"
 #include "system/filesys.h"
 #include "system/syslog.h"
+#include "system/dir.h"
 
 #include "lib/util/time_basic.h"
 #include "lib/util/sys_rw.h"
@@ -154,6 +155,36 @@ static int file_log_state_destructor(struct file_log_state *state)
 	return 0;
 }
 
+static bool file_log_validate(const char *option)
+{
+	char *t, *dir;
+	struct stat st;
+	int ret;
+
+	if (option == NULL || strcmp(option, "-") == 0) {
+		return true;
+	}
+
+	t = strdup(option);
+	if (t == NULL) {
+		return false;
+	}
+
+	dir = dirname(t);
+
+	ret = stat(dir, &st);
+	free(t);
+	if (ret != 0) {
+		return false;
+	}
+
+	if (! S_ISDIR(st.st_mode)) {
+		return false;
+	}
+
+	return true;
+}
+
 static int file_log_setup(TALLOC_CTX *mem_ctx, const char *option,
 			  const char *app_name)
 {
@@ -239,6 +270,7 @@ struct syslog_log_state {
 	/* RFC3164 says: The total length of the packet MUST be 1024
 	   bytes or less. */
 	char buffer[1024];
+	unsigned int dropped_count;
 };
 
 /* Format messages as per RFC3164
@@ -307,19 +339,66 @@ static void syslog_log(void *private_data, int level, const char *msg)
 	syslog(debug_level_to_priority(level), "%s", msg);
 }
 
-static void syslog_log_sock(void *private_data, int level, const char *msg)
+static int syslog_log_sock_maybe(struct syslog_log_state *state,
+				 int level, const char *msg)
 {
-	struct syslog_log_state *state = talloc_get_type_abort(
-		private_data, struct syslog_log_state);
 	int n;
+	ssize_t ret;
 
 	n = state->format(level, state, msg, state->buffer,
 			  sizeof(state->buffer));
 	if (n == -1) {
-		return;
+		return E2BIG;
 	}
 
-	sys_write_v(state->fd, state->buffer, n);
+	do {
+		ret = write(state->fd, state->buffer, n);
+	} while (ret == -1 && errno == EINTR);
+
+	if (ret == -1) {
+		return errno;
+	}
+
+	return 0;
+
+}
+static void syslog_log_sock(void *private_data, int level, const char *msg)
+{
+	struct syslog_log_state *state = talloc_get_type_abort(
+		private_data, struct syslog_log_state);
+	int ret;
+
+	if (state->dropped_count > 0) {
+		char t[64] = { 0 };
+		snprintf(t, sizeof(t),
+			 "[Dropped %u log messages]\n",
+			 state->dropped_count);
+		t[sizeof(t)-1] = '\0';
+		ret = syslog_log_sock_maybe(state, level, t);
+		if (ret == EAGAIN || ret == EWOULDBLOCK) {
+			state->dropped_count++;
+			/*
+			 * If above failed then actually drop the
+			 * message that would be logged below, since
+			 * it would have been dropped anyway and it is
+			 * also likely to fail.  Falling through and
+			 * attempting to log the message also means
+			 * that the dropped message count will be
+			 * logged out of order.
+			 */
+			return;
+		}
+		if (ret != 0) {
+			/* Silent failure on any other error */
+			return;
+		}
+		state->dropped_count = 0;
+	}
+
+	ret = syslog_log_sock_maybe(state, level, msg);
+	if (ret == EAGAIN || ret == EWOULDBLOCK) {
+		state->dropped_count++;
+	}
 }
 
 static int syslog_log_setup_syslog(TALLOC_CTX *mem_ctx, const char *app_name)
@@ -462,6 +541,23 @@ static int syslog_log_setup_udp(TALLOC_CTX *mem_ctx, const char *app_name,
 	return 0;
 }
 
+static bool syslog_log_validate(const char *option)
+{
+	if (option == NULL) {
+		return true;
+#ifdef _PATH_LOG
+	} else if (strcmp(option, "nonblocking") == 0) {
+		return true;
+#endif
+	} else if (strcmp(option, "udp") == 0) {
+		return true;
+	} else if (strcmp(option, "udp-rfc5424") == 0) {
+		return true;
+	}
+
+	return false;
+}
+
 static int syslog_log_setup(TALLOC_CTX *mem_ctx, const char *option,
 			    const char *app_name)
 {
@@ -480,27 +576,107 @@ static int syslog_log_setup(TALLOC_CTX *mem_ctx, const char *option,
 	return EINVAL;
 }
 
+struct log_backend {
+	const char *name;
+	bool (*validate)(const char *option);
+	int (*setup)(TALLOC_CTX *mem_ctx,
+		     const char *option,
+		     const char *app_name);
+};
+
+static struct log_backend log_backend[] = {
+	{
+		.name = "file",
+		.validate = file_log_validate,
+		.setup = file_log_setup,
+	},
+	{
+		.name = "syslog",
+		.validate = syslog_log_validate,
+		.setup = syslog_log_setup,
+	},
+};
+
+static int log_backend_parse(TALLOC_CTX *mem_ctx,
+			     const char *logging,
+			     struct log_backend **backend,
+			     char **backend_option)
+{
+	struct log_backend *b = NULL;
+	char *t, *name, *option;
+	int i;
+
+	t = talloc_strdup(mem_ctx, logging);
+	if (t == NULL) {
+		return ENOMEM;
+	}
+
+	name = strtok(t, ":");
+	if (name == NULL) {
+		talloc_free(t);
+		return EINVAL;
+	}
+	option = strtok(NULL, ":");
+
+	for (i=0; i<ARRAY_SIZE(log_backend); i++) {
+		if (strcmp(log_backend[i].name, name) == 0) {
+			b = &log_backend[i];
+		}
+	}
+
+	if (b == NULL) {
+		talloc_free(t);
+		return ENOENT;
+	}
+
+	*backend = b;
+	if (option != NULL) {
+		*backend_option = talloc_strdup(mem_ctx, option);
+		if (*backend_option == NULL) {
+			talloc_free(t);
+			return ENOMEM;
+		}
+	} else {
+		*backend_option = NULL;
+	}
+
+	talloc_free(t);
+	return 0;
+}
+
+bool logging_validate(const char *logging)
+{
+	TALLOC_CTX *tmp_ctx;
+	struct log_backend *backend;
+	char *option;
+	int ret;
+	bool status;
+
+	tmp_ctx = talloc_new(NULL);
+	if (tmp_ctx == NULL) {
+		return false;
+	}
+
+	ret = log_backend_parse(tmp_ctx, logging, &backend, &option);
+	if (ret != 0) {
+		talloc_free(tmp_ctx);
+		return false;
+	}
+
+	status = backend->validate(option);
+	talloc_free(tmp_ctx);
+	return status;
+}
+
 /* Initialise logging */
 int logging_init(TALLOC_CTX *mem_ctx, const char *logging,
 		 const char *debug_level, const char *app_name)
 {
-	struct {
-		const char *name;
-		int (*setup)(TALLOC_CTX *mem_ctx, const char *option,
-			     const char *app_name);
-	} log_backend[] = {
-		{
-			.name = "file",
-			.setup = file_log_setup,
-		},
-		{
-			.name = "syslog",
-			.setup = syslog_log_setup,
-		},
-	};
-	int (*setup)(TALLOC_CTX *, const char *, const char *) = NULL;
-	char *str, *name, *option;
-	int ret, i;
+	struct log_backend *backend = NULL;
+	char *option = NULL;
+	int ret;
+
+	setup_logging(app_name, DEBUG_STDERR);
 
 	setup_logging(app_name, DEBUG_STDERR);
 
@@ -518,35 +694,17 @@ int logging_init(TALLOC_CTX *mem_ctx, const char *logging,
 		return EINVAL;
 	}
 
-	str = talloc_strdup(mem_ctx, logging);
-	if (str == NULL) {
-		return ENOMEM;
-	}
-
-	name = strtok(str, ":");
-	if (name == NULL) {
-		talloc_free(str);
-		return EINVAL;
-	}
-	option = strtok(NULL, ":");
-	/*
-	 * option can be NULL here, both setup()
-	 * backends handle this.
-	 */
-
-	for (i=0; i<ARRAY_SIZE(log_backend); i++) {
-		if (strcmp(log_backend[i].name, name) == 0) {
-			setup = log_backend[i].setup;
+	ret = log_backend_parse(mem_ctx, logging, &backend, &option);
+	if (ret != 0) {
+		if (ret == ENOENT) {
+			fprintf(stderr, "Invalid logging option \'%s\'\n",
+				logging);
 		}
+		talloc_free(option);
+		return ret;
 	}
 
-	if (setup == NULL) {
-		talloc_free(str);
-		fprintf(stderr, "Invalid logging option \'%s\'\n", logging);
-		return EINVAL;
-	}
-
-	ret = setup(mem_ctx, option, app_name);
-	talloc_free(str);
+	ret = backend->setup(mem_ctx, option, app_name);
+	talloc_free(option);
 	return ret;
 }

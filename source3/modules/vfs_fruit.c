@@ -31,6 +31,8 @@
 #include "../libcli/smb/smb2_create_ctx.h"
 #include "lib/util/sys_rw.h"
 #include "lib/util/tevent_ntstatus.h"
+#include "lib/util/tevent_unix.h"
+#include "offload_token.h"
 #include "string_replace.h"
 
 #ifdef __OS2__
@@ -142,6 +144,8 @@ struct fruit_config_data {
 	bool posix_rename;
 	bool aapl_zero_file_id;
 	const char *model;
+	bool time_machine;
+	off_t time_machine_max_size;
 
 	/*
 	 * Additional options, all enabled by default,
@@ -478,9 +482,11 @@ struct fio {
  */
 static struct adouble *ad_init(TALLOC_CTX *ctx, vfs_handle_struct *handle,
 			       adouble_type_t type);
-static int ad_set(struct adouble *ad, const char *path);
+static int ad_set(struct adouble *ad, const struct smb_filename *smb_fname);
 static int ad_fset(struct adouble *ad, files_struct *fsp);
-static int adouble_path(TALLOC_CTX *ctx, const char *path_in, char **path_out);
+static int adouble_path(TALLOC_CTX *ctx,
+			const struct smb_filename *smb_fname__in,
+			struct smb_filename **ppsmb_fname_out);
 static AfpInfo *afpinfo_new(TALLOC_CTX *ctx);
 static ssize_t afpinfo_pack(const AfpInfo *ai, char *buf);
 static AfpInfo *afpinfo_unpack(TALLOC_CTX *ctx, const void *data);
@@ -848,7 +854,7 @@ static bool ad_unpack(struct adouble *ad, const size_t nentries,
 		off = RIVAL(ad->ad_data, AD_HEADER_LEN + (i * AD_ENTRY_LEN) + 4);
 		len = RIVAL(ad->ad_data, AD_HEADER_LEN + (i * AD_ENTRY_LEN) + 8);
 
-		if (!eid || eid > ADEID_MAX) {
+		if (!eid || eid >= ADEID_MAX) {
 			DEBUG(1, ("bogus eid %d\n", eid));
 			return false;
 		}
@@ -936,7 +942,7 @@ static bool ad_unpack(struct adouble *ad, const size_t nentries,
 }
 
 static bool ad_convert_xattr(struct adouble *ad,
-			     const char *path,
+			     const struct smb_filename *smb_fname,
 			     char *map)
 {
 	static struct char_mappings **string_replace_cmaps = NULL;
@@ -989,10 +995,10 @@ static bool ad_convert_xattr(struct adouble *ad,
 		}
 
 		stream_name = synthetic_smb_fname(talloc_tos(),
-						  path,
+						  smb_fname->base_name,
 						  mapped_name,
 						  NULL,
-						  0);
+						  smb_fname->flags);
 		TALLOC_FREE(mapped_name);
 		if (stream_name == NULL) {
 			DBG_ERR("synthetic_smb_fname failed\n");
@@ -1055,11 +1061,11 @@ static bool ad_convert_xattr(struct adouble *ad,
  * bytes containing packed xattrs. Netatalk can't deal with that, so
  * we simply discard the packed xattrs.
  *
- * @return -1 in case an error occured, 0 if no conversion was done, 1
+ * @return -1 in case an error occurred, 0 if no conversion was done, 1
  * otherwise
  **/
 static int ad_convert(struct adouble *ad,
-		      const char *path,
+		      const struct smb_filename *smb_fname,
 		      int fd)
 {
 	int rc = 0;
@@ -1078,8 +1084,9 @@ static int ad_convert(struct adouble *ad,
 		goto exit;
 	}
 
-	ok = ad_convert_xattr(ad, path, map);
+	ok = ad_convert_xattr(ad, smb_fname, map);
 	if (!ok) {
+		munmap(map, origlen);
 		return -1;
 	}
 
@@ -1110,15 +1117,16 @@ exit:
 /**
  * Read and parse Netatalk AppleDouble metadata xattr
  **/
-static ssize_t ad_read_meta(struct adouble *ad, const char *path)
+static ssize_t ad_read_meta(struct adouble *ad,
+				const struct smb_filename *smb_fname)
 {
 	int      rc = 0;
 	ssize_t  ealen;
 	bool     ok;
 
-	DEBUG(10, ("reading meta xattr for %s\n", path));
+	DEBUG(10, ("reading meta xattr for %s\n", smb_fname->base_name));
 
-	ealen = SMB_VFS_GETXATTR(ad->ad_handle->conn, path,
+	ealen = SMB_VFS_GETXATTR(ad->ad_handle->conn, smb_fname,
 				 AFPINFO_EA_NETATALK, ad->ad_data,
 				 AD_DATASZ_XATTR);
 	if (ealen == -1) {
@@ -1168,13 +1176,14 @@ static ssize_t ad_read_meta(struct adouble *ad, const char *path)
 	}
 
 exit:
-	DEBUG(10, ("reading meta xattr for %s, rc: %d\n", path, rc));
+	DEBUG(10, ("reading meta xattr for %s, rc: %d\n",
+		smb_fname->base_name, rc));
 
 	if (rc != 0) {
 		ealen = -1;
 		if (errno == EINVAL) {
 			become_root();
-			removexattr(path, AFPINFO_EA_NETATALK);
+			removexattr(smb_fname->base_name, AFPINFO_EA_NETATALK);
 			unbecome_root();
 			errno = ENOENT;
 		}
@@ -1182,36 +1191,41 @@ exit:
 	return ealen;
 }
 
-static int ad_open_rsrc_xattr(const char *path, int flags, mode_t mode)
+static int ad_open_rsrc_xattr(const struct smb_filename *smb_fname,
+				int flags,
+				mode_t mode)
 {
 #ifdef HAVE_ATTROPEN
 	/* FIXME: direct Solaris xattr syscall */
-	return attropen(path, AFPRESOURCE_EA_NETATALK, flags, mode);
+	return attropen(smb_fname->base_name,
+			AFPRESOURCE_EA_NETATALK, flags, mode);
 #else
 	errno = ENOSYS;
 	return -1;
 #endif
 }
 
-static int ad_open_rsrc_adouble(const char *path, int flags, mode_t mode)
+static int ad_open_rsrc_adouble(const struct smb_filename *smb_fname,
+				int flags,
+				mode_t mode)
 {
-	char *adp = NULL;
 	int ret;
 	int fd;
+	struct smb_filename *adp_smb_fname = NULL;
 
-	ret = adouble_path(talloc_tos(), path, &adp);
+	ret = adouble_path(talloc_tos(), smb_fname, &adp_smb_fname);
 	if (ret != 0) {
 		return -1;
 	}
 
-	fd = open(adp, flags, mode);
-	TALLOC_FREE(adp);
+	fd = open(adp_smb_fname->base_name, flags, mode);
+	TALLOC_FREE(adp_smb_fname);
 
 	return fd;
 }
 
 static int ad_open_rsrc(vfs_handle_struct *handle,
-			const char *path,
+			const struct smb_filename *smb_fname,
 			int flags,
 			mode_t mode)
 {
@@ -1222,9 +1236,9 @@ static int ad_open_rsrc(vfs_handle_struct *handle,
 				struct fruit_config_data, return -1);
 
 	if (config->rsrc == FRUIT_RSRC_XATTR) {
-		fd = ad_open_rsrc_xattr(path, flags, mode);
+		fd = ad_open_rsrc_xattr(smb_fname, flags, mode);
 	} else {
-		fd = ad_open_rsrc_adouble(path, flags, mode);
+		fd = ad_open_rsrc_adouble(smb_fname, flags, mode);
 	}
 
 	return fd;
@@ -1238,14 +1252,14 @@ static int ad_open_rsrc(vfs_handle_struct *handle,
 static int ad_open(vfs_handle_struct *handle,
 		   struct adouble *ad,
 		   files_struct *fsp,
-		   const char *path,
+		   const struct smb_filename *smb_fname,
 		   int flags,
 		   mode_t mode)
 {
 	int fd;
 
-	DBG_DEBUG("Path [%s] type [%s]\n",
-		  path, ad->ad_type == ADOUBLE_META ? "meta" : "rsrc");
+	DBG_DEBUG("Path [%s] type [%s]\n", smb_fname->base_name,
+		  ad->ad_type == ADOUBLE_META ? "meta" : "rsrc");
 
 	if (ad->ad_type == ADOUBLE_META) {
 		return 0;
@@ -1257,7 +1271,7 @@ static int ad_open(vfs_handle_struct *handle,
 		return 0;
 	}
 
-	fd = ad_open_rsrc(handle, path, flags, mode);
+	fd = ad_open_rsrc(handle, smb_fname, flags, mode);
 	if (fd == -1) {
 		return -1;
 	}
@@ -1265,13 +1279,13 @@ static int ad_open(vfs_handle_struct *handle,
 	ad->ad_fd = fd;
 
 	DBG_DEBUG("Path [%s] type [%s] fd [%d]\n",
-		  path, ad->ad_type == ADOUBLE_META ? "meta" : "rsrc", fd);
+		  smb_fname->base_name,
+		  ad->ad_type == ADOUBLE_META ? "meta" : "rsrc", fd);
 
 	return 0;
 }
 
-static ssize_t ad_read_rsrc_xattr(struct adouble *ad,
-				  const char *path)
+static ssize_t ad_read_rsrc_xattr(struct adouble *ad)
 {
 	int ret;
 	SMB_STRUCT_STAT st;
@@ -1289,7 +1303,7 @@ static ssize_t ad_read_rsrc_xattr(struct adouble *ad,
 }
 
 static ssize_t ad_read_rsrc_adouble(struct adouble *ad,
-				    const char *path)
+				const struct smb_filename *smb_fname)
 {
 	SMB_STRUCT_STAT sbuf;
 	char *p_ad = NULL;
@@ -1335,14 +1349,15 @@ static ssize_t ad_read_rsrc_adouble(struct adouble *ad,
 			talloc_array_length(ad->ad_data), 0);
 	if (len != talloc_array_length(ad->ad_data)) {
 		DBG_NOTICE("%s %s: bad size: %zd\n",
-			   path, strerror(errno), len);
+			   smb_fname->base_name, strerror(errno), len);
 		return -1;
 	}
 
 	/* Now parse entries */
 	ok = ad_unpack(ad, ADEID_NUM_DOT_UND, sbuf.st_ex_size);
 	if (!ok) {
-		DBG_ERR("invalid AppleDouble resource %s\n", path);
+		DBG_ERR("invalid AppleDouble resource %s\n",
+			smb_fname->base_name);
 		errno = EINVAL;
 		return -1;
 	}
@@ -1350,7 +1365,8 @@ static ssize_t ad_read_rsrc_adouble(struct adouble *ad,
 	if ((ad_getentryoff(ad, ADEID_FINDERI) != ADEDOFF_FINDERI_DOT_UND)
 	    || (ad_getentrylen(ad, ADEID_FINDERI) < ADEDLEN_FINDERI)
 	    || (ad_getentryoff(ad, ADEID_RFORK)	< ADEDOFF_RFORK_DOT_UND)) {
-		DBG_ERR("invalid AppleDouble resource %s\n", path);
+		DBG_ERR("invalid AppleDouble resource %s\n",
+			smb_fname->base_name);
 		errno = EINVAL;
 		return -1;
 	}
@@ -1366,21 +1382,21 @@ static ssize_t ad_read_rsrc_adouble(struct adouble *ad,
 	 * there is lost.
 	 */
 
-	ret = ad_convert(ad, path, ad->ad_fd);
+	ret = ad_convert(ad, smb_fname, ad->ad_fd);
 	if (ret != 0) {
-		DBG_WARNING("Failed to convert [%s]\n", path);
+		DBG_WARNING("Failed to convert [%s]\n", smb_fname->base_name);
 		return len;
 	}
 
 	ok = ad_pack(ad);
 	if (!ok) {
-		DBG_WARNING("ad_pack [%s] failed\n", path);
+		DBG_WARNING("ad_pack [%s] failed\n", smb_fname->base_name);
 		return -1;
 	}
 
 	len = sys_pwrite(ad->ad_fd, ad->ad_data, AD_DATASZ_DOT_UND, 0);
 	if (len != AD_DATASZ_DOT_UND) {
-		DBG_ERR("%s: bad size: %zd\n", path, len);
+		DBG_ERR("%s: bad size: %zd\n", smb_fname->base_name, len);
 		return -1;
 	}
 
@@ -1409,9 +1425,10 @@ static ssize_t ad_read_rsrc_adouble(struct adouble *ad,
 	}
 
 	stream_name = synthetic_smb_fname(talloc_tos(),
-					  path,
+					  smb_fname->base_name,
 					  AFPINFO_STREAM,
-					  NULL, 0);
+					  NULL,
+					  smb_fname->flags);
 	if (stream_name == NULL) {
 		data_blob_free(&aiblob);
 		DBG_ERR("synthetic_smb_fname failed\n");
@@ -1470,7 +1487,7 @@ static ssize_t ad_read_rsrc_adouble(struct adouble *ad,
  * Read and parse resource fork, either ._ AppleDouble file or xattr
  **/
 static ssize_t ad_read_rsrc(struct adouble *ad,
-			    const char *path)
+			const struct smb_filename *smb_fname)
 {
 	struct fruit_config_data *config = NULL;
 	ssize_t len;
@@ -1479,9 +1496,9 @@ static ssize_t ad_read_rsrc(struct adouble *ad,
 				struct fruit_config_data, return -1);
 
 	if (config->rsrc == FRUIT_RSRC_XATTR) {
-		len = ad_read_rsrc_xattr(ad, path);
+		len = ad_read_rsrc_xattr(ad);
 	} else {
-		len = ad_read_rsrc_adouble(ad, path);
+		len = ad_read_rsrc_adouble(ad, smb_fname);
 	}
 
 	return len;
@@ -1490,13 +1507,13 @@ static ssize_t ad_read_rsrc(struct adouble *ad,
 /**
  * Read and unpack an AppleDouble metadata xattr or resource
  **/
-static ssize_t ad_read(struct adouble *ad, const char *path)
+static ssize_t ad_read(struct adouble *ad, const struct smb_filename *smb_fname)
 {
 	switch (ad->ad_type) {
 	case ADOUBLE_META:
-		return ad_read_meta(ad, path);
+		return ad_read_meta(ad, smb_fname);
 	case ADOUBLE_RSRC:
-		return ad_read_rsrc(ad, path);
+		return ad_read_rsrc(ad, smb_fname);
 	default:
 		return -1;
 	}
@@ -1638,7 +1655,7 @@ static struct adouble *ad_init(TALLOC_CTX *ctx, vfs_handle_struct *handle,
 static struct adouble *ad_get_internal(TALLOC_CTX *ctx,
 				       vfs_handle_struct *handle,
 				       files_struct *fsp,
-				       const char *path,
+				       const struct smb_filename *smb_fname,
 				       adouble_type_t type)
 {
 	int rc = 0;
@@ -1647,11 +1664,12 @@ static struct adouble *ad_get_internal(TALLOC_CTX *ctx,
 	int mode;
 
 	if (fsp != NULL) {
-		path = fsp->base_fsp->fsp_name->base_name;
+		smb_fname = fsp->base_fsp->fsp_name;
 	}
 
 	DEBUG(10, ("ad_get(%s) called for %s\n",
-		   type == ADOUBLE_META ? "meta" : "rsrc", path));
+		   type == ADOUBLE_META ? "meta" : "rsrc",
+		   smb_fname->base_name));
 
 	ad = ad_alloc(ctx, handle, type);
 	if (ad == NULL) {
@@ -1662,27 +1680,30 @@ static struct adouble *ad_get_internal(TALLOC_CTX *ctx,
 	/* Try rw first so we can use the fd in ad_convert() */
 	mode = O_RDWR;
 
-	rc = ad_open(handle, ad, fsp, path, mode, 0);
+	rc = ad_open(handle, ad, fsp, smb_fname, mode, 0);
 	if (rc == -1 && ((errno == EROFS) || (errno == EACCES))) {
 		mode = O_RDONLY;
-		rc = ad_open(handle, ad, fsp, path, mode, 0);
+		rc = ad_open(handle, ad, fsp, smb_fname, mode, 0);
 	}
 	if (rc == -1) {
 		DBG_DEBUG("ad_open [%s] error [%s]\n",
-			  path, strerror(errno));
+			  smb_fname->base_name, strerror(errno));
 		goto exit;
+
 	}
 
-	len = ad_read(ad, path);
+	len = ad_read(ad, smb_fname);
 	if (len == -1) {
-		DEBUG(10, ("error reading AppleDouble for %s\n", path));
+		DEBUG(10, ("error reading AppleDouble for %s\n",
+			smb_fname->base_name));
 		rc = -1;
 		goto exit;
 	}
 
 exit:
 	DEBUG(10, ("ad_get(%s) for %s returning %d\n",
-		  type == ADOUBLE_META ? "meta" : "rsrc", path, rc));
+		  type == ADOUBLE_META ? "meta" : "rsrc",
+		  smb_fname->base_name, rc));
 
 	if (rc != 0) {
 		TALLOC_FREE(ad);
@@ -1695,17 +1716,17 @@ exit:
  *
  * @param[in] ctx      talloc context
  * @param[in] handle   vfs handle
- * @param[in] path     pathname to file or directory
+ * @param[in] smb_fname pathname to file or directory
  * @param[in] type     type of AppleDouble, ADOUBLE_META or ADOUBLE_RSRC
  *
  * @return             talloced struct adouble or NULL on error
  **/
 static struct adouble *ad_get(TALLOC_CTX *ctx,
 			      vfs_handle_struct *handle,
-			      const char *path,
+			      const struct smb_filename *smb_fname,
 			      adouble_type_t type)
 {
-	return ad_get_internal(ctx, handle, NULL, path, type);
+	return ad_get_internal(ctx, handle, NULL, smb_fname, type);
 }
 
 /**
@@ -1729,19 +1750,20 @@ static struct adouble *ad_fget(TALLOC_CTX *ctx, vfs_handle_struct *handle,
  *
  * @param[in] ad      adouble handle
  *
- * @param[in] path    pathname to file or directory
+ * @param[in] smb_fname    pathname to file or directory
  *
  * @return            status code, 0 means success
  **/
-static int ad_set(struct adouble *ad, const char *path)
+static int ad_set(struct adouble *ad, const struct smb_filename *smb_fname)
 {
 	bool ok;
 	int ret;
 
-	DBG_DEBUG("Path [%s]\n", path);
+	DBG_DEBUG("Path [%s]\n", smb_fname->base_name);
 
 	if (ad->ad_type != ADOUBLE_META) {
-		DBG_ERR("ad_set on [%s] used with ADOUBLE_RSRC\n", path);
+		DBG_ERR("ad_set on [%s] used with ADOUBLE_RSRC\n",
+			smb_fname->base_name);
 		return -1;
 	}
 
@@ -1751,12 +1773,12 @@ static int ad_set(struct adouble *ad, const char *path)
 	}
 
 	ret = SMB_VFS_SETXATTR(ad->ad_handle->conn,
-			       path,
+			       smb_fname,
 			       AFPINFO_EA_NETATALK,
 			       ad->ad_data,
 			       AD_DATASZ_XATTR, 0);
 
-	DBG_DEBUG("Path [%s] ret [%d]\n", path, ret);
+	DBG_DEBUG("Path [%s] ret [%d]\n", smb_fname->base_name, ret);
 
 	return ret;
 }
@@ -1792,7 +1814,7 @@ static int ad_fset(struct adouble *ad, files_struct *fsp)
 	switch (ad->ad_type) {
 	case ADOUBLE_META:
 		rc = SMB_VFS_NEXT_SETXATTR(ad->ad_handle,
-					   fsp->fsp_name->base_name,
+					   fsp->fsp_name,
 					   AFPINFO_EA_NETATALK,
 					   ad->ad_data,
 					   AD_DATASZ_XATTR, 0);
@@ -1867,6 +1889,7 @@ static int init_fruit_config(vfs_handle_struct *handle)
 {
 	struct fruit_config_data *config;
 	int enumval;
+	const char *tm_size_str = NULL;
 
 	config = talloc_zero(handle->conn, struct fruit_config_data);
 	if (!config) {
@@ -1938,6 +1961,9 @@ static int init_fruit_config(vfs_handle_struct *handle)
 	config->use_aapl = lp_parm_bool(
 		-1, FRUIT_PARAM_TYPE_NAME, "aapl", true);
 
+	config->time_machine = lp_parm_bool(
+		SNUM(handle->conn), FRUIT_PARAM_TYPE_NAME, "time machine", false);
+
 	config->unix_info_enabled = lp_parm_bool(
 		-1, FRUIT_PARAM_TYPE_NAME, "nfs_aces", true);
 
@@ -1962,6 +1988,13 @@ static int init_fruit_config(vfs_handle_struct *handle)
 	config->model = lp_parm_const_string(
 		-1, FRUIT_PARAM_TYPE_NAME, "model", "MacSamba");
 
+	tm_size_str = lp_parm_const_string(
+		SNUM(handle->conn), FRUIT_PARAM_TYPE_NAME,
+		"time machine max size", NULL);
+	if (tm_size_str != NULL) {
+		config->time_machine_max_size = conv_str_size(tm_size_str);
+	}
+
 	SMB_VFS_HANDLE_SET_DATA(handle, config,
 				NULL, struct fruit_config_data,
 				return -1);
@@ -1971,20 +2004,41 @@ static int init_fruit_config(vfs_handle_struct *handle)
 
 /**
  * Prepend "._" to a basename
+ * Return a new struct smb_filename with stream_name == NULL.
  **/
-static int adouble_path(TALLOC_CTX *ctx, const char *path_in, char **path_out)
+static int adouble_path(TALLOC_CTX *ctx,
+			const struct smb_filename *smb_fname_in,
+			struct smb_filename **pp_smb_fname_out)
 {
 	char *parent;
 	const char *base;
+	struct smb_filename *smb_fname = cp_smb_filename(ctx,
+						smb_fname_in);
 
-	if (!parent_dirname(ctx, path_in, &parent, &base)) {
+	if (smb_fname == NULL) {
 		return -1;
 	}
 
-	*path_out = talloc_asprintf(ctx, "%s/._%s", parent, base);
-	if (*path_out == NULL) {
+	/* We need streamname to be NULL */
+	TALLOC_FREE(smb_fname->stream_name);
+
+	/* And we're replacing base_name. */
+	TALLOC_FREE(smb_fname->base_name);
+
+	if (!parent_dirname(smb_fname, smb_fname_in->base_name,
+				&parent, &base)) {
+		TALLOC_FREE(smb_fname);
 		return -1;
 	}
+
+	smb_fname->base_name = talloc_asprintf(smb_fname,
+					"%s/._%s", parent, base);
+	if (smb_fname->base_name == NULL) {
+		TALLOC_FREE(smb_fname);
+		return -1;
+	}
+
+	*pp_smb_fname_out = smb_fname;
 
 	return 0;
 }
@@ -2155,12 +2209,16 @@ static bool del_fruit_stream(TALLOC_CTX *mem_ctx, unsigned int *num_streams,
 	}
 
 	for (i = 0; i < *num_streams; i++) {
-		if (strequal_m(tmp[i].name, name)) {
+		if (strequal_m(tmp[i].name, AFPRESOURCE_STREAM)) {
 			break;
 		}
 	}
 
 	if (i == *num_streams) {
+		return true;
+	}
+
+	if (tmp[i].size > 0) {
 		return true;
 	}
 
@@ -2224,7 +2282,7 @@ static void update_btime(vfs_handle_struct *handle,
 		return;
 	}
 
-	ad = ad_get(talloc_tos(), handle, smb_fname->base_name, ADOUBLE_META);
+	ad = ad_get(talloc_tos(), handle, smb_fname, ADOUBLE_META);
 	if (ad == NULL) {
 		return;
 	}
@@ -2306,7 +2364,7 @@ static off_t denymode_to_netatalk_brl(enum apple_fork fork_type,
  * Call fcntl() with an exclusive F_GETLK request in order to
  * determine if there's an exisiting shared lock
  *
- * @return true if the requested lock was found or any error occured
+ * @return true if the requested lock was found or any error occurred
  *         false if the lock was not found
  **/
 static bool test_netatalk_lock(files_struct *fsp, off_t in_offset)
@@ -2335,7 +2393,6 @@ static NTSTATUS fruit_check_access(vfs_handle_struct *handle,
 				   uint32_t deny_mode)
 {
 	NTSTATUS status = NT_STATUS_OK;
-	struct byte_range_lock *br_lck = NULL;
 	bool open_for_reading, open_for_writing, deny_read, deny_write;
 	off_t off;
 	bool have_read = false;
@@ -2393,6 +2450,8 @@ static NTSTATUS fruit_check_access(vfs_handle_struct *handle,
 
 		/* Set locks */
 		if ((access_mask & FILE_READ_DATA) && have_read) {
+			struct byte_range_lock *br_lck = NULL;
+
 			off = access_to_netatalk_brl(fork_type, FILE_READ_DATA);
 			br_lck = do_lock(
 				handle->conn->sconn->msg_ctx, fsp,
@@ -2400,13 +2459,16 @@ static NTSTATUS fruit_check_access(vfs_handle_struct *handle,
 				READ_LOCK, POSIX_LOCK, false,
 				&status, NULL);
 
+			TALLOC_FREE(br_lck);
+
 			if (!NT_STATUS_IS_OK(status))  {
 				return status;
 			}
-			TALLOC_FREE(br_lck);
 		}
 
 		if ((deny_mode & DENY_READ) && have_read) {
+			struct byte_range_lock *br_lck = NULL;
+
 			off = denymode_to_netatalk_brl(fork_type, DENY_READ);
 			br_lck = do_lock(
 				handle->conn->sconn->msg_ctx, fsp,
@@ -2414,10 +2476,11 @@ static NTSTATUS fruit_check_access(vfs_handle_struct *handle,
 				READ_LOCK, POSIX_LOCK, false,
 				&status, NULL);
 
+			TALLOC_FREE(br_lck);
+
 			if (!NT_STATUS_IS_OK(status)) {
 				return status;
 			}
-			TALLOC_FREE(br_lck);
 		}
 	}
 
@@ -2443,6 +2506,8 @@ static NTSTATUS fruit_check_access(vfs_handle_struct *handle,
 
 		/* Set locks */
 		if ((access_mask & FILE_WRITE_DATA) && have_read) {
+			struct byte_range_lock *br_lck = NULL;
+
 			off = access_to_netatalk_brl(fork_type, FILE_WRITE_DATA);
 			br_lck = do_lock(
 				handle->conn->sconn->msg_ctx, fsp,
@@ -2450,13 +2515,15 @@ static NTSTATUS fruit_check_access(vfs_handle_struct *handle,
 				READ_LOCK, POSIX_LOCK, false,
 				&status, NULL);
 
+			TALLOC_FREE(br_lck);
+
 			if (!NT_STATUS_IS_OK(status)) {
 				return status;
 			}
-			TALLOC_FREE(br_lck);
-
 		}
 		if ((deny_mode & DENY_WRITE) && have_read) {
+			struct byte_range_lock *br_lck = NULL;
+
 			off = denymode_to_netatalk_brl(fork_type, DENY_WRITE);
 			br_lck = do_lock(
 				handle->conn->sconn->msg_ctx, fsp,
@@ -2464,14 +2531,13 @@ static NTSTATUS fruit_check_access(vfs_handle_struct *handle,
 				READ_LOCK, POSIX_LOCK, false,
 				&status, NULL);
 
+			TALLOC_FREE(br_lck);
+
 			if (!NT_STATUS_IS_OK(status)) {
 				return status;
 			}
-			TALLOC_FREE(br_lck);
 		}
 	}
-
-	TALLOC_FREE(br_lck);
 
 	return status;
 }
@@ -2572,6 +2638,10 @@ static NTSTATUS check_aapl(vfs_handle_struct *handle,
 
 		default:
 			break;
+		}
+
+		if (config->time_machine) {
+			caps |= SMB2_CRTCTX_AAPL_FULL_SYNC;
 		}
 
 		SBVAL(p, 0, caps);
@@ -2702,7 +2772,7 @@ static bool readdir_attr_meta_finderi_netatalk(
 	struct adouble *ad = NULL;
 	char *p = NULL;
 
-	ad = ad_get(talloc_tos(), handle, smb_fname->base_name, ADOUBLE_META);
+	ad = ad_get(talloc_tos(), handle, smb_fname, ADOUBLE_META);
 	if (ad == NULL) {
 		return false;
 	}
@@ -2787,7 +2857,7 @@ static uint64_t readdir_attr_rfork_size_adouble(
 	struct adouble *ad = NULL;
 	uint64_t rfork_size;
 
-	ad = ad_get(talloc_tos(), handle, smb_fname->base_name,
+	ad = ad_get(talloc_tos(), handle, smb_fname,
 		    ADOUBLE_RSRC);
 	if (ad == NULL) {
 		return 0;
@@ -2899,10 +2969,54 @@ static NTSTATUS readdir_attr_macmeta(struct vfs_handle_struct *handle,
 	return status;
 }
 
+static NTSTATUS remove_virtual_nfs_aces(struct security_descriptor *psd)
+{
+	NTSTATUS status;
+	uint32_t i;
+
+	if (psd->dacl == NULL) {
+		return NT_STATUS_OK;
+	}
+
+	for (i = 0; i < psd->dacl->num_aces; i++) {
+		/* MS NFS style mode/uid/gid */
+		int cmp = dom_sid_compare_domain(
+				&global_sid_Unix_NFS,
+				&psd->dacl->aces[i].trustee);
+		if (cmp != 0) {
+			/* Normal ACE entry. */
+			continue;
+		}
+
+		/*
+		 * security_descriptor_dacl_del()
+		 * *must* return NT_STATUS_OK as we know
+		 * we have something to remove.
+		 */
+
+		status = security_descriptor_dacl_del(psd,
+				&psd->dacl->aces[i].trustee);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_WARNING("failed to remove MS NFS style ACE: %s\n",
+				nt_errstr(status));
+			return status;
+		}
+
+		/*
+		 * security_descriptor_dacl_del() may delete more
+		 * then one entry subsequent to this one if the
+		 * SID matches, but we only need to ensure that
+		 * we stay looking at the same element in the array.
+		 */
+		i--;
+	}
+	return NT_STATUS_OK;
+}
+
 /* Search MS NFS style ACE with UNIX mode */
 static NTSTATUS check_ms_nfs(vfs_handle_struct *handle,
 			     files_struct *fsp,
-			     const struct security_descriptor *psd,
+			     struct security_descriptor *psd,
 			     mode_t *pmode,
 			     bool *pdo_chmod)
 {
@@ -2936,7 +3050,12 @@ static NTSTATUS check_ms_nfs(vfs_handle_struct *handle,
 		}
 	}
 
-	return NT_STATUS_OK;
+	/*
+	 * Remove any incoming virtual ACE entries generated by
+	 * fruit_fget_nt_acl().
+	 */
+
+	return remove_virtual_nfs_aces(psd);
 }
 
 /****************************************************************************
@@ -2992,6 +3111,19 @@ static int fruit_connect(vfs_handle_struct *handle,
 		lp_do_parameter(SNUM(handle->conn),
 				"catia:mappings",
 				fruit_catia_maps);
+	}
+
+	if (config->time_machine) {
+		DBG_NOTICE("Enabling durable handles for Time Machine "
+			   "support on [%s]\n", service);
+		lp_do_parameter(SNUM(handle->conn), "durable handles", "yes");
+		lp_do_parameter(SNUM(handle->conn), "kernel oplocks", "no");
+		lp_do_parameter(SNUM(handle->conn), "kernel share modes", "no");
+		if (!lp_strict_sync(SNUM(handle->conn))) {
+			DBG_WARNING("Time Machine without strict sync is not "
+				    "recommended!\n");
+		}
+		lp_do_parameter(SNUM(handle->conn), "posix locking", "no");
 	}
 
 	return rc;
@@ -3095,7 +3227,7 @@ static int fruit_open_meta_netatalk(vfs_handle_struct *handle,
 			goto exit;
 		}
 
-		rc = ad_set(ad, fsp->fsp_name->base_name);
+		rc = ad_set(ad, fsp->fsp_name);
 		if (rc != 0) {
 			rc = -1;
 			goto exit;
@@ -3152,7 +3284,7 @@ static int fruit_open_meta(vfs_handle_struct *handle,
 		return -1;
 	}
 
-	fio = (struct fio *)VFS_ADD_FSP_EXTENSION(handle, fsp, struct fio, NULL);
+	fio = VFS_ADD_FSP_EXTENSION(handle, fsp, struct fio, NULL);
 	fio->type = ADOUBLE_META;
 	fio->config = config;
 
@@ -3169,7 +3301,6 @@ static int fruit_open_rsrc_adouble(vfs_handle_struct *handle,
 	struct adouble *ad = NULL;
 	struct smb_filename *smb_fname_base = NULL;
 	struct fruit_config_data *config = NULL;
-	char *adpath = NULL;
 	int hostfd = -1;
 
 	SMB_VFS_HANDLE_GET_DATA(handle, config,
@@ -3183,20 +3314,8 @@ static int fruit_open_rsrc_adouble(vfs_handle_struct *handle,
 		goto exit;
 	}
 
-	rc = adouble_path(talloc_tos(), smb_fname->base_name, &adpath);
+	rc = adouble_path(talloc_tos(), smb_fname, &smb_fname_base);
 	if (rc != 0) {
-		goto exit;
-	}
-
-	/* Create an smb_filename with stream_name == NULL. */
-	smb_fname_base = synthetic_smb_fname(talloc_tos(),
-					adpath,
-					NULL,
-					NULL,
-					smb_fname->flags);
-	if (smb_fname_base == NULL) {
-		errno = ENOMEM;
-		rc = -1;
 		goto exit;
 	}
 
@@ -3234,7 +3353,6 @@ static int fruit_open_rsrc_adouble(vfs_handle_struct *handle,
 
 exit:
 
-	TALLOC_FREE(adpath);
 	TALLOC_FREE(smb_fname_base);
 
 	DEBUG(10, ("fruit_open resource fork: rc=%d, fd=%d\n", rc, hostfd));
@@ -3333,7 +3451,7 @@ static int fruit_open_rsrc(vfs_handle_struct *handle,
 		return -1;
 	}
 
-	fio = (struct fio *)VFS_ADD_FSP_EXTENSION(handle, fsp, struct fio, NULL);
+	fio = VFS_ADD_FSP_EXTENSION(handle, fsp, struct fio, NULL);
 	fio->type = ADOUBLE_RSRC;
 	fio->config = config;
 
@@ -3370,8 +3488,6 @@ static int fruit_rename(struct vfs_handle_struct *handle,
 			const struct smb_filename *smb_fname_dst)
 {
 	int rc = -1;
-	char *src_adouble_path = NULL;
-	char *dst_adouble_path = NULL;
 	struct fruit_config_data *config = NULL;
 	struct smb_filename *src_adp_smb_fname = NULL;
 	struct smb_filename *dst_adp_smb_fname = NULL;
@@ -3396,23 +3512,12 @@ static int fruit_rename(struct vfs_handle_struct *handle,
 		return 0;
 	}
 
-	rc = adouble_path(talloc_tos(), smb_fname_src->base_name,
-			  &src_adouble_path);
+	rc = adouble_path(talloc_tos(), smb_fname_src, &src_adp_smb_fname);
 	if (rc != 0) {
 		goto done;
 	}
-	src_adp_smb_fname = synthetic_smb_fname(talloc_tos(),
-						src_adouble_path,
-						NULL, NULL,
-						smb_fname_src->flags);
-	TALLOC_FREE(src_adouble_path);
-	if (src_adp_smb_fname == NULL) {
-		rc = -1;
-		goto done;
-	}
 
-	rc = adouble_path(talloc_tos(), smb_fname_dst->base_name,
-			  &dst_adouble_path);
+	rc = adouble_path(talloc_tos(), smb_fname_dst, &dst_adp_smb_fname);
 	if (rc != 0) {
 		goto done;
 	}
@@ -3451,7 +3556,7 @@ static int fruit_unlink_meta_netatalk(vfs_handle_struct *handle,
 				      const struct smb_filename *smb_fname)
 {
 	return SMB_VFS_REMOVEXATTR(handle->conn,
-				   smb_fname->base_name,
+				   smb_fname,
 				   AFPINFO_EA_NETATALK);
 }
 
@@ -3532,12 +3637,11 @@ static int fruit_unlink_rsrc_adouble(vfs_handle_struct *handle,
 				     bool force_unlink)
 {
 	int rc;
-	char *adp = NULL;
 	struct adouble *ad = NULL;
 	struct smb_filename *adp_smb_fname = NULL;
 
 	if (!force_unlink) {
-		ad = ad_get(talloc_tos(), handle, smb_fname->base_name,
+		ad = ad_get(talloc_tos(), handle, smb_fname,
 			    ADOUBLE_RSRC);
 		if (ad == NULL) {
 			errno = ENOENT;
@@ -3560,16 +3664,8 @@ static int fruit_unlink_rsrc_adouble(vfs_handle_struct *handle,
 		TALLOC_FREE(ad);
 	}
 
-	rc = adouble_path(talloc_tos(), smb_fname->base_name, &adp);
+	rc = adouble_path(talloc_tos(), smb_fname, &adp_smb_fname);
 	if (rc != 0) {
-		return -1;
-	}
-
-	adp_smb_fname = synthetic_smb_fname(talloc_tos(), adp,
-					    NULL, NULL,
-					    smb_fname->flags);
-	TALLOC_FREE(adp);
-	if (adp_smb_fname == NULL) {
 		return -1;
 	}
 
@@ -3676,18 +3772,17 @@ static int fruit_chmod(vfs_handle_struct *handle,
 		       mode_t mode)
 {
 	int rc = -1;
-	char *adp = NULL;
 	struct fruit_config_data *config = NULL;
-	const char *path = smb_fname->base_name;
 	struct smb_filename *smb_fname_adp = NULL;
 
-	rc = SMB_VFS_NEXT_CHMOD(handle, smb_fname, mode);
-	if (rc != 0) {
-		return rc;
-	}
+	if (!force_unlink) {
+		ad = ad_get(talloc_tos(), handle, smb_fname->base_name,
+			    ADOUBLE_RSRC);
+		if (ad == NULL) {
+			errno = ENOENT;
+			return -1;
+		}
 
-	SMB_VFS_HANDLE_GET_DATA(handle, config,
-				struct fruit_config_data, return -1);
 
 	if (config->rsrc != FRUIT_RSRC_ADFILE) {
 		return 0;
@@ -3701,23 +3796,12 @@ static int fruit_chmod(vfs_handle_struct *handle,
 		return 0;
 	}
 
-	rc = adouble_path(talloc_tos(), path, &adp);
+	rc = adouble_path(talloc_tos(), smb_fname, &smb_fname_adp);
 	if (rc != 0) {
 		return -1;
 	}
 
-	DEBUG(10, ("fruit_chmod: %s\n", adp));
-
-	smb_fname_adp = synthetic_smb_fname(talloc_tos(),
-					adp,
-					NULL,
-					NULL,
-					smb_fname->flags);
-	if (smb_fname_adp == NULL) {
-		TALLOC_FREE(adp);
-		errno = ENOMEM;
-		return -1;
-	}
+	DEBUG(10, ("fruit_chmod: %s\n", smb_fname_adp->base_name));
 
 	rc = SMB_VFS_NEXT_CHMOD(handle, smb_fname_adp, mode);
 	if (errno == ENOENT) {
@@ -3725,7 +3809,6 @@ static int fruit_chmod(vfs_handle_struct *handle,
 	}
 
 	TALLOC_FREE(smb_fname_adp);
-	TALLOC_FREE(adp);
 	return rc;
 }
 
@@ -3735,7 +3818,6 @@ static int fruit_chown(vfs_handle_struct *handle,
 		       gid_t gid)
 {
 	int rc = -1;
-	char *adp = NULL;
 	struct fruit_config_data *config = NULL;
 	struct smb_filename *adp_smb_fname = NULL;
 
@@ -3759,23 +3841,12 @@ static int fruit_chown(vfs_handle_struct *handle,
 		return 0;
 	}
 
-	rc = adouble_path(talloc_tos(), smb_fname->base_name, &adp);
+	rc = adouble_path(talloc_tos(), smb_fname, &adp_smb_fname);
 	if (rc != 0) {
 		goto done;
 	}
 
-	DEBUG(10, ("fruit_chown: %s\n", adp));
-
-	adp_smb_fname = synthetic_smb_fname(talloc_tos(),
-					adp,
-					NULL,
-					NULL,
-					smb_fname->flags);
-	if (adp_smb_fname == NULL) {
-		errno = ENOMEM;
-		rc = -1;
-		goto done;
-	}
+	DEBUG(10, ("fruit_chown: %s\n", adp_smb_fname->base_name));
 
 	rc = SMB_VFS_NEXT_CHOWN(handle, adp_smb_fname, uid, gid);
 	if (errno == ENOENT) {
@@ -3783,7 +3854,6 @@ static int fruit_chown(vfs_handle_struct *handle,
 	}
 
  done:
-	TALLOC_FREE(adp);
 	TALLOC_FREE(adp_smb_fname);
 	return rc;
 }
@@ -3833,17 +3903,6 @@ static int fruit_rmdir(struct vfs_handle_struct *handle,
 			return -1;
 		}
 
-		/*
-		 * Check whether it's a valid AppleDouble file, if
-		 * yes, delete it, ignore it otherwise.
-		 */
-		ad = ad_get(talloc_tos(), handle, p, ADOUBLE_RSRC);
-		if (ad == NULL) {
-			TALLOC_FREE(p);
-			continue;
-		}
-		TALLOC_FREE(ad);
-
 		ad_smb_fname = synthetic_smb_fname(talloc_tos(), p,
 						    NULL, NULL,
 						    smb_fname->flags);
@@ -3853,12 +3912,24 @@ static int fruit_rmdir(struct vfs_handle_struct *handle,
 			return -1;
 		}
 
+		/*
+		 * Check whether it's a valid AppleDouble file, if
+		 * yes, delete it, ignore it otherwise.
+		 */
+		ad = ad_get(talloc_tos(), handle, ad_smb_fname, ADOUBLE_RSRC);
+		if (ad == NULL) {
+			TALLOC_FREE(ad_smb_fname);
+			TALLOC_FREE(p);
+			continue;
+		}
+		TALLOC_FREE(ad);
+
 		ret = SMB_VFS_NEXT_UNLINK(handle, ad_smb_fname);
-		TALLOC_FREE(ad_smb_fname);
 		if (ret != 0) {
 			DBG_ERR("Deleting [%s] failed\n",
 				smb_fname_str_dbg(ad_smb_fname));
 		}
+		TALLOC_FREE(ad_smb_fname);
 	}
 
 exit_rmdir:
@@ -3956,6 +4027,11 @@ static ssize_t fruit_pread_meta(vfs_handle_struct *handle,
 		return 0;
 	}
 
+	if (fio == NULL) {
+		DBG_ERR("Failed to fetch fsp extension");
+		return -1;
+	}
+
 	/* Yes, macOS always reads from offset 0 */
 	offset = 0;
 	to_return = MIN(n, AFP_INFO_SIZE);
@@ -4019,6 +4095,11 @@ static ssize_t fruit_pread_rsrc(vfs_handle_struct *handle,
 	struct fio *fio = (struct fio *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
 	ssize_t nread;
 
+	if (fio == NULL) {
+		errno = EINVAL;
+		return -1;
+	}
+
 	switch (fio->config->rsrc) {
 	case FRUIT_RSRC_STREAM:
 		nread = fruit_pread_rsrc_stream(handle, fsp, data, n, offset);
@@ -4047,8 +4128,8 @@ static ssize_t fruit_pread(vfs_handle_struct *handle,
 	struct fio *fio = (struct fio *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
 	ssize_t nread;
 
-	DBG_DEBUG("Path [%s] offset=%zd, size=%zd\n",
-		  fsp_str_dbg(fsp), offset, n);
+	DBG_DEBUG("Path [%s] offset=%"PRIdMAX", size=%zd\n",
+		  fsp_str_dbg(fsp), (intmax_t)offset, n);
 
 	if (fio == NULL) {
 		return SMB_VFS_NEXT_PREAD(handle, fsp, data, n, offset);
@@ -4062,6 +4143,105 @@ static ssize_t fruit_pread(vfs_handle_struct *handle,
 
 	DBG_DEBUG("Path [%s] nread [%zd]\n", fsp_str_dbg(fsp), nread);
 	return nread;
+}
+
+static bool fruit_must_handle_aio_stream(struct fio *fio)
+{
+	if (fio == NULL) {
+		return false;
+	};
+
+	if ((fio->type == ADOUBLE_META) &&
+	    (fio->config->meta == FRUIT_META_NETATALK))
+	{
+		return true;
+	}
+
+	if ((fio->type == ADOUBLE_RSRC) &&
+	    (fio->config->rsrc == FRUIT_RSRC_ADFILE))
+	{
+		return true;
+	}
+
+	return false;
+}
+
+struct fruit_pread_state {
+	ssize_t nread;
+	struct vfs_aio_state vfs_aio_state;
+};
+
+static void fruit_pread_done(struct tevent_req *subreq);
+
+static struct tevent_req *fruit_pread_send(
+	struct vfs_handle_struct *handle,
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct files_struct *fsp,
+	void *data,
+	size_t n, off_t offset)
+{
+	struct tevent_req *req = NULL;
+	struct tevent_req *subreq = NULL;
+	struct fruit_pread_state *state = NULL;
+	struct fio *fio = (struct fio *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
+
+	req = tevent_req_create(mem_ctx, &state,
+				struct fruit_pread_state);
+	if (req == NULL) {
+		return NULL;
+	}
+
+	if (fruit_must_handle_aio_stream(fio)) {
+		state->nread = SMB_VFS_PREAD(fsp, data, n, offset);
+		if (state->nread != n) {
+			if (state->nread != -1) {
+				errno = EIO;
+			}
+			tevent_req_error(req, errno);
+			return tevent_req_post(req, ev);
+		}
+		tevent_req_done(req);
+		return tevent_req_post(req, ev);
+	}
+
+	subreq = SMB_VFS_NEXT_PREAD_SEND(state, ev, handle, fsp,
+					 data, n, offset);
+	if (tevent_req_nomem(req, subreq)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, fruit_pread_done, req);
+	return req;
+}
+
+static void fruit_pread_done(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+	struct fruit_pread_state *state = tevent_req_data(
+		req, struct fruit_pread_state);
+
+	state->nread = SMB_VFS_PREAD_RECV(subreq, &state->vfs_aio_state);
+	TALLOC_FREE(subreq);
+
+	if (tevent_req_error(req, state->vfs_aio_state.error)) {
+		return;
+	}
+	tevent_req_done(req);
+}
+
+static ssize_t fruit_pread_recv(struct tevent_req *req,
+					struct vfs_aio_state *vfs_aio_state)
+{
+	struct fruit_pread_state *state = tevent_req_data(
+		req, struct fruit_pread_state);
+
+	if (tevent_req_is_unix_error(req, &vfs_aio_state->error)) {
+		return -1;
+	}
+
+	*vfs_aio_state = state->vfs_aio_state;
+	return state->nread;
 }
 
 static ssize_t fruit_pwrite_meta_stream(vfs_handle_struct *handle,
@@ -4178,6 +4358,11 @@ static ssize_t fruit_pwrite_meta(vfs_handle_struct *handle,
 		return -1;
 	}
 
+	if (fio == NULL) {
+		DBG_ERR("Failed to fetch fsp extension");
+		return -1;
+	}
+
 	switch (fio->config->meta) {
 	case FRUIT_META_STREAM:
 		nwritten = fruit_pwrite_meta_stream(handle, fsp, data,
@@ -4255,6 +4440,11 @@ static ssize_t fruit_pwrite_rsrc(vfs_handle_struct *handle,
 	struct fio *fio = (struct fio *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
 	ssize_t nwritten;
 
+	if (fio == NULL) {
+		DBG_ERR("Failed to fetch fsp extension");
+		return -1;
+	}
+
 	switch (fio->config->rsrc) {
 	case FRUIT_RSRC_STREAM:
 		nwritten = fruit_pwrite_rsrc_stream(handle, fsp, data, n, offset);
@@ -4283,8 +4473,8 @@ static ssize_t fruit_pwrite(vfs_handle_struct *handle,
 	struct fio *fio = (struct fio *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
 	ssize_t nwritten;
 
-	DBG_DEBUG("Path [%s] offset=%zd, size=%zd\n",
-		  fsp_str_dbg(fsp), offset, n);
+	DBG_DEBUG("Path [%s] offset=%"PRIdMAX", size=%zd\n",
+		  fsp_str_dbg(fsp), (intmax_t)offset, n);
 
 	if (fio == NULL) {
 		return SMB_VFS_NEXT_PWRITE(handle, fsp, data, n, offset);
@@ -4298,6 +4488,84 @@ static ssize_t fruit_pwrite(vfs_handle_struct *handle,
 
 	DBG_DEBUG("Path [%s] nwritten=%zd\n", fsp_str_dbg(fsp), nwritten);
 	return nwritten;
+}
+
+struct fruit_pwrite_state {
+	ssize_t nwritten;
+	struct vfs_aio_state vfs_aio_state;
+};
+
+static void fruit_pwrite_done(struct tevent_req *subreq);
+
+static struct tevent_req *fruit_pwrite_send(
+	struct vfs_handle_struct *handle,
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct files_struct *fsp,
+	const void *data,
+	size_t n, off_t offset)
+{
+	struct tevent_req *req = NULL;
+	struct tevent_req *subreq = NULL;
+	struct fruit_pwrite_state *state = NULL;
+	struct fio *fio = (struct fio *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
+
+	req = tevent_req_create(mem_ctx, &state,
+				struct fruit_pwrite_state);
+	if (req == NULL) {
+		return NULL;
+	}
+
+	if (fruit_must_handle_aio_stream(fio)) {
+		state->nwritten = SMB_VFS_PWRITE(fsp, data, n, offset);
+		if (state->nwritten != n) {
+			if (state->nwritten != -1) {
+				errno = EIO;
+			}
+			tevent_req_error(req, errno);
+			return tevent_req_post(req, ev);
+		}
+		tevent_req_done(req);
+		return tevent_req_post(req, ev);
+	}
+
+	subreq = SMB_VFS_NEXT_PWRITE_SEND(state, ev, handle, fsp,
+					  data, n, offset);
+	if (tevent_req_nomem(req, subreq)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, fruit_pwrite_done, req);
+	return req;
+}
+
+static void fruit_pwrite_done(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+	struct fruit_pwrite_state *state = tevent_req_data(
+		req, struct fruit_pwrite_state);
+
+	state->nwritten = SMB_VFS_PWRITE_RECV(subreq, &state->vfs_aio_state);
+	TALLOC_FREE(subreq);
+
+	if (tevent_req_error(req, state->vfs_aio_state.error)) {
+		return;
+	}
+	tevent_req_done(req);
+}
+
+static ssize_t fruit_pwrite_recv(struct tevent_req *req,
+					 struct vfs_aio_state *vfs_aio_state)
+{
+	struct fruit_pwrite_state *state = tevent_req_data(
+		req, struct fruit_pwrite_state);
+
+	if (tevent_req_is_unix_error(req, &vfs_aio_state->error)) {
+		return -1;
+	}
+
+	*vfs_aio_state = state->vfs_aio_state;
+	return state->nwritten;
 }
 
 /**
@@ -4342,7 +4610,7 @@ static int fruit_stat_meta_netatalk(vfs_handle_struct *handle,
 {
 	struct adouble *ad = NULL;
 
-	ad = ad_get(talloc_tos(), handle, smb_fname->base_name, ADOUBLE_META);
+	ad = ad_get(talloc_tos(), handle, smb_fname, ADOUBLE_META);
 	if (ad == NULL) {
 		DBG_INFO("fruit_stat_meta %s: %s\n",
 			 smb_fname_str_dbg(smb_fname), strerror(errno));
@@ -4395,7 +4663,7 @@ static int fruit_stat_rsrc_netatalk(vfs_handle_struct *handle,
 	struct adouble *ad = NULL;
 	int ret;
 
-	ad = ad_get(talloc_tos(), handle, smb_fname->base_name, ADOUBLE_RSRC);
+	ad = ad_get(talloc_tos(), handle, smb_fname, ADOUBLE_RSRC);
 	if (ad == NULL) {
 		errno = ENOENT;
 		return -1;
@@ -4413,6 +4681,96 @@ static int fruit_stat_rsrc_netatalk(vfs_handle_struct *handle,
 					      smb_fname->stream_name);
 	TALLOC_FREE(ad);
 	return 0;
+}
+
+static int fruit_stat_rsrc_stream(vfs_handle_struct *handle,
+				  struct smb_filename *smb_fname,
+				  bool follow_links)
+{
+	int ret;
+
+	if (follow_links) {
+		ret = SMB_VFS_NEXT_STAT(handle, smb_fname);
+	} else {
+		ret = SMB_VFS_NEXT_LSTAT(handle, smb_fname);
+	}
+
+	return ret;
+}
+
+static int fruit_stat_rsrc_xattr(vfs_handle_struct *handle,
+				 struct smb_filename *smb_fname,
+				 bool follow_links)
+{
+#ifdef HAVE_ATTROPEN
+	int ret;
+	int fd = -1;
+
+	/* Populate the stat struct with info from the base file. */
+	ret = fruit_stat_base(handle, smb_fname, follow_links);
+	if (ret != 0) {
+		return -1;
+	}
+
+	fd = attropen(smb_fname->base_name,
+		      AFPRESOURCE_EA_NETATALK,
+		      O_RDONLY);
+	if (fd == -1) {
+		return 0;
+	}
+
+	ret = sys_fstat(fd, &smb_fname->st, false);
+	if (ret != 0) {
+		close(fd);
+		DBG_ERR("fstat [%s:%s] failed\n", smb_fname->base_name,
+			AFPRESOURCE_EA_NETATALK);
+		return -1;
+	}
+	close(fd);
+	fd = -1;
+
+	smb_fname->st.st_ex_ino = fruit_inode(&smb_fname->st,
+					      smb_fname->stream_name);
+
+	return ret;
+
+#else
+	errno = ENOSYS;
+	return -1;
+#endif
+}
+
+static int fruit_stat_meta(vfs_handle_struct *handle,
+			   struct smb_filename *smb_fname,
+			   bool follow_links)
+{
+	struct fruit_config_data *config = NULL;
+	int ret;
+
+	DBG_DEBUG("Path [%s]\n", smb_fname_str_dbg(smb_fname));
+
+	SMB_VFS_HANDLE_GET_DATA(handle, config,
+				struct fruit_config_data, return -1);
+
+	switch (config->rsrc) {
+	case FRUIT_RSRC_STREAM:
+		ret = fruit_stat_rsrc_stream(handle, smb_fname, follow_links);
+		break;
+
+	case FRUIT_RSRC_XATTR:
+		ret = fruit_stat_rsrc_xattr(handle, smb_fname, follow_links);
+		break;
+
+	case FRUIT_RSRC_ADFILE:
+		ret = fruit_stat_rsrc_netatalk(handle, smb_fname, follow_links);
+		break;
+
+	default:
+		DBG_ERR("Unexpected rsrc config [%d]\n", config->rsrc);
+		return -1;
+	}
+
+	return ret;
 }
 
 static int fruit_stat_rsrc_stream(vfs_handle_struct *handle,
@@ -4662,7 +5020,7 @@ static int fruit_fstat_rsrc_adouble(vfs_handle_struct *handle,
 	}
 
 	ad = ad_get(talloc_tos(), handle,
-		    fsp->base_fsp->fsp_name->base_name,
+		    fsp->base_fsp->fsp_name,
 		    ADOUBLE_RSRC);
 	if (ad == NULL) {
 		DBG_ERR("ad_get [%s] failed [%s]\n",
@@ -4728,8 +5086,8 @@ static int fruit_fstat(vfs_handle_struct *handle, files_struct *fsp,
 		sbuf->st_ex_blocks = sbuf->st_ex_size / STAT_ST_BLOCKSIZE + 1;
 	}
 
-	DBG_DEBUG("Path [%s] rc [%d] size [%zd]\n",
-		  fsp_str_dbg(fsp), rc, sbuf->st_ex_size);
+	DBG_DEBUG("Path [%s] rc [%d] size [%"PRIdMAX"]\n",
+		  fsp_str_dbg(fsp), rc, (intmax_t)sbuf->st_ex_size);
 	return rc;
 }
 
@@ -4913,8 +5271,7 @@ static NTSTATUS fruit_streaminfo_meta_netatalk(
 		}
 	}
 
-	ad = ad_get(talloc_tos(), handle,
-		    smb_fname->base_name, ADOUBLE_META);
+	ad = ad_get(talloc_tos(), handle, smb_fname, ADOUBLE_META);
 	if (ad == NULL) {
 		return NT_STATUS_OK;
 	}
@@ -5041,8 +5398,7 @@ static NTSTATUS fruit_streaminfo_rsrc_adouble(
 		}
 	}
 
-	ad = ad_get(talloc_tos(), handle, smb_fname->base_name,
-		    ADOUBLE_RSRC);
+	ad = ad_get(talloc_tos(), handle, smb_fname, ADOUBLE_RSRC);
 	if (ad == NULL) {
 		return NT_STATUS_OK;
 	}
@@ -5159,7 +5515,7 @@ static int fruit_ntimes(vfs_handle_struct *handle,
 	DEBUG(10,("set btime for %s to %s\n", smb_fname_str_dbg(smb_fname),
 		 time_to_asc(convert_timespec_to_time_t(ft->create_time))));
 
-	ad = ad_get(talloc_tos(), handle, smb_fname->base_name, ADOUBLE_META);
+	ad = ad_get(talloc_tos(), handle, smb_fname, ADOUBLE_META);
 	if (ad == NULL) {
 		goto exit;
 	}
@@ -5167,7 +5523,7 @@ static int fruit_ntimes(vfs_handle_struct *handle,
 	ad_setdate(ad, AD_DATE_CREATE | AD_DATE_UNIX,
 		   convert_time_t_to_uint32_t(ft->create_time.tv_sec));
 
-	rc = ad_set(ad, smb_fname->base_name);
+	rc = ad_set(ad, smb_fname);
 
 exit:
 
@@ -5265,6 +5621,11 @@ static int fruit_ftruncate_rsrc(struct vfs_handle_struct *handle,
 	struct fio *fio = (struct fio *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
 	int ret;
 
+	if (fio == NULL) {
+		DBG_ERR("Failed to fetch fsp extension");
+		return -1;
+	}
+
 	switch (fio->config->rsrc) {
 	case FRUIT_RSRC_XATTR:
 		ret = fruit_ftruncate_rsrc_xattr(handle, fsp, offset);
@@ -5312,9 +5673,17 @@ static int fruit_ftruncate(struct vfs_handle_struct *handle,
 	struct fio *fio = (struct fio *)VFS_FETCH_FSP_EXTENSION(handle, fsp);
 	int ret;
 
-	DBG_DEBUG("Path [%s] offset [%zd]\n", fsp_str_dbg(fsp), offset);
+	DBG_DEBUG("Path [%s] offset [%"PRIdMAX"]\n", fsp_str_dbg(fsp),
+		  (intmax_t)offset);
 
 	if (fio == NULL) {
+		if (offset == 0 &&
+		    global_fruit_config.nego_aapl &&
+		    is_ntfs_stream_smb_fname(fsp->fsp_name) &&
+		    !is_ntfs_default_stream_smb_fname(fsp->fsp_name))
+		{
+			return SMB_VFS_NEXT_UNLINK(handle, fsp->fsp_name);
+		}
 		return SMB_VFS_NEXT_FTRUNCATE(handle, fsp, offset);
 	}
 
@@ -5376,17 +5745,6 @@ static NTSTATUS fruit_create_file(vfs_handle_struct *handle,
 	fsp = *result;
 
 	if (global_fruit_config.nego_aapl) {
-		if (config->copyfile_enabled) {
-			/*
-			 * Set a flag in the fsp. Gets used in
-			 * copychunk to check whether the special
-			 * Apple copyfile semantics for copychunk
-			 * should be allowed in a copychunk request
-			 * with a count of 0.
-			 */
-			fsp->aapl_copyfile_supported = true;
-		}
-
 		if (config->posix_rename && fsp->is_directory) {
 			/*
 			 * Enable POSIX directory rename behaviour
@@ -5546,6 +5904,13 @@ static NTSTATUS fruit_fget_nt_acl(vfs_handle_struct *handle,
 		return NT_STATUS_OK;
 	}
 
+	/* First remove any existing ACE's with NFS style mode/uid/gid SIDs. */
+	status = remove_virtual_nfs_aces(*ppdesc);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("failed to remove MS NFS style ACEs\n");
+		return status;
+	}
+
 	/* MS NFS style mode */
 	sid_compose(&sid, &global_sid_Unix_NFS_Mode, fsp->fsp_name->st.st_ex_mode);
 	init_sec_ace(&ace, &sid, SEC_ACE_TYPE_ACCESS_DENIED, 0, 0);
@@ -5579,24 +5944,53 @@ static NTSTATUS fruit_fget_nt_acl(vfs_handle_struct *handle,
 static NTSTATUS fruit_fset_nt_acl(vfs_handle_struct *handle,
 				  files_struct *fsp,
 				  uint32_t security_info_sent,
-				  const struct security_descriptor *psd)
+				  const struct security_descriptor *orig_psd)
 {
 	NTSTATUS status;
 	bool do_chmod;
 	mode_t ms_nfs_mode = 0;
 	int result;
+	struct security_descriptor *psd = NULL;
+	uint32_t orig_num_aces = 0;
+
+	if (orig_psd->dacl != NULL) {
+		orig_num_aces = orig_psd->dacl->num_aces;
+	}
+
+	psd = security_descriptor_copy(talloc_tos(), orig_psd);
+	if (psd == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
 
 	DBG_DEBUG("fruit_fset_nt_acl: %s\n", fsp_str_dbg(fsp));
 
 	status = check_ms_nfs(handle, fsp, psd, &ms_nfs_mode, &do_chmod);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(1, ("fruit_fset_nt_acl: check_ms_nfs failed%s\n", fsp_str_dbg(fsp)));
+		TALLOC_FREE(psd);
 		return status;
+	}
+
+	/*
+	 * If only ms_nfs ACE entries were sent, ensure we set the DACL
+	 * sent/present flags correctly now we've removed them.
+	 */
+
+	if (orig_num_aces != 0) {
+		/*
+		 * Are there any ACE's left ?
+		 */
+		if (psd->dacl->num_aces == 0) {
+			/* No - clear the DACL sent/present flags. */
+			security_info_sent &= ~SECINFO_DACL;
+			psd->type &= ~SEC_DESC_DACL_PRESENT;
+		}
 	}
 
 	status = SMB_VFS_NEXT_FSET_NT_ACL(handle, fsp, security_info_sent, psd);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(1, ("fruit_fset_nt_acl: SMB_VFS_NEXT_FSET_NT_ACL failed%s\n", fsp_str_dbg(fsp)));
+		TALLOC_FREE(psd);
 		return status;
 	}
 
@@ -5614,14 +6008,123 @@ static NTSTATUS fruit_fset_nt_acl(vfs_handle_struct *handle,
 				  result, (unsigned)ms_nfs_mode,
 				  strerror(errno)));
 			status = map_nt_error_from_unix(errno);
+			TALLOC_FREE(psd);
 			return status;
 		}
 	}
 
+	TALLOC_FREE(psd);
 	return NT_STATUS_OK;
 }
 
-struct fruit_copy_chunk_state {
+static struct vfs_offload_ctx *fruit_offload_ctx;
+
+struct fruit_offload_read_state {
+	struct vfs_handle_struct *handle;
+	struct tevent_context *ev;
+	files_struct *fsp;
+	uint32_t fsctl;
+	DATA_BLOB token;
+};
+
+static void fruit_offload_read_done(struct tevent_req *subreq);
+
+static struct tevent_req *fruit_offload_read_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct vfs_handle_struct *handle,
+	files_struct *fsp,
+	uint32_t fsctl,
+	uint32_t ttl,
+	off_t offset,
+	size_t to_copy)
+{
+	struct tevent_req *req = NULL;
+	struct tevent_req *subreq = NULL;
+	struct fruit_offload_read_state *state = NULL;
+
+	req = tevent_req_create(mem_ctx, &state,
+				struct fruit_offload_read_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	*state = (struct fruit_offload_read_state) {
+		.handle = handle,
+		.ev = ev,
+		.fsp = fsp,
+		.fsctl = fsctl,
+	};
+
+	subreq = SMB_VFS_NEXT_OFFLOAD_READ_SEND(mem_ctx, ev, handle, fsp,
+						fsctl, ttl, offset, to_copy);
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, fruit_offload_read_done, req);
+	return req;
+}
+
+static void fruit_offload_read_done(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+	struct fruit_offload_read_state *state = tevent_req_data(
+		req, struct fruit_offload_read_state);
+	NTSTATUS status;
+
+	status = SMB_VFS_NEXT_OFFLOAD_READ_RECV(subreq,
+						state->handle,
+						state,
+						&state->token);
+	TALLOC_FREE(subreq);
+	if (tevent_req_nterror(req, status)) {
+		return;
+	}
+
+	if (state->fsctl != FSCTL_SRV_REQUEST_RESUME_KEY) {
+		tevent_req_done(req);
+		return;
+	}
+
+	status = vfs_offload_token_ctx_init(state->fsp->conn->sconn->client,
+					    &fruit_offload_ctx);
+	if (tevent_req_nterror(req, status)) {
+		return;
+	}
+
+	status = vfs_offload_token_db_store_fsp(fruit_offload_ctx,
+						state->fsp,
+						&state->token);
+	if (tevent_req_nterror(req, status)) {
+		return;
+	}
+
+	tevent_req_done(req);
+	return;
+}
+
+static NTSTATUS fruit_offload_read_recv(struct tevent_req *req,
+					struct vfs_handle_struct *handle,
+					TALLOC_CTX *mem_ctx,
+					DATA_BLOB *token)
+{
+	struct fruit_offload_read_state *state = tevent_req_data(
+		req, struct fruit_offload_read_state);
+	NTSTATUS status;
+
+	if (tevent_req_is_nterror(req, &status)) {
+		tevent_req_received(req);
+		return status;
+	}
+
+	token->length = state->token.length;
+	token->data = talloc_move(mem_ctx, &state->token.data);
+
+	tevent_req_received(req);
+	return NT_STATUS_OK;
+}
+
+struct fruit_offload_write_state {
 	struct vfs_handle_struct *handle;
 	off_t copied;
 	struct files_struct *src_fsp;
@@ -5629,21 +6132,25 @@ struct fruit_copy_chunk_state {
 	bool is_copyfile;
 };
 
-static void fruit_copy_chunk_done(struct tevent_req *subreq);
-static struct tevent_req *fruit_copy_chunk_send(struct vfs_handle_struct *handle,
+static void fruit_offload_write_done(struct tevent_req *subreq);
+static struct tevent_req *fruit_offload_write_send(struct vfs_handle_struct *handle,
 						TALLOC_CTX *mem_ctx,
 						struct tevent_context *ev,
-						struct files_struct *src_fsp,
-						off_t src_off,
+						uint32_t fsctl,
+						DATA_BLOB *token,
+						off_t transfer_offset,
 						struct files_struct *dest_fsp,
 						off_t dest_off,
 						off_t num)
 {
 	struct tevent_req *req, *subreq;
-	struct fruit_copy_chunk_state *fruit_copy_chunk_state;
+	struct fruit_offload_write_state *state;
 	NTSTATUS status;
 	struct fruit_config_data *config;
+	off_t src_off = transfer_offset;
+	files_struct *src_fsp = NULL;
 	off_t to_copy = num;
+	bool copyfile_enabled = false;
 
 	DEBUG(10,("soff: %ju, doff: %ju, len: %ju\n",
 		  (uintmax_t)src_off, (uintmax_t)dest_off, (uintmax_t)num));
@@ -5652,39 +6159,52 @@ static struct tevent_req *fruit_copy_chunk_send(struct vfs_handle_struct *handle
 				struct fruit_config_data,
 				return NULL);
 
-	req = tevent_req_create(mem_ctx, &fruit_copy_chunk_state,
-				struct fruit_copy_chunk_state);
+	req = tevent_req_create(mem_ctx, &state,
+				struct fruit_offload_write_state);
 	if (req == NULL) {
 		return NULL;
 	}
-	fruit_copy_chunk_state->handle = handle;
-	fruit_copy_chunk_state->src_fsp = src_fsp;
-	fruit_copy_chunk_state->dst_fsp = dest_fsp;
+	state->handle = handle;
+	state->dst_fsp = dest_fsp;
+
+	switch (fsctl) {
+	case FSCTL_SRV_COPYCHUNK:
+	case FSCTL_SRV_COPYCHUNK_WRITE:
+		copyfile_enabled = config->copyfile_enabled;
+		break;
+	default:
+		break;
+	}
 
 	/*
 	 * Check if this a OS X copyfile style copychunk request with
 	 * a requested chunk count of 0 that was translated to a
-	 * copy_chunk_send VFS call overloading the parameters src_off
+	 * offload_write_send VFS call overloading the parameters src_off
 	 * = dest_off = num = 0.
 	 */
-	if ((src_off == 0) && (dest_off == 0) && (num == 0) &&
-	    src_fsp->aapl_copyfile_supported &&
-	    dest_fsp->aapl_copyfile_supported)
-	{
+	if (copyfile_enabled && num == 0 && src_off == 0 && dest_off == 0) {
+		status = vfs_offload_token_db_fetch_fsp(
+			fruit_offload_ctx, token, &src_fsp);
+		if (tevent_req_nterror(req, status)) {
+			return tevent_req_post(req, ev);
+		}
+		state->src_fsp = src_fsp;
+
 		status = vfs_stat_fsp(src_fsp);
 		if (tevent_req_nterror(req, status)) {
 			return tevent_req_post(req, ev);
 		}
 
 		to_copy = src_fsp->fsp_name->st.st_ex_size;
-		fruit_copy_chunk_state->is_copyfile = true;
+		state->is_copyfile = true;
 	}
 
-	subreq = SMB_VFS_NEXT_COPY_CHUNK_SEND(handle,
+	subreq = SMB_VFS_NEXT_OFFLOAD_WRITE_SEND(handle,
 					      mem_ctx,
 					      ev,
-					      src_fsp,
-					      src_off,
+					      fsctl,
+					      token,
+					      transfer_offset,
 					      dest_fsp,
 					      dest_off,
 					      to_copy);
@@ -5692,16 +6212,16 @@ static struct tevent_req *fruit_copy_chunk_send(struct vfs_handle_struct *handle
 		return tevent_req_post(req, ev);
 	}
 
-	tevent_req_set_callback(subreq, fruit_copy_chunk_done, req);
+	tevent_req_set_callback(subreq, fruit_offload_write_done, req);
 	return req;
 }
 
-static void fruit_copy_chunk_done(struct tevent_req *subreq)
+static void fruit_offload_write_done(struct tevent_req *subreq)
 {
 	struct tevent_req *req = tevent_req_callback_data(
 		subreq, struct tevent_req);
-	struct fruit_copy_chunk_state *state = tevent_req_data(
-		req, struct fruit_copy_chunk_state);
+	struct fruit_offload_write_state *state = tevent_req_data(
+		req, struct fruit_offload_write_state);
 	NTSTATUS status;
 	unsigned int num_streams = 0;
 	struct stream_struct *streams = NULL;
@@ -5709,7 +6229,7 @@ static void fruit_copy_chunk_done(struct tevent_req *subreq)
 	struct smb_filename *src_fname_tmp = NULL;
 	struct smb_filename *dst_fname_tmp = NULL;
 
-	status = SMB_VFS_NEXT_COPY_CHUNK_RECV(state->handle,
+	status = SMB_VFS_NEXT_OFFLOAD_WRITE_RECV(state->handle,
 					      subreq,
 					      &state->copied);
 	TALLOC_FREE(subreq);
@@ -5723,7 +6243,7 @@ static void fruit_copy_chunk_done(struct tevent_req *subreq)
 	}
 
 	/*
-	 * Now copy all reamining streams. We know the share supports
+	 * Now copy all remaining streams. We know the share supports
 	 * streams, because we're in vfs_fruit. We don't do this async
 	 * because streams are few and small.
 	 */
@@ -5797,12 +6317,12 @@ static void fruit_copy_chunk_done(struct tevent_req *subreq)
 	tevent_req_done(req);
 }
 
-static NTSTATUS fruit_copy_chunk_recv(struct vfs_handle_struct *handle,
+static NTSTATUS fruit_offload_write_recv(struct vfs_handle_struct *handle,
 				      struct tevent_req *req,
 				      off_t *copied)
 {
-	struct fruit_copy_chunk_state *fruit_copy_chunk_state = tevent_req_data(
-		req, struct fruit_copy_chunk_state);
+	struct fruit_offload_write_state *state = tevent_req_data(
+		req, struct fruit_offload_write_state);
 	NTSTATUS status;
 
 	if (tevent_req_is_nterror(req, &status)) {
@@ -5813,14 +6333,432 @@ static NTSTATUS fruit_copy_chunk_recv(struct vfs_handle_struct *handle,
 		return status;
 	}
 
-	*copied = fruit_copy_chunk_state->copied;
+	*copied = state->copied;
 	tevent_req_received(req);
 
 	return NT_STATUS_OK;
 }
 
+static char *fruit_get_bandsize_line(char **lines, int numlines)
+{
+	static regex_t re;
+	static bool re_initialized = false;
+	int i;
+	int ret;
+
+	if (!re_initialized) {
+		ret = regcomp(&re, "^[[:blank:]]*<key>band-size</key>$", 0);
+		if (ret != 0) {
+			return NULL;
+		}
+		re_initialized = true;
+	}
+
+	for (i = 0; i < numlines; i++) {
+		regmatch_t matches[1];
+
+		ret = regexec(&re, lines[i], 1, matches, 0);
+		if (ret == 0) {
+			/*
+			 * Check if the match was on the last line, sa we want
+			 * the subsequent line.
+			 */
+			if (i + 1 == numlines) {
+				return NULL;
+			}
+			return lines[i + 1];
+		}
+		if (ret != REG_NOMATCH) {
+			return NULL;
+		}
+	}
+
+	return NULL;
+}
+
+static bool fruit_get_bandsize_from_line(char *line, size_t *_band_size)
+{
+	static regex_t re;
+	static bool re_initialized = false;
+	regmatch_t matches[2];
+	uint64_t band_size;
+	int ret;
+	bool ok;
+
+	if (!re_initialized) {
+		ret = regcomp(&re,
+			      "^[[:blank:]]*"
+			      "<integer>\\([[:digit:]]*\\)</integer>$",
+			      0);
+		if (ret != 0) {
+			return false;
+		}
+		re_initialized = true;
+	}
+
+	ret = regexec(&re, line, 2, matches, 0);
+	if (ret != 0) {
+		DBG_ERR("regex failed [%s]\n", line);
+		return false;
+	}
+
+	line[matches[1].rm_eo] = '\0';
+
+	ok = conv_str_u64(&line[matches[1].rm_so], &band_size);
+	if (!ok) {
+		return false;
+	}
+	*_band_size = (size_t)band_size;
+	return true;
+}
+
+/*
+ * This reads and parses an Info.plist from a TM sparsebundle looking for the
+ * "band-size" key and value.
+ */
+static bool fruit_get_bandsize(vfs_handle_struct *handle,
+			       const char *dir,
+			       size_t *band_size)
+{
+#define INFO_PLIST_MAX_SIZE 64*1024
+	char *plist = NULL;
+	struct smb_filename *smb_fname = NULL;
+	files_struct *fsp = NULL;
+	uint8_t *file_data = NULL;
+	char **lines = NULL;
+	char *band_size_line = NULL;
+	size_t plist_file_size;
+	ssize_t nread;
+	int numlines;
+	int ret;
+	bool ok = false;
+	NTSTATUS status;
+
+	plist = talloc_asprintf(talloc_tos(),
+				"%s/%s/Info.plist",
+				handle->conn->connectpath,
+				dir);
+	if (plist == NULL) {
+		ok = false;
+		goto out;
+	}
+
+	smb_fname = synthetic_smb_fname(talloc_tos(), plist, NULL, NULL, 0);
+	if (smb_fname == NULL) {
+		ok = false;
+		goto out;
+	}
+
+	ret = SMB_VFS_NEXT_LSTAT(handle, smb_fname);
+	if (ret != 0) {
+		DBG_INFO("Ignoring Sparsebundle without Info.plist [%s]\n", dir);
+		ok = true;
+		goto out;
+	}
+
+	plist_file_size = smb_fname->st.st_ex_size;
+
+	if (plist_file_size > INFO_PLIST_MAX_SIZE) {
+		DBG_INFO("%s is too large, ignoring\n", plist);
+		ok = true;
+		goto out;
+	}
+
+	status = SMB_VFS_NEXT_CREATE_FILE(
+		handle,				/* conn */
+		NULL,				/* req */
+		0,				/* root_dir_fid */
+		smb_fname,			/* fname */
+		FILE_GENERIC_READ,		/* access_mask */
+		FILE_SHARE_READ | FILE_SHARE_WRITE, /* share_access */
+		FILE_OPEN,			/* create_disposition */
+		0,				/* create_options */
+		0,				/* file_attributes */
+		INTERNAL_OPEN_ONLY,		/* oplock_request */
+		NULL,				/* lease */
+		0,				/* allocation_size */
+		0,				/* private_flags */
+		NULL,				/* sd */
+		NULL,				/* ea_list */
+		&fsp,				/* result */
+		NULL,				/* psbuf */
+		NULL, NULL);			/* create context */
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_INFO("Opening [%s] failed [%s]\n",
+			 smb_fname_str_dbg(smb_fname), nt_errstr(status));
+		ok = false;
+		goto out;
+	}
+
+	file_data = talloc_array(talloc_tos(), uint8_t, plist_file_size);
+	if (file_data == NULL) {
+		ok = false;
+		goto out;
+	}
+
+	nread = SMB_VFS_NEXT_PREAD(handle, fsp, file_data, plist_file_size, 0);
+	if (nread != plist_file_size) {
+		DBG_ERR("Short read on [%s]: %zu/%zd\n",
+			fsp_str_dbg(fsp), nread, plist_file_size);
+		ok = false;
+		goto out;
+
+	}
+
+	status = close_file(NULL, fsp, NORMAL_CLOSE);
+	fsp = NULL;
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("close_file failed: %s\n", nt_errstr(status));
+		ok = false;
+		goto out;
+	}
+
+	lines = file_lines_parse((char *)file_data,
+				 plist_file_size,
+				 &numlines,
+				 talloc_tos());
+	if (lines == NULL) {
+		ok = false;
+		goto out;
+	}
+
+	band_size_line = fruit_get_bandsize_line(lines, numlines);
+	if (band_size_line == NULL) {
+		DBG_ERR("Didn't find band-size key in [%s]\n",
+			smb_fname_str_dbg(smb_fname));
+		ok = false;
+		goto out;
+	}
+
+	ok = fruit_get_bandsize_from_line(band_size_line, band_size);
+	if (!ok) {
+		DBG_ERR("fruit_get_bandsize_from_line failed\n");
+		goto out;
+	}
+
+	DBG_DEBUG("Parsed band-size [%zu] for [%s]\n", *band_size, plist);
+
+out:
+	if (fsp != NULL) {
+		status = close_file(NULL, fsp, NORMAL_CLOSE);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("close_file failed: %s\n", nt_errstr(status));
+		}
+		fsp = NULL;
+	}
+	TALLOC_FREE(plist);
+	TALLOC_FREE(smb_fname);
+	TALLOC_FREE(file_data);
+	TALLOC_FREE(lines);
+	return ok;
+}
+
+struct fruit_disk_free_state {
+	off_t total_size;
+};
+
+static bool fruit_get_num_bands(vfs_handle_struct *handle,
+				char *bundle,
+				size_t *_nbands)
+{
+	char *path = NULL;
+	struct smb_filename *bands_dir = NULL;
+	DIR *d = NULL;
+	struct dirent *e = NULL;
+	size_t nbands;
+	int ret;
+
+	path = talloc_asprintf(talloc_tos(),
+			       "%s/%s/bands",
+			       handle->conn->connectpath,
+			       bundle);
+	if (path == NULL) {
+		return false;
+	}
+
+	bands_dir = synthetic_smb_fname(talloc_tos(),
+					path,
+					NULL,
+					NULL,
+					0);
+	TALLOC_FREE(path);
+	if (bands_dir == NULL) {
+		return false;
+	}
+
+	d = SMB_VFS_NEXT_OPENDIR(handle, bands_dir, NULL, 0);
+	if (d == NULL) {
+		TALLOC_FREE(bands_dir);
+		return false;
+	}
+
+	nbands = 0;
+
+	for (e = SMB_VFS_NEXT_READDIR(handle, d, NULL);
+	     e != NULL;
+	     e = SMB_VFS_NEXT_READDIR(handle, d, NULL))
+	{
+		if (ISDOT(e->d_name) || ISDOTDOT(e->d_name)) {
+			continue;
+		}
+		nbands++;
+	}
+
+	ret = SMB_VFS_NEXT_CLOSEDIR(handle, d);
+	if (ret != 0) {
+		TALLOC_FREE(bands_dir);
+		return false;
+	}
+
+	DBG_DEBUG("%zu bands in [%s]\n", nbands, smb_fname_str_dbg(bands_dir));
+
+	TALLOC_FREE(bands_dir);
+
+	*_nbands = nbands;
+	return true;
+}
+
+static bool fruit_tmsize_do_dirent(vfs_handle_struct *handle,
+				   struct fruit_disk_free_state *state,
+				   struct dirent *e)
+{
+	bool ok;
+	char *p = NULL;
+	size_t sparsebundle_strlen = strlen("sparsebundle");
+	size_t bandsize = 0;
+	size_t nbands;
+	off_t tm_size;
+
+	p = strstr(e->d_name, "sparsebundle");
+	if (p == NULL) {
+		return true;
+	}
+
+	if (p[sparsebundle_strlen] != '\0') {
+		return true;
+	}
+
+	DBG_DEBUG("Processing sparsebundle [%s]\n", e->d_name);
+
+	ok = fruit_get_bandsize(handle, e->d_name, &bandsize);
+	if (!ok) {
+		/*
+		 * Beware of race conditions: this may be an uninitialized
+		 * Info.plist that a client is just creating. We don't want let
+		 * this to trigger complete failure.
+		 */
+		DBG_ERR("Processing sparsebundle [%s] failed\n", e->d_name);
+		return true;
+	}
+
+	ok = fruit_get_num_bands(handle, e->d_name, &nbands);
+	if (!ok) {
+		/*
+		 * Beware of race conditions: this may be a backup sparsebundle
+		 * in an early stage lacking a bands subdirectory. We don't want
+		 * let this to trigger complete failure.
+		 */
+		DBG_ERR("Processing sparsebundle [%s] failed\n", e->d_name);
+		return true;
+	}
+
+	if (bandsize > SIZE_MAX/nbands) {
+		DBG_ERR("tmsize overflow: bandsize [%zu] nbands [%zu]\n",
+			bandsize, nbands);
+		return false;
+	}
+	tm_size = bandsize * nbands;
+
+	if (state->total_size + tm_size < state->total_size) {
+		DBG_ERR("tmsize overflow: bandsize [%zu] nbands [%zu]\n",
+			bandsize, nbands);
+		return false;
+	}
+
+	state->total_size += tm_size;
+
+	DBG_DEBUG("[%s] tm_size [%jd] total_size [%jd]\n",
+		  e->d_name, (intmax_t)tm_size, (intmax_t)state->total_size);
+
+	return true;
+}
+
+/**
+ * Calculate used size of a TimeMachine volume
+ *
+ * This assumes that the volume is used only for TimeMachine.
+ *
+ * - readdir(basedir of share), then
+ * - for every element that matches regex "^\(.*\)\.sparsebundle$" :
+ * - parse "\1.sparsebundle/Info.plist" and read the band-size XML key
+ * - count band files in "\1.sparsebundle/bands/"
+ * - calculate used size of all bands: band_count * band_size
+ **/
+static uint64_t fruit_disk_free(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				uint64_t *_bsize,
+				uint64_t *_dfree,
+				uint64_t *_dsize)
+{
+	struct fruit_config_data *config = NULL;
+	struct fruit_disk_free_state state = {0};
+	DIR *d = NULL;
+	struct dirent *e = NULL;
+	uint64_t dfree;
+	uint64_t dsize;
+	int ret;
+	bool ok;
+
+	SMB_VFS_HANDLE_GET_DATA(handle, config,
+				struct fruit_config_data,
+				return UINT64_MAX);
+
+	if (!config->time_machine ||
+	    config->time_machine_max_size == 0)
+	{
+		return SMB_VFS_NEXT_DISK_FREE(handle,
+					      smb_fname,
+					      _bsize,
+					      _dfree,
+					      _dsize);
+	}
+
+	d = SMB_VFS_NEXT_OPENDIR(handle, smb_fname, NULL, 0);
+	if (d == NULL) {
+		return UINT64_MAX;
+	}
+
+	for (e = SMB_VFS_NEXT_READDIR(handle, d, NULL);
+	     e != NULL;
+	     e = SMB_VFS_NEXT_READDIR(handle, d, NULL))
+	{
+		ok = fruit_tmsize_do_dirent(handle, &state, e);
+		if (!ok) {
+			SMB_VFS_NEXT_CLOSEDIR(handle, d);
+			return UINT64_MAX;
+		}
+	}
+
+	ret = SMB_VFS_NEXT_CLOSEDIR(handle, d);
+	if (ret != 0) {
+		return UINT64_MAX;
+	}
+
+	dsize = config->time_machine_max_size / 512;
+	dfree = dsize - (state.total_size / 512);
+	if (dfree > dsize) {
+		dfree = 0;
+	}
+
+	*_bsize = 512;
+	*_dsize = dsize;
+	*_dfree = dfree;
+	return dfree / 2;
+}
+
 static struct vfs_fn_pointers vfs_fruit_fns = {
 	.connect_fn = fruit_connect,
+	.disk_free_fn = fruit_disk_free,
 
 	/* File operations */
 	.chmod_fn = fruit_chmod,
@@ -5831,6 +6769,10 @@ static struct vfs_fn_pointers vfs_fruit_fns = {
 	.open_fn = fruit_open,
 	.pread_fn = fruit_pread,
 	.pwrite_fn = fruit_pwrite,
+	.pread_send_fn = fruit_pread_send,
+	.pread_recv_fn = fruit_pread_recv,
+	.pwrite_send_fn = fruit_pwrite_send,
+	.pwrite_recv_fn = fruit_pwrite_recv,
 	.stat_fn = fruit_stat,
 	.lstat_fn = fruit_lstat,
 	.fstat_fn = fruit_fstat,
@@ -5840,16 +6782,18 @@ static struct vfs_fn_pointers vfs_fruit_fns = {
 	.fallocate_fn = fruit_fallocate,
 	.create_file_fn = fruit_create_file,
 	.readdir_attr_fn = fruit_readdir_attr,
-	.copy_chunk_send_fn = fruit_copy_chunk_send,
-	.copy_chunk_recv_fn = fruit_copy_chunk_recv,
+	.offload_read_send_fn = fruit_offload_read_send,
+	.offload_read_recv_fn = fruit_offload_read_recv,
+	.offload_write_send_fn = fruit_offload_write_send,
+	.offload_write_recv_fn = fruit_offload_write_recv,
 
 	/* NT ACL operations */
 	.fget_nt_acl_fn = fruit_fget_nt_acl,
 	.fset_nt_acl_fn = fruit_fset_nt_acl,
 };
 
-NTSTATUS vfs_fruit_init(void);
-NTSTATUS vfs_fruit_init(void)
+static_decl_vfs;
+NTSTATUS vfs_fruit_init(TALLOC_CTX *ctx)
 {
 	NTSTATUS ret = smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "fruit",
 					&vfs_fruit_fns);

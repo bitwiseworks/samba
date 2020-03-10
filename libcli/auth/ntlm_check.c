@@ -224,7 +224,7 @@ NTSTATUS hash_password_check(TALLOC_CTX *mem_ctx,
 			     const struct samr_Password *stored_nt)
 {
 	if (stored_nt == NULL) {
-		DEBUG(3,("ntlm_password_check: NO NT password stored for user %s.\n", 
+		DEBUG(3,("hash_password_check: NO NT password stored for user %s.\n",
 			 username));
 	}
 
@@ -232,14 +232,14 @@ NTSTATUS hash_password_check(TALLOC_CTX *mem_ctx,
 		if (memcmp(client_nt->hash, stored_nt->hash, sizeof(stored_nt->hash)) == 0) {
 			return NT_STATUS_OK;
 		} else {
-			DEBUG(3,("ntlm_password_check: Interactive logon: NT password check failed for user %s\n",
+			DEBUG(3,("hash_password_check: Interactive logon: NT password check failed for user %s\n",
 				 username));
 			return NT_STATUS_WRONG_PASSWORD;
 		}
 
 	} else if (client_lanman && stored_lanman) {
 		if (!lanman_auth) {
-			DEBUG(3,("ntlm_password_check: Interactive logon: only LANMAN password supplied for user %s, and LM passwords are disabled!\n",
+			DEBUG(3,("hash_password_check: Interactive logon: only LANMAN password supplied for user %s, and LM passwords are disabled!\n",
 				 username));
 			return NT_STATUS_WRONG_PASSWORD;
 		}
@@ -250,7 +250,7 @@ NTSTATUS hash_password_check(TALLOC_CTX *mem_ctx,
 		if (memcmp(client_lanman->hash, stored_lanman->hash, sizeof(stored_lanman->hash)) == 0) {
 			return NT_STATUS_OK;
 		} else {
-			DEBUG(3,("ntlm_password_check: Interactive logon: LANMAN password check failed for user %s\n",
+			DEBUG(3,("hash_password_check: Interactive logon: LANMAN password check failed for user %s\n",
 				 username));
 			return NT_STATUS_WRONG_PASSWORD;
 		}
@@ -280,7 +280,7 @@ NTSTATUS hash_password_check(TALLOC_CTX *mem_ctx,
 
 NTSTATUS ntlm_password_check(TALLOC_CTX *mem_ctx,
 			     bool lanman_auth,
-			     bool ntlm_auth,
+			     enum ntlm_auth_level ntlm_auth,
 			     uint32_t logon_parameters,
 			     const DATA_BLOB *challenge,
 			     const DATA_BLOB *lm_response,
@@ -295,6 +295,12 @@ NTSTATUS ntlm_password_check(TALLOC_CTX *mem_ctx,
 {
 	DATA_BLOB tmp_sess_key;
 	const char *upper_client_domain = NULL;
+
+	if (ntlm_auth == NTLM_AUTH_DISABLED) {
+		DBG_WARNING("ntlm_password_check: NTLM authentication not "
+			    "permitted by configuration.\n");
+		return NT_STATUS_NTLM_BLOCKED;
+	}
 
 	if (client_domain != NULL) {
 		upper_client_domain = talloc_strdup_upper(mem_ctx, client_domain);
@@ -397,7 +403,8 @@ NTSTATUS ntlm_password_check(TALLOC_CTX *mem_ctx,
 			DEBUG(3,("ntlm_password_check: NTLMv2 password check failed\n"));
 		}
 	} else if (nt_response->length == 24 && stored_nt) {
-		if (ntlm_auth) {		
+		if (ntlm_auth == NTLM_AUTH_ON
+		    || (ntlm_auth == NTLM_AUTH_MSCHAPv2_NTLMV2_ONLY && (logon_parameters & MSV1_0_ALLOW_MSVCHAPV2))) {
 			/* We have the NT MD4 hash challenge available - see if we can
 			   use it (ie. does it exist in the smbpasswd file).
 			*/
@@ -565,7 +572,7 @@ NTSTATUS ntlm_password_check(TALLOC_CTX *mem_ctx,
 	   - I think this is related to Win9X pass-though authentication
 	*/
 	DEBUG(4,("ntlm_password_check: Checking NT MD4 password in LM field\n"));
-	if (ntlm_auth) {
+	if (ntlm_auth == NTLM_AUTH_ON) {
 		if (smb_pwd_check_ntlmv1(mem_ctx, 
 					 lm_response, 
 					 stored_nt->hash, challenge,

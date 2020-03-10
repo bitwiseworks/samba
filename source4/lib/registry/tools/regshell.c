@@ -428,7 +428,7 @@ static char **reg_complete_command(const char *text, int start, int end)
 	/* Complete command */
 	char **matches;
 	size_t len, samelen=0;
-	int i, count=1;
+	size_t i, count = 1;
 
 	matches = malloc_array_p(char *, MAX_COMPLETIONS);
 	if (!matches) return NULL;
@@ -463,10 +463,8 @@ static char **reg_complete_command(const char *text, int start, int end)
 	return matches;
 
 cleanup:
-	count--;
-	while (count >= 0) {
-		free(matches[count]);
-		count--;
+	for (i = 0; i < count; i++) {
+		free(matches[i]);
 	}
 	free(matches);
 	return NULL;
@@ -586,9 +584,12 @@ int main(int argc, const char **argv)
 
 	if (remote != NULL) {
 		ctx->registry = reg_common_open_remote(remote, ev_ctx,
-					 cmdline_lp_ctx, cmdline_credentials);
+					 cmdline_lp_ctx,
+					popt_get_cmdline_credentials());
 	} else if (file != NULL) {
-		ctx->current = reg_common_open_file(file, ev_ctx, cmdline_lp_ctx, cmdline_credentials);
+		ctx->current = reg_common_open_file(file, ev_ctx,
+					cmdline_lp_ctx,
+					popt_get_cmdline_credentials());
 		if (ctx->current == NULL)
 			return 1;
 		ctx->registry = ctx->current->context;
@@ -596,7 +597,9 @@ int main(int argc, const char **argv)
 		ctx->predef = NULL;
 		ctx->root = ctx->current;
 	} else {
-		ctx->registry = reg_common_open_local(cmdline_credentials, ev_ctx, cmdline_lp_ctx);
+		ctx->registry = reg_common_open_local(
+					popt_get_cmdline_credentials(),
+					ev_ctx, cmdline_lp_ctx);
 	}
 
 	if (ctx->registry == NULL)

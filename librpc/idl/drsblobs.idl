@@ -17,6 +17,9 @@ interface drsblobs {
 	 * replPropertyMetaData
 	 * w2k  uses version 1
 	 * w2k3 uses version 1
+	 *
+	 * Also equivalent to
+	 * MS-DRSR 4.1.10.2.22 PROPERTY_META_DATA
 	 */
 	typedef [public] struct {
 		drsuapi_DsAttributeId attid;
@@ -26,6 +29,10 @@ interface drsblobs {
 		hyper originating_usn;
 		hyper local_usn;
 	} replPropertyMetaData1;
+
+	void decode_replPropertyMetaData1(
+		[in] replPropertyMetaData1 blob
+		);
 
 	typedef struct {
 		uint32 count;
@@ -316,6 +323,16 @@ interface drsblobs {
 		 * 'Primary:CLEARTEXT':
 		 *    data contains the cleartext password
 		 *    as UTF16 string encoded as HEX string
+		 *
+		 * 'Primary:userPassword':
+		 *    ...
+		 *
+		 * 'Primary:SambaGPG':
+		 *    ...
+		 *
+		 * 'Primary:NTLM-Strong-NTOWF':
+		 *    ... Not yet implemented.
+		 *
 		 */
 		[charset(DOS)] uint8 data[data_len];
 	} supplementalCredentialsPackage;
@@ -452,6 +469,40 @@ interface drsblobs {
 	void decode_PrimarySambaGPG(
 		[in] package_PrimarySambaGPGBlob blob
 		);
+
+	/*
+	 * Password hashes stored in a scheme compatible with
+	 * OpenLDAP's userPassword attribute. The Package is named
+	 * Primary:userPassword each calculated hash,
+	 * which is typically caclulated via crypt(), the scheme is stored.
+	 * The scheme name and the {scheme} format is re-used from OpenLDAP's
+	 * use for userPassword to aid interopability when exported.
+	 *
+	 * The currently supported scheme so far is {CRYPT}, which may
+	 * be specified multiple times if both CryptSHA256 ($5$) and
+	 * CryptSHA512 ($6$) are in use.
+	 *
+	 * current_nt_hash is either the unicodePwd or the
+	 * NTLM-Strong-NTOWF, to allow us to prove this password is
+	 * a valid element.
+	 */
+	typedef struct {
+		[value(2*strlen_m(scheme))] uint16 scheme_len;
+		[charset(UTF16)] uint8 scheme[scheme_len];
+		[value((value?value->length:0))] uint32 value_len;
+		[relative,subcontext(0),subcontext_size(value_len),
+			flag(NDR_REMAINING)] DATA_BLOB *value;
+	} package_PrimaryUserPasswordValue;
+
+	typedef [public] struct {
+		samr_Password current_nt_hash;
+		uint16 num_hashes;
+		package_PrimaryUserPasswordValue hashes[num_hashes];
+	} package_PrimaryUserPasswordBlob;
+
+	void decode_PrimaryUserPasswordBlob(
+		[in] package_PrimaryUserPasswordBlob blob
+	);
 
 	typedef struct {
 		[value(0)] uint32 size;
@@ -670,4 +721,34 @@ interface drsblobs {
 	[nopython] void decode_ForestTrustInfo(
 		[in] ForestTrustInfo blob
 		);
+
+	typedef enum {
+		ENC_SECRET_AES_128_AEAD = 1
+	} EncryptedSecretAlgorithm;
+
+	const uint32 ENCRYPTED_SECRET_MAGIC_VALUE = 0xCA5CADED;
+
+	typedef [public] struct {
+		DATA_BLOB cleartext;
+	} PlaintextSecret;
+
+	/* The AEAD routines uses this as the additional authenticated data */
+	typedef [public] struct {
+		uint32 magic;
+		uint32 version;
+		uint32 algorithm;
+		uint32 flags;
+	} EncryptedSecretHeader;
+
+	typedef [public] struct {
+		/*
+		 * The iv is before the header to ensure that the first bytes of
+		 * the encrypted values are not predictable.
+		 * We do this so that if the decryption gets disabled, we don't
+		 * end up with predictable unicodePasswords.
+		 */
+		DATA_BLOB iv;
+		EncryptedSecretHeader header;
+		[flag(NDR_REMAINING)] DATA_BLOB encrypted;
+	} EncryptedSecret;
 }

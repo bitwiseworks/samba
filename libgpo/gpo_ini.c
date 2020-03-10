@@ -56,7 +56,7 @@ static bool store_keyval_pair(const char *key, const char *value, void *ctx_ptr)
 	}
 
 	ctx->data[ctx->keyval_count]->key = talloc_asprintf(ctx, "%s:%s", ctx->current_section, key);
-	ctx->data[ctx->keyval_count]->val = talloc_strdup(ctx, value);
+	ctx->data[ctx->keyval_count]->val = talloc_strdup(ctx, value ? value : "");
 
 	if (!ctx->data[ctx->keyval_count]->key ||
 	    !ctx->data[ctx->keyval_count]->val) {
@@ -87,9 +87,19 @@ static NTSTATUS convert_file_from_ucs2(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	data_in = (uint8_t *)file_load(filename_in, &n, 0, NULL);
+	data_in = (uint8_t *)file_load(filename_in, &n, 0, mem_ctx);
 	if (!data_in) {
 		status = NT_STATUS_NO_SUCH_FILE;
+		goto out;
+	}
+
+	DEBUG(11,("convert_file_from_ucs2: "
+	       "data_in[0]: 0x%x, data_in[1]: 0x%x, data_in[2]: 0x%x\n",
+		data_in[0], data_in[1], data_in[2]));
+
+	if ((data_in[0] != 0xff) || (data_in[1] != 0xfe) || (data_in[2] != 0x0d)) {
+		*filename_out = NULL;
+		status = NT_STATUS_OK;
 		goto out;
 	}
 
@@ -115,20 +125,12 @@ static NTSTATUS convert_file_from_ucs2(TALLOC_CTX *mem_ctx,
 		goto out;
 	}
 
-	/* skip utf8 BOM */
 	DEBUG(11,("convert_file_from_ucs2: "
-	       "data_out[0]: 0x%x, data_out[1]: 0x%x, data_out[2]: 0x%x\n",
-		data_out[0], data_out[1], data_out[2]));
+		 "%s skipping utf16-le BOM\n", tmp_name));
 
-	if ((data_out[0] == 0xef) && (data_out[1] == 0xbb) &&
-	    (data_out[2] == 0xbf)) {
-		DEBUG(11,("convert_file_from_ucs2: "
-			 "%s skipping utf8 BOM\n", tmp_name));
-		data_out += 3;
-		converted_size -= 3;
-	}
+	converted_size -= 3;
 
-	if (write(tmp_fd, data_out, converted_size) != converted_size) {
+	if (write(tmp_fd, data_out + 3, converted_size) != converted_size) {
 		status = map_nt_error_from_unix_common(errno);
 		goto out;
 	}
@@ -143,6 +145,7 @@ static NTSTATUS convert_file_from_ucs2(TALLOC_CTX *mem_ctx,
 	}
 
 	talloc_free(data_in);
+	talloc_free(data_out);
 
 	return status;
 }
@@ -150,7 +153,7 @@ static NTSTATUS convert_file_from_ucs2(TALLOC_CTX *mem_ctx,
 /****************************************************************
 ****************************************************************/
 
-NTSTATUS gp_inifile_getstring(struct gp_inifile_context *ctx, const char *key, char **ret)
+NTSTATUS gp_inifile_getstring(struct gp_inifile_context *ctx, const char *key, const char **ret)
 {
 	int i;
 
@@ -170,7 +173,7 @@ NTSTATUS gp_inifile_getstring(struct gp_inifile_context *ctx, const char *key, c
 
 NTSTATUS gp_inifile_getint(struct gp_inifile_context *ctx, const char *key, int *ret)
 {
-	char *value;
+	const char *value;
 	NTSTATUS result;
 
 	result = gp_inifile_getstring(ctx,key, &value);
@@ -189,7 +192,7 @@ NTSTATUS gp_inifile_getint(struct gp_inifile_context *ctx, const char *key, int 
 
 NTSTATUS gp_inifile_getbool(struct gp_inifile_context *ctx, const char *key, bool *ret)
 {
-	char *value;
+	const char *value;
 	NTSTATUS result;
 
 	result = gp_inifile_getstring(ctx,key, &value);
@@ -213,6 +216,80 @@ NTSTATUS gp_inifile_getbool(struct gp_inifile_context *ctx, const char *key, boo
 
 	return NT_STATUS_NOT_FOUND;
 }
+
+/****************************************************************
+****************************************************************/
+
+NTSTATUS gp_inifile_enum_section(struct gp_inifile_context *ctx,
+				 const char *section,
+				 size_t *num_ini_keys,
+				 const char ***ini_keys,
+				 const char ***ini_values)
+{
+	NTSTATUS status;
+	int i;
+	size_t num_keys = 0, num_vals = 0;
+	const char **keys = NULL;
+	const char **values = NULL;
+
+	if (section == NULL || num_ini_keys == NULL ||
+	    ini_keys == NULL || ini_values == NULL) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	for (i = 0; i < ctx->keyval_count; i++) {
+
+		bool ok;
+
+		/*
+		 * section: KEYNAME
+		 * KEYNAME:value matches
+		 * KEYNAME_OEM:value not
+		 */
+
+		if (strlen(section)+1 > strlen(ctx->data[i]->key)) {
+			continue;
+		}
+
+		if (!strnequal(section, ctx->data[i]->key, strlen(section))) {
+			continue;
+		}
+
+		if (ctx->data[i]->key[strlen(section)] != ':') {
+			continue;
+		}
+
+		ok = add_string_to_array(ctx, ctx->data[i]->key, &keys, &num_keys);
+		if (!ok) {
+			status = NT_STATUS_NO_MEMORY;
+			goto failed;
+		}
+
+		ok = add_string_to_array(ctx, ctx->data[i]->val, &values, &num_vals);
+		if (!ok) {
+			status = NT_STATUS_NO_MEMORY;
+			goto failed;
+		}
+
+		if (num_keys != num_vals) {
+			status = NT_STATUS_INTERNAL_DB_CORRUPTION;
+			goto failed;
+		}
+	}
+
+	*num_ini_keys = num_keys;
+	*ini_keys = keys;
+	*ini_values = values;
+
+	return NT_STATUS_OK;
+
+ failed:
+	talloc_free(keys);
+	talloc_free(values);
+
+	return status;
+}
+
 
 /****************************************************************
 ****************************************************************/
@@ -249,7 +326,8 @@ NTSTATUS gp_inifile_init_context(TALLOC_CTX *mem_ctx,
 		goto failed;
 	}
 
-	rv = pm_process(tmp_filename, change_section, store_keyval_pair, ctx);
+	rv = pm_process(tmp_filename != NULL ? tmp_filename : ini_filename,
+			change_section, store_keyval_pair, ctx);
 	if (!rv) {
 		return NT_STATUS_NO_SUCH_FILE;
 	}
@@ -273,6 +351,60 @@ NTSTATUS gp_inifile_init_context(TALLOC_CTX *mem_ctx,
 }
 
 /****************************************************************
+****************************************************************/
+
+NTSTATUS gp_inifile_init_context_direct(TALLOC_CTX *mem_ctx,
+					const char *unix_path,
+					struct gp_inifile_context **pgp_ctx)
+{
+	struct gp_inifile_context *gp_ctx = NULL;
+	NTSTATUS status;
+	bool rv;
+	char *tmp_filename = NULL;
+
+	if (unix_path == NULL || pgp_ctx == NULL) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	gp_ctx = talloc_zero(mem_ctx, struct gp_inifile_context);
+	if (gp_ctx == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	status = convert_file_from_ucs2(mem_ctx, unix_path,
+					&tmp_filename);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto failed;
+	}
+
+	rv = pm_process_with_flags(tmp_filename != NULL ? tmp_filename : unix_path,
+				   true,
+				   change_section,
+				   store_keyval_pair,
+				   gp_ctx);
+	if (!rv) {
+		return NT_STATUS_NO_SUCH_FILE;
+	}
+
+	gp_ctx->generated_filename = tmp_filename;
+	gp_ctx->mem_ctx = mem_ctx;
+
+	*pgp_ctx = gp_ctx;
+
+	return NT_STATUS_OK;
+
+ failed:
+
+	DEBUG(1,("gp_inifile_init_context_direct failed: %s\n",
+		nt_errstr(status)));
+
+	talloc_free(gp_ctx);
+
+	return status;
+}
+
+
+/****************************************************************
  parse the local gpt.ini file
 ****************************************************************/
 
@@ -288,7 +420,7 @@ NTSTATUS parse_gpt_ini(TALLOC_CTX *mem_ctx,
 	NTSTATUS result;
 	int rv;
 	int v = 0;
-	char *name = NULL;
+	const char *name = NULL;
 	struct gp_inifile_context *ctx;
 
 	if (!filename) {

@@ -51,7 +51,7 @@ class cmd_ntacl_set(Command):
         }
 
     takes_options = [
-        Option("--quiet", help="Be quiet", action="store_true"),
+        Option("-q", "--quiet", help="Be quiet", action="store_true"),
         Option("--xattr-backend", type="choice", help="xattr backend type (native fs or tdb)",
                choices=["native","tdb"]),
         Option("--eadb-file", help="Name of the tdb file where attributes are stored", type="string"),
@@ -71,7 +71,7 @@ class cmd_ntacl_set(Command):
         try:
             samdb = SamDB(session_info=system_session(),
                           lp=lp)
-        except Exception, e:
+        except Exception as e:
             raise CommandError("Unable to open samdb:", e)
 
         if not use_ntvfs and not use_s3fs:
@@ -146,7 +146,7 @@ class cmd_ntacl_get(Command):
         try:
             samdb = SamDB(session_info=system_session(),
                           lp=lp)
-        except Exception, e:
+        except Exception as e:
             raise CommandError("Unable to open samdb:", e)
 
         if not use_ntvfs and not use_s3fs:
@@ -199,7 +199,7 @@ class cmd_ntacl_sysvolreset(Command):
         try:
             samdb = SamDB(session_info=system_session(),
                           lp=lp)
-        except Exception, e:
+        except Exception as e:
             raise CommandError("Unable to open samdb:", e)
 
         if not use_ntvfs and not use_s3fs:
@@ -259,7 +259,7 @@ class cmd_ntacl_sysvolcheck(Command):
         sysvol = lp.get("path", "sysvol")
         try:
             samdb = SamDB(session_info=system_session(), lp=lp)
-        except Exception, e:
+        except Exception as e:
             raise CommandError("Unable to open samdb:", e)
 
         domain_sid = security.dom_sid(samdb.domain_sid)

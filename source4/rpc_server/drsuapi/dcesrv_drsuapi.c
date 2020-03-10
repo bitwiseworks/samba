@@ -33,6 +33,9 @@
 #include "param/param.h"
 #include "lib/messaging/irpc.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS            DBGC_DRS_REPL
+
 #define DRSUAPI_UNSUPPORTED(fname) do { \
 	DEBUG(1,(__location__ ": Unsupported DRS call %s\n", #fname)); \
 	if (DEBUGLVL(2)) NDR_PRINT_IN_DEBUG(fname, r); \
@@ -93,8 +96,13 @@ static WERROR dcesrv_drsuapi_DsBind(struct dcesrv_call_state *dce_call, TALLOC_C
 	/*
 	 * connect to the samdb
 	 */
-	b_state->sam_ctx = samdb_connect(b_state, dce_call->event_ctx, 
-					 dce_call->conn->dce_ctx->lp_ctx, auth_info, 0);
+	b_state->sam_ctx = samdb_connect(
+		b_state,
+		dce_call->event_ctx,
+		dce_call->conn->dce_ctx->lp_ctx,
+		auth_info,
+		dce_call->conn->remote_address,
+		0);
 	if (!b_state->sam_ctx) {
 		return WERR_FOOBAR;
 	}
@@ -107,9 +115,14 @@ static WERROR dcesrv_drsuapi_DsBind(struct dcesrv_call_state *dce_call, TALLOC_C
 		werr = drs_security_level_check(dce_call, NULL, SECURITY_RO_DOMAIN_CONTROLLER,
 						samdb_domain_sid(b_state->sam_ctx));
 		if (W_ERROR_IS_OK(werr)) {
-			b_state->sam_ctx_system = samdb_connect(b_state, dce_call->event_ctx,
-								dce_call->conn->dce_ctx->lp_ctx,
-								system_session(dce_call->conn->dce_ctx->lp_ctx), 0);
+			b_state->sam_ctx_system
+			= samdb_connect(
+				b_state,
+				dce_call->event_ctx,
+				dce_call->conn->dce_ctx->lp_ctx,
+				system_session(dce_call->conn->dce_ctx->lp_ctx),
+				dce_call->conn->remote_address,
+				0);
 			if (!b_state->sam_ctx_system) {
 				return WERR_FOOBAR;
 			}
@@ -1005,7 +1018,8 @@ static WERROR dcesrv_drsuapi_DsReplicaGetInfo(struct dcesrv_call_state *dce_call
 		level = security_session_user_level(dce_call->conn->auth_state.session_info, NULL);
 		if (level < SECURITY_DOMAIN_CONTROLLER) {
 			DEBUG(1,(__location__ ": Administrator access required for DsReplicaGetInfo\n"));
-			security_token_debug(0, 2, dce_call->conn->auth_state.session_info->security_token);
+			security_token_debug(DBGC_DRS_REPL, 2,
+					     dce_call->conn->auth_state.session_info->security_token);
 			return WERR_DS_DRA_ACCESS_DENIED;
 		}
 	}

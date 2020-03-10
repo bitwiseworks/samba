@@ -23,6 +23,7 @@
 */
 
 #include "includes.h"
+#include "libsmb/namequery.h"
 #include "libsmb/libsmb.h"
 #include "auth_info.h"
 #include "libsmbclient.h"
@@ -38,6 +39,26 @@
  * Routine to open a directory
  * We accept the URL syntax explained in SMBC_parse_path(), above.
  */
+
+static void remove_dirplus(SMBCFILE *dir)
+{
+	struct smbc_dirplus_list *d = NULL;
+
+	d = dir->dirplus_list;
+	while (d != NULL) {
+		struct smbc_dirplus_list *f = d;
+		d = d->next;
+
+		SAFE_FREE(f->smb_finfo->short_name);
+		SAFE_FREE(f->smb_finfo->name);
+		SAFE_FREE(f->smb_finfo);
+		SAFE_FREE(f);
+	}
+
+	dir->dirplus_list = NULL;
+	dir->dirplus_end = NULL;
+	dir->dirplus_next = NULL;
+}
 
 static void
 remove_dir(SMBCFILE *dir)
@@ -136,6 +157,73 @@ add_dirent(SMBCFILE *dir,
 
 	return 0;
 
+}
+
+static int add_dirplus(SMBCFILE *dir, struct file_info *finfo)
+{
+	struct smbc_dirplus_list *new_entry = NULL;
+	struct libsmb_file_info *info = NULL;
+
+	new_entry = SMB_MALLOC_P(struct smbc_dirplus_list);
+	if (new_entry == NULL) {
+		dir->dir_error = ENOMEM;
+		return -1;
+	}
+	ZERO_STRUCTP(new_entry);
+
+	info = SMB_MALLOC_P(struct libsmb_file_info);
+	if (info == NULL) {
+		SAFE_FREE(new_entry);
+		dir->dir_error = ENOMEM;
+		return -1;
+	}
+
+	ZERO_STRUCTP(info);
+
+	info->btime_ts = finfo->btime_ts;
+	info->atime_ts = finfo->atime_ts;
+	info->ctime_ts = finfo->ctime_ts;
+	info->mtime_ts = finfo->mtime_ts;
+	info->gid = finfo->gid;
+	info->attrs = finfo->mode;
+	info->size = finfo->size;
+	info->uid = finfo->uid;
+	info->name = SMB_STRDUP(finfo->name);
+	if (info->name == NULL) {
+		SAFE_FREE(info);
+		SAFE_FREE(new_entry);
+		dir->dir_error = ENOMEM;
+		return -1;
+	}
+
+	if (finfo->short_name) {
+		info->short_name = SMB_STRDUP(finfo->short_name);
+	} else {
+		info->short_name = SMB_STRDUP("");
+	}
+
+	if (info->short_name == NULL) {
+		SAFE_FREE(info->name);
+		SAFE_FREE(info);
+		SAFE_FREE(new_entry);
+		dir->dir_error = ENOMEM;
+		return -1;
+	}
+	new_entry->smb_finfo = info;
+
+	/* Now add to the list. */
+	if (dir->dirplus_list == NULL) {
+		/* Empty list - point everything at new_entry. */
+		dir->dirplus_list = new_entry;
+		dir->dirplus_end = new_entry;
+		dir->dirplus_next = new_entry;
+	} else {
+		/* Append to list but leave the ->next cursor alone. */
+		dir->dirplus_end->next = new_entry;
+		dir->dirplus_end = new_entry;
+	}
+
+	return 0;
 }
 
 static void
@@ -247,11 +335,17 @@ dir_list_fn(const char *mnt,
             const char *mask,
             void *state)
 {
+	SMBCFILE *dirp = (SMBCFILE *)state;
+	int ret;
 
 	if (add_dirent((SMBCFILE *)state, finfo->name, "",
 		       (finfo->mode&FILE_ATTRIBUTE_DIRECTORY?SMBC_DIR:SMBC_FILE)) < 0) {
 		SMBCFILE *dir = (SMBCFILE *)state;
 		return map_nt_error_from_unix(dir->dir_error);
+	}
+	ret = add_dirplus(dirp, finfo);
+	if (ret < 0) {
+		return map_nt_error_from_unix(dirp->dir_error);
 	}
 	return NT_STATUS_OK;
 }
@@ -590,6 +684,10 @@ SMBC_opendir_ctx(SMBCCTX *context,
                                 continue;
                         }
 
+			if (smbXcli_conn_protocol(srv->cli->conn) > PROTOCOL_NT1) {
+				continue;
+			}
+
                         dir->srv = srv;
                         dir->dir_type = SMBC_WORKGROUP;
 
@@ -703,6 +801,15 @@ SMBC_opendir_ctx(SMBCCTX *context,
 				}
 
 				dir->srv = srv;
+
+				if (smbXcli_conn_protocol(srv->cli->conn) > PROTOCOL_NT1) {
+					if (dir) {
+						SAFE_FREE(dir->fname);
+						SAFE_FREE(dir);
+					}
+					TALLOC_FREE(frame);
+					return NULL;
+				}
 
 				/* Now, list the servers ... */
 				if (!cli_NetServerEnum(srv->cli, wgroup,
@@ -916,6 +1023,7 @@ SMBC_closedir_ctx(SMBCCTX *context,
 	}
 
 	remove_dir(dir); /* Clean it up */
+	remove_dirplus(dir);
 
 	DLIST_REMOVE(context->internal->files, dir);
 
@@ -930,27 +1038,47 @@ SMBC_closedir_ctx(SMBCCTX *context,
 
 }
 
-static void
+static int
 smbc_readdir_internal(SMBCCTX * context,
                       struct smbc_dirent *dest,
                       struct smbc_dirent *src,
                       int max_namebuf_len)
 {
         if (smbc_getOptionUrlEncodeReaddirEntries(context)) {
+		int remaining_len;
 
                 /* url-encode the name.  get back remaining buffer space */
-                max_namebuf_len =
+                remaining_len =
                         smbc_urlencode(dest->name, src->name, max_namebuf_len);
+
+		/* -1 means no null termination. */
+		if (remaining_len < 0) {
+			return -1;
+		}
 
                 /* We now know the name length */
                 dest->namelen = strlen(dest->name);
 
+		if (dest->namelen + 1 < 1) {
+			/* Integer wrap. */
+			return -1;
+		}
+
+		if (dest->namelen + 1 >= max_namebuf_len) {
+			/* Out of space for comment. */
+			return -1;
+		}
+
                 /* Save the pointer to the beginning of the comment */
                 dest->comment = dest->name + dest->namelen + 1;
 
+		if (remaining_len < 1) {
+			/* No room for comment null termination. */
+			return -1;
+		}
+
                 /* Copy the comment */
-                strncpy(dest->comment, src->comment, max_namebuf_len - 1);
-                dest->comment[max_namebuf_len - 1] = '\0';
+                strlcpy(dest->comment, src->comment, remaining_len);
 
                 /* Save other fields */
                 dest->smbc_type = src->smbc_type;
@@ -960,10 +1088,21 @@ smbc_readdir_internal(SMBCCTX * context,
         } else {
 
                 /* No encoding.  Just copy the entry as is. */
+		if (src->dirlen > max_namebuf_len) {
+			return -1;
+		}
                 memcpy(dest, src, src->dirlen);
+		if (src->namelen + 1 < 1) {
+			/* Integer wrap */
+			return -1;
+		}
+		if (src->namelen + 1 >= max_namebuf_len) {
+			/* Comment off the end. */
+			return -1;
+		}
                 dest->comment = (char *)(&dest->name + src->namelen + 1);
         }
-
+	return 0;
 }
 
 /*
@@ -975,6 +1114,7 @@ SMBC_readdir_ctx(SMBCCTX *context,
                  SMBCFILE *dir)
 {
         int maxlen;
+	int ret;
 	struct smbc_dirent *dirp, *dirent;
 	TALLOC_CTX *frame = talloc_stackframe();
 
@@ -1024,12 +1164,63 @@ SMBC_readdir_ctx(SMBCCTX *context,
         dirp = &context->internal->dirent;
         maxlen = sizeof(context->internal->_dirent_name);
 
-        smbc_readdir_internal(context, dirp, dirent, maxlen);
+        ret = smbc_readdir_internal(context, dirp, dirent, maxlen);
+	if (ret == -1) {
+		errno = EINVAL;
+		TALLOC_FREE(frame);
+                return NULL;
+	}
 
         dir->dir_next = dir->dir_next->next;
 
 	TALLOC_FREE(frame);
         return dirp;
+}
+
+/*
+ * Routine to get a directory entry with all attributes
+ */
+
+const struct libsmb_file_info *
+SMBC_readdirplus_ctx(SMBCCTX *context,
+                     SMBCFILE *dir)
+{
+	struct libsmb_file_info *smb_finfo = NULL;
+	TALLOC_CTX *frame = talloc_stackframe();
+
+	/* Check that all is ok first ... */
+
+	if (context == NULL || !context->internal->initialized) {
+		DBG_ERR("Invalid context in SMBC_readdirplus_ctx()\n");
+		TALLOC_FREE(frame);
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if (dir == NULL ||
+	    SMBC_dlist_contains(context->internal->files,
+				dir) == 0) {
+		DBG_ERR("Invalid dir in SMBC_readdirplus_ctx()\n");
+		TALLOC_FREE(frame);
+		errno = EBADF;
+		return NULL;
+	}
+
+	if (dir->dirplus_next == NULL) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	smb_finfo = dir->dirplus_next->smb_finfo;
+	if (smb_finfo == NULL) {
+		TALLOC_FREE(frame);
+		errno = ENOENT;
+		return NULL;
+	}
+	dir->dirplus_next = dir->dirplus_next->next;
+
+	TALLOC_FREE(frame);
+	return smb_finfo;
 }
 
 /*
@@ -1082,6 +1273,7 @@ SMBC_getdents_ctx(SMBCCTX *context,
 	 */
 
 	while ((dirlist = dir->dir_next)) {
+		int ret;
 		struct smbc_dirent *dirent;
 		struct smbc_dirent *currentEntry = (struct smbc_dirent *)ndir;
 
@@ -1096,8 +1288,13 @@ SMBC_getdents_ctx(SMBCCTX *context,
                 /* Do urlencoding of next entry, if so selected */
                 dirent = &context->internal->dirent;
                 maxlen = sizeof(context->internal->_dirent_name);
-                smbc_readdir_internal(context, dirent,
+		ret = smbc_readdir_internal(context, dirent,
                                       dirlist->dirent, maxlen);
+		if (ret == -1) {
+			errno = EINVAL;
+			TALLOC_FREE(frame);
+			return -1;
+		}
 
                 reqd = dirent->dirlen;
 
@@ -2032,12 +2229,16 @@ SMBC_rename_ctx(SMBCCTX *ocontext,
 		return -1;
 	}
 
-	if (!NT_STATUS_IS_OK(cli_rename(targetcli1, targetpath1, targetpath2))) {
+	if (!NT_STATUS_IS_OK(
+		cli_rename(targetcli1, targetpath1, targetpath2, false))) {
 		int eno = SMBC_errno(ocontext, targetcli1);
 
 		if (eno != EEXIST ||
-		    !NT_STATUS_IS_OK(cli_unlink(targetcli1, targetpath2, FILE_ATTRIBUTE_SYSTEM | FILE_ATTRIBUTE_HIDDEN)) ||
-		    !NT_STATUS_IS_OK(cli_rename(targetcli1, targetpath1, targetpath2))) {
+		    !NT_STATUS_IS_OK(cli_unlink(targetcli1, targetpath2,
+						FILE_ATTRIBUTE_SYSTEM |
+						    FILE_ATTRIBUTE_HIDDEN)) ||
+		    !NT_STATUS_IS_OK(cli_rename(targetcli1, targetpath1,
+						targetpath2, false))) {
 
 			errno = eno;
 			TALLOC_FREE(frame);

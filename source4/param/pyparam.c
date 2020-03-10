@@ -18,13 +18,12 @@
 */
 
 #include <Python.h>
+#include "python/py3compat.h"
 #include "includes.h"
 #include "param/param.h"
 #include "param/loadparm.h"
 #include <pytalloc.h>
 #include "dynconfig/dynconfig.h"
-
-void initparam(void);
 
 #define PyLoadparmContext_AsLoadparmContext(obj) pytalloc_get_type(obj, struct loadparm_context)
 #define PyLoadparmService_AsLoadparmService(obj) pytalloc_get_type(obj, struct loadparm_service)
@@ -64,7 +63,7 @@ static PyObject *py_lp_ctx_get_helper(struct loadparm_context *lp_ctx, const cha
 			if (value == NULL) {
 			return NULL;
 			}
-			return PyString_FromString(value);
+			return PyStr_FromString(value);
 		}
 
 		parm = lpcfg_parm_struct(lp_ctx, param_name);
@@ -84,7 +83,7 @@ static PyObject *py_lp_ctx_get_helper(struct loadparm_context *lp_ctx, const cha
 		value = lpcfg_get_parametric(lp_ctx, NULL, type, option);
 		if (value == NULL)
 			return NULL;
-		return PyString_FromString(value);
+		return PyStr_FromString(value);
 	} else {
 		/* its a global parameter */
 		parm = lpcfg_parm_struct(lp_ctx, param_name);
@@ -101,10 +100,10 @@ static PyObject *py_lp_ctx_get_helper(struct loadparm_context *lp_ctx, const cha
     /* construct and return the right type of python object */
     switch (parm->type) {
     case P_CHAR:
-	return PyString_FromFormat("%c", *(char *)parm_ptr);
+	return PyStr_FromFormat("%c", *(char *)parm_ptr);
     case P_STRING:
     case P_USTRING:
-	return PyString_FromString(*(char **)parm_ptr);
+	return PyStr_FromString(*(char **)parm_ptr);
     case P_BOOL:
 	return PyBool_FromLong(*(bool *)parm_ptr);
     case P_BOOLREV:
@@ -116,7 +115,7 @@ static PyObject *py_lp_ctx_get_helper(struct loadparm_context *lp_ctx, const cha
     case P_ENUM:
 	for (i=0; parm->enum_list[i].name; i++) {
 	    if (*(int *)parm_ptr == parm->enum_list[i].value) {
-		return PyString_FromString(parm->enum_list[i].name);
+		return PyStr_FromString(parm->enum_list[i].name);
 	    }
 	}
 	return NULL;
@@ -134,7 +133,7 @@ static PyObject *py_lp_ctx_get_helper(struct loadparm_context *lp_ctx, const cha
 	    pylist = PyList_New(str_list_length(strlist));
 	    for (j = 0; strlist[j]; j++) 
 		PyList_SetItem(pylist, j, 
-			       PyString_FromString(strlist[j]));
+			       PyStr_FromString(strlist[j]));
 	    return pylist;
 	}
     }
@@ -226,7 +225,7 @@ static PyObject *py_lp_ctx_private_path(PyObject *self, PyObject *args)
 		return NULL;
 
 	path = lpcfg_private_path(NULL, PyLoadparmContext_AsLoadparmContext(self), name);
-	ret = PyString_FromString(path);
+	ret = PyStr_FromString(path);
 	talloc_free(path);
 
 	return ret;
@@ -241,7 +240,7 @@ static PyObject *py_lp_ctx_services(PyObject *self, PyObject *unused)
 	for (i = 0; i < lpcfg_numservices(lp_ctx); i++) {
 		struct loadparm_service *service = lpcfg_servicebynum(lp_ctx, i);
 		if (service != NULL) {
-			PyList_SetItem(ret, i, PyString_FromString(lpcfg_servicename(service)));
+			PyList_SetItem(ret, i, PyStr_FromString(lpcfg_servicename(service)));
 		}
 	}
 	return ret;
@@ -256,43 +255,60 @@ static PyObject *py_lp_ctx_server_role(PyObject *self, PyObject *unused)
 	role = lpcfg_server_role(lp_ctx);
 	role_str = server_role_str(role);
 
-	return PyString_FromString(role_str);
+	return PyStr_FromString(role_str);
 }
 
 static PyObject *py_lp_dump(PyObject *self, PyObject *args)
 {
-	PyObject *py_stream;
 	bool show_defaults = false;
+	const char *file_name = "";
+	const char *mode = "w";
 	FILE *f;
 	struct loadparm_context *lp_ctx = PyLoadparmContext_AsLoadparmContext(self);
 
-	if (!PyArg_ParseTuple(args, "O|b", &py_stream, &show_defaults))
+	if (!PyArg_ParseTuple(args, "|bss", &show_defaults, &file_name, &mode))
 		return NULL;
 
-	f = PyFile_AsFile(py_stream);
+	if (file_name[0] == '\0') {
+		f = stdout;
+	} else {
+		f = fopen(file_name, mode);
+	}
+
 	if (f == NULL) {
+		PyErr_SetFromErrno(PyExc_IOError);
 		return NULL;
 	}
 
 	lpcfg_dump(lp_ctx, f, show_defaults, lpcfg_numservices(lp_ctx));
+
+	if (f != stdout) {
+		fclose(f);
+	}
 
 	Py_RETURN_NONE;
 }
 
 static PyObject *py_lp_dump_a_parameter(PyObject *self, PyObject *args)
 {
-	PyObject *py_stream;
 	char *param_name;
 	const char *section_name = NULL;
+	const char *file_name = "";
+	const char *mode = "w";
 	FILE *f;
 	struct loadparm_context *lp_ctx = PyLoadparmContext_AsLoadparmContext(self);
 	struct loadparm_service *service;
 	bool ret;
 
-	if (!PyArg_ParseTuple(args, "Os|z", &py_stream, &param_name, &section_name))
+	if (!PyArg_ParseTuple(args, "s|zss", &param_name, &section_name, &file_name, &mode))
 		return NULL;
 
-	f = PyFile_AsFile(py_stream);
+	if (file_name[0] == '\0') {
+		f = stdout;
+	} else {
+		f = fopen(file_name, mode);
+	}
+
 	if (f == NULL) {
 		return NULL;
 	}
@@ -321,6 +337,10 @@ static PyObject *py_lp_dump_a_parameter(PyObject *self, PyObject *args)
 		return NULL;
 	}
 
+	if (f != stdout) {
+		fclose(f);
+	}
+
 	Py_RETURN_NONE;
 
 }
@@ -335,9 +355,31 @@ static PyObject *py_lp_log_level(PyObject *self, PyObject *unused)
 static PyObject *py_samdb_url(PyObject *self, PyObject *unused)
 {
 	struct loadparm_context *lp_ctx = PyLoadparmContext_AsLoadparmContext(self);
-	return PyString_FromFormat("tdb://%s/sam.ldb", lpcfg_private_dir(lp_ctx));
+	return PyStr_FromFormat("tdb://%s/sam.ldb", lpcfg_private_dir(lp_ctx));
 }
 
+static PyObject *py_cache_path(PyObject *self, PyObject *args)
+{
+	struct loadparm_context *lp_ctx = PyLoadparmContext_AsLoadparmContext(self);
+	char *name = NULL;
+	char *path = NULL;
+	PyObject *ret = NULL;
+
+	if (!PyArg_ParseTuple(args, "s", &name)) {
+		return NULL;
+	}
+
+	path = lpcfg_cache_path(NULL, lp_ctx, name);
+	if (!path) {
+		PyErr_Format(PyExc_RuntimeError,
+			     "Unable to access cache %s", name);
+		return NULL;
+	}
+	ret = PyStr_FromString(path);
+	talloc_free(path);
+
+	return ret;
+}
 
 static PyMethodDef py_lp_ctx_methods[] = {
 	{ "load", py_lp_ctx_load, METH_VARARGS,
@@ -366,14 +408,17 @@ static PyMethodDef py_lp_ctx_methods[] = {
 		"S.server_role() -> value\n"
 		"Get the server role." },
 	{ "dump", py_lp_dump, METH_VARARGS,
-		"S.dump(stream, show_defaults=False)" },
+		"S.dump(show_defaults=False, file_name='', mode='w')" },
+	{ "dump_a_parameter", py_lp_dump_a_parameter, METH_VARARGS,
+		"S.dump_a_parameter(name, service_name, file_name='', mode='w')" },
 	{ "log_level", py_lp_log_level, METH_NOARGS,
 		"S.log_level() -> int\n Get the active log level" },
-	{ "dump_a_parameter", py_lp_dump_a_parameter, METH_VARARGS,
-		"S.dump_a_parameter(stream, name, service_name)" },
 	{ "samdb_url", py_samdb_url, METH_NOARGS,
 	        "S.samdb_url() -> string\n"
 	        "Returns the current URL for sam.ldb." },
+	{ "cache_path", py_cache_path, METH_VARARGS,
+		"S.cache_path(name) -> string\n"
+		"Returns a path in the Samba cache directory." },
 	{ NULL }
 };
 
@@ -388,7 +433,7 @@ static PyObject *py_lp_ctx_config_file(PyObject *self, void *closure)
 	if (configfile == NULL)
 		Py_RETURN_NONE;
 	else
-		return PyString_FromString(configfile);
+		return PyStr_FromString(configfile);
 }
 
 static PyGetSetDef py_lp_ctx_getset[] = {
@@ -400,7 +445,52 @@ static PyGetSetDef py_lp_ctx_getset[] = {
 
 static PyObject *py_lp_ctx_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
-	return pytalloc_reference(type, loadparm_init_global(false));
+	const char *kwnames[] = {"filename_for_non_global_lp", NULL};
+	PyObject *lp_ctx;
+	const char *non_global_conf = NULL;
+	struct loadparm_context *ctx;
+
+	if (!PyArg_ParseTupleAndKeywords(args,
+					 kwargs,
+					 "|s",
+					 discard_const_p(char *,
+							 kwnames),
+					 &non_global_conf)) {
+		return NULL;
+	}
+
+	/*
+	 * by default, any LoadParm python objects map to a single global
+	 * underlying object. The filename_for_non_global_lp arg overrides this
+	 * default behaviour and creates a separate underlying LoadParm object.
+	 */
+	if (non_global_conf != NULL) {
+		bool ok;
+		ctx = loadparm_init(NULL);
+		if (ctx == NULL) {
+			PyErr_NoMemory();
+			return NULL;
+		}
+
+		lp_ctx = pytalloc_reference(type, ctx);
+		if (lp_ctx == NULL) {
+			PyErr_NoMemory();
+			return NULL;
+		}
+
+		ok = lpcfg_load_no_global(
+			PyLoadparmContext_AsLoadparmContext(lp_ctx),
+			non_global_conf);
+		if (!ok) {
+			PyErr_Format(PyExc_ValueError,
+				     "Could not load non-global conf %s",
+				     non_global_conf);
+			return NULL;
+		}
+		return lp_ctx;
+	} else{
+		return pytalloc_reference(type, loadparm_init_global(false));
+	}
 }
 
 static Py_ssize_t py_lp_ctx_len(PyObject *self)
@@ -411,11 +501,11 @@ static Py_ssize_t py_lp_ctx_len(PyObject *self)
 static PyObject *py_lp_ctx_getitem(PyObject *self, PyObject *name)
 {
 	struct loadparm_service *service;
-	if (!PyString_Check(name)) {
+	if (!(PyStr_Check(name) || PyUnicode_Check(name))) {
 		PyErr_SetString(PyExc_TypeError, "Only string subscripts are supported");
 		return NULL;
 	}
-	service = lpcfg_service(PyLoadparmContext_AsLoadparmContext(self), PyString_AsString(name));
+	service = lpcfg_service(PyLoadparmContext_AsLoadparmContext(self), PyStr_AsString(name));
 	if (service == NULL) {
 		PyErr_SetString(PyExc_KeyError, "No such section");
 		return NULL;
@@ -439,18 +529,23 @@ PyTypeObject PyLoadparmContext = {
 
 static PyObject *py_lp_service_dump(PyObject *self, PyObject *args)
 {
-	PyObject *py_stream;
 	bool show_defaults = false;
 	FILE *f;
+	const char *file_name = "";
+	const char *mode = "w";
 	struct loadparm_service *service = PyLoadparmService_AsLoadparmService(self);
 	struct loadparm_service *default_service;
 	PyObject *py_default_service;
 
-	if (!PyArg_ParseTuple(args, "OO|b", &py_stream, &py_default_service,
-						  &show_defaults))
+	if (!PyArg_ParseTuple(args, "O|bss", &py_default_service, &show_defaults, &file_name, &mode))
 		return NULL;
 
-	f = PyFile_AsFile(py_stream);
+	if (file_name[0] == '\0') {
+		f = stdout;
+	} else {
+		f = fopen(file_name, mode);
+	}
+
 	if (f == NULL) {
 		return NULL;
 	}
@@ -467,12 +562,16 @@ static PyObject *py_lp_service_dump(PyObject *self, PyObject *args)
 
 	lpcfg_dump_one(f, show_defaults, service, default_service);
 
+	if (f != stdout) {
+		fclose(f);
+	}
+
 	Py_RETURN_NONE;
 }
 
 static PyMethodDef py_lp_service_methods[] = {
 	{ "dump", (PyCFunction)py_lp_service_dump, METH_VARARGS, 
-		"S.dump(f, default_service, show_defaults=False)" },
+		"S.dump(default_service, show_defaults=False, file_name='', mode='w')" },
 	{ NULL }
 };
 
@@ -484,27 +583,27 @@ PyTypeObject PyLoadparmService = {
 
 static PyObject *py_default_path(PyObject *self)
 {
-	return PyString_FromString(lp_default_path());
+	return PyStr_FromString(lp_default_path());
 }
 
 static PyObject *py_setup_dir(PyObject *self)
 {
-	return PyString_FromString(dyn_SETUPDIR);
+	return PyStr_FromString(dyn_SETUPDIR);
 }
 
 static PyObject *py_modules_dir(PyObject *self)
 {
-	return PyString_FromString(dyn_MODULESDIR);
+	return PyStr_FromString(dyn_MODULESDIR);
 }
 
 static PyObject *py_bin_dir(PyObject *self)
 {
-	return PyString_FromString(dyn_BINDIR);
+	return PyStr_FromString(dyn_BINDIR);
 }
 
 static PyObject *py_sbin_dir(PyObject *self)
 {
-	return PyString_FromString(dyn_SBINDIR);
+	return PyStr_FromString(dyn_SBINDIR);
 }
 
 static PyMethodDef pyparam_methods[] = {
@@ -521,20 +620,32 @@ static PyMethodDef pyparam_methods[] = {
 	{ NULL }
 };
 
-void initparam(void)
+static struct PyModuleDef moduledef = {
+	PyModuleDef_HEAD_INIT,
+	.m_name = "param",
+	.m_doc = "Parsing and writing Samba configuration files.",
+	.m_size = -1,
+	.m_methods = pyparam_methods,
+};
+
+MODULE_INIT_FUNC(param)
 {
 	PyObject *m;
+	PyTypeObject *talloc_type = pytalloc_GetObjectType();
+	if (talloc_type == NULL)
+		return NULL;
 
 	if (pytalloc_BaseObject_PyType_Ready(&PyLoadparmContext) < 0)
-		return;
+		return NULL;
 
 	if (pytalloc_BaseObject_PyType_Ready(&PyLoadparmService) < 0)
-		return;
+		return NULL;
 
-	m = Py_InitModule3("param", pyparam_methods, "Parsing and writing Samba configuration files.");
+	m = PyModule_Create(&moduledef);
 	if (m == NULL)
-		return;
+		return NULL;
 
 	Py_INCREF(&PyLoadparmContext);
 	PyModule_AddObject(m, "LoadParm", (PyObject *)&PyLoadparmContext);
+	return m;
 }

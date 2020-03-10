@@ -23,6 +23,7 @@
 
 #include "includes.h"
 #include "system/filesys.h"
+#include "lib/util/server_id.h"
 #include "popt_common.h"
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
@@ -35,10 +36,10 @@
 #include "printing/queue_process.h"
 #include "rpc_server/rpc_service_setup.h"
 #include "rpc_server/rpc_config.h"
-#include "serverid.h"
 #include "passdb.h"
 #include "auth.h"
 #include "messages.h"
+#include "messages_ctdb.h"
 #include "smbprofile.h"
 #include "lib/id_cache.h"
 #include "lib/param/param.h"
@@ -52,6 +53,7 @@
 #include "smbd/smbd_cleanupd.h"
 #include "lib/util/sys_rw.h"
 #include "cleanupdb.h"
+#include "g_lock.h"
 
 #ifdef CLUSTER_SUPPORT
 #include "ctdb_protocol.h"
@@ -277,6 +279,7 @@ static void smbd_parent_id_cache_delete(struct messaging_context *ctx,
 
 #ifdef CLUSTER_SUPPORT
 static int smbd_parent_ctdb_reconfigured(
+	struct tevent_context *ev,
 	uint32_t src_vnn, uint32_t dst_vnn, uint64_t dst_srvid,
 	const uint8_t *msg, size_t msglen, void *private_data)
 {
@@ -361,7 +364,7 @@ static struct tevent_req *notifyd_req(struct messaging_context *msg_ctx,
 	}
 
 	if (lp_clustering()) {
-		ctdbd_conn = messaging_ctdbd_connection();
+		ctdbd_conn = messaging_ctdb_connection();
 	}
 
 	req = notifyd_send(msg_ctx, ev, msg_ctx, ctdbd_conn,
@@ -758,7 +761,7 @@ static void cleanup_timeout_fn(struct tevent_context *event_ctx,
 	parent->cleanup_te = NULL;
 
 	messaging_send_buf(parent->msg_ctx, parent->cleanupd,
-			   MSG_SMB_UNLOCK, NULL, 0);
+			   MSG_SMB_BRL_VALIDATE, NULL, 0);
 }
 
 static void cleanupd_started(struct tevent_req *req)
@@ -976,6 +979,7 @@ static void smbd_accept_connection(struct tevent_context *ev,
 			 strerror(errno)));
 		return;
 	}
+	smb_set_close_on_exec(fd);
 
 	if (s->parent->interactive) {
 		reinit_after_fork(msg_ctx, ev, true, NULL);
@@ -1263,21 +1267,6 @@ static bool open_sockets_smbd(struct smbd_parent_context *parent,
 		return false;
 	}
 
-	/* Setup the main smbd so that we can get messages. Note that
-	   do this after starting listening. This is needed as when in
-	   clustered mode, ctdb won't allow us to start doing database
-	   operations until it has gone thru a full startup, which
-	   includes checking to see that smbd is listening. */
-
-	if (!serverid_register(messaging_server_id(msg_ctx),
-			       FLAG_MSG_GENERAL|FLAG_MSG_SMBD
-			       |FLAG_MSG_PRINT_GENERAL
-			       |FLAG_MSG_DBWRAP)) {
-		DEBUG(0, ("open_sockets_smbd: Failed to register "
-			  "myself in serverid.tdb\n"));
-		return false;
-	}
-
         /* Listen to messages */
 
 	messaging_register(msg_ctx, NULL, MSG_SHUTDOWN, msg_exit_server);
@@ -1302,7 +1291,7 @@ static bool open_sockets_smbd(struct smbd_parent_context *parent,
 
 #ifdef CLUSTER_SUPPORT
 	if (lp_clustering()) {
-		struct ctdbd_connection *conn = messaging_ctdbd_connection();
+		struct ctdbd_connection *conn = messaging_ctdb_connection();
 
 		register_with_ctdbd(conn, CTDB_SRVID_RECONFIGURE,
 				    smbd_parent_ctdb_reconfigured, msg_ctx);
@@ -1455,6 +1444,112 @@ static void smbd_parent_sig_hup_handler(struct tevent_context *ev,
 	printing_subsystem_update(parent->ev_ctx, parent->msg_ctx, true);
 }
 
+struct smbd_claim_version_state {
+	TALLOC_CTX *mem_ctx;
+	char *version;
+};
+
+static void smbd_claim_version_parser(const struct g_lock_rec *locks,
+				      size_t num_locks,
+				      const uint8_t *data,
+				      size_t datalen,
+				      void *private_data)
+{
+	struct smbd_claim_version_state *state = private_data;
+
+	if (datalen == 0) {
+		state->version = NULL;
+		return;
+	}
+	if (data[datalen-1] != '\0') {
+		DBG_WARNING("Invalid samba version\n");
+		dump_data(DBGLVL_WARNING, data, datalen);
+		state->version = NULL;
+		return;
+	}
+	state->version = talloc_strdup(state->mem_ctx, (const char *)data);
+}
+
+static NTSTATUS smbd_claim_version(struct messaging_context *msg,
+				   const char *version)
+{
+	const char *name = "samba_version_string";
+	struct smbd_claim_version_state state;
+	struct g_lock_ctx *ctx;
+	NTSTATUS status;
+
+	ctx = g_lock_ctx_init(msg, msg);
+	if (ctx == NULL) {
+		DBG_WARNING("g_lock_ctx_init failed\n");
+		return NT_STATUS_UNSUCCESSFUL;
+	}
+
+	status = g_lock_lock(ctx, string_term_tdb_data(name), G_LOCK_READ,
+			     (struct timeval) { .tv_sec = 60 });
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("g_lock_lock(G_LOCK_READ) failed: %s\n",
+			    nt_errstr(status));
+		TALLOC_FREE(ctx);
+		return status;
+	}
+
+	state = (struct smbd_claim_version_state) { .mem_ctx = ctx };
+
+	status = g_lock_dump(ctx, string_term_tdb_data(name),
+			     smbd_claim_version_parser, &state);
+	if (!NT_STATUS_IS_OK(status) &&
+	    !NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND)) {
+		DBG_ERR("Could not read samba_version_string\n");
+		g_lock_unlock(ctx, string_term_tdb_data(name));
+		TALLOC_FREE(ctx);
+		return status;
+	}
+
+	if ((state.version != NULL) && (strcmp(version, state.version) == 0)) {
+		/*
+		 * Leave the read lock for us around. Someone else already
+		 * set the version correctly
+		 */
+		TALLOC_FREE(ctx);
+		return NT_STATUS_OK;
+	}
+
+	status = g_lock_lock(ctx, string_term_tdb_data(name), G_LOCK_WRITE,
+			     (struct timeval) { .tv_sec = 60 });
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("g_lock_lock(G_LOCK_WRITE) failed: %s\n",
+			    nt_errstr(status));
+		DBG_ERR("smbd %s already running, refusing to start "
+			"version %s\n", state.version, version);
+		TALLOC_FREE(ctx);
+		return NT_STATUS_SXS_VERSION_CONFLICT;
+	}
+
+	status = g_lock_write_data(ctx, string_term_tdb_data(name),
+				   (const uint8_t *)version,
+				   strlen(version)+1);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("g_lock_write_data failed: %s\n",
+			    nt_errstr(status));
+		TALLOC_FREE(ctx);
+		return status;
+	}
+
+	status = g_lock_lock(ctx, string_term_tdb_data(name), G_LOCK_READ,
+			     (struct timeval) { .tv_sec = 60 });
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("g_lock_lock(G_LOCK_READ) failed: %s\n",
+			    nt_errstr(status));
+		TALLOC_FREE(ctx);
+		return status;
+	}
+
+	/*
+	 * Leave "ctx" dangling so that g_lock.tdb keeps opened.
+	 */
+	return NT_STATUS_OK;
+}
+
 /****************************************************************************
  main program.
 ****************************************************************************/
@@ -1489,7 +1584,7 @@ extern void build_options(bool screen);
 	struct poptOption long_options[] = {
 	POPT_AUTOHELP
 	{"daemon", 'D', POPT_ARG_NONE, NULL, OPT_DAEMON, "Become a daemon (default)" },
-	{"interactive", 'i', POPT_ARG_NONE, NULL, OPT_INTERACTIVE, "Run interactive (not a daemon)"},
+	{"interactive", 'i', POPT_ARG_NONE, NULL, OPT_INTERACTIVE, "Run interactive (not a daemon) and log to stdout"},
 	{"foreground", 'F', POPT_ARG_NONE, NULL, OPT_FORK, "Run daemon in foreground (for daemontools, etc.)" },
 	{"no-process-group", '\0', POPT_ARG_NONE, NULL, OPT_NO_PROCESS_GROUP, "Don't create a new process group" },
 	{"log-stdout", 'S', POPT_ARG_NONE, NULL, OPT_LOG_STDOUT, "Log to stdout" },
@@ -1852,6 +1947,11 @@ extern void build_options(bool screen);
 		exit_daemon("Samba cannot init server context", EACCES);
 	}
 
+	status = smbXsrv_client_global_init();
+	if (!NT_STATUS_IS_OK(status)) {
+		exit_daemon("Samba cannot init clients context", EACCES);
+	}
+
 	status = smbXsrv_session_global_init(msg_ctx);
 	if (!NT_STATUS_IS_OK(status)) {
 		exit_daemon("Samba cannot init session context", EACCES);
@@ -1885,10 +1985,6 @@ extern void build_options(bool screen);
 		exit_daemon("Samba cannot init scavenging", EACCES);
 	}
 
-	if (!serverid_parent_init(ev_ctx)) {
-		exit_daemon("Samba cannot init server id", EACCES);
-	}
-
 	if (!W_ERROR_IS_OK(registry_init_full()))
 		exit_daemon("Samba cannot init registry", EACCES);
 
@@ -1900,14 +1996,14 @@ extern void build_options(bool screen);
 		exit_daemon("ERROR: failed to load share info db.", EACCES);
 	}
 
-	status = init_system_session_info();
+	status = init_system_session_info(NULL);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(1, ("ERROR: failed to setup system user info: %s.\n",
 			  nt_errstr(status)));
 		return -1;
 	}
 
-	if (!init_guest_info()) {
+	if (!init_guest_session_info(NULL)) {
 		DEBUG(0,("ERROR: failed to setup guest info.\n"));
 		return -1;
 	}
@@ -1919,6 +2015,15 @@ extern void build_options(bool screen);
 	status = smbXsrv_open_global_init();
 	if (!NT_STATUS_IS_OK(status)) {
 		exit_daemon("Samba cannot init global open", map_errno_from_nt_status(status));
+	}
+
+	if (lp_clustering() && !lp_allow_unsafe_cluster_upgrade()) {
+		status = smbd_claim_version(msg_ctx, samba_version_string());
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_WARNING("Could not claim version: %s\n",
+				    nt_errstr(status));
+			return -1;
+		}
 	}
 
 	/* This MUST be done before start_epmd() because otherwise

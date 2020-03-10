@@ -8,6 +8,7 @@
 # secured enough (SASL with a minimum of 128 Bit encryption) - consider
 # MS-ADTS 3.1.1.3.1.5
 
+from __future__ import print_function
 import optparse
 import sys
 import base64
@@ -18,6 +19,7 @@ sys.path.insert(0, "bin/python")
 import samba
 
 from samba.tests.subunitrun import SubunitOptions, TestProgram
+from samba.tests.password_test import PasswordTestCase
 
 import samba.getopt as options
 
@@ -34,6 +36,7 @@ from samba import gensec
 from samba.samdb import SamDB
 import samba.tests
 from samba.tests import delete_force
+from password_lockout_base import BasePasswordTestCase
 
 parser = optparse.OptionParser("passwords.py [options] <host>")
 sambaopts = options.SambaOptions(parser)
@@ -63,7 +66,7 @@ creds.set_gensec_features(creds.get_gensec_features() | gensec.FEATURE_SEAL)
 # Tests start here
 #
 
-class PasswordTests(samba.tests.TestCase):
+class PasswordTests(PasswordTestCase):
 
     def setUp(self):
         super(PasswordTests, self).setUp()
@@ -75,24 +78,10 @@ class PasswordTests(samba.tests.TestCase):
         # Gets back the configuration basedn
         configuration_dn = self.ldb.get_config_basedn().get_linearized()
 
-        # Get the old "dSHeuristics" if it was set
-        dsheuristics = self.ldb.get_dsheuristics()
+        # permit password changes during this test
+        self.allow_password_changes()
 
-        # Set the "dSHeuristics" to activate the correct "userPassword" behaviour
-        self.ldb.set_dsheuristics("000000001")
-
-        # Reset the "dSHeuristics" as they were before
-        self.addCleanup(self.ldb.set_dsheuristics, dsheuristics)
-
-        # Get the old "minPwdAge"
-        minPwdAge = self.ldb.get_minPwdAge()
-
-        # Set it temporarily to "0"
-        self.ldb.set_minPwdAge("0")
         self.base_dn = self.ldb.domain_dn()
-
-        # Reset the "minPwdAge" as it was before
-        self.addCleanup(self.ldb.set_minPwdAge, minPwdAge)
 
         # (Re)adds the test user "testuser" with no password atm
         delete_force(self.ldb, "cn=testuser,cn=users," + self.base_dn)
@@ -113,7 +102,8 @@ add: userPassword
 userPassword: thatsAcomplPASS2
 """)
             self.fail()
-        except LdbError, (num, msg):
+        except LdbError as e:
+            (num, msg) = e.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
             # Windows (2008 at least) seems to have some small bug here: it
             # returns "0000056A" on longer (always wrong) previous passwords.
@@ -141,7 +131,8 @@ userPassword: thatsAcomplPASS1
 add: userPassword
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e1:
+            (num, _) = e1.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         # Enables the user account
@@ -171,7 +162,8 @@ add: userPassword
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e2:
+            (num, _) = e2.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
     def test_unicodePwd_hash_change(self):
@@ -189,7 +181,8 @@ add: unicodePwd
 unicodePwd: YYYYYYYYYYYYYYYY
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e3:
+            (num, _) = e3.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
     def test_unicodePwd_clear_set(self):
@@ -208,9 +201,9 @@ unicodePwd: YYYYYYYYYYYYYYYY
 dn: cn=testuser,cn=users,""" + self.base_dn + """
 changetype: modify
 delete: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS1\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS1\"".encode('utf-16-le')).decode('utf8') + """
 add: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')).decode('utf8') + """
 """)
 
         # Wrong old password
@@ -219,12 +212,13 @@ unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')) 
 dn: cn=testuser,cn=users,""" + self.base_dn + """
 changetype: modify
 delete: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS3\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS3\"".encode('utf-16-le')).decode('utf8') + """
 add: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS4\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS4\"".encode('utf-16-le')).decode('utf8') + """
 """)
             self.fail()
-        except LdbError, (num, msg):
+        except LdbError as e4:
+            (num, msg) = e4.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
             self.assertTrue('00000056' in msg)
 
@@ -234,12 +228,13 @@ unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS4\"".encode('utf-16-le')) 
 dn: cn=testuser,cn=users,""" + self.base_dn + """
 changetype: modify
 delete: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')).decode('utf8') + """
 add: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')).decode('utf8') + """
 """)
             self.fail()
-        except LdbError, (num, msg):
+        except LdbError as e5:
+            (num, msg) = e5.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
             self.assertTrue('0000052D' in msg)
 
@@ -254,7 +249,8 @@ unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')) 
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e6:
+            (num, _) = e6.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
     def test_dBCSPwd_hash_change(self):
@@ -271,7 +267,8 @@ add: dBCSPwd
 dBCSPwd: YYYYYYYYYYYYYYYY
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e7:
+            (num, _) = e7.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
     def test_userPassword_clear_set(self):
@@ -310,7 +307,8 @@ add: userPassword
 userPassword: thatsAcomplPASS4
 """)
             self.fail()
-        except LdbError, (num, msg):
+        except LdbError as e8:
+            (num, msg) = e8.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
             self.assertTrue('00000056' in msg)
 
@@ -325,7 +323,8 @@ add: userPassword
 userPassword: thatsAcomplPASS2
 """)
             self.fail()
-        except LdbError, (num, msg):
+        except LdbError as e9:
+            (num, msg) = e9.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
             self.assertTrue('0000052D' in msg)
 
@@ -340,7 +339,8 @@ userPassword: thatsAcomplPASS2
               FLAG_MOD_REPLACE, "clearTextPassword")
             self.ldb.modify(m)
             # this passes against s4
-        except LdbError, (num, msg):
+        except LdbError as e10:
+            (num, msg) = e10.args
             # "NO_SUCH_ATTRIBUTE" is returned by Windows -> ignore it
             if num != ERR_NO_SUCH_ATTRIBUTE:
                 raise LdbError(num, msg)
@@ -354,12 +354,13 @@ userPassword: thatsAcomplPASS2
 dn: cn=testuser,cn=users,""" + self.base_dn + """
 changetype: modify
 delete: clearTextPassword
-clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS1".encode('utf-16-le')) + """
+clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS1".encode('utf-16-le')).decode('utf8') + """
 add: clearTextPassword
-clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS2".encode('utf-16-le')) + """
+clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS2".encode('utf-16-le')).decode('utf8') + """
 """)
             # this passes against s4
-        except LdbError, (num, msg):
+        except LdbError as e11:
+            (num, msg) = e11.args
             # "NO_SUCH_ATTRIBUTE" is returned by Windows -> ignore it
             if num != ERR_NO_SUCH_ATTRIBUTE:
                 raise LdbError(num, msg)
@@ -370,12 +371,13 @@ clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS2".encode('utf-16-le'
 dn: cn=testuser,cn=users,""" + self.base_dn + """
 changetype: modify
 delete: clearTextPassword
-clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS3".encode('utf-16-le')) + """
+clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS3".encode('utf-16-le')).decode('utf8') + """
 add: clearTextPassword
-clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS4".encode('utf-16-le')) + """
+clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS4".encode('utf-16-le')).decode('utf8') + """
 """)
             self.fail()
-        except LdbError, (num, msg):
+        except LdbError as e12:
+            (num, msg) = e12.args
             # "NO_SUCH_ATTRIBUTE" is returned by Windows -> ignore it
             if num != ERR_NO_SUCH_ATTRIBUTE:
                 self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
@@ -387,12 +389,13 @@ clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS4".encode('utf-16-le'
 dn: cn=testuser,cn=users,""" + self.base_dn + """
 changetype: modify
 delete: clearTextPassword
-clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS2".encode('utf-16-le')) + """
+clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS2".encode('utf-16-le')).decode('utf8') + """
 add: clearTextPassword
-clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS2".encode('utf-16-le')) + """
+clearTextPassword:: """ + base64.b64encode("thatsAcomplPASS2".encode('utf-16-le')).decode('utf8') + """
 """)
             self.fail()
-        except LdbError, (num, msg):
+        except LdbError as e13:
+            (num, msg) = e13.args
             # "NO_SUCH_ATTRIBUTE" is returned by Windows -> ignore it
             if num != ERR_NO_SUCH_ATTRIBUTE:
                 self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
@@ -409,7 +412,8 @@ delete: userPassword
 userPassword: thatsAcomplPASS1
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e14:
+            (num, _) = e14.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         try:
@@ -420,7 +424,8 @@ delete: userPassword
 userPassword: thatsAcomplPASS1
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e15:
+            (num, _) = e15.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         try:
@@ -430,7 +435,8 @@ changetype: modify
 delete: userPassword
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e16:
+            (num, _) = e16.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         try:
@@ -440,7 +446,8 @@ changetype: modify
 delete: userPassword
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e17:
+            (num, _) = e17.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         try:
@@ -451,7 +458,8 @@ add: userPassword
 userPassword: thatsAcomplPASS1
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e18:
+            (num, _) = e18.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         try:
@@ -462,7 +470,8 @@ add: userPassword
 userPassword: thatsAcomplPASS1
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e19:
+            (num, _) = e19.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
 
         try:
@@ -476,7 +485,8 @@ userPassword: thatsAcomplPASS2
 userPassword: thatsAcomplPASS2
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e20:
+            (num, _) = e20.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         try:
@@ -490,7 +500,8 @@ userPassword: thatsAcomplPASS2
 userPassword: thatsAcomplPASS2
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e21:
+            (num, _) = e21.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         try:
@@ -504,7 +515,8 @@ add: userPassword
 userPassword: thatsAcomplPASS2
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e22:
+            (num, _) = e22.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         try:
@@ -518,7 +530,8 @@ add: userPassword
 userPassword: thatsAcomplPASS2
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e23:
+            (num, _) = e23.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         try:
@@ -533,7 +546,8 @@ add: userPassword
 userPassword: thatsAcomplPASS2
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e24:
+            (num, _) = e24.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         try:
@@ -548,7 +562,8 @@ add: userPassword
 userPassword: thatsAcomplPASS2
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e25:
+            (num, _) = e25.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
 
         try:
@@ -563,7 +578,8 @@ add: userPassword
 userPassword: thatsAcomplPASS2
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e26:
+            (num, _) = e26.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         try:
@@ -578,7 +594,8 @@ add: userPassword
 userPassword: thatsAcomplPASS2
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e27:
+            (num, _) = e27.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
 
         try:
@@ -593,7 +610,8 @@ replace: userPassword
 userPassword: thatsAcomplPASS3
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e28:
+            (num, _) = e28.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         try:
@@ -608,7 +626,8 @@ replace: userPassword
 userPassword: thatsAcomplPASS3
 """)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e29:
+            (num, _) = e29.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
 
         # Reverse order does work
@@ -628,10 +647,11 @@ changetype: modify
 delete: userPassword
 userPassword: thatsAcomplPASS2
 add: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS3\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS3\"".encode('utf-16-le')).decode('utf8') + """
 """)
              # this passes against s4
-        except LdbError, (num, _):
+        except LdbError as e30:
+            (num, _) = e30.args
             self.assertEquals(num, ERR_ATTRIBUTE_OR_VALUE_EXISTS)
 
         try:
@@ -639,12 +659,13 @@ unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS3\"".encode('utf-16-le')) 
 dn: cn=testuser,cn=users,""" + self.base_dn + """
 changetype: modify
 delete: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS3\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS3\"".encode('utf-16-le')).decode('utf8') + """
 add: userPassword
 userPassword: thatsAcomplPASS4
 """)
              # this passes against s4
-        except LdbError, (num, _):
+        except LdbError as e31:
+            (num, _) = e31.args
             self.assertEquals(num, ERR_NO_SUCH_ATTRIBUTE)
 
         # Several password changes at once are allowed
@@ -684,7 +705,7 @@ userPassword: thatsAcomplPASS4
              "userPassword": ["thatsAcomplPASS1", "thatsAcomplPASS1"] })
 
     def test_empty_passwords(self):
-        print "Performs some empty passwords testing"
+        print("Performs some empty passwords testing")
 
         try:
             self.ldb.add({
@@ -692,7 +713,8 @@ userPassword: thatsAcomplPASS4
                  "objectclass": "user",
                  "unicodePwd": [] })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e32:
+            (num, _) = e32.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         try:
@@ -701,7 +723,8 @@ userPassword: thatsAcomplPASS4
                  "objectclass": "user",
                  "dBCSPwd": [] })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e33:
+            (num, _) = e33.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         try:
@@ -710,7 +733,8 @@ userPassword: thatsAcomplPASS4
                  "objectclass": "user",
                  "userPassword": [] })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e34:
+            (num, _) = e34.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         try:
@@ -719,7 +743,8 @@ userPassword: thatsAcomplPASS4
                  "objectclass": "user",
                  "clearTextPassword": [] })
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e35:
+            (num, _) = e35.args
             self.assertTrue(num == ERR_CONSTRAINT_VIOLATION or
                             num == ERR_NO_SUCH_ATTRIBUTE) # for Windows
 
@@ -731,7 +756,8 @@ userPassword: thatsAcomplPASS4
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e36:
+            (num, _) = e36.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         m = Message()
@@ -740,7 +766,8 @@ userPassword: thatsAcomplPASS4
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e37:
+            (num, _) = e37.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         m = Message()
@@ -749,7 +776,8 @@ userPassword: thatsAcomplPASS4
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e38:
+            (num, _) = e38.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         m = Message()
@@ -758,7 +786,8 @@ userPassword: thatsAcomplPASS4
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e39:
+            (num, _) = e39.args
             self.assertTrue(num == ERR_CONSTRAINT_VIOLATION or
                             num == ERR_NO_SUCH_ATTRIBUTE) # for Windows
 
@@ -768,7 +797,8 @@ userPassword: thatsAcomplPASS4
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e40:
+            (num, _) = e40.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         m = Message()
@@ -777,7 +807,8 @@ userPassword: thatsAcomplPASS4
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e41:
+            (num, _) = e41.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         m = Message()
@@ -786,7 +817,8 @@ userPassword: thatsAcomplPASS4
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e42:
+            (num, _) = e42.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         m = Message()
@@ -795,7 +827,8 @@ userPassword: thatsAcomplPASS4
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e43:
+            (num, _) = e43.args
             self.assertTrue(num == ERR_UNWILLING_TO_PERFORM or
                             num == ERR_NO_SUCH_ATTRIBUTE) # for Windows
 
@@ -805,7 +838,8 @@ userPassword: thatsAcomplPASS4
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e44:
+            (num, _) = e44.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         m = Message()
@@ -814,7 +848,8 @@ userPassword: thatsAcomplPASS4
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e45:
+            (num, _) = e45.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         m = Message()
@@ -823,7 +858,8 @@ userPassword: thatsAcomplPASS4
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e46:
+            (num, _) = e46.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         m = Message()
@@ -832,12 +868,13 @@ userPassword: thatsAcomplPASS4
         try:
             self.ldb.modify(m)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e47:
+            (num, _) = e47.args
             self.assertTrue(num == ERR_CONSTRAINT_VIOLATION or
                             num == ERR_NO_SUCH_ATTRIBUTE) # for Windows
 
     def test_plain_userPassword(self):
-        print "Performs testing about the standard 'userPassword' behaviour"
+        print("Performs testing about the standard 'userPassword' behaviour")
 
         # Delete the "dSHeuristics"
         self.ldb.set_dsheuristics(None)
@@ -913,7 +950,7 @@ userPassword: thatsAcomplPASS4
         self.ldb.set_dsheuristics("000000001")
 
     def test_modify_dsheuristics_userPassword(self):
-        print "Performs testing about reading userPassword between dsHeuristic modifies"
+        print("Performs testing about reading userPassword between dsHeuristic modifies")
 
         # Make sure userPassword cannot be read
         self.ldb.set_dsheuristics("000000000")
@@ -936,7 +973,8 @@ userPassword: thatsAcomplPASS4
         res = ldb1.search("cn=testuser,cn=users," + self.base_dn,
                           scope=SCOPE_BASE, attrs=["userPassword"])
 
-        # userPassword cannot be read, despite the dsHeuristic setting
+        # userPassword cannot be read, it wasn't set, instead the
+        # password was
         self.assertTrue(len(res) == 1)
         self.assertFalse("userPassword" in res[0])
 
@@ -944,7 +982,15 @@ userPassword: thatsAcomplPASS4
         ldb2 = SamDB(url=host, session_info=system_session(lp),
                      credentials=creds, lp=lp)
 
-        # Set userPassword to be unreadable
+        res = ldb2.search("cn=testuser,cn=users," + self.base_dn,
+                          scope=SCOPE_BASE, attrs=["userPassword"])
+
+        # Check on the new connection that userPassword was not stored
+        # from ldb1 or is not readable
+        self.assertTrue(len(res) == 1)
+        self.assertFalse("userPassword" in res[0])
+
+        # Set userPassword to be readable
         # This setting does not affect this connection
         ldb2.set_dsheuristics("000000000")
         time.sleep(1)
@@ -965,11 +1011,10 @@ userPassword: thatsAcomplPASS4
         res = ldb2.search("cn=testuser,cn=users," + self.base_dn,
                           scope=SCOPE_BASE, attrs=["userPassword"])
 
-        # userPassword can be read in this connection
-        # This is regardless of the current dsHeuristics setting
+        # Check despite setting it with userPassword support disabled
+        # on this connection it should still not be readable
         self.assertTrue(len(res) == 1)
-        self.assertTrue("userPassword" in res[0])
-        self.assertEquals(res[0]["userPassword"][0], "thatsAcomplPASS2")
+        self.assertFalse("userPassword" in res[0])
 
         # Only password from ldb1 is the user's password
         creds2 = Credentials()
@@ -1000,6 +1045,17 @@ userPassword: thatsAcomplPASS4
 
         # Reset the test "dSHeuristics" (reactivate "userPassword" pwd changes)
         self.ldb.set_dsheuristics("000000001")
+
+        ldb4 = SamDB(url=host, session_info=system_session(lp),
+                     credentials=creds, lp=lp)
+
+        # Check that userPassword that was stored from ldb2
+        res = ldb4.search("cn=testuser,cn=users," + self.base_dn,
+                          scope=SCOPE_BASE, attrs=["userPassword"])
+
+        # userPassword can be not be read
+        self.assertTrue(len(res) == 1)
+        self.assertFalse("userPassword" in res[0])
 
     def test_zero_length(self):
         # Get the old "minPwdLength"
@@ -1062,7 +1118,7 @@ dn: cn=testuser,cn=users,""" + self.base_dn + """
 changetype: modify
 delete: unicodePwd
 add: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS3\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS3\"".encode('utf-16-le')).decode('utf8') + """
 """)
         except LdbError, (num, msg):
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)

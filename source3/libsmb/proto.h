@@ -26,7 +26,6 @@
 #ifndef _LIBSMB_PROTO_H_
 #define _LIBSMB_PROTO_H_
 
-#include "ads.h"
 #include "auth_info.h"
 
 struct smb_trans_enc_state;
@@ -149,7 +148,6 @@ NTSTATUS cli_cm_open(TALLOC_CTX *ctx,
 				const char *server,
 				const char *share,
 				const struct user_auth_info *auth_info,
-				bool show_hdr,
 				bool force_encrypt,
 				int max_protocol,
 				int port,
@@ -157,6 +155,13 @@ NTSTATUS cli_cm_open(TALLOC_CTX *ctx,
 				struct cli_state **pcli);
 void cli_cm_display(struct cli_state *c);
 struct client_dfs_referral;
+NTSTATUS cli_dfs_get_referral_ex(TALLOC_CTX *ctx,
+			struct cli_state *cli,
+			const char *path,
+			uint16_t max_referral_level,
+			struct client_dfs_referral **refs,
+			size_t *num_refs,
+			size_t *consumed);
 NTSTATUS cli_dfs_get_referral(TALLOC_CTX *ctx,
 			struct cli_state *cli,
 			const char *path,
@@ -184,17 +189,14 @@ bool cli_check_msdfs_proxy(TALLOC_CTX *ctx,
 int cli_set_message(char *buf,int num_words,int num_bytes,bool zero);
 unsigned int cli_set_timeout(struct cli_state *cli, unsigned int timeout);
 bool cli_set_backup_intent(struct cli_state *cli, bool flag);
-void cli_setup_packet_buf(struct cli_state *cli, char *buf);
 extern struct GUID cli_state_client_guid;
 struct cli_state *cli_state_create(TALLOC_CTX *mem_ctx,
 				   int fd,
 				   const char *remote_name,
-				   const char *remote_realm,
 				   int signing_state,
 				   int flags);
 void cli_nt_pipes_close(struct cli_state *cli);
 void cli_shutdown(struct cli_state *cli);
-const char *cli_state_remote_realm(struct cli_state *cli);
 uint16_t cli_state_get_vc_num(struct cli_state *cli);
 uint32_t cli_setpid(struct cli_state *cli, uint32_t pid);
 uint32_t cli_getpid(struct cli_state *cli);
@@ -332,12 +334,16 @@ NTSTATUS cli_posix_chown(struct cli_state *cli,
 			uid_t uid,
 			gid_t gid);
 struct tevent_req *cli_rename_send(TALLOC_CTX *mem_ctx,
-                                struct tevent_context *ev,
-                                struct cli_state *cli,
-                                const char *fname_src,
-                                const char *fname_dst);
+				   struct tevent_context *ev,
+				   struct cli_state *cli,
+				   const char *fname_src,
+				   const char *fname_dst,
+				   bool replace);
 NTSTATUS cli_rename_recv(struct tevent_req *req);
-NTSTATUS cli_rename(struct cli_state *cli, const char *fname_src, const char *fname_dst);
+NTSTATUS cli_rename(struct cli_state *cli,
+		    const char *fname_src,
+		    const char *fname_dst,
+		    bool replace);
 struct tevent_req *cli_ntrename_send(TALLOC_CTX *mem_ctx,
                                 struct tevent_context *ev,
                                 struct cli_state *cli,
@@ -417,7 +423,7 @@ struct tevent_req *cli_openx_send(TALLOC_CTX *mem_ctx, struct tevent_context *ev
 NTSTATUS cli_openx_recv(struct tevent_req *req, uint16_t *fnum);
 NTSTATUS cli_openx(struct cli_state *cli, const char *fname, int flags, int share_mode, uint16_t *pfnum);
 NTSTATUS cli_open(struct cli_state *cli, const char *fname, int flags, int share_mode, uint16_t *pfnum);
-struct tevent_req *cli_close_create(TALLOC_CTX *mem_ctx,
+struct tevent_req *cli_smb1_close_create(TALLOC_CTX *mem_ctx,
 				    struct tevent_context *ev,
 				    struct cli_state *cli, uint16_t fnum,
 				    struct tevent_req **psubreq);
@@ -968,6 +974,12 @@ NTSTATUS cli_readlink(struct cli_state *cli, const char *fname,
 		       TALLOC_CTX *mem_ctx, char **psubstitute_name,
 		      char **pprint_name, uint32_t *pflags);
 
+NTSTATUS fill_quota_buffer(TALLOC_CTX *mem_ctx,
+			   SMB_NTQUOTA_LIST *tmp_list,
+			   bool return_single,
+			   uint32_t max_data,
+			   DATA_BLOB *blob,
+			   SMB_NTQUOTA_LIST **end_ptr);
 /* The following definitions come from libsmb/passchange.c  */
 
 NTSTATUS remote_password_change(const char *remote_machine,

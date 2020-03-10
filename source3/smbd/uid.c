@@ -52,6 +52,8 @@ bool change_to_guest(void)
 
 	current_user.conn = NULL;
 	current_user.vuid = UID_FIELD_INVALID;
+	current_user.need_chdir = false;
+	current_user.done_chdir = false;
 
 	TALLOC_FREE(pass);
 
@@ -75,6 +77,7 @@ static void free_conn_session_info_if_unused(connection_struct *conn)
 		}
 	}
 	/* Not used, safe to free. */
+	conn->user_ev_ctx = NULL;
 	TALLOC_FREE(conn->session_info);
 }
 
@@ -89,7 +92,7 @@ static uint32_t create_share_access_mask(int snum,
 	uint32_t share_access = 0;
 
 	share_access_check(token,
-			lp_servicename(talloc_tos(), snum),
+			lp_const_servicename(snum),
 			MAXIMUM_ALLOWED_ACCESS,
 			&share_access);
 
@@ -147,10 +150,10 @@ NTSTATUS check_user_share_access(connection_struct *conn,
 
 	if ((share_access & (FILE_READ_DATA|FILE_WRITE_DATA)) == 0) {
 		/* No access, read or write. */
-		DEBUG(3,("user %s connection to %s denied due to share "
+		DBG_NOTICE("user %s connection to %s denied due to share "
 			 "security descriptor.\n",
 			 session_info->unix_info->unix_name,
-			 lp_servicename(talloc_tos(), snum)));
+			 lp_const_servicename(snum));
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
@@ -158,9 +161,9 @@ NTSTATUS check_user_share_access(connection_struct *conn,
 	    !(share_access & FILE_WRITE_DATA)) {
 		/* smb.conf allows r/w, but the security descriptor denies
 		 * write. Fall back to looking at readonly. */
-		readonly_share = True;
-		DEBUG(5,("falling back to read-only access-evaluation due to "
-			 "security descriptor\n"));
+		readonly_share = true;
+		DBG_INFO("falling back to read-only access-evaluation due to "
+			 "security descriptor\n");
 	}
 
 	*p_share_access = share_access;
@@ -200,8 +203,10 @@ static bool check_user_ok(connection_struct *conn,
 			}
 			free_conn_session_info_if_unused(conn);
 			conn->session_info = ent->session_info;
+			conn->user_ev_ctx = ent->user_ev_ctx;
 			conn->read_only = ent->read_only;
 			conn->share_access = ent->share_access;
+			conn->vuid = ent->vuid;
 			return(True);
 		}
 	}
@@ -239,6 +244,16 @@ static bool check_user_ok(connection_struct *conn,
 		return false;
 	}
 
+	if (admin_user) {
+		DEBUG(2,("check_user_ok: user %s is an admin user. "
+			"Setting uid as %d\n",
+			ent->session_info->unix_info->unix_name,
+			sec_initial_uid() ));
+		ent->session_info->unix_token->uid = sec_initial_uid();
+	}
+
+	ent->user_ev_ctx = conn->sconn->raw_ev_ctx;
+
 	/*
 	 * It's actually OK to call check_user_ok() with
 	 * vuid == UID_FIELD_INVALID as called from change_to_user_by_session().
@@ -250,6 +265,8 @@ static bool check_user_ok(connection_struct *conn,
 	ent->share_access = share_access;
 	free_conn_session_info_if_unused(conn);
 	conn->session_info = ent->session_info;
+	conn->vuid = ent->vuid;
+	conn->user_ev_ctx = ent->user_ev_ctx;
 	if (vuid == UID_FIELD_INVALID) {
 		/*
 		 * Not strictly needed, just make it really
@@ -258,18 +275,11 @@ static bool check_user_ok(connection_struct *conn,
 		ent->read_only = false;
 		ent->share_access = 0;
 		ent->session_info = NULL;
+		ent->user_ev_ctx = NULL;
 	}
 
 	conn->read_only = readonly_share;
 	conn->share_access = share_access;
-
-	if (admin_user) {
-		DEBUG(2,("check_user_ok: user %s is an admin user. "
-			"Setting uid as %d\n",
-			conn->session_info->unix_info->unix_name,
-			sec_initial_uid() ));
-		conn->session_info->unix_token->uid = sec_initial_uid();
-	}
 
 	return(True);
 }
@@ -291,15 +301,28 @@ static bool change_to_user_internal(connection_struct *conn,
 	gid_t *group_list = NULL;
 	bool ok;
 
+	if ((current_user.conn == conn) &&
+	    (current_user.vuid == vuid) &&
+	    (current_user.need_chdir == conn->tcon_done) &&
+	    (current_user.ut.uid == session_info->unix_token->uid))
+	{
+		DBG_INFO("Skipping user change - already user\n");
+		return true;
+	}
+
+	set_current_user_info(session_info->unix_info->sanitized_username,
+			      session_info->unix_info->unix_name,
+			      session_info->info->domain_name);
+
 	snum = SNUM(conn);
 
 	ok = check_user_ok(conn, vuid, session_info, snum);
 	if (!ok) {
-		DEBUG(2,("SMB user %s (unix user %s) "
+		DBG_WARNING("SMB user %s (unix user %s) "
 			 "not permitted access to share %s.\n",
 			 session_info->unix_info->sanitized_username,
 			 session_info->unix_info->unix_name,
-			 lp_servicename(talloc_tos(), snum)));
+			 lp_const_servicename(snum));
 		return false;
 	}
 
@@ -355,12 +378,30 @@ static bool change_to_user_internal(connection_struct *conn,
 
 	current_user.conn = conn;
 	current_user.vuid = vuid;
+	current_user.need_chdir = conn->tcon_done;
 
-	DEBUG(5, ("Impersonated user: uid=(%d,%d), gid=(%d,%d)\n",
-		 (int)getuid(),
-		 (int)geteuid(),
-		 (int)getgid(),
-		 (int)getegid()));
+	if (current_user.need_chdir) {
+		ok = chdir_current_service(conn);
+		if (!ok) {
+			DBG_ERR("chdir_current_service() failed!\n");
+			return false;
+		}
+		current_user.done_chdir = true;
+	}
+
+	if (CHECK_DEBUGLVL(DBGLVL_INFO)) {
+		struct smb_filename *cwdfname = vfs_GetWd(talloc_tos(), conn);
+		if (cwdfname == NULL) {
+			return false;
+		}
+		DBG_INFO("Impersonated user: uid=(%d,%d), gid=(%d,%d), cwd=[%s]\n",
+			 (int)getuid(),
+			 (int)geteuid(),
+			 (int)getgid(),
+			 (int)getegid(),
+			 cwdfname->base_name);
+		TALLOC_FREE(cwdfname);
+	}
 
 	return true;
 }
@@ -376,24 +417,20 @@ bool change_to_user(connection_struct *conn, uint64_t vuid)
 	}
 
 	vuser = get_valid_user_struct(conn->sconn, vuid);
-
-	if ((current_user.conn == conn) &&
-		   (vuser != NULL) && (current_user.vuid == vuid) &&
-		   (current_user.ut.uid == vuser->session_info->unix_token->uid)) {
-		DEBUG(4,("Skipping user change - already "
-			 "user\n"));
-		return(True);
-	}
-
 	if (vuser == NULL) {
 		/* Invalid vuid sent */
-		DEBUG(2,("Invalid vuid %llu used on share %s.\n",
-			 (unsigned long long)vuid, lp_servicename(talloc_tos(),
-								  snum)));
+		DBG_WARNING("Invalid vuid %llu used on share %s.\n",
+			    (unsigned long long)vuid,
+			    lp_const_servicename(snum));
 		return false;
 	}
 
 	return change_to_user_internal(conn, vuser->session_info, vuid);
+}
+
+bool change_to_user_by_fsp(struct files_struct *fsp)
+{
+	return change_to_user(fsp->conn, fsp->vuid);
 }
 
 static bool change_to_user_by_session(connection_struct *conn,
@@ -401,13 +438,6 @@ static bool change_to_user_by_session(connection_struct *conn,
 {
 	SMB_ASSERT(conn != NULL);
 	SMB_ASSERT(session_info != NULL);
-
-	if ((current_user.conn == conn) &&
-	    (current_user.ut.uid == session_info->unix_token->uid)) {
-		DEBUG(7, ("Skipping user change - already user\n"));
-
-		return true;
-	}
 
 	return change_to_user_internal(conn, session_info, UID_FIELD_INVALID);
 }
@@ -426,6 +456,8 @@ bool smbd_change_to_root_user(void)
 
 	current_user.conn = NULL;
 	current_user.vuid = UID_FIELD_INVALID;
+	current_user.need_chdir = false;
+	current_user.done_chdir = false;
 
 	return(True);
 }
@@ -473,6 +505,7 @@ bool smbd_unbecome_authenticated_pipe_user(void)
 static void push_conn_ctx(void)
 {
 	struct conn_ctx *ctx_p;
+	extern userdom_struct current_user_info;
 
 	/* Check we don't overflow our stack */
 
@@ -486,6 +519,9 @@ static void push_conn_ctx(void)
 
 	ctx_p->conn = current_user.conn;
 	ctx_p->vuid = current_user.vuid;
+	ctx_p->need_chdir = current_user.need_chdir;
+	ctx_p->done_chdir = current_user.done_chdir;
+	ctx_p->user_info = current_user_info;
 
 	DEBUG(4, ("push_conn_ctx(%llu) : conn_ctx_stack_ndx = %d\n",
 		(unsigned long long)ctx_p->vuid, conn_ctx_stack_ndx));
@@ -507,11 +543,33 @@ static void pop_conn_ctx(void)
 	conn_ctx_stack_ndx--;
 	ctx_p = &conn_ctx_stack[conn_ctx_stack_ndx];
 
+	set_current_user_info(ctx_p->user_info.smb_name,
+			      ctx_p->user_info.unix_name,
+			      ctx_p->user_info.domain);
+
+	/*
+	 * Check if the current context did a chdir_current_service()
+	 * and restore the cwd_fname of the previous context
+	 * if needed.
+	 */
+	if (current_user.done_chdir && ctx_p->need_chdir) {
+		int ret;
+
+		ret = vfs_ChDir(ctx_p->conn, ctx_p->conn->cwd_fname);
+		if (ret != 0) {
+			DBG_ERR("vfs_ChDir() failed!\n");
+			smb_panic("vfs_ChDir() failed!\n");
+		}
+	}
+
 	current_user.conn = ctx_p->conn;
 	current_user.vuid = ctx_p->vuid;
+	current_user.need_chdir = ctx_p->need_chdir;
+	current_user.done_chdir = ctx_p->done_chdir;
 
-	ctx_p->conn = NULL;
-	ctx_p->vuid = UID_FIELD_INVALID;
+	*ctx_p = (struct conn_ctx) {
+		.vuid = UID_FIELD_INVALID,
+	};
 }
 
 /****************************************************************************
@@ -559,6 +617,11 @@ bool become_user(connection_struct *conn, uint64_t vuid)
 	}
 
 	return True;
+}
+
+bool become_user_by_fsp(struct files_struct *fsp)
+{
+	return become_user(fsp->conn, fsp->vuid);
 }
 
 bool become_user_by_session(connection_struct *conn,

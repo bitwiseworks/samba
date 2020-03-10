@@ -304,7 +304,7 @@ static bool test_replay_commands(struct torture_context *tctx, struct smb2_tree 
 	CHECK_STATUS(status, NT_STATUS_OK);
 
 	qfinfo = (union smb_fileinfo) {
-		.generic.level = RAW_SFILEINFO_POSITION_INFORMATION,
+		.generic.level = RAW_FILEINFO_POSITION_INFORMATION,
 		.generic.in.file.handle = h
 	};
 	torture_comment(tctx, "Trying getinfo\n");
@@ -1677,7 +1677,7 @@ static bool test_channel_sequence_table(struct torture_context *tctx,
 		}
 
 		qfinfo = (union smb_fileinfo) {
-			.generic.level = RAW_SFILEINFO_POSITION_INFORMATION,
+			.generic.level = RAW_FILEINFO_POSITION_INFORMATION,
 			.generic.in.file.handle = handle
 		};
 
@@ -1764,7 +1764,6 @@ static bool test_replay3(struct torture_context *tctx, struct smb2_tree *tree1)
 {
 	const char *host = torture_setting_string(tctx, "host", NULL);
 	const char *share = torture_setting_string(tctx, "share", NULL);
-	struct cli_credentials *credentials = cmdline_credentials;
 	NTSTATUS status;
 	TALLOC_CTX *mem_ctx = talloc_new(tctx);
 	struct smb2_handle _h;
@@ -1845,7 +1844,7 @@ static bool test_replay3(struct torture_context *tctx, struct smb2_tree *tree1)
 			lpcfg_smb_ports(tctx->lp_ctx),
 			share,
 			lpcfg_resolve_context(tctx->lp_ctx),
-			credentials,
+			popt_get_cmdline_credentials(),
 			&tree2,
 			tctx->ev,
 			&transport1->options,
@@ -1868,7 +1867,7 @@ static bool test_replay3(struct torture_context *tctx, struct smb2_tree *tree1)
 	torture_assert(tctx, session1_2 != NULL, "smb2_session_channel failed");
 
 	status = smb2_session_setup_spnego(session1_2,
-			cmdline_credentials,
+			popt_get_cmdline_credentials(),
 			0 /* previous_session_id */);
 	CHECK_STATUS(status, NT_STATUS_OK);
 
@@ -1923,7 +1922,6 @@ static bool test_replay4(struct torture_context *tctx, struct smb2_tree *tree1)
 {
 	const char *host = torture_setting_string(tctx, "host", NULL);
 	const char *share = torture_setting_string(tctx, "share", NULL);
-	struct cli_credentials *credentials = cmdline_credentials;
 	NTSTATUS status;
 	TALLOC_CTX *mem_ctx = talloc_new(tctx);
 	struct smb2_handle _h1;
@@ -2069,7 +2067,7 @@ static bool test_replay4(struct torture_context *tctx, struct smb2_tree *tree1)
 			lpcfg_smb_ports(tctx->lp_ctx),
 			share,
 			lpcfg_resolve_context(tctx->lp_ctx),
-			credentials,
+			popt_get_cmdline_credentials(),
 			&tree2,
 			tctx->ev,
 			&transport1->options,
@@ -2092,7 +2090,7 @@ static bool test_replay4(struct torture_context *tctx, struct smb2_tree *tree1)
 	torture_assert(tctx, session1_2 != NULL, "smb2_session_channel failed");
 
 	status = smb2_session_setup_spnego(session1_2,
-			cmdline_credentials,
+			popt_get_cmdline_credentials(),
 			0 /* previous_session_id */);
 	CHECK_STATUS(status, NT_STATUS_OK);
 
@@ -2352,7 +2350,7 @@ static bool test_replay6(struct torture_context *tctx, struct smb2_tree *tree)
 	torture_reset_break_info(tctx, &break_info);
 
 	qfinfo = (union smb_fileinfo) {
-		.generic.level = RAW_SFILEINFO_POSITION_INFORMATION,
+		.generic.level = RAW_FILEINFO_POSITION_INFORMATION,
 		.generic.in.file.handle = *h
 	};
 	torture_comment(tctx, "Trying getinfo\n");
@@ -2523,10 +2521,10 @@ done:
 	return ret;
 }
 
-struct torture_suite *torture_smb2_replay_init(void)
+struct torture_suite *torture_smb2_replay_init(TALLOC_CTX *ctx)
 {
 	struct torture_suite *suite =
-		torture_suite_create(talloc_autofree_context(), "replay");
+		torture_suite_create(ctx, "replay");
 
 	torture_suite_add_1smb2_test(suite, "replay-commands", test_replay_commands);
 	torture_suite_add_1smb2_test(suite, "replay-regular", test_replay_regular);

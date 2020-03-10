@@ -31,6 +31,7 @@
 #include "../libcli/security/security.h"
 #include "../librpc/gen_ndr/netlogon.h"
 #include "lib/param/loadparm.h"
+#include "libsmb/namequery.h"
 
 #ifdef HAVE_LDAP
 
@@ -279,7 +280,12 @@ static bool ads_try_connect(ADS_STRUCT *ads, bool gc,
 	SAFE_FREE(ads->config.client_site_name);
 	SAFE_FREE(ads->server.workgroup);
 
-	ads->config.flags	       = cldap_reply.server_type;
+	if (!check_cldap_reply_required_flags(cldap_reply.server_type,
+					      ads->config.flags)) {
+		ret = false;
+		goto out;
+	}
+
 	ads->config.ldap_server_name   = SMB_STRDUP(cldap_reply.pdc_dns_name);
 	ads->config.realm              = SMB_STRDUP(cldap_reply.dns_domain);
 	if (!strupper_m(ads->config.realm)) {
@@ -304,6 +310,9 @@ static bool ads_try_connect(ADS_STRUCT *ads, bool gc,
 	/* Store our site name. */
 	sitename_store( cldap_reply.domain_name, cldap_reply.client_site);
 	sitename_store( cldap_reply.dns_domain, cldap_reply.client_site);
+
+	/* Leave this until last so that the flags are not clobbered */
+	ads->config.flags	       = cldap_reply.server_type;
 
 	ret = true;
 
@@ -334,7 +343,9 @@ static NTSTATUS cldap_ping_list(ADS_STRUCT *ads,const char *domain,
 			check_negative_conn_cache(domain, server)))
 			continue;
 
+		/* Returns ok only if it matches the correct server type */
 		ok = ads_try_connect(ads, false, &ip_list[i].ss);
+
 		if (ok) {
 			return NT_STATUS_OK;
 		}
@@ -402,7 +413,7 @@ static NTSTATUS resolve_and_ping_dns(ADS_STRUCT *ads, const char *sitename,
 				     const char *realm)
 {
 	int count;
-	struct ip_service *ip_list;
+	struct ip_service *ip_list = NULL;
 	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
 
 	DEBUG(6, ("resolve_and_ping_dns: (cldap) looking for realm '%s'\n",
@@ -411,6 +422,7 @@ static NTSTATUS resolve_and_ping_dns(ADS_STRUCT *ads, const char *sitename,
 	status = get_sorted_dc_list(realm, sitename, &ip_list, &count,
 				    true);
 	if (!NT_STATUS_IS_OK(status)) {
+		SAFE_FREE(ip_list);
 		return status;
 	}
 
@@ -566,8 +578,9 @@ ADS_STATUS ads_connect(ADS_STRUCT *ads)
 	char addr[INET6_ADDRSTRLEN];
 
 	ZERO_STRUCT(ads->ldap);
+	ZERO_STRUCT(ads->ldap_wrap_data);
 	ads->ldap.last_attempt	= time_mono(NULL);
-	ads->ldap.wrap_type	= ADS_SASLWRAP_TYPE_PLAIN;
+	ads->ldap_wrap_data.wrap_type	= ADS_SASLWRAP_TYPE_PLAIN;
 
 	/* try with a user specified server */
 
@@ -601,6 +614,11 @@ ADS_STATUS ads_connect(ADS_STRUCT *ads)
 
 		if (ads->server.gc == true) {
 			return ADS_ERROR(LDAP_OPERATIONS_ERROR);
+		}
+
+		if (ads->server.no_fallback) {
+			status = ADS_ERROR_NT(NT_STATUS_NOT_FOUND);
+			goto out;
 		}
 	}
 
@@ -643,8 +661,8 @@ got_connection:
 		goto out;
 	}
 
-	ads->ldap.mem_ctx = talloc_init("ads LDAP connection memory");
-	if (!ads->ldap.mem_ctx) {
+	ads->ldap_wrap_data.mem_ctx = talloc_init("ads LDAP connection memory");
+	if (!ads->ldap_wrap_data.mem_ctx) {
 		status = ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
 		goto out;
 	}
@@ -730,13 +748,15 @@ void ads_disconnect(ADS_STRUCT *ads)
 		ldap_unbind(ads->ldap.ld);
 		ads->ldap.ld = NULL;
 	}
-	if (ads->ldap.wrap_ops && ads->ldap.wrap_ops->disconnect) {
-		ads->ldap.wrap_ops->disconnect(ads);
+	if (ads->ldap_wrap_data.wrap_ops &&
+		ads->ldap_wrap_data.wrap_ops->disconnect) {
+		ads->ldap_wrap_data.wrap_ops->disconnect(&ads->ldap_wrap_data);
 	}
-	if (ads->ldap.mem_ctx) {
-		talloc_free(ads->ldap.mem_ctx);
+	if (ads->ldap_wrap_data.mem_ctx) {
+		talloc_free(ads->ldap_wrap_data.mem_ctx);
 	}
 	ZERO_STRUCT(ads->ldap);
+	ZERO_STRUCT(ads->ldap_wrap_data);
 }
 
 /*
@@ -1036,6 +1056,11 @@ done:
 		ber_bvfree(ext_bv);
 	}
 
+	if (rc != LDAP_SUCCESS && *res != NULL) {
+		ads_msgfree(ads, *res);
+		*res = NULL;
+	}
+
 	/* if/when we decide to utf8-encode attrs, take out this next line */
 	TALLOC_FREE(search_attrs);
 
@@ -1086,9 +1111,6 @@ static ADS_STATUS ads_do_paged_search(ADS_STRUCT *ads, const char *bind_path,
 		status = ads_do_paged_search_args(ads, bind_path, scope, expr,
 					      attrs, args, &res2, &count, &cookie);
 		if (!ADS_ERR_OK(status)) {
-			/* Ensure we free all collected results */
-			ads_msgfree(ads, *res);
-			*res = NULL;
 			break;
 		}
 
@@ -1925,7 +1947,7 @@ bool ads_element_in_array(const char **el_array, size_t num_el, const char *el)
  *
  * @param[in]  num_spns     The number of principals stored in the array.
  *
- * @return                  0 on success, or a ADS error if a failure occured.
+ * @return                  0 on success, or a ADS error if a failure occurred.
  */
 ADS_STATUS ads_get_service_principal_names(TALLOC_CTX *mem_ctx,
 					   ADS_STRUCT *ads,
@@ -1976,28 +1998,27 @@ done:
  * (found by hostname) in AD.
  * @param ads An initialized ADS_STRUCT
  * @param machine_name the NetBIOS name of the computer, which is used to identify the computer account.
- * @param my_fqdn The fully qualified DNS name of the machine
- * @param spn A string of the service principal to add, i.e. 'host'
+ * @param spns An array or strings for the service principals to add,
+ *        i.e. 'cifs/machine_name', 'http/machine.full.domain.com' etc.
  * @return 0 upon sucess, or non-zero if a failure occurs
  **/
 
-ADS_STATUS ads_add_service_principal_name(ADS_STRUCT *ads, const char *machine_name, 
-                                          const char *my_fqdn, const char *spn)
+ADS_STATUS ads_add_service_principal_names(ADS_STRUCT *ads,
+					   const char *machine_name,
+                                           const char **spns)
 {
 	ADS_STATUS ret;
 	TALLOC_CTX *ctx;
 	LDAPMessage *res = NULL;
-	char *psp1, *psp2;
 	ADS_MODLIST mods;
 	char *dn_string = NULL;
-	const char *servicePrincipalName[3] = {NULL, NULL, NULL};
+	const char **servicePrincipalName = spns;
 
 	ret = ads_find_machine_acct(ads, &res, machine_name);
 	if (!ADS_ERR_OK(ret) || ads_count_replies(ads, res) != 1) {
 		DEBUG(1,("ads_add_service_principal_name: WARNING: Host Account for %s not found... skipping operation.\n",
 			machine_name));
-		DEBUG(1,("ads_add_service_principal_name: WARNING: Service Principal '%s/%s@%s' has NOT been added.\n",
-			spn, machine_name, ads->config.realm));
+		DEBUG(1,("ads_add_service_principal_name: WARNING: Service Principals have NOT been added.\n"));
 		ads_msgfree(ads, res);
 		return ADS_ERROR(LDAP_NO_SUCH_OBJECT);
 	}
@@ -2008,44 +2029,24 @@ ADS_STATUS ads_add_service_principal_name(ADS_STRUCT *ads, const char *machine_n
 		return ADS_ERROR(LDAP_NO_MEMORY);
 	}
 
-	/* add short name spn */
-
-	if ( (psp1 = talloc_asprintf(ctx, "%s/%s", spn, machine_name)) == NULL ) {
-		talloc_destroy(ctx);
-		ads_msgfree(ads, res);
-		return ADS_ERROR(LDAP_NO_MEMORY);
-	}
-	if (!strlower_m(&psp1[strlen(spn) + 1])) {
-		ret = ADS_ERROR(LDAP_NO_MEMORY);
-		goto out;
-	}
-	servicePrincipalName[0] = psp1;
-
-	DEBUG(5,("ads_add_service_principal_name: INFO: Adding %s to host %s\n", 
-		psp1, machine_name));
+	DEBUG(5,("ads_add_service_principal_name: INFO: "
+		"Adding %s to host %s\n",
+		spns[0] ? "N/A" : spns[0], machine_name));
 
 
-	/* add fully qualified spn */
-
-	if ( (psp2 = talloc_asprintf(ctx, "%s/%s", spn, my_fqdn)) == NULL ) {
-		ret = ADS_ERROR(LDAP_NO_MEMORY);
-		goto out;
-	}
-	if (!strlower_m(&psp2[strlen(spn) + 1])) {
-		ret = ADS_ERROR(LDAP_NO_MEMORY);
-		goto out;
-	}
-	servicePrincipalName[1] = psp2;
-
-	DEBUG(5,("ads_add_service_principal_name: INFO: Adding %s to host %s\n", 
-		psp2, machine_name));
+	DEBUG(5,("ads_add_service_principal_name: INFO: "
+		"Adding %s to host %s\n",
+		spns[1] ? "N/A" : spns[1], machine_name));
 
 	if ( (mods = ads_init_mods(ctx)) == NULL ) {
 		ret = ADS_ERROR(LDAP_NO_MEMORY);
 		goto out;
 	}
 
-	ret = ads_add_strlist(ctx, &mods, "servicePrincipalName", servicePrincipalName);
+	ret = ads_add_strlist(ctx,
+			      &mods,
+			      "servicePrincipalName",
+			      servicePrincipalName);
 	if (!ADS_ERR_OK(ret)) {
 		DEBUG(1,("ads_add_service_principal_name: Error: Updating Service Principals in LDAP\n"));
 		goto out;
@@ -3386,7 +3387,7 @@ char* ads_get_dnshostname( ADS_STRUCT *ads, TALLOC_CTX *ctx, const char *machine
 	int count = 0;
 	char *name = NULL;
 
-	status = ads_find_machine_acct(ads, &res, lp_netbios_name());
+	status = ads_find_machine_acct(ads, &res, machine_name);
 	if (!ADS_ERR_OK(status)) {
 		DEBUG(0,("ads_get_dnshostname: Failed to find account for %s\n",
 			lp_netbios_name()));
@@ -3443,33 +3444,37 @@ out:
 /********************************************************************
 ********************************************************************/
 
-char* ads_get_samaccountname( ADS_STRUCT *ads, TALLOC_CTX *ctx, const char *machine_name )
+bool ads_has_samaccountname( ADS_STRUCT *ads, TALLOC_CTX *ctx, const char *machine_name )
 {
 	LDAPMessage *res = NULL;
 	ADS_STATUS status;
 	int count = 0;
 	char *name = NULL;
+	bool ok = false;
 
-	status = ads_find_machine_acct(ads, &res, lp_netbios_name());
+	status = ads_find_machine_acct(ads, &res, machine_name);
 	if (!ADS_ERR_OK(status)) {
-		DEBUG(0,("ads_get_dnshostname: Failed to find account for %s\n",
+		DEBUG(0,("ads_has_samaccountname: Failed to find account for %s\n",
 			lp_netbios_name()));
 		goto out;
 	}
 
 	if ( (count = ads_count_replies(ads, res)) != 1 ) {
-		DEBUG(1,("ads_get_dnshostname: %d entries returned!\n", count));
+		DEBUG(1,("ads_has_samaccountname: %d entries returned!\n", count));
 		goto out;
 	}
 
 	if ( (name = ads_pull_string(ads, ctx, res, "sAMAccountName")) == NULL ) {
-		DEBUG(0,("ads_get_dnshostname: No sAMAccountName attribute!\n"));
+		DEBUG(0,("ads_has_samaccountname: No sAMAccountName attribute!\n"));
 	}
 
 out:
 	ads_msgfree(ads, res);
-
-	return name;
+	if (name != NULL) {
+		ok = (strlen(name) > 0);
+	}
+	TALLOC_FREE(name);
+	return ok;
 }
 
 #if 0

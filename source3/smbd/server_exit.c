@@ -44,8 +44,10 @@
 #include "printing.h"
 #include "serverid.h"
 #include "messages.h"
+#include "passdb.h"
 #include "../lib/util/pidfile.h"
 #include "smbprofile.h"
+#include "libcli/auth/netlogon_creds_cli.h"
 
 static struct files_struct *log_writeable_file_fn(
 	struct files_struct *fsp, void *private_data)
@@ -166,14 +168,6 @@ static void exit_server_common(enum server_exit_reason how,
 	/* 3 second timeout. */
 	print_notify_send_messages(msg_ctx, 3);
 
-	/* delete our entry in the serverid database. */
-	if (am_parent) {
-		/*
-		 * For children the parent takes care of cleaning up
-		 */
-		serverid_deregister(messaging_server_id(msg_ctx));
-	}
-
 #ifdef USE_DMAPI
 	/* Destroy Samba DMAPI session only if we are master smbd process */
 	if (am_parent) {
@@ -222,6 +216,7 @@ static void exit_server_common(enum server_exit_reason how,
 	sconn = NULL;
 	xconn = NULL;
 	client = NULL;
+	netlogon_creds_cli_close_global_db();
 	TALLOC_FREE(global_smbXsrv_client);
 	smbprofile_dump();
 	server_messaging_context_free();
@@ -267,6 +262,9 @@ NTSTATUS smbd_reinit_after_fork(struct messaging_context *msg_ctx,
 				struct tevent_context *ev_ctx,
 				bool parent_longlived, const char *comment)
 {
+	NTSTATUS ret;
 	am_parent = NULL;
-	return reinit_after_fork(msg_ctx, ev_ctx, parent_longlived, comment);
+	ret = reinit_after_fork(msg_ctx, ev_ctx, parent_longlived, comment);
+	initialize_password_db(true, ev_ctx);
+	return ret;
 }

@@ -37,10 +37,10 @@ struct named_pipe_client {
 
 	struct tstream_context *tstream;
 
-	struct tsocket_address *client;
-	char *client_name;
-	struct tsocket_address *server;
-	char *server_name;
+	struct tsocket_address *remote_client_addr;
+	char *remote_client_name;
+	struct tsocket_address *local_server_addr;
+	char *local_server_name;
 
 	struct auth_session_info *session_info;
 
@@ -69,8 +69,8 @@ int make_server_pipes_struct(TALLOC_CTX *mem_ctx,
 			     struct messaging_context *msg_ctx,
 			     const char *pipe_name,
 			     enum dcerpc_transport_t transport,
-			     const struct tsocket_address *local_address,
 			     const struct tsocket_address *remote_address,
+			     const struct tsocket_address *local_address,
 			     struct auth_session_info *session_info,
 			     struct pipes_struct **_p,
 			     int *perrno);

@@ -96,7 +96,7 @@ struct IP4_ARRAY *dns_addr_array_to_ip4_array(TALLOC_CTX *mem_ctx,
 					      struct DNS_ADDR_ARRAY *ip)
 {
 	struct IP4_ARRAY *ret;
-	int i, count, curr;
+	size_t i, count, curr;
 
 	if (ip == NULL) {
 		return NULL;
@@ -219,9 +219,7 @@ int dns_split_name_components(TALLOC_CTX *tmp_ctx, const char *name, char ***com
 	return count;
 
 failed:
-	if (str) {
-		talloc_free(str);
-	}
+	TALLOC_FREE(str);
 	return -1;
 }
 
@@ -1120,21 +1118,6 @@ int dns_name_compare(const struct ldb_message **m1, const struct ldb_message **m
 
 	return strcasecmp(ptr1, ptr2);
 }
-
-
-bool dns_name_equal(const char *name1, const char *name2)
-{
-	size_t len1 = strlen(name1);
-	size_t len2 = strlen(name2);
-
-	if (len1 > 0 && name1[len1-1] == '.') len1--;
-	if (len2 > 0 && name2[len2-1] == '.') len2--;
-	if (len1 != len2) {
-		return false;
-	}
-	return strncasecmp(name1, name2, len1) == 0;
-}
-
 
 bool dns_record_match(struct dnsp_DnssrvRpcRecord *rec1, struct dnsp_DnssrvRpcRecord *rec2)
 {

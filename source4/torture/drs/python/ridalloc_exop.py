@@ -40,7 +40,6 @@ from samba.drs_utils import drs_DsBind
 from samba.samdb import SamDB
 
 import shutil, tempfile, os
-from samba.netcmd.main import cmd_sambatool
 from samba.auth import system_session, admin_session
 from samba.dbchecker import dbcheck
 from samba.ndr import ndr_pack
@@ -74,11 +73,11 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
                        "server_dn": self.ldb_dc2.get_serverName()}
 
         msgs = self.ldb_dc1.search(scope=ldb.SCOPE_BASE, base=fsmo_info_1["server_dn"], attrs=["serverReference"])
-        fsmo_info_1["server_acct_dn"] = ldb.Dn(self.ldb_dc1, msgs[0]["serverReference"][0])
+        fsmo_info_1["server_acct_dn"] = ldb.Dn(self.ldb_dc1, msgs[0]["serverReference"][0].decode('utf8'))
         fsmo_info_1["rid_set_dn"] = ldb.Dn(self.ldb_dc1, "CN=RID Set") + fsmo_info_1["server_acct_dn"]
 
         msgs = self.ldb_dc2.search(scope=ldb.SCOPE_BASE, base=fsmo_info_2["server_dn"], attrs=["serverReference"])
-        fsmo_info_2["server_acct_dn"] = ldb.Dn(self.ldb_dc2, msgs[0]["serverReference"][0])
+        fsmo_info_2["server_acct_dn"] = ldb.Dn(self.ldb_dc2, msgs[0]["serverReference"][0].decode('utf8'))
         fsmo_info_2["rid_set_dn"] = ldb.Dn(self.ldb_dc2, "CN=RID Set") + fsmo_info_2["server_acct_dn"]
 
         # determine the owner dc
@@ -218,7 +217,8 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
         try:
             # ldb_dc1 is now RID MASTER (as VAMPIREDC)
             ldb_dc1.modify(m)
-        except ldb.LdbError, (num, msg):
+        except ldb.LdbError as e1:
+            (num, msg) = e1.args
             self.fail("Failed to reassign RID Master " +  msg)
 
         try:
@@ -232,7 +232,7 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             # 3. Make sure the allocation succeeds
             try:
                 (level, ctr) = drs.DsGetNCChanges(drs_handle, 8, req8)
-            except RuntimeError, e:
+            except RuntimeError as e:
                 self.fail("RID allocation failed: " + str(e))
 
             fsmo_dn = ldb.Dn(self.ldb_dc1, "CN=RID Manager$,CN=System," + self.ldb_dc1.domain_dn())
@@ -258,7 +258,8 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             m["becomeRidMaster"] = ldb.MessageElement("1", ldb.FLAG_MOD_REPLACE, "becomeRidMaster")
             try:
                 ldb_dc2.modify(m)
-            except ldb.LdbError, (num, msg):
+            except ldb.LdbError as e:
+                (num, msg) = e.args
                 self.fail("Failed to restore RID Master " +  msg)
 
     def test_offline_samba_tool_seized_ridalloc(self):
@@ -281,7 +282,7 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             res = new_ldb.search(base=ldb.Dn(new_ldb, new_ldb.get_serverName()),
                                  scope=ldb.SCOPE_BASE, attrs=["serverReference"])
             # 2. Get server reference
-            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0])
+            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0].decode('utf8'))
 
             # Assert that no RID Set has been set
             res = new_ldb.search(base=server_ref_dn,
@@ -305,24 +306,24 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
     def _test_join(self, server, netbios_name):
         tmpdir = os.path.join(self.tempdir, "targetdir")
         creds = self.get_credentials()
-        cmd = cmd_sambatool.subcommands['domain'].subcommands['join']
-        result = cmd._run("samba-tool domain join",
-                          creds.get_realm(),
-                          "dc", "-U%s%%%s" % (creds.get_username(),
-                                              creds.get_password()),
-                          '--targetdir=%s' % tmpdir,
-                          '--server=%s' % server,
-                          "--option=netbios name = %s" % netbios_name)
+        (result, out, err) = self.runsubcmd("domain", "join",
+                                            creds.get_realm(),
+                                            "dc", "-U%s%%%s" % (creds.get_username(),
+                                                                creds.get_password()),
+                                            '--targetdir=%s' % tmpdir,
+                                            '--server=%s' % server,
+                                            "--option=netbios name = %s" % netbios_name)
+        self.assertCmdSuccess(result, out, err)
         return tmpdir
 
     def _test_force_demote(self, server, netbios_name):
         creds = self.get_credentials()
-        cmd = cmd_sambatool.subcommands['domain'].subcommands['demote']
-        result = cmd._run("samba-tool domain demote",
-                          "-U%s%%%s" % (creds.get_username(),
-                                              creds.get_password()),
-                          '--server=%s' % server,
-                          "--remove-other-dead-server=%s" % netbios_name)
+        (result, out, err) = self.runsubcmd("domain", "demote",
+                                            "-U%s%%%s" % (creds.get_username(),
+                                                          creds.get_password()),
+                                            '--server=%s' % server,
+                                            "--remove-other-dead-server=%s" % netbios_name)
+        self.assertCmdSuccess(result, out, err)
 
     def test_offline_manual_seized_ridalloc_with_dbcheck(self):
         """Peform the same actions as test_offline_samba_tool_seized_ridalloc,
@@ -355,7 +356,7 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             res = new_ldb.search(base=ldb.Dn(new_ldb, new_ldb.get_serverName()),
                                  scope=ldb.SCOPE_BASE, attrs=["serverReference"])
             # 2. Get server reference
-            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0])
+            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0].decode('utf8'))
 
             # Assert that no RID Set has been set
             res = new_ldb.search(base=server_ref_dn,
@@ -406,7 +407,7 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             res = new_ldb.search(base=ldb.Dn(new_ldb, new_ldb.get_serverName()),
                                  scope=ldb.SCOPE_BASE, attrs=["serverReference"])
             # 2. Get server reference
-            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0])
+            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0].decode('utf8'))
 
             # Assert that no RID Set has been set
             res = new_ldb.search(base=server_ref_dn,
@@ -456,7 +457,7 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             res = new_ldb.search(base=ldb.Dn(new_ldb, new_ldb.get_serverName()),
                                  scope=ldb.SCOPE_BASE, attrs=["serverReference"])
             # 2. Get server reference
-            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0])
+            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0].decode('utf8'))
 
             # Assert that no RID Set has been set
             res = new_ldb.search(base=server_ref_dn,
@@ -499,7 +500,7 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             res = new_ldb.search(base=ldb.Dn(new_ldb, new_ldb.get_serverName()),
                                  scope=ldb.SCOPE_BASE, attrs=["serverReference"])
             # 2. Get server reference
-            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0])
+            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0].decode('utf8'))
 
             # 3. Assert we get the RID Set
             res = new_ldb.search(base=server_ref_dn,
@@ -531,14 +532,14 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             res = new_ldb.search(base=ldb.Dn(new_ldb, new_ldb.get_serverName()),
                                  scope=ldb.SCOPE_BASE, attrs=["serverReference"])
             # 2. Get server reference
-            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0])
+            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0].decode('utf8'))
 
             # 3. Assert we get the RID Set
             res = new_ldb.search(base=server_ref_dn,
                                  scope=ldb.SCOPE_BASE, attrs=['rIDSetReferences'])
 
             self.assertTrue("rIDSetReferences" in res[0])
-            rid_set_dn = ldb.Dn(new_ldb, res[0]["rIDSetReferences"][0])
+            rid_set_dn = ldb.Dn(new_ldb, res[0]["rIDSetReferences"][0].decode('utf8'))
 
             # 4. Add a new user (triggers RID set work)
             new_ldb.newuser("ridalloctestuser", "P@ssword!")
@@ -609,15 +610,14 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             res = new_ldb.search(base=ldb.Dn(new_ldb, new_ldb.get_serverName()),
                                  scope=ldb.SCOPE_BASE, attrs=["serverReference"])
             # 2. Get server reference
-            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0])
+            server_ref_dn = ldb.Dn(new_ldb, res[0]['serverReference'][0].decode('utf8'))
 
             # 3. Assert we get the RID Set
             res = new_ldb.search(base=server_ref_dn,
                                  scope=ldb.SCOPE_BASE, attrs=['rIDSetReferences'])
 
             self.assertTrue("rIDSetReferences" in res[0])
-            rid_set_dn = ldb.Dn(new_ldb, res[0]["rIDSetReferences"][0])
-
+            rid_set_dn = ldb.Dn(new_ldb, res[0]["rIDSetReferences"][0].decode('utf8'))
             # 4. Seize the RID Manager role
             (result, out, err) = self.runsubcmd("fsmo", "seize", "--role", "rid", "-H", ldb_url, "-s", smbconf, "--force")
             self.assertCmdSuccess(result, out, err)

@@ -49,10 +49,18 @@ void ads_disp_sd(ADS_STRUCT *ads, TALLOC_CTX *mem_ctx, struct security_descripto
 
 /* The following definitions come from libads/kerberos_keytab.c  */
 
-int ads_keytab_add_entry(ADS_STRUCT *ads, const char *srvPrinc);
+int ads_keytab_add_entry(ADS_STRUCT *ads, const char *srvPrinc,
+			 bool update_ads);
 int ads_keytab_flush(ADS_STRUCT *ads);
 int ads_keytab_create_default(ADS_STRUCT *ads);
 int ads_keytab_list(const char *keytab_name);
+
+/* The following definitions come from libads/net_ads_setspn.c  */
+bool ads_setspn_list(ADS_STRUCT *ads, const char *machine);
+bool ads_setspn_add(ADS_STRUCT *ads, const char *machine_name,
+		    const char * spn);
+bool ads_setspn_delete(ADS_STRUCT *ads, const char *machine_name,
+		       const char * spn);
 
 /* The following definitions come from libads/krb5_errs.c  */
 
@@ -95,8 +103,8 @@ ADS_STATUS ads_get_service_principal_names(TALLOC_CTX *mem_ctx,
 					   char ***spn_array,
 					   size_t *num_spns);
 ADS_STATUS ads_clear_service_principal_names(ADS_STRUCT *ads, const char *machine_name);
-ADS_STATUS ads_add_service_principal_name(ADS_STRUCT *ads, const char *machine_name,
-                                          const char *my_fqdn, const char *spn);
+ADS_STATUS ads_add_service_principal_names(ADS_STRUCT *ads, const char *machine_name,
+                                          const char **spns);
 ADS_STATUS ads_create_machine_acct(ADS_STRUCT *ads,
 				   const char *machine_name,
 				   const char *org_unit,
@@ -121,7 +129,7 @@ ADS_STATUS ads_get_sid_from_extended_dn(TALLOC_CTX *mem_ctx,
 					struct dom_sid *sid);
 char* ads_get_dnshostname( ADS_STRUCT *ads, TALLOC_CTX *ctx, const char *machine_name );
 char* ads_get_upn( ADS_STRUCT *ads, TALLOC_CTX *ctx, const char *machine_name );
-char* ads_get_samaccountname( ADS_STRUCT *ads, TALLOC_CTX *ctx, const char *machine_name );
+bool ads_has_samaccountname( ADS_STRUCT *ads, TALLOC_CTX *ctx, const char *machine_name );
 ADS_STATUS ads_join_realm(ADS_STRUCT *ads, const char *machine_name,
 			uint32_t account_type, const char *org_unit);
 ADS_STATUS ads_leave_realm(ADS_STRUCT *ads, const char *hostname);
@@ -182,15 +190,25 @@ ADS_STATUS ads_sasl_bind(ADS_STRUCT *ads);
 
 /* The following definitions come from libads/sasl_wrapping.c  */
 
-ADS_STATUS ads_setup_sasl_wrapping(ADS_STRUCT *ads,
+ADS_STATUS ads_setup_sasl_wrapping(struct ads_saslwrap *wrap, LDAP *ld,
 				   const struct ads_saslwrap_ops *ops,
 				   void *private_data);
-ADS_STATUS ads_setup_sasl_wrapping(ADS_STRUCT *ads,
-				   const struct ads_saslwrap_ops *ops,
-				   void *private_data);
+void ndr_print_ads_saslwrap_struct(struct ndr_print *ndr,
+				   const char *name,
+				   const struct ads_saslwrap *r);
 
 /* The following definitions come from libads/util.c  */
 
 ADS_STATUS ads_change_trust_account_password(ADS_STRUCT *ads, char *host_principal);
+
+struct spn_struct {
+	const char *serviceclass;
+	const char *servicename;
+	const char *host;
+	int32_t port;
+};
+
+/* parse a windows style SPN, returns NULL if parsing fails */
+struct spn_struct *parse_spn(TALLOC_CTX *ctx, const char *srvprinc);
 
 #endif /* _LIBADS_ADS_PROTO_H_ */

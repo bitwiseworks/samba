@@ -4,9 +4,11 @@
 
 define_test "callout is 'false', causes releaseip-pre to fail"
 
-setup_nfs
+setup
 
-export CTDB_NFS_CALLOUT="echo releaseip-pre ; false"
+setup_script_options "service" "60.nfs" <<EOF
+CTDB_NFS_CALLOUT="echo releaseip-pre ; false"
+EOF
 
 required_result 1 "releaseip-pre"
 simple_test

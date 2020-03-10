@@ -30,7 +30,7 @@
 #include "libds/common/roles.h"
 
 /* logged when starting the various Samba daemons */
-#define COPYRIGHT_STARTUP_MESSAGE	"Copyright Andrew Tridgell and the Samba Team 1992-2017"
+#define COPYRIGHT_STARTUP_MESSAGE	"Copyright Andrew Tridgell and the Samba Team 1992-2018"
 
 #define SAFETY_MARGIN 1024
 #define LARGE_WRITEX_HDR_SIZE 65
@@ -125,7 +125,6 @@ struct uuid;
 struct named_mutex;
 struct wb_context;
 struct rpc_cli_smbd_conn;
-struct fncall_context;
 
 /* the basic packet size, assuming no words or bytes */
 #define smb_size 39
@@ -157,6 +156,8 @@ struct sys_notify_context {
 struct current_user {
 	struct connection_struct *conn;
 	uint64_t vuid; /* SMB2 compat */
+	bool need_chdir;
+	bool done_chdir;
 	struct security_unix_token ut;
 	struct security_token *nt_user_token;
 };
@@ -419,6 +420,9 @@ Offset  Data			length.
 
 /* Private options for printer support */
 #define NTCREATEX_OPTIONS_PRIVATE_DELETE_ON_CLOSE 0x0008
+
+/* Private option for streams support */
+#define NTCREATEX_OPTIONS_PRIVATE_STREAM_BASEOPEN 0x0010
 
 /* Flag for NT transact rename call. */
 #define RENAME_REPLACE_IF_EXISTS 1

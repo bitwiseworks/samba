@@ -74,8 +74,6 @@
 #define pipe(A) os2_pipe(A)
 #endif
 
-static void tevent_abort(struct tevent_context *ev, const char *reason);
-
 struct tevent_ops_list {
 	struct tevent_ops_list *next, *prev;
 	const char *name;
@@ -304,10 +302,17 @@ int tevent_common_context_destructor(struct tevent_context *ev)
 	struct tevent_timer *te, *tn;
 	struct tevent_immediate *ie, *in;
 	struct tevent_signal *se, *sn;
-
+	struct tevent_wrapper_glue *gl, *gn;
 #ifdef HAVE_PTHREAD
 	int ret;
+#endif
 
+	if (ev->wrapper.glue != NULL) {
+		tevent_abort(ev,
+			"tevent_common_context_destructor() active on wrapper");
+	}
+
+#ifdef HAVE_PTHREAD
 	ret = pthread_mutex_lock(&tevent_contexts_mutex);
 	if (ret != 0) {
 		abort();
@@ -351,10 +356,18 @@ int tevent_common_context_destructor(struct tevent_context *ev)
 	}
 #endif
 
+	for (gl = ev->wrapper.list; gl; gl = gn) {
+		gn = gl->next;
+
+		gl->main_ev = NULL;
+		DLIST_REMOVE(ev->wrapper.list, gl);
+	}
+
 	tevent_common_wakeup_fini(ev);
 
 	for (fd = ev->fd_events; fd; fd = fn) {
 		fn = fd->next;
+		fd->wrapper = NULL;
 		fd->event_ctx = NULL;
 		DLIST_REMOVE(ev->fd_events, fd);
 	}
@@ -362,12 +375,14 @@ int tevent_common_context_destructor(struct tevent_context *ev)
 	ev->last_zero_timer = NULL;
 	for (te = ev->timer_events; te; te = tn) {
 		tn = te->next;
+		te->wrapper = NULL;
 		te->event_ctx = NULL;
 		DLIST_REMOVE(ev->timer_events, te);
 	}
 
 	for (ie = ev->immediate_events; ie; ie = in) {
 		in = ie->next;
+		ie->wrapper = NULL;
 		ie->event_ctx = NULL;
 		ie->cancel_fn = NULL;
 		DLIST_REMOVE(ev->immediate_events, ie);
@@ -375,6 +390,7 @@ int tevent_common_context_destructor(struct tevent_context *ev)
 
 	for (se = ev->signal_events; se; se = sn) {
 		sn = se->next;
+		se->wrapper = NULL;
 		se->event_ctx = NULL;
 		DLIST_REMOVE(ev->signal_events, se);
 		/*
@@ -433,6 +449,25 @@ static int tevent_common_context_constructor(struct tevent_context *ev)
 	talloc_set_destructor(ev, tevent_common_context_destructor);
 
 	return 0;
+}
+
+void tevent_common_check_double_free(TALLOC_CTX *ptr, const char *reason)
+{
+	void *parent_ptr = talloc_parent(ptr);
+	size_t parent_blocks = talloc_total_blocks(parent_ptr);
+
+	if (parent_ptr != NULL && parent_blocks == 0) {
+		/*
+		 * This is an implicit talloc free, as we still have a parent
+		 * but it's already being destroyed. Note that
+		 * talloc_total_blocks(ptr) also just returns 0 if a
+		 * talloc_free(ptr) is still in progress of freeing all
+		 * children.
+		 */
+		return;
+	}
+
+	tevent_abort(NULL, reason);
 }
 
 /*
@@ -579,10 +614,12 @@ void tevent_set_abort_fn(void (*abort_fn)(const char *reason))
 	tevent_abort_fn = abort_fn;
 }
 
-static void tevent_abort(struct tevent_context *ev, const char *reason)
+void tevent_abort(struct tevent_context *ev, const char *reason)
 {
-	tevent_debug(ev, TEVENT_DEBUG_FATAL,
-		     "abort: %s\n", reason);
+	if (ev != NULL) {
+		tevent_debug(ev, TEVENT_DEBUG_FATAL,
+			     "abort: %s\n", reason);
+	}
 
 	if (!tevent_abort_fn) {
 		abort();
@@ -660,6 +697,16 @@ struct tevent_signal *_tevent_add_signal(struct tevent_context *ev,
 
 void tevent_loop_allow_nesting(struct tevent_context *ev)
 {
+	if (ev->wrapper.glue != NULL) {
+		tevent_abort(ev, "tevent_loop_allow_nesting() on wrapper");
+		return;
+	}
+
+	if (ev->wrapper.list != NULL) {
+		tevent_abort(ev, "tevent_loop_allow_nesting() with wrapper");
+		return;
+	}
+
 	ev->nesting.allowed = true;
 }
 

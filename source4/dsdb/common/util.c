@@ -47,6 +47,14 @@
 #include "libds/common/flag_mapping.h"
 #include "../lib/util/util_runcmd.h"
 #include "lib/util/access.h"
+#include "lib/util/util_str_hex.h"
+#include "libcli/util/ntstatus.h"
+
+/*
+ * This included to allow us to handle DSDB_FLAG_REPLICATED_UPDATE in
+ * dsdb_request_add_controls()
+ */
+#include "dsdb/samdb/ldb_modules/util.h"
 
 /*
   search the sam for the specified attributes in a specific domain, filter on
@@ -1288,6 +1296,61 @@ failed:
 	return false;
 }
 
+/*
+  work out the domain guid for the current open ldb
+*/
+const struct GUID *samdb_domain_guid(struct ldb_context *ldb)
+{
+	TALLOC_CTX *tmp_ctx = NULL;
+	struct GUID *domain_guid = NULL;
+	const char *attrs[] = {
+		"objectGUID",
+		NULL
+	};
+	struct ldb_result *res = NULL;
+	int ret;
+
+	/* see if we have a cached copy */
+	domain_guid = (struct GUID *)ldb_get_opaque(ldb, "cache.domain_guid");
+	if (domain_guid) {
+		return domain_guid;
+	}
+
+	tmp_ctx = talloc_new(ldb);
+	if (tmp_ctx == NULL) {
+		goto failed;
+	}
+
+	ret = ldb_search(ldb, tmp_ctx, &res, ldb_get_default_basedn(ldb), LDB_SCOPE_BASE, attrs, "objectGUID=*");
+	if (ret != LDB_SUCCESS) {
+		goto failed;
+	}
+
+	if (res->count != 1) {
+		goto failed;
+	}
+
+	domain_guid = talloc(tmp_ctx, struct GUID);
+	if (domain_guid == NULL) {
+		goto failed;
+	}
+	*domain_guid = samdb_result_guid(res->msgs[0], "objectGUID");
+
+	/* cache the domain_sid in the ldb */
+	if (ldb_set_opaque(ldb, "cache.domain_guid", domain_guid) != LDB_SUCCESS) {
+		goto failed;
+	}
+
+	talloc_steal(ldb, domain_guid);
+	talloc_free(tmp_ctx);
+
+	return domain_guid;
+
+failed:
+	talloc_free(tmp_ctx);
+	return NULL;
+}
+
 bool samdb_set_ntds_settings_dn(struct ldb_context *ldb, struct ldb_dn *ntds_settings_dn_in)
 {
 	TALLOC_CTX *tmp_ctx;
@@ -1819,9 +1882,13 @@ const char *samdb_server_site_name(struct ldb_context *ldb, TALLOC_CTX *mem_ctx)
 /*
  * Finds the client site by using the client's IP address.
  * The "subnet_name" returns the name of the subnet if parameter != NULL
+ *
+ * Has a Windows-based fallback to provide the only site available, or an empty
+ * string if there are multiple sites.
  */
 const char *samdb_client_site_name(struct ldb_context *ldb, TALLOC_CTX *mem_ctx,
-				   const char *ip_address, char **subnet_name)
+				   const char *ip_address, char **subnet_name,
+				   bool fallback)
 {
 	const char *attrs[] = { "cn", "siteObject", NULL };
 	struct ldb_dn *sites_container_dn, *subnets_dn, *sites_dn;
@@ -1890,7 +1957,7 @@ const char *samdb_client_site_name(struct ldb_context *ldb, TALLOC_CTX *mem_ctx,
 		}
 	}
 
-	if (site_name == NULL) {
+	if (site_name == NULL && fallback) {
 		/* This is the Windows Server fallback rule: when no subnet
 		 * exists and we have only one site available then use it (it
 		 * is for sure the same as our server site). If more sites do
@@ -2108,6 +2175,11 @@ enum samr_ValidationStatus samdb_check_password(TALLOC_CTX *mem_ctx,
 	}
 
 	TALLOC_FREE(password_script);
+
+	/*
+	 * Here are the standard AD password quality rules, which we
+	 * run after the script.
+	 */
 
 	if (!check_password_quality(utf8_pw)) {
 		return SAMR_VALIDATION_STATUS_NOT_COMPLEX_ENOUGH;
@@ -3483,6 +3555,53 @@ int samdb_rodc(struct ldb_context *sam_ctx, bool *am_rodc)
 	return LDB_SUCCESS;
 }
 
+int samdb_dns_host_name(struct ldb_context *sam_ctx, const char **host_name)
+{
+	const char *_host_name = NULL;
+	const char *attrs[] = { "dnsHostName", NULL };
+	TALLOC_CTX *tmp_ctx = NULL;
+	int ret;
+	struct ldb_result *res = NULL;
+
+	_host_name = (const char *)ldb_get_opaque(sam_ctx, "cache.dns_host_name");
+	if (_host_name != NULL) {
+		*host_name = _host_name;
+		return LDB_SUCCESS;
+	}
+
+	tmp_ctx = talloc_new(sam_ctx);
+
+	ret = dsdb_search_dn(sam_ctx, tmp_ctx, &res, NULL, attrs, 0);
+
+	if (res->count != 1 || ret != LDB_SUCCESS) {
+		DEBUG(0, ("Failed to get rootDSE for dnsHostName: %s",
+			  ldb_errstring(sam_ctx)));
+		TALLOC_FREE(tmp_ctx);
+		return ret;
+	}
+
+
+	_host_name = ldb_msg_find_attr_as_string(res->msgs[0],
+						 "dnsHostName",
+						 NULL);
+	if (_host_name == NULL) {
+		DEBUG(0, ("Failed to get dnsHostName from rootDSE"));
+		TALLOC_FREE(tmp_ctx);
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+	ret = ldb_set_opaque(sam_ctx, "cache.dns_host_name",
+			     discard_const_p(char *, _host_name));
+	if (ret != LDB_SUCCESS) {
+		TALLOC_FREE(tmp_ctx);
+		return ldb_operr(sam_ctx);
+	}
+
+	*host_name = talloc_steal(sam_ctx, _host_name);
+
+	TALLOC_FREE(tmp_ctx);
+	return LDB_SUCCESS;
+}
+
 bool samdb_set_am_rodc(struct ldb_context *ldb, bool am_rodc)
 {
 	TALLOC_CTX *tmp_ctx;
@@ -3923,7 +4042,7 @@ int dsdb_find_nc_root(struct ldb_context *samdb, TALLOC_CTX *mem_ctx, struct ldb
 	if ((el == NULL) || (el->num_values < 3)) {
 		struct ldb_message *tmp_msg;
 
-		DEBUG(5,("dsdb_find_nc_root: Finding a valid 'namingContexts' element in the RootDSE failed. Using a temporary list."));
+		DEBUG(5,("dsdb_find_nc_root: Finding a valid 'namingContexts' element in the RootDSE failed. Using a temporary list.\n"));
 
 		/* This generates a temporary list of NCs in order to let the
 		 * provisioning work. */
@@ -4308,6 +4427,13 @@ int dsdb_request_add_controls(struct ldb_request *req, uint32_t dsdb_flags)
 
 	if (dsdb_flags & DSDB_MODIFY_PARTIAL_REPLICA) {
 		ret = ldb_request_add_control(req, DSDB_CONTROL_PARTIAL_REPLICA, false, NULL);
+		if (ret != LDB_SUCCESS) {
+			return ret;
+		}
+	}
+
+	if (dsdb_flags & DSDB_FLAG_REPLICATED_UPDATE) {
+		ret = ldb_request_add_control(req, DSDB_CONTROL_REPLICATED_UPDATE_OID, false, NULL);
 		if (ret != LDB_SUCCESS) {
 			return ret;
 		}
@@ -5121,12 +5247,12 @@ _PUBLIC_ NTSTATUS NS_GUID_from_string(const char *s, struct GUID *guid)
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	if (11 == sscanf(s, "%08x-%04x%04x-%02x%02x%02x%02x-%02x%02x%02x%02x",
-			 &time_low, &time_mid, &time_hi_and_version, 
-			 &clock_seq[0], &clock_seq[1],
-			 &node[0], &node[1], &node[2], &node[3], &node[4], &node[5])) {
-	        status = NT_STATUS_OK;
-	}
+	status =  parse_guid_string(s,
+				    &time_low,
+				    &time_mid,
+				    &time_hi_and_version,
+				    clock_seq,
+				    node);
 
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
@@ -5182,12 +5308,46 @@ static int dsdb_effective_badPwdCount(const struct ldb_message *user_msg,
 }
 
 /*
+ * Returns a user's PSO, or NULL if none was found
+ */
+static struct ldb_result *lookup_user_pso(struct ldb_context *sam_ldb,
+					  TALLOC_CTX *mem_ctx,
+					  const struct ldb_message *user_msg,
+					  const char * const *attrs)
+{
+	struct ldb_result *res = NULL;
+	struct ldb_dn *pso_dn = NULL;
+	int ret;
+
+	/* if the user has a PSO that applies, then use the PSO's setting */
+	pso_dn = ldb_msg_find_attr_as_dn(sam_ldb, mem_ctx, user_msg,
+					 "msDS-ResultantPSO");
+
+	if (pso_dn != NULL) {
+
+		ret = dsdb_search_dn(sam_ldb, mem_ctx, &res, pso_dn, attrs, 0);
+		if (ret != LDB_SUCCESS) {
+
+			/*
+			 * log the error. The caller should fallback to using
+			 * the default domain password settings
+			 */
+			DBG_ERR("Error retrieving msDS-ResultantPSO %s for %s",
+				ldb_dn_get_linearized(pso_dn),
+				ldb_dn_get_linearized(user_msg->dn));
+		}
+		talloc_free(pso_dn);
+	}
+	return res;
+}
+
+/*
  * Return the effective badPwdCount
  *
  * This requires that the user_msg have (if present):
  *  - badPasswordTime
  *  - badPwdCount
- *
+ *  - msDS-ResultantPSO
  */
 int samdb_result_effective_badPwdCount(struct ldb_context *sam_ldb,
 				       TALLOC_CTX *mem_ctx,
@@ -5196,9 +5356,61 @@ int samdb_result_effective_badPwdCount(struct ldb_context *sam_ldb,
 {
 	struct timeval tv_now = timeval_current();
 	NTTIME now = timeval_to_nttime(&tv_now);
-	int64_t lockOutObservationWindow = samdb_search_int64(sam_ldb, mem_ctx, 0, domain_dn,
-							      "lockOutObservationWindow", NULL);
+	int64_t lockOutObservationWindow;
+	struct ldb_result *res = NULL;
+	const char *attrs[] = { "msDS-LockoutObservationWindow",
+				NULL };
+
+	res = lookup_user_pso(sam_ldb, mem_ctx, user_msg, attrs);
+
+	if (res != NULL) {
+		lockOutObservationWindow =
+			ldb_msg_find_attr_as_int(res->msgs[0],
+						 "msDS-LockoutObservationWindow",
+						  0);
+		talloc_free(res);
+	} else {
+
+		/* no PSO was found, lookup the default domain setting */
+		lockOutObservationWindow =
+			 samdb_search_int64(sam_ldb, mem_ctx, 0, domain_dn,
+					    "lockOutObservationWindow", NULL);
+	}
+
 	return dsdb_effective_badPwdCount(user_msg, lockOutObservationWindow, now);
+}
+
+/*
+ * Returns the lockoutThreshold that applies. If a PSO is specified, then that
+ * setting is used over the domain defaults
+ */
+static int64_t get_lockout_threshold(struct ldb_message *domain_msg,
+				     struct ldb_message *pso_msg)
+{
+	if (pso_msg != NULL) {
+		return ldb_msg_find_attr_as_int(pso_msg,
+						"msDS-LockoutThreshold", 0);
+	} else {
+		return ldb_msg_find_attr_as_int(domain_msg,
+						"lockoutThreshold", 0);
+	}
+}
+
+/*
+ * Returns the lockOutObservationWindow that applies. If a PSO is specified,
+ * then that setting is used over the domain defaults
+ */
+static int64_t get_lockout_observation_window(struct ldb_message *domain_msg,
+					      struct ldb_message *pso_msg)
+{
+	if (pso_msg != NULL) {
+		return ldb_msg_find_attr_as_int(pso_msg,
+						"msDS-LockoutObservationWindow",
+						 0);
+	} else {
+		return ldb_msg_find_attr_as_int(domain_msg,
+						"lockOutObservationWindow", 0);
+	}
 }
 
 /*
@@ -5213,11 +5425,16 @@ int samdb_result_effective_badPwdCount(struct ldb_context *sam_ldb,
  *  - pwdProperties
  *  - lockoutThreshold
  *  - lockOutObservationWindow
+ *
+ * This also requires that the pso_msg have (if present):
+ *  - msDS-LockoutThreshold
+ *  - msDS-LockoutObservationWindow
  */
 NTSTATUS dsdb_update_bad_pwd_count(TALLOC_CTX *mem_ctx,
 				   struct ldb_context *sam_ctx,
 				   struct ldb_message *user_msg,
 				   struct ldb_message *domain_msg,
+				   struct ldb_message *pso_msg,
 				   struct ldb_message **_mod_msg)
 {
 	int i, ret, badPwdCount;
@@ -5250,8 +5467,7 @@ NTSTATUS dsdb_update_bad_pwd_count(TALLOC_CTX *mem_ctx,
 	 * Also, the built in administrator account is exempt:
 	 * http://msdn.microsoft.com/en-us/library/windows/desktop/aa375371%28v=vs.85%29.aspx
 	 */
-	lockoutThreshold = ldb_msg_find_attr_as_int(domain_msg,
-						    "lockoutThreshold", 0);
+	lockoutThreshold = get_lockout_threshold(domain_msg, pso_msg);
 	if (lockoutThreshold == 0 || (rid == DOMAIN_RID_ADMINISTRATOR)) {
 		DEBUG(5, ("Not updating badPwdCount on %s after wrong password\n",
 			  ldb_dn_get_linearized(user_msg->dn)));
@@ -5268,8 +5484,8 @@ NTSTATUS dsdb_update_bad_pwd_count(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	lockOutObservationWindow = ldb_msg_find_attr_as_int64(domain_msg,
-							      "lockOutObservationWindow", 0);
+	lockOutObservationWindow = get_lockout_observation_window(domain_msg,
+								  pso_msg);
 
 	badPwdCount = dsdb_effective_badPwdCount(user_msg, lockOutObservationWindow, now);
 
@@ -5292,10 +5508,10 @@ NTSTATUS dsdb_update_bad_pwd_count(TALLOC_CTX *mem_ctx,
 			TALLOC_FREE(mod_msg);
 			return NT_STATUS_NO_MEMORY;
 		}
-		DEBUG(5, ("Locked out user %s after %d wrong passwords\n",
+		DEBUGC( DBGC_AUTH, 1, ("Locked out user %s after %d wrong passwords\n",
 			  ldb_dn_get_linearized(user_msg->dn), badPwdCount));
 	} else {
-		DEBUG(5, ("Updated badPwdCount on %s after %d wrong passwords\n",
+		DEBUGC( DBGC_AUTH, 5, ("Updated badPwdCount on %s after %d wrong passwords\n",
 			  ldb_dn_get_linearized(user_msg->dn), badPwdCount));
 	}
 
@@ -5493,4 +5709,44 @@ int dsdb_user_obj_set_primary_group_id(struct ldb_context *ldb, struct ldb_messa
 	}
 
 	return LDB_SUCCESS;
+}
+
+/**
+ * Returns True if the source and target DNs both have the same naming context,
+ * i.e. they're both in the same partition.
+ */
+bool dsdb_objects_have_same_nc(struct ldb_context *ldb,
+			       TALLOC_CTX *mem_ctx,
+			       struct ldb_dn *source_dn,
+			       struct ldb_dn *target_dn)
+{
+	TALLOC_CTX *tmp_ctx;
+	struct ldb_dn *source_nc;
+	struct ldb_dn *target_nc;
+	int ret;
+	bool same_nc = true;
+
+	tmp_ctx = talloc_new(mem_ctx);
+
+	ret = dsdb_find_nc_root(ldb, tmp_ctx, source_dn, &source_nc);
+	if (ret != LDB_SUCCESS) {
+		DBG_ERR("Failed to find base DN for source %s\n",
+			ldb_dn_get_linearized(source_dn));
+		talloc_free(tmp_ctx);
+		return true;
+	}
+
+	ret = dsdb_find_nc_root(ldb, tmp_ctx, target_dn, &target_nc);
+	if (ret != LDB_SUCCESS) {
+		DBG_ERR("Failed to find base DN for target %s\n",
+			ldb_dn_get_linearized(target_dn));
+		talloc_free(tmp_ctx);
+		return true;
+	}
+
+	same_nc = (ldb_dn_compare(source_nc, target_nc) == 0);
+
+	talloc_free(tmp_ctx);
+
+	return same_nc;
 }

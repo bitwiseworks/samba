@@ -18,12 +18,14 @@
 
 #include "includes.h"
 #include "utils/net.h"
+#include "libsmb/namequery.h"
 #include "libads/sitename_cache.h"
 #include "../lib/addns/dnsquery.h"
 #include "../librpc/gen_ndr/ndr_netlogon.h"
 #include "smb_krb5.h"
 #include "../libcli/security/security.h"
 #include "passdb/lookup_sid.h"
+#include "libsmb/dsgetdcname.h"
 
 int net_lookup_usage(struct net_context *c, int argc, const char **argv)
 {
@@ -405,11 +407,12 @@ static int net_lookup_dsgetdcname(struct net_context *c, int argc, const char **
 
 	domain_name = argv[0];
 
-	if (argc >= 2)
+	if (argc >= 2) {
 		sscanf(argv[1], "%x", &flags);
+	}
 
-	if (!flags) {
-		flags |= DS_DIRECTORY_SERVICE_REQUIRED;
+	if (flags == 0) {
+		flags = DS_DIRECTORY_SERVICE_REQUIRED;
 	}
 
 	if (argc == 3) {

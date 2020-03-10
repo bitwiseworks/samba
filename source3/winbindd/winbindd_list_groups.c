@@ -74,6 +74,8 @@ struct tevent_req *winbindd_list_groups_send(TALLOC_CTX *mem_ctx,
 	}
 
 	if (request->domain_name[0] != '\0') {
+		ZERO_STRUCT(state->domains[0].groups);
+
 		state->domains[0].domain = find_domain_from_name_noinit(
 			request->domain_name);
 		if (state->domains[0].domain == NULL) {
@@ -83,7 +85,10 @@ struct tevent_req *winbindd_list_groups_send(TALLOC_CTX *mem_ctx,
 	} else {
 		i = 0;
 		for (domain = domain_list(); domain; domain = domain->next) {
-			state->domains[i++].domain = domain;
+			ZERO_STRUCT(state->domains[i].groups);
+
+			state->domains[i].domain = domain;
+			i++;
 		}
 	}
 
@@ -166,10 +171,13 @@ NTSTATUS winbindd_list_groups_recv(struct tevent_req *req,
 		struct winbindd_list_groups_domstate *d = &state->domains[i];
 
 		for (j=0; j<d->groups.num_principals; j++) {
-			fstring name;
-			fill_domain_username(name, d->domain->name,
+			const char *name;
+			name = fill_domain_username_talloc(response, d->domain->name,
 					     d->groups.principals[j].name,
 					     True);
+			if (name == NULL) {
+				return NT_STATUS_NO_MEMORY;
+			}
 			len += strlen(name)+1;
 		}
 		response->data.num_entries += d->groups.num_principals;
@@ -185,11 +193,14 @@ NTSTATUS winbindd_list_groups_recv(struct tevent_req *req,
 		struct winbindd_list_groups_domstate *d = &state->domains[i];
 
 		for (j=0; j<d->groups.num_principals; j++) {
-			fstring name;
+			const char *name;
 			size_t this_len;
-			fill_domain_username(name, d->domain->name,
+			name = fill_domain_username_talloc(response, d->domain->name,
 					     d->groups.principals[j].name,
 					     True);
+			if (name == NULL) {
+				return NT_STATUS_NO_MEMORY;
+			}
 			this_len = strlen(name);
 			memcpy(result+len, name, this_len);
 			len += this_len;

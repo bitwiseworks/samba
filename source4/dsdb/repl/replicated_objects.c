@@ -31,6 +31,9 @@
 #include "libcli/auth/libcli_auth.h"
 #include "param/param.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS            DBGC_DRS_REPL
+
 static WERROR dsdb_repl_merge_working_schema(struct ldb_context *ldb,
 					     struct dsdb_schema *dest_schema,
 					     const struct dsdb_schema *ref_schema)
@@ -724,6 +727,12 @@ WERROR dsdb_replicated_objects_convert(struct ldb_context *ldb,
 		 * based on the cross-ref object.
 		 */
 		if (W_ERROR_EQUAL(status, WERR_DS_ADD_REPLICA_INHIBITED)) {
+			struct GUID_txt_buf guid_str;
+			DBG_ERR("Ignoring object outside partition %s %s: %s\n",
+				GUID_buf_string(&cur->object.identifier->guid,
+						&guid_str),
+				cur->object.identifier->dn,
+				win_errstr(status));
 			continue;
 		}
 
@@ -835,14 +844,13 @@ WERROR dsdb_replicated_objects_commit(struct ldb_context *ldb,
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
 
-	/* TODO: handle linked attributes */
-
 	/* wrap the extended operation in a transaction 
 	   See [MS-DRSR] 3.3.2 Transactions
 	 */
 	ret = ldb_transaction_start(ldb);
 	if (ret != LDB_SUCCESS) {
-		DEBUG(0,(__location__ " Failed to start transaction\n"));
+		DEBUG(0,(__location__ " Failed to start transaction: %s\n",
+			 ldb_errstring(ldb)));
 		return WERR_FOOBAR;
 	}
 
@@ -865,7 +873,7 @@ WERROR dsdb_replicated_objects_commit(struct ldb_context *ldb,
 		cur_schema = dsdb_get_schema(ldb, tmp_ctx);
 		used_global_schema = dsdb_uses_global_schema(ldb);
 
-		ret = dsdb_reference_schema(ldb, working_schema, false);
+		ret = dsdb_reference_schema(ldb, working_schema, SCHEMA_MEMORY_ONLY);
 		if (ret != LDB_SUCCESS) {
 			DEBUG(0,(__location__ "Failed to reference working schema - %s\n",
 				 ldb_strerror(ret)));
@@ -882,15 +890,18 @@ WERROR dsdb_replicated_objects_commit(struct ldb_context *ldb,
 		if (used_global_schema) { 
 			dsdb_set_global_schema(ldb);
 		} else if (cur_schema) {
-			dsdb_reference_schema(ldb, cur_schema, false);
+			dsdb_reference_schema(ldb, cur_schema, SCHEMA_MEMORY_ONLY);
 		}
 
-		if (!W_ERROR_EQUAL(objects->error, WERR_DS_DRA_MISSING_PARENT)) {
-			DEBUG(1,("Failed to apply records: %s: %s\n",
-				 ldb_errstring(ldb), ldb_strerror(ret)));
-		} else {
+		if (W_ERROR_EQUAL(objects->error, WERR_DS_DRA_RECYCLED_TARGET)) {
+			DEBUG(3,("Missing target while attempting to apply records: %s\n",
+				 ldb_errstring(ldb)));
+		} else if (W_ERROR_EQUAL(objects->error, WERR_DS_DRA_MISSING_PARENT)) {
 			DEBUG(3,("Missing parent while attempting to apply records: %s\n",
 				 ldb_errstring(ldb)));
+		} else {
+			DEBUG(1,("Failed to apply records: %s: %s\n",
+				 ldb_errstring(ldb), ldb_strerror(ret)));
 		}
 		ldb_transaction_cancel(ldb);
 		TALLOC_FREE(tmp_ctx);
@@ -912,10 +923,11 @@ WERROR dsdb_replicated_objects_commit(struct ldb_context *ldb,
 			if (used_global_schema) { 
 				dsdb_set_global_schema(ldb);
 			} else if (cur_schema ) {
-				dsdb_reference_schema(ldb, cur_schema, false);
+				dsdb_reference_schema(ldb, cur_schema, SCHEMA_MEMORY_ONLY);
 			}
 			DEBUG(0,("Failed to save updated prefixMap: %s\n",
 				 win_errstr(werr)));
+			ldb_transaction_cancel(ldb);
 			TALLOC_FREE(tmp_ctx);
 			return werr;
 		}
@@ -927,10 +939,11 @@ WERROR dsdb_replicated_objects_commit(struct ldb_context *ldb,
 		if (used_global_schema) { 
 			dsdb_set_global_schema(ldb);
 		} else if (cur_schema ) {
-			dsdb_reference_schema(ldb, cur_schema, false);
+			dsdb_reference_schema(ldb, cur_schema, SCHEMA_MEMORY_ONLY);
 		}
-		DEBUG(0,(__location__ " Failed to prepare commit of transaction: %s\n",
-			 ldb_errstring(ldb)));
+		DBG_ERR(" Failed to prepare commit of transaction: %s (%s)\n",
+			ldb_errstring(ldb),
+			ldb_strerror(ret));
 		TALLOC_FREE(tmp_ctx);
 		return WERR_FOOBAR;
 	}
@@ -941,7 +954,7 @@ WERROR dsdb_replicated_objects_commit(struct ldb_context *ldb,
 		if (used_global_schema) { 
 			dsdb_set_global_schema(ldb);
 		} else if (cur_schema ) {
-			dsdb_reference_schema(ldb, cur_schema, false);
+			dsdb_reference_schema(ldb, cur_schema, SCHEMA_MEMORY_ONLY);
 		}
 		DEBUG(0,(__location__ " Failed to load partition uSN\n"));
 		ldb_transaction_cancel(ldb);
@@ -955,7 +968,7 @@ WERROR dsdb_replicated_objects_commit(struct ldb_context *ldb,
 		if (used_global_schema) { 
 			dsdb_set_global_schema(ldb);
 		} else if (cur_schema ) {
-			dsdb_reference_schema(ldb, cur_schema, false);
+			dsdb_reference_schema(ldb, cur_schema, SCHEMA_MEMORY_ONLY);
 		}
 		DEBUG(0,(__location__ " Failed to commit transaction\n"));
 		TALLOC_FREE(tmp_ctx);
@@ -1000,7 +1013,7 @@ WERROR dsdb_replicated_objects_commit(struct ldb_context *ldb,
 				new_schema != NULL ?
 				new_schema->metadata_usn : 0,
 				working_schema, working_schema->metadata_usn);
-			dsdb_reference_schema(ldb, cur_schema, false);
+			dsdb_reference_schema(ldb, cur_schema, SCHEMA_MEMORY_ONLY);
 			if (used_global_schema) {
 				dsdb_set_global_schema(ldb);
 			}

@@ -1,3 +1,5 @@
+<?xml version="1.0" encoding="iso-8859-1"?>
+<!DOCTYPE refentry PUBLIC "-//Samba-Team//DTD DocBook V4.2-Based Variant V1.0//EN" "http://www.samba.org/samba/DTD/samba-doc">
 <refentry id="smb.conf.5" xmlns:xi="http://www.w3.org/2003/XInclude"
 	                 xmlns:samba="http://www.samba.org/samba/DTD/samba-doc">
 	
@@ -6,7 +8,7 @@
 	<manvolnum>5</manvolnum>
 	<refmiscinfo class="source">Samba</refmiscinfo>
 	<refmiscinfo class="manual">File Formats and Conventions</refmiscinfo>
-	<refmiscinfo class="version">4.6</refmiscinfo>
+	<refmiscinfo class="version">&doc.version;</refmiscinfo>
 </refmeta>
 
 
@@ -510,6 +512,13 @@ chmod 1770 /usr/local/samba/lib/usershares
 		</varlistentry>
 
 		<varlistentry>
+		<term>%J</term>
+		<listitem><para>the IP address of the client machine,
+			colons/dots replaced by underscores.</para>
+		</listitem>
+		</varlistentry>
+
+		<varlistentry>
 		<term>%i</term>
 		<listitem><para>the local IP address to which a client connected.</para>
 		<para>Before 4.0.0 it could contain IPv4 mapped IPv6 addresses,
@@ -518,8 +527,20 @@ chmod 1770 /usr/local/samba/lib/usershares
 		</varlistentry>
 
 		<varlistentry>
+		<term>%j</term>
+		<listitem><para>the local IP address to which a client connected,
+			colons/dots replaced by underscores.</para>
+		</listitem>
+		</varlistentry>
+
+		<varlistentry>
 		<term>%T</term>
 		<listitem><para>the current date and time.</para></listitem>
+		</varlistentry>
+
+		<varlistentry>
+		<term>%t</term>
+		<listitem><para>the current date and time in a minimal format without colons (YYYYYmmdd_HHMMSS).</para></listitem>
 		</varlistentry>
 
 		<varlistentry>
@@ -853,7 +874,7 @@ chmod 1770 /usr/local/samba/lib/usershares
 <refsect1>
 	<title>VERSION</title>
 
-	<para>This man page is correct for version 4 of the Samba suite.</para>
+	<para>This man page is part of version &doc.version; of the Samba suite.</para>
 </refsect1>
 
 <refsect1>
@@ -878,14 +899,6 @@ chmod 1770 /usr/local/samba/lib/usershares
 	<para>
 	The original Samba software and related utilities were created by Andrew Tridgell. Samba is now developed
 	by the Samba Team as an Open Source project similar to the way the Linux kernel is developed.
-	</para>
-	
-	<para>
-	The original Samba man pages were written by Karl Auer. The man page sources were converted to YODL format (another 
-	excellent piece of Open Source software, available at <ulink noescape="1" url="ftp://ftp.icce.rug.nl/pub/unix/">
-	ftp://ftp.icce.rug.nl/pub/unix/</ulink>) and updated for the Samba 2.0 release by Jeremy Allison.  The conversion
-	to DocBook for Samba 2.2 was done by Gerald Carter. The conversion to DocBook XML 4.2 for Samba 3.0 was done by
-	Alexander Bokovoy.
 	</para>
 </refsect1>
 

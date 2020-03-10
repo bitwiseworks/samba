@@ -216,7 +216,8 @@ static int fold_string(int (*fprintf_fn)(void *, const char *, ...), void *priva
 			const char *buf, size_t length, int start_pos)
 {
 	size_t i;
-	int total=0, ret;
+	size_t total = 0;
+	int ret;
 
 	for (i=0;i<length;i++) {
 		ret = fprintf_fn(private_data, "%c", buf[i]);
@@ -280,7 +281,8 @@ static int ldb_ldif_write_trace(struct ldb_context *ldb,
 {
 	TALLOC_CTX *mem_ctx;
 	unsigned int i, j;
-	int total=0, ret;
+	size_t total = 0;
+	int ret;
 	char *p;
 	const struct ldb_message *msg;
 	const char * const * secret_attributes = ldb_get_opaque(ldb, LDB_SECRET_ATTRIBUTE_LIST_OPAQUE);
@@ -1079,4 +1081,25 @@ char *ldb_ldif_message_string(struct ldb_context *ldb, TALLOC_CTX *mem_ctx,
 	ldif.msg = discard_const_p(struct ldb_message, msg);
 
 	return ldb_ldif_write_string(ldb, mem_ctx, &ldif);
+}
+
+/*
+ * convenient function to turn a ldb_message into a string. Useful for
+ * debugging but also safer if some of the LDIF could be sensitive.
+ *
+ * The secret attributes are specified in a 'const char * const *' within
+ * the LDB_SECRET_ATTRIBUTE_LIST opaque set on the ldb
+ *
+ */
+char *ldb_ldif_message_redacted_string(struct ldb_context *ldb,
+				       TALLOC_CTX *mem_ctx,
+				       enum ldb_changetype changetype,
+				       const struct ldb_message *msg)
+{
+	struct ldb_ldif ldif;
+
+	ldif.changetype = changetype;
+	ldif.msg = discard_const_p(struct ldb_message, msg);
+
+	return ldb_ldif_write_redacted_trace_string(ldb, mem_ctx, &ldif);
 }

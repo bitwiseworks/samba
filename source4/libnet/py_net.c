@@ -20,6 +20,7 @@
 */
 
 #include <Python.h>
+#include "python/py3compat.h"
 #include "includes.h"
 #include <pyldb.h>
 #include <pytalloc.h>
@@ -35,8 +36,7 @@
 #include "dsdb/samdb/samdb.h"
 #include "py_net.h"
 #include "librpc/rpc/pyrpc_util.h"
-
-void initnet(void);
+#include "libcli/drsuapi/drsuapi.h"
 
 static void PyErr_SetDsExtendedError(enum drsuapi_DsExtendedError ext_err, const char *error_description)
 {
@@ -155,22 +155,39 @@ static PyObject *py_net_change_password(py_net_Object *self, PyObject *args, PyO
 {
 	union libnet_ChangePassword r;
 	NTSTATUS status;
-	TALLOC_CTX *mem_ctx;
-	struct tevent_context *ev;
-	const char *kwnames[] = { "newpassword", NULL };
-
+	TALLOC_CTX *mem_ctx = NULL;
+	struct tevent_context *ev = NULL;
+	const char *kwnames[] = { "newpassword", "oldpassword", "domain", "username", NULL };
+	const char *newpass = NULL;
+	const char *oldpass = NULL;
 	ZERO_STRUCT(r);
-
-	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "s:change_password",
-					discard_const_p(char *, kwnames),
-					&r.generic.in.newpassword)) {
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "es|esss:change_password",
+					 discard_const_p(char *, kwnames),
+					 "utf8",
+					 &newpass,
+					 "utf8",
+					 &oldpass,
+					 &r.generic.in.domain_name,
+					 &r.generic.in.account_name)) {
 		return NULL;
 	}
 
+	r.generic.in.newpassword = newpass;
+	r.generic.in.oldpassword = oldpass;
+
 	r.generic.level = LIBNET_CHANGE_PASSWORD_GENERIC;
-	r.generic.in.account_name = cli_credentials_get_username(self->libnet_ctx->cred);
-	r.generic.in.domain_name = cli_credentials_get_domain(self->libnet_ctx->cred);
-	r.generic.in.oldpassword = cli_credentials_get_password(self->libnet_ctx->cred);
+	if (r.generic.in.account_name == NULL) {
+		r.generic.in.account_name
+			= cli_credentials_get_username(self->libnet_ctx->cred);
+	}
+	if (r.generic.in.domain_name == NULL) {
+		r.generic.in.domain_name
+			= cli_credentials_get_domain(self->libnet_ctx->cred);
+	}
+	if (r.generic.in.oldpassword == NULL) {
+		r.generic.in.oldpassword
+			= cli_credentials_get_password(self->libnet_ctx->cred);
+	}
 
 	/* FIXME: we really need to get a context from the caller or we may end
 	 * up with 2 event contexts */
@@ -178,11 +195,17 @@ static PyObject *py_net_change_password(py_net_Object *self, PyObject *args, PyO
 
 	mem_ctx = talloc_new(ev);
 	if (mem_ctx == NULL) {
+		PyMem_Free(discard_const_p(char, newpass));
+		PyMem_Free(discard_const_p(char, oldpass));
 		PyErr_NoMemory();
 		return NULL;
 	}
 
 	status = libnet_ChangePassword(self->libnet_ctx, mem_ctx, &r);
+
+	PyMem_Free(discard_const_p(char, newpass));
+	PyMem_Free(discard_const_p(char, oldpass));
+
 	if (NT_STATUS_IS_ERR(status)) {
 		PyErr_SetNTSTATUS_and_string(status,
 					     r.generic.out.error_string
@@ -193,7 +216,6 @@ static PyObject *py_net_change_password(py_net_Object *self, PyObject *args, PyO
 	}
 
 	talloc_free(mem_ctx);
-
 	Py_RETURN_NONE;
 }
 
@@ -290,7 +312,7 @@ static PyObject *py_net_time(py_net_Object *self, PyObject *args, PyObject *kwar
 	tm = localtime(&r.generic.out.time);
 	strftime(timestr, sizeof(timestr)-1, "%c %Z",tm);
 	
-	ret = PyString_FromString(timestr);
+	ret = PyStr_FromString(timestr);
 
 	talloc_free(mem_ctx);
 
@@ -597,6 +619,75 @@ static PyObject *py_net_replicate_chunk(py_net_Object *self, PyObject *args, PyO
 
 
 /*
+  just do the decryption of a DRS replicated attribute
+ */
+static PyObject *py_net_replicate_decrypt(py_net_Object *self, PyObject *args, PyObject *kwargs)
+{
+	const char *kwnames[] = { "drspipe", "attribute", "rid", NULL };
+	PyObject *py_drspipe, *py_attribute;
+	NTSTATUS status;
+        dcerpc_InterfaceObject *drs_pipe;
+	TALLOC_CTX *frame;
+	TALLOC_CTX *context;
+	DATA_BLOB gensec_skey;
+	unsigned int rid;
+	struct drsuapi_DsReplicaAttribute *attribute;
+	WERROR werr;
+
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OOI",
+					 discard_const_p(char *, kwnames),
+	                                 &py_drspipe,
+					 &py_attribute, &rid)) {
+		return NULL;
+	}
+
+	frame = talloc_stackframe();
+
+	if (!py_check_dcerpc_type(py_drspipe,
+				  "samba.dcerpc.base",
+				  "ClientConnection")) {
+		return NULL;
+	}
+	drs_pipe = (dcerpc_InterfaceObject *)(py_drspipe);
+
+	status = gensec_session_key(drs_pipe->pipe->conn->security_state.generic_state,
+				    frame,
+				    &gensec_skey);
+	if (!NT_STATUS_IS_OK(status)) {
+		char *error_string
+			= talloc_asprintf(frame,
+					  "Unable to get session key from drspipe: %s",
+					  nt_errstr(status));
+		PyErr_SetNTSTATUS_and_string(status, error_string);
+		talloc_free(frame);
+		return NULL;
+	}
+
+	if (!py_check_dcerpc_type(py_attribute, "samba.dcerpc.drsuapi",
+				  "DsReplicaAttribute")) {
+		return NULL;
+	}
+
+	attribute = pytalloc_get_ptr(py_attribute);
+	context   = pytalloc_get_mem_ctx(py_attribute);
+	werr = drsuapi_decrypt_attribute(context, &gensec_skey,
+					 rid, 0, attribute);
+	if (!W_ERROR_IS_OK(werr)) {
+		char *error_string = talloc_asprintf(frame,
+						     "Unable to get decrypt attribute: %s",
+						     win_errstr(werr));
+		PyErr_SetWERROR_and_string(werr, error_string);
+		talloc_free(frame);
+		return NULL;
+	}
+
+	talloc_free(frame);
+
+	Py_RETURN_NONE;
+
+}
+
+/*
   find a DC given a domain name and server type
  */
 static PyObject *py_net_finddc(py_net_Object *self, PyObject *args, PyObject *kwargs)
@@ -616,8 +707,18 @@ static PyObject *py_net_finddc(py_net_Object *self, PyObject *args, PyObject *kw
 	}
 
 	mem_ctx = talloc_new(self->mem_ctx);
+	if (mem_ctx == NULL) {
+		PyErr_NoMemory();
+		return NULL;
+	}
 
 	io = talloc_zero(mem_ctx, struct finddcs);
+	if (io == NULL) {
+		TALLOC_FREE(mem_ctx);
+		PyErr_NoMemory();
+		return NULL;
+	}
+
 	if (domain != NULL) {
 		io->in.domain_name = domain;
 	}
@@ -648,6 +749,9 @@ static const char py_net_replicate_init_doc[] = "replicate_init(samdb, lp, drspi
 static const char py_net_replicate_chunk_doc[] = "replicate_chunk(state, level, ctr, schema)\n"
 					 "Process replication for one chunk";
 
+static const char py_net_replicate_decrypt_doc[] = "replicate_decrypt(drs, attribute, rid)\n"
+					 "Decrypt (in place) a DsReplicaAttribute replicated with drs.GetNCChanges()";
+
 static const char py_net_finddc_doc[] = "finddc(flags=server_type, domain=None, address=None)\n"
 					 "Find a DC with the specified 'server_type' bits. The 'domain' and/or 'address' have to be used as additional search criteria. Returns the whole netlogon struct";
 
@@ -660,7 +764,8 @@ static PyMethodDef net_obj_methods[] = {
 	{"delete_user", (PyCFunction)py_net_user_delete, METH_VARARGS|METH_KEYWORDS, py_net_delete_user_doc},
 	{"replicate_init", (PyCFunction)py_net_replicate_init, METH_VARARGS|METH_KEYWORDS, py_net_replicate_init_doc},
 	{"replicate_chunk", (PyCFunction)py_net_replicate_chunk, METH_VARARGS|METH_KEYWORDS, py_net_replicate_chunk_doc},
-	{"finddc", (PyCFunction)py_net_finddc, METH_KEYWORDS, py_net_finddc_doc},
+	{"replicate_decrypt", (PyCFunction)py_net_replicate_decrypt, METH_VARARGS|METH_KEYWORDS, py_net_replicate_decrypt_doc},
+	{"finddc", (PyCFunction)py_net_finddc, METH_VARARGS|METH_KEYWORDS, py_net_finddc_doc},
 	{ NULL }
 };
 
@@ -720,7 +825,7 @@ static PyObject *net_obj_new(PyTypeObject *type, PyObject *args, PyObject *kwarg
 
 
 PyTypeObject py_net_Type = {
-	PyObject_HEAD_INIT(NULL) 0,
+	PyVarObject_HEAD_INIT(NULL, 0)
 	.tp_name = "net.Net",
 	.tp_basicsize = sizeof(py_net_Object),
 	.tp_dealloc = (destructor)py_net_dealloc,
@@ -728,21 +833,29 @@ PyTypeObject py_net_Type = {
 	.tp_new = net_obj_new,
 };
 
-void initnet(void)
+static struct PyModuleDef moduledef = {
+	PyModuleDef_HEAD_INIT,
+	.m_name = "net",
+	.m_size = -1,
+};
+
+MODULE_INIT_FUNC(net)
 {
 	PyObject *m;
 
 	if (PyType_Ready(&py_net_Type) < 0)
-		return;
+		return NULL;
 
-	m = Py_InitModule3("net", NULL, NULL);
+	m = PyModule_Create(&moduledef);
 	if (m == NULL)
-		return;
+		return NULL;
 
 	Py_INCREF(&py_net_Type);
 	PyModule_AddObject(m, "Net", (PyObject *)&py_net_Type);
-	PyModule_AddObject(m, "LIBNET_JOINDOMAIN_AUTOMATIC", PyInt_FromLong(LIBNET_JOINDOMAIN_AUTOMATIC));
-	PyModule_AddObject(m, "LIBNET_JOINDOMAIN_SPECIFIED", PyInt_FromLong(LIBNET_JOINDOMAIN_SPECIFIED));
-	PyModule_AddObject(m, "LIBNET_JOIN_AUTOMATIC", PyInt_FromLong(LIBNET_JOIN_AUTOMATIC));
-	PyModule_AddObject(m, "LIBNET_JOIN_SPECIFIED", PyInt_FromLong(LIBNET_JOIN_SPECIFIED));
+	PyModule_AddIntConstant(m, "LIBNET_JOINDOMAIN_AUTOMATIC", LIBNET_JOINDOMAIN_AUTOMATIC);
+	PyModule_AddIntConstant(m, "LIBNET_JOINDOMAIN_SPECIFIED", LIBNET_JOINDOMAIN_SPECIFIED);
+	PyModule_AddIntConstant(m, "LIBNET_JOIN_AUTOMATIC", LIBNET_JOIN_AUTOMATIC);
+	PyModule_AddIntConstant(m, "LIBNET_JOIN_SPECIFIED", LIBNET_JOIN_SPECIFIED);
+
+	return m;
 }

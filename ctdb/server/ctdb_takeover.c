@@ -39,8 +39,11 @@
 #include "common/rb_tree.h"
 #include "common/reqid.h"
 #include "common/system.h"
+#include "common/system_socket.h"
 #include "common/common.h"
 #include "common/logging.h"
+
+#include "server/ctdb_config.h"
 
 #include "server/ipalloc.h"
 
@@ -298,10 +301,16 @@ static void ctdb_vnn_unassign_iface(struct ctdb_context *ctdb,
 static bool ctdb_vnn_available(struct ctdb_context *ctdb,
 			       struct ctdb_vnn *vnn)
 {
+	uint32_t flags;
 	struct vnn_interface *i;
 
 	/* Nodes that are not RUNNING can not host IPs */
 	if (ctdb->runstate != CTDB_RUNSTATE_RUNNING) {
+		return false;
+	}
+
+	flags = ctdb->nodes[ctdb->pnn]->flags;
+	if ((flags & (NODE_FLAGS_INACTIVE|NODE_FLAGS_DISABLED)) != 0) {
 		return false;
 	}
 
@@ -457,7 +466,7 @@ static void ctdb_do_takeip_callback(struct ctdb_context *ctdb, int status,
 	TDB_DATA data;
 
 	if (status != 0) {
-		if (status == -ETIME) {
+		if (status == -ETIMEDOUT) {
 			ctdb_ban_self(ctdb);
 		}
 		DEBUG(DEBUG_ERR,(__location__ " Failed to takeover IP %s on interface %s\n",
@@ -576,10 +585,9 @@ static void ctdb_do_updateip_callback(struct ctdb_context *ctdb, int status,
 {
 	struct ctdb_do_updateip_state *state =
 		talloc_get_type(private_data, struct ctdb_do_updateip_state);
-	int32_t ret;
 
 	if (status != 0) {
-		if (status == -ETIME) {
+		if (status == -ETIMEDOUT) {
 			ctdb_ban_self(ctdb);
 		}
 		DEBUG(DEBUG_ERR,
@@ -599,17 +607,6 @@ static void ctdb_do_updateip_callback(struct ctdb_context *ctdb, int status,
 		ctdb_request_control_reply(ctdb, state->c, NULL, status, NULL);
 		talloc_free(state);
 		return;
-	}
-
-	if (ctdb->do_checkpublicip) {
-
-	ret = ctdb_announce_vnn_iface(ctdb, state->vnn);
-	if (ret != 0) {
-		ctdb_request_control_reply(ctdb, state->c, NULL, -1, NULL);
-		talloc_free(state);
-		return;
-	}
-
 	}
 
 	/* the control succeeded */
@@ -755,7 +752,7 @@ int32_t ctdb_control_takeover_ip(struct ctdb_context *ctdb,
 		return 0;
 	}
 
-	if (ctdb->tunable.disable_ip_failover == 0 && ctdb->do_checkpublicip) {
+	if (ctdb_config.failover_disabled == 0 && ctdb->do_checkpublicip) {
 		have_ip = ctdb_sys_have_ip(&pip->addr);
 	}
 	best_iface = ctdb_vnn_best_iface(ctdb, vnn);
@@ -889,11 +886,11 @@ static void release_ip_callback(struct ctdb_context *ctdb, int status,
 	struct release_ip_callback_state *state =
 		talloc_get_type(private_data, struct release_ip_callback_state);
 
-	if (status == -ETIME) {
+	if (status == -ETIMEDOUT) {
 		ctdb_ban_self(ctdb);
 	}
 
-	if (ctdb->tunable.disable_ip_failover == 0 && ctdb->do_checkpublicip) {
+	if (ctdb_config.failover_disabled == 0 && ctdb->do_checkpublicip) {
 		if  (ctdb_sys_have_ip(state->addr)) {
 			DEBUG(DEBUG_ERR,
 			      ("IP %s still hosted during release IP callback, failing\n",
@@ -957,7 +954,7 @@ int32_t ctdb_control_release_ip(struct ctdb_context *ctdb,
 	 * local node.  Redundant releases need to update the PNN but
 	 * are otherwise ignored.
 	 */
-	if (ctdb->tunable.disable_ip_failover == 0 && ctdb->do_checkpublicip) {
+	if (ctdb_config.failover_disabled == 0 && ctdb->do_checkpublicip) {
 		if (!ctdb_sys_have_ip(&pip->addr)) {
 			DEBUG(DEBUG_DEBUG,("Redundant release of IP %s/%u on interface %s (ip not held)\n",
 				ctdb_addr_to_str(&pip->addr),
@@ -1118,9 +1115,33 @@ static int ctdb_add_public_address(struct ctdb_context *ctdb,
 */
 int ctdb_set_public_addresses(struct ctdb_context *ctdb, bool check_addresses)
 {
+	bool ok;
 	char **lines;
 	int nlines;
 	int i;
+
+	/* If no public addresses file given then try the default */
+	if (ctdb->public_addresses_file == NULL) {
+		const char *b = getenv("CTDB_BASE");
+		if (b == NULL) {
+			DBG_ERR("CTDB_BASE not set\n");
+			return -1;
+		}
+		ctdb->public_addresses_file = talloc_asprintf(
+					ctdb, "%s/%s", b, "public_addresses");
+		if (ctdb->public_addresses_file == NULL) {
+			DBG_ERR("Out of memory\n");
+			return -1;
+		}
+	}
+
+	/* If the file doesn't exist then warn and do nothing */
+	ok = file_exist(ctdb->public_addresses_file);
+	if (!ok) {
+		D_WARNING("Not loading public addresses, no file %s\n",
+			  ctdb->public_addresses_file);
+		return 0;
+	}
 
 	lines = file_lines_load(ctdb->public_addresses_file, &nlines, 0, ctdb);
 	if (lines == NULL) {
@@ -1150,18 +1171,15 @@ int ctdb_set_public_addresses(struct ctdb_context *ctdb, bool check_addresses)
 		}
 		tok = strtok(line, " \t");
 		addrstr = tok;
+
 		tok = strtok(NULL, " \t");
 		if (tok == NULL) {
-			if (NULL == ctdb->default_public_interface) {
-				DEBUG(DEBUG_CRIT,("No default public interface and no interface specified at line %u of public address list\n",
-					 i+1));
-				talloc_free(lines);
-				return -1;
-			}
-			ifaces = ctdb->default_public_interface;
-		} else {
-			ifaces = tok;
+			D_ERR("No interface specified at line %u "
+			      "of public addresses file\n", i+1);
+			talloc_free(lines);
+			return -1;
 		}
+		ifaces = tok;
 
 		if (!addrstr || !parse_ip_mask(addrstr, ifaces, &addr, &mask)) {
 			DEBUG(DEBUG_CRIT,("Badly formed line %u in public address list\n", i+1));
@@ -1175,6 +1193,9 @@ int ctdb_set_public_addresses(struct ctdb_context *ctdb, bool check_addresses)
 		}
 	}
 
+
+	D_NOTICE("Loaded public addresses from %s\n",
+		 ctdb->public_addresses_file);
 
 	talloc_free(lines);
 	return 0;
@@ -1424,7 +1445,7 @@ static void ctdb_remove_connection(struct ctdb_vnn *vnn, struct ctdb_connection 
 	   and we don't need to do anything
 	 */
 	if (vnn->tcp_array == NULL) {
-		DEBUG(DEBUG_INFO,("Trying to remove tickle that doesnt exist (array is empty) %s:%u\n",
+		DEBUG(DEBUG_INFO,("Trying to remove tickle that doesn't exist (array is empty) %s:%u\n",
 			ctdb_addr_to_str(&conn->dst),
 			ntohs(conn->dst.ip.sin_port)));
 		return;
@@ -1436,7 +1457,7 @@ static void ctdb_remove_connection(struct ctdb_vnn *vnn, struct ctdb_connection 
 	 */
 	tcpp = ctdb_tcp_find(vnn->tcp_array, conn);
 	if (tcpp == NULL) {
-		DEBUG(DEBUG_INFO,("Trying to remove tickle that doesnt exist %s:%u\n",
+		DEBUG(DEBUG_INFO,("Trying to remove tickle that doesn't exist %s:%u\n",
 			ctdb_addr_to_str(&conn->dst),
 			ntohs(conn->dst.ip.sin_port)));
 		return;
@@ -1558,7 +1579,7 @@ void ctdb_release_all_ips(struct ctdb_context *ctdb)
 	struct ctdb_vnn *vnn, *next;
 	int count = 0;
 
-	if (ctdb->tunable.disable_ip_failover == 1) {
+	if (ctdb_config.failover_disabled == 1) {
 		return;
 	}
 
@@ -1577,7 +1598,7 @@ void ctdb_release_all_ips(struct ctdb_context *ctdb)
 		if (vnn->update_in_flight) {
 			DEBUG(DEBUG_WARNING,
 			      (__location__
-			       " Not releasing IP %s/%u on interface %s, an update is already in progess\n",
+			       " Not releasing IP %s/%u on interface %s, an update is already in progress\n",
 				    ctdb_addr_to_str(&vnn->public_address),
 				    vnn->public_netmask_bits,
 				    ctdb_vnn_iface_string(vnn)));
@@ -2238,7 +2259,7 @@ static void ctdb_ipreallocated_callback(struct ctdb_context *ctdb,
 		DEBUG(DEBUG_ERR,
 		      (" \"ipreallocated\" event script failed (status %d)\n",
 		       status));
-		if (status == -ETIME) {
+		if (status == -ETIMEDOUT) {
 			ctdb_ban_self(ctdb);
 		}
 	}

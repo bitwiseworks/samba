@@ -256,7 +256,7 @@ static DATA_BLOB *get_new_descriptor(struct ldb_module *module,
 	enum ndr_err_code ndr_err;
 	struct ldb_context *ldb = ldb_module_get_ctx(module);
 	struct auth_session_info *session_info
-		= ldb_get_opaque(ldb, "sessionInfo");
+		= ldb_get_opaque(ldb, DSDB_SESSION_INFO);
 	const struct dom_sid *domain_sid = samdb_domain_sid(ldb);
 	char *sddl_sd;
 	struct dom_sid *default_owner;
@@ -416,7 +416,7 @@ static DATA_BLOB *get_new_descriptor(struct ldb_module *module,
 	}
 
 	sddl_sd = sddl_encode(mem_ctx, final_sd, domain_sid);
-	DEBUG(10, ("Object %s created with desriptor %s\n\n", ldb_dn_get_linearized(dn), sddl_sd));
+	DEBUG(10, ("Object %s created with descriptor %s\n\n", ldb_dn_get_linearized(dn), sddl_sd));
 
 	linear_sd = talloc(mem_ctx, DATA_BLOB);
 	if (!linear_sd) {

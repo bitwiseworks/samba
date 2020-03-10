@@ -105,10 +105,8 @@ void init_strict_lock_struct(files_struct *fsp,
 				br_off size,
 				enum brl_type lock_type,
 				struct lock_struct *plock);
-bool strict_lock_default(files_struct *fsp,
-				struct lock_struct *plock);
-void strict_unlock_default(files_struct *fsp,
-				struct lock_struct *plock);
+bool strict_lock_check_default(files_struct *fsp,
+			       struct lock_struct *plock);
 NTSTATUS query_lock(files_struct *fsp,
 			uint64_t *psmblctx,
 			uint64_t *pcount,
@@ -142,7 +140,9 @@ void locking_close_file(struct messaging_context *msg_ctx,
 bool locking_init(void);
 bool locking_init_readonly(void);
 bool locking_end(void);
-char *share_mode_str(TALLOC_CTX *ctx, int num, const struct share_mode_entry *e);
+char *share_mode_str(TALLOC_CTX *ctx, int num,
+		     const struct file_id *id,
+		     const struct share_mode_entry *e);
 struct share_mode_lock *get_existing_share_mode_lock(TALLOC_CTX *mem_ctx,
 						     struct file_id id);
 struct share_mode_lock *get_share_mode_lock(
@@ -153,6 +153,13 @@ struct share_mode_lock *get_share_mode_lock(
 	const struct timespec *old_write_time);
 struct share_mode_lock *fetch_share_mode_unlocked(TALLOC_CTX *mem_ctx,
 						  struct file_id id);
+struct tevent_req *fetch_share_mode_send(TALLOC_CTX *mem_ctx,
+					 struct tevent_context *ev,
+					 struct file_id id,
+					 bool *queued);
+NTSTATUS fetch_share_mode_recv(struct tevent_req *req,
+			       TALLOC_CTX *mem_ctx,
+			       struct share_mode_lock **_lck);
 bool rename_share_filename(struct messaging_context *msg_ctx,
 			struct share_mode_lock *lck,
 			struct file_id id,
@@ -200,11 +207,13 @@ bool is_delete_on_close_set(struct share_mode_lock *lck, uint32_t name_hash);
 bool set_sticky_write_time(struct file_id fileid, struct timespec write_time);
 bool set_write_time(struct file_id fileid, struct timespec write_time);
 struct timespec get_share_mode_write_time(struct share_mode_lock *lck);
+bool file_has_open_streams(files_struct *fsp);
 int share_mode_forall(int (*fn)(struct file_id fid,
 				const struct share_mode_data *data,
 				void *private_data),
 		      void *private_data);
 int share_entry_forall(int (*fn)(const struct share_mode_entry *,
+				 const struct file_id *id,
 				 const char *, const char *,
 				 const char *, void *),
 		      void *private_data);

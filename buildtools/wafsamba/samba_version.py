@@ -97,7 +97,7 @@ also accepted as dictionary entries here
         if os.name == 'os2':
             self.MAINTAINED_BY=None
 
-        for a, b in version_dict.iteritems():
+        for a, b in version_dict.items():
             if a.startswith("SAMBA_VERSION_"):
                 setattr(self, a[14:], b)
             else:

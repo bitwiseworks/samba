@@ -460,12 +460,12 @@ int main(int argc, const char *argv[])
 {
 	char *cmdstr = NULL;
 	struct cmd_set	**cmd_set;
+	struct conn_struct_tos *c = NULL;
 	struct vfs_state *vfs;
 	int i;
 	char *filename = NULL;
 	char cwd[MAXPATHLEN];
 	TALLOC_CTX *frame = talloc_stackframe();
-	struct tevent_context *ev;
 	struct auth_session_info *session_info = NULL;
 	NTSTATUS status = NT_STATUS_OK;
 
@@ -525,10 +525,9 @@ int main(int argc, const char *argv[])
 
 	/* some basic initialization stuff */
 	sec_init();
-	init_guest_info();
+	init_guest_session_info(frame);
 	locking_init();
-	serverid_parent_init(NULL);
-	vfs = talloc_zero(NULL, struct vfs_state);
+	vfs = talloc_zero(frame, struct vfs_state);
 	if (vfs == NULL) {
 		return 1;
 	}
@@ -537,23 +536,19 @@ int main(int argc, const char *argv[])
 		return 1;
 	}
 
-	ev = server_event_context();
-
-	status = create_conn_struct(vfs,
-				ev,
-				server_messaging_context(),
-                                &vfs->conn,
-                                -1,
-                                getcwd(cwd, sizeof(cwd)),
-                                session_info);
+	status = create_conn_struct_tos(server_messaging_context(),
+					-1,
+					getcwd(cwd, sizeof(cwd)),
+					session_info,
+					&c);
 	if (!NT_STATUS_IS_OK(status)) {
 		return 1;
 	}
+	vfs->conn = c->conn;
 
 	vfs->conn->share_access = FILE_GENERIC_ALL;
 	vfs->conn->read_only = false;
 
-	serverid_register(messaging_server_id(vfs->conn->sconn->msg_ctx), 0);
 	file_init(vfs->conn->sconn);
 	for (i=0; i < 1024; i++)
 		vfs->files[i] = NULL;

@@ -41,6 +41,7 @@
 #include "librpc/rpc/rpc_common.h"
 #include "lib/util/samba_modules.h"
 #include "librpc/gen_ndr/ndr_dcerpc.h"
+#include "../lib/util/tevent_ntstatus.h"
 
 static NTSTATUS dcesrv_negotiate_contexts(struct dcesrv_call_state *call,
 				const struct dcerpc_bind *b,
@@ -238,7 +239,7 @@ const struct dcesrv_interface *find_interface_by_uuid(const struct dcesrv_endpoi
 /*
   find the earlier parts of a fragmented call awaiting reassembily
 */
-static struct dcesrv_call_state *dcesrv_find_fragmented_call(struct dcesrv_connection *dce_conn, uint16_t call_id)
+static struct dcesrv_call_state *dcesrv_find_fragmented_call(struct dcesrv_connection *dce_conn, uint32_t call_id)
 {
 	struct dcesrv_call_state *c;
 	for (c=dce_conn->incoming_fragmented_call_list;c;c=c->next) {
@@ -274,7 +275,8 @@ _PUBLIC_ NTSTATUS dcesrv_interface_register(struct dcesrv_context *dce_ctx,
 	enum dcerpc_transport_t transport;
 	char *ep_string = NULL;
 	bool use_single_process = true;
-	
+	const char *ep_process_string;
+
 	/*
 	 * If we are not using handles, there is no need for force
 	 * this service into using a single process.
@@ -353,8 +355,15 @@ _PUBLIC_ NTSTATUS dcesrv_interface_register(struct dcesrv_context *dce_ctx,
 		 * If we have mulitiple endpoints on port 0, they each
 		 * get an epemeral port (currently by walking up from
 		 * 1024).
+		 *
+		 * Because one endpoint can only have one process
+		 * model, we add a new IP_TCP endpoint for each model.
+		 *
+		 * This works in conjunction with the forced overwrite
+		 * of ep->use_single_process below.
 		 */
-		if (!use_single_process && transport == NCACN_IP_TCP) {
+		if (ep->use_single_process != use_single_process
+		    && transport == NCACN_IP_TCP) {
 			add_ep = true;
 		}
 	}
@@ -436,8 +445,15 @@ _PUBLIC_ NTSTATUS dcesrv_interface_register(struct dcesrv_context *dce_ctx,
 	/* Re-get the string as we may have set a port */
 	ep_string = dcerpc_binding_string(dce_ctx, ep->ep_description);
 
-	DEBUG(4,("dcesrv_interface_register: interface '%s' registered on endpoint '%s'\n",
-		 iface->name, ep_string));
+	if (use_single_process) {
+		ep_process_string = "single process required";
+	} else {
+		ep_process_string = "multi process compatible";
+	}
+
+	DBG_INFO("dcesrv_interface_register: interface '%s' "
+		 "registered on endpoint '%s' (%s)\n",
+		 iface->name, ep_string, ep_process_string);
 	TALLOC_FREE(ep_string);
 
 	return NT_STATUS_OK;
@@ -768,21 +784,113 @@ _PUBLIC_ NTSTATUS dcesrv_interface_bind_allow_connect(struct dcesrv_call_state *
 	return NT_STATUS_OK;
 }
 
+struct dcesrv_conn_auth_wait_context {
+	struct tevent_req *req;
+	bool done;
+	NTSTATUS status;
+};
+
+struct dcesrv_conn_auth_wait_state {
+	uint8_t dummy;
+};
+
+static struct tevent_req *dcesrv_conn_auth_wait_send(TALLOC_CTX *mem_ctx,
+						     struct tevent_context *ev,
+						     void *private_data)
+{
+	struct dcesrv_conn_auth_wait_context *auth_wait =
+		talloc_get_type_abort(private_data,
+		struct dcesrv_conn_auth_wait_context);
+	struct tevent_req *req = NULL;
+	struct dcesrv_conn_auth_wait_state *state = NULL;
+
+	req = tevent_req_create(mem_ctx, &state,
+				struct dcesrv_conn_auth_wait_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	auth_wait->req = req;
+
+	tevent_req_defer_callback(req, ev);
+
+	if (!auth_wait->done) {
+		return req;
+	}
+
+	if (tevent_req_nterror(req, auth_wait->status)) {
+		return tevent_req_post(req, ev);
+	}
+
+	tevent_req_done(req);
+	return tevent_req_post(req, ev);
+}
+
+static NTSTATUS dcesrv_conn_auth_wait_recv(struct tevent_req *req)
+{
+	return tevent_req_simple_recv_ntstatus(req);
+}
+
+static NTSTATUS dcesrv_conn_auth_wait_setup(struct dcesrv_connection *conn)
+{
+	struct dcesrv_conn_auth_wait_context *auth_wait = NULL;
+
+	if (conn->wait_send != NULL) {
+		return NT_STATUS_INTERNAL_ERROR;
+	}
+
+	auth_wait = talloc_zero(conn, struct dcesrv_conn_auth_wait_context);
+	if (auth_wait == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	conn->wait_private = auth_wait;
+	conn->wait_send = dcesrv_conn_auth_wait_send;
+	conn->wait_recv = dcesrv_conn_auth_wait_recv;
+	return NT_STATUS_OK;
+}
+
+static void dcesrv_conn_auth_wait_finished(struct dcesrv_connection *conn,
+					   NTSTATUS status)
+{
+	struct dcesrv_conn_auth_wait_context *auth_wait =
+		talloc_get_type_abort(conn->wait_private,
+		struct dcesrv_conn_auth_wait_context);
+
+	auth_wait->done = true;
+	auth_wait->status = status;
+
+	if (auth_wait->req == NULL) {
+		return;
+	}
+
+	if (tevent_req_nterror(auth_wait->req, status)) {
+		return;
+	}
+
+	tevent_req_done(auth_wait->req);
+}
+
+static NTSTATUS dcesrv_auth_reply(struct dcesrv_call_state *call);
+
+static void dcesrv_bind_done(struct tevent_req *subreq);
+
 /*
   handle a bind request
 */
 static NTSTATUS dcesrv_bind(struct dcesrv_call_state *call)
 {
-	struct ncacn_packet pkt;
-	struct data_blob_list_item *rep;
+	struct dcesrv_connection *conn = call->conn;
+	struct ncacn_packet *pkt = &call->ack_pkt;
 	NTSTATUS status;
 	uint32_t extra_flags = 0;
 	uint16_t max_req = 0;
 	uint16_t max_rep = 0;
 	const char *ep_prefix = "";
 	const char *endpoint = NULL;
+	struct dcesrv_auth *auth = &call->conn->auth_state;
 	struct dcerpc_ack_ctx *ack_ctx_list = NULL;
 	struct dcerpc_ack_ctx *ack_features = NULL;
+	struct tevent_req *subreq = NULL;
 	size_t i;
 
 	status = dcerpc_verify_ncacn_packet_header(&call->pkt,
@@ -939,9 +1047,12 @@ static NTSTATUS dcesrv_bind(struct dcesrv_call_state *call)
 	}
 
 	/*
-	 * At this point we know which interface (eg netlogon, lsa,
-	 * drsuapi) the caller requested.  This is available on
-	 * call->conntext->iface.
+	 * At this point we still don't know which interface (eg
+	 * netlogon, lsa, drsuapi) the caller requested in this bind!
+	 * The most recently added context is available as the first
+	 * element in the linked list at call->conn->contexts, that is
+	 * call->conn->contexts->iface, but they may not have
+	 * requested one at all!
 	 */
 
 	if ((call->pkt.pfc_flags & DCERPC_PFC_FLAG_CONC_MPX) &&
@@ -960,9 +1071,6 @@ static NTSTATUS dcesrv_bind(struct dcesrv_call_state *call)
 	 * is being requested.
 	 */
 	if (!dcesrv_auth_bind(call)) {
-		struct dcesrv_auth *auth = &call->conn->auth_state;
-
-		TALLOC_FREE(call->context);
 
 		if (auth->auth_level == DCERPC_AUTH_LEVEL_NONE) {
 			/*
@@ -981,14 +1089,14 @@ static NTSTATUS dcesrv_bind(struct dcesrv_call_state *call)
 	}
 
 	/* setup a bind_ack */
-	dcesrv_init_hdr(&pkt, lpcfg_rpc_big_endian(call->conn->dce_ctx->lp_ctx));
-	pkt.auth_length = 0;
-	pkt.call_id = call->pkt.call_id;
-	pkt.ptype = DCERPC_PKT_BIND_ACK;
-	pkt.pfc_flags = DCERPC_PFC_FLAG_FIRST | DCERPC_PFC_FLAG_LAST | extra_flags;
-	pkt.u.bind_ack.max_xmit_frag = call->conn->max_xmit_frag;
-	pkt.u.bind_ack.max_recv_frag = call->conn->max_recv_frag;
-	pkt.u.bind_ack.assoc_group_id = call->conn->assoc_group->id;
+	dcesrv_init_hdr(pkt, lpcfg_rpc_big_endian(call->conn->dce_ctx->lp_ctx));
+	pkt->auth_length = 0;
+	pkt->call_id = call->pkt.call_id;
+	pkt->ptype = DCERPC_PKT_BIND_ACK;
+	pkt->pfc_flags = DCERPC_PFC_FLAG_FIRST | DCERPC_PFC_FLAG_LAST | extra_flags;
+	pkt->u.bind_ack.max_xmit_frag = call->conn->max_xmit_frag;
+	pkt->u.bind_ack.max_recv_frag = call->conn->max_recv_frag;
+	pkt->u.bind_ack.assoc_group_id = call->conn->assoc_group->id;
 
 	endpoint = dcerpc_binding_get_string_option(
 				call->conn->endpoint->ep_description,
@@ -1007,33 +1115,74 @@ static NTSTATUS dcesrv_bind(struct dcesrv_call_state *call)
 		endpoint += 6;
 	}
 
-	pkt.u.bind_ack.secondary_address = talloc_asprintf(call, "%s%s",
+	pkt->u.bind_ack.secondary_address = talloc_asprintf(call, "%s%s",
 							   ep_prefix,
 							   endpoint);
-	if (pkt.u.bind_ack.secondary_address == NULL) {
-		TALLOC_FREE(call->context);
+	if (pkt->u.bind_ack.secondary_address == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
-	pkt.u.bind_ack.num_results = call->pkt.u.bind.num_contexts;
-	pkt.u.bind_ack.ctx_list = ack_ctx_list;
-	pkt.u.bind_ack.auth_info = data_blob_null;
+	pkt->u.bind_ack.num_results = call->pkt.u.bind.num_contexts;
+	pkt->u.bind_ack.ctx_list = ack_ctx_list;
+	pkt->u.bind_ack.auth_info = data_blob_null;
 
-	status = dcesrv_auth_bind_ack(call, &pkt);
+	status = dcesrv_auth_prepare_bind_ack(call, pkt);
 	if (!NT_STATUS_IS_OK(status)) {
-		TALLOC_FREE(call->context);
 		return dcesrv_bind_nak(call, 0);
 	}
 
+	if (auth->auth_finished) {
+		return dcesrv_auth_reply(call);
+	}
+
+	subreq = gensec_update_send(call, call->event_ctx,
+				    auth->gensec_security,
+				    call->in_auth_info.credentials);
+	if (subreq == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	tevent_req_set_callback(subreq, dcesrv_bind_done, call);
+
+	return dcesrv_conn_auth_wait_setup(conn);
+}
+
+static void dcesrv_bind_done(struct tevent_req *subreq)
+{
+	struct dcesrv_call_state *call =
+		tevent_req_callback_data(subreq,
+		struct dcesrv_call_state);
+	struct dcesrv_connection *conn = call->conn;
+	NTSTATUS status;
+
+	status = gensec_update_recv(subreq, call,
+				    &call->out_auth_info->credentials);
+	TALLOC_FREE(subreq);
+
+	status = dcesrv_auth_complete(call, status);
+	if (!NT_STATUS_IS_OK(status)) {
+		status = dcesrv_bind_nak(call, 0);
+		dcesrv_conn_auth_wait_finished(conn, status);
+		return;
+	}
+
+	status = dcesrv_auth_reply(call);
+	dcesrv_conn_auth_wait_finished(conn, status);
+	return;
+}
+
+static NTSTATUS dcesrv_auth_reply(struct dcesrv_call_state *call)
+{
+	struct ncacn_packet *pkt = &call->ack_pkt;
+	struct data_blob_list_item *rep = NULL;
+	NTSTATUS status;
+
 	rep = talloc_zero(call, struct data_blob_list_item);
 	if (!rep) {
-		TALLOC_FREE(call->context);
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	status = ncacn_push_auth(&rep->blob, call, &pkt,
+	status = ncacn_push_auth(&rep->blob, call, pkt,
 				 call->out_auth_info);
 	if (!NT_STATUS_IS_OK(status)) {
-		TALLOC_FREE(call->context);
 		return status;
 	}
 
@@ -1052,11 +1201,16 @@ static NTSTATUS dcesrv_bind(struct dcesrv_call_state *call)
 }
 
 
+static void dcesrv_auth3_done(struct tevent_req *subreq);
+
 /*
   handle a auth3 request
 */
 static NTSTATUS dcesrv_auth3(struct dcesrv_call_state *call)
 {
+	struct dcesrv_connection *conn = call->conn;
+	struct dcesrv_auth *auth = &call->conn->auth_state;
+	struct tevent_req *subreq = NULL;
 	NTSTATUS status;
 
 	if (!call->conn->allow_auth3) {
@@ -1084,18 +1238,71 @@ static NTSTATUS dcesrv_auth3(struct dcesrv_call_state *call)
 	}
 
 	/* handle the auth3 in the auth code */
-	if (!dcesrv_auth_auth3(call)) {
+	if (!dcesrv_auth_prepare_auth3(call)) {
+		/*
+		 * we don't send a reply to a auth3 request,
+		 * except by a fault.
+		 *
+		 * In anycase we mark the connection as
+		 * invalid.
+		 */
 		call->conn->auth_state.auth_invalid = true;
 		if (call->fault_code != 0) {
 			return dcesrv_fault_disconnect(call, call->fault_code);
 		}
+		TALLOC_FREE(call);
+		return NT_STATUS_OK;
 	}
 
-	talloc_free(call);
+	subreq = gensec_update_send(call, call->event_ctx,
+				    auth->gensec_security,
+				    call->in_auth_info.credentials);
+	if (subreq == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	tevent_req_set_callback(subreq, dcesrv_auth3_done, call);
 
-	/* we don't send a reply to a auth3 request, except by a
-	   fault */
-	return NT_STATUS_OK;
+	return dcesrv_conn_auth_wait_setup(conn);
+}
+
+static void dcesrv_auth3_done(struct tevent_req *subreq)
+{
+	struct dcesrv_call_state *call =
+		tevent_req_callback_data(subreq,
+		struct dcesrv_call_state);
+	struct dcesrv_connection *conn = call->conn;
+	NTSTATUS status;
+
+	status = gensec_update_recv(subreq, call,
+				    &call->out_auth_info->credentials);
+	TALLOC_FREE(subreq);
+
+	status = dcesrv_auth_complete(call, status);
+	if (!NT_STATUS_IS_OK(status)) {
+		/*
+		 * we don't send a reply to a auth3 request,
+		 * except by a fault.
+		 *
+		 * In anycase we mark the connection as
+		 * invalid.
+		 */
+		call->conn->auth_state.auth_invalid = true;
+		if (call->fault_code != 0) {
+			status = dcesrv_fault_disconnect(call, call->fault_code);
+			dcesrv_conn_auth_wait_finished(conn, status);
+			return;
+		}
+		TALLOC_FREE(call);
+		dcesrv_conn_auth_wait_finished(conn, NT_STATUS_OK);
+		return;
+	}
+
+	/*
+	 * we don't send a reply to a auth3 request.
+	 */
+	TALLOC_FREE(call);
+	dcesrv_conn_auth_wait_finished(conn, NT_STATUS_OK);
+	return;
 }
 
 
@@ -1327,17 +1534,21 @@ static NTSTATUS dcesrv_negotiate_contexts(struct dcesrv_call_state *call,
 	return NT_STATUS_OK;
 }
 
+static void dcesrv_alter_done(struct tevent_req *subreq);
+
 /*
   handle a alter context request
 */
 static NTSTATUS dcesrv_alter(struct dcesrv_call_state *call)
 {
+	struct dcesrv_connection *conn = call->conn;
 	NTSTATUS status;
 	bool auth_ok = false;
-	struct ncacn_packet pkt;
+	struct ncacn_packet *pkt = &call->ack_pkt;
 	uint32_t extra_flags = 0;
-	struct data_blob_list_item *rep = NULL;
+	struct dcesrv_auth *auth = &call->conn->auth_state;
 	struct dcerpc_ack_ctx *ack_ctx_list = NULL;
+	struct tevent_req *subreq = NULL;
 	size_t i;
 
 	if (!call->conn->allow_alter) {
@@ -1427,46 +1638,61 @@ static NTSTATUS dcesrv_alter(struct dcesrv_call_state *call)
 		return dcesrv_fault_disconnect(call, DCERPC_FAULT_ACCESS_DENIED);
 	}
 
-	dcesrv_init_hdr(&pkt, lpcfg_rpc_big_endian(call->conn->dce_ctx->lp_ctx));
-	pkt.auth_length = 0;
-	pkt.call_id = call->pkt.call_id;
-	pkt.ptype = DCERPC_PKT_ALTER_RESP;
-	pkt.pfc_flags = DCERPC_PFC_FLAG_FIRST | DCERPC_PFC_FLAG_LAST | extra_flags;
-	pkt.u.alter_resp.max_xmit_frag = call->conn->max_xmit_frag;
-	pkt.u.alter_resp.max_recv_frag = call->conn->max_recv_frag;
-	pkt.u.alter_resp.assoc_group_id = call->conn->assoc_group->id;
-	pkt.u.alter_resp.secondary_address = "";
-	pkt.u.alter_resp.num_results = call->pkt.u.alter.num_contexts;
-	pkt.u.alter_resp.ctx_list = ack_ctx_list;
-	pkt.u.alter_resp.auth_info = data_blob_null;
+	dcesrv_init_hdr(pkt, lpcfg_rpc_big_endian(call->conn->dce_ctx->lp_ctx));
+	pkt->auth_length = 0;
+	pkt->call_id = call->pkt.call_id;
+	pkt->ptype = DCERPC_PKT_ALTER_RESP;
+	pkt->pfc_flags = DCERPC_PFC_FLAG_FIRST | DCERPC_PFC_FLAG_LAST | extra_flags;
+	pkt->u.alter_resp.max_xmit_frag = call->conn->max_xmit_frag;
+	pkt->u.alter_resp.max_recv_frag = call->conn->max_recv_frag;
+	pkt->u.alter_resp.assoc_group_id = call->conn->assoc_group->id;
+	pkt->u.alter_resp.secondary_address = "";
+	pkt->u.alter_resp.num_results = call->pkt.u.alter.num_contexts;
+	pkt->u.alter_resp.ctx_list = ack_ctx_list;
+	pkt->u.alter_resp.auth_info = data_blob_null;
 
-	status = dcesrv_auth_alter_ack(call, &pkt);
+	status = dcesrv_auth_prepare_alter_ack(call, pkt);
 	if (!NT_STATUS_IS_OK(status)) {
 		return dcesrv_fault_disconnect(call, DCERPC_FAULT_SEC_PKG_ERROR);
 	}
 
-	rep = talloc_zero(call, struct data_blob_list_item);
-	if (!rep) {
+	if (auth->auth_finished) {
+		return dcesrv_auth_reply(call);
+	}
+
+	subreq = gensec_update_send(call, call->event_ctx,
+				    auth->gensec_security,
+				    call->in_auth_info.credentials);
+	if (subreq == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
+	tevent_req_set_callback(subreq, dcesrv_alter_done, call);
 
-	status = ncacn_push_auth(&rep->blob, call, &pkt, call->out_auth_info);
+	return dcesrv_conn_auth_wait_setup(conn);
+}
+
+static void dcesrv_alter_done(struct tevent_req *subreq)
+{
+	struct dcesrv_call_state *call =
+		tevent_req_callback_data(subreq,
+		struct dcesrv_call_state);
+	struct dcesrv_connection *conn = call->conn;
+	NTSTATUS status;
+
+	status = gensec_update_recv(subreq, call,
+				    &call->out_auth_info->credentials);
+	TALLOC_FREE(subreq);
+
+	status = dcesrv_auth_complete(call, status);
 	if (!NT_STATUS_IS_OK(status)) {
-		return status;
+		status = dcesrv_fault_disconnect(call, DCERPC_FAULT_SEC_PKG_ERROR);
+		dcesrv_conn_auth_wait_finished(conn, status);
+		return;
 	}
 
-	dcerpc_set_frag_length(&rep->blob, rep->blob.length);
-
-	DLIST_ADD_END(call->replies, rep);
-	dcesrv_call_set_list(call, DCESRV_LIST_CALL_LIST);
-
-	if (call->conn->call_list && call->conn->call_list->replies) {
-		if (call->conn->transport.report_output_data) {
-			call->conn->transport.report_output_data(call->conn);
-		}
-	}
-
-	return NT_STATUS_OK;
+	status = dcesrv_auth_reply(call);
+	dcesrv_conn_auth_wait_finished(conn, status);
+	return;
 }
 
 /*
@@ -2109,7 +2335,7 @@ const struct dcesrv_endpoint_server *dcesrv_ep_server_byname(const char *name)
 void dcerpc_server_init(struct loadparm_context *lp_ctx)
 {
 	static bool initialized;
-#define _MODULE_PROTO(init) extern NTSTATUS init(void);
+#define _MODULE_PROTO(init) extern NTSTATUS init(TALLOC_CTX *);
 	STATIC_dcerpc_server_MODULES_PROTO;
 	init_module_fn static_init[] = { STATIC_dcerpc_server_MODULES };
 	init_module_fn *shared_init;
@@ -2121,8 +2347,8 @@ void dcerpc_server_init(struct loadparm_context *lp_ctx)
 
 	shared_init = load_samba_modules(NULL, "dcerpc_server");
 
-	run_init_functions(static_init);
-	run_init_functions(shared_init);
+	run_init_functions(NULL, static_init);
+	run_init_functions(NULL, shared_init);
 
 	talloc_free(shared_init);
 }
@@ -2157,6 +2383,10 @@ static void dcesrv_terminate_connection(struct dcesrv_connection *dce_conn, cons
 	srv_conn = talloc_get_type(dce_conn->transport.private_data,
 				   struct stream_connection);
 
+	dce_conn->wait_send = NULL;
+	dce_conn->wait_recv = NULL;
+	dce_conn->wait_private = NULL;
+
 	dce_conn->allow_bind = false;
 	dce_conn->allow_auth3 = false;
 	dce_conn->allow_alter = false;
@@ -2174,11 +2404,11 @@ static void dcesrv_terminate_connection(struct dcesrv_connection *dce_conn, cons
 		return;
 	}
 
-	DEBUG(3,("dcesrv: terminating connection due to '%s' defered due to pending calls\n",
+	DEBUG(3,("dcesrv: terminating connection due to '%s' deferred due to pending calls\n",
 		 reason));
 	dce_conn->terminate = talloc_strdup(dce_conn, reason);
 	if (dce_conn->terminate == NULL) {
-		dce_conn->terminate = "dcesrv: defered terminating connection - no memory";
+		dce_conn->terminate = "dcesrv: deferred terminating connection - no memory";
 	}
 	DLIST_ADD_END(dce_ctx->broken_connections, dce_conn);
 }
@@ -2477,7 +2707,7 @@ static void dcesrv_sock_accept(struct stream_connection *srv_conn)
 			struct tsocket_address *r = NULL;
 
 			ret = tsocket_address_unix_from_path(dcesrv_conn,
-							     "/root/ncalrpc_as_system",
+							     AS_SYSTEM_MAGIC_PATH_TOKEN,
 							     &r);
 			if (ret == -1) {
 				status = map_nt_error_from_unix_common(errno);
@@ -2510,6 +2740,8 @@ static void dcesrv_sock_accept(struct stream_connection *srv_conn)
 	return;
 }
 
+static void dcesrv_conn_wait_done(struct tevent_req *subreq);
+
 static void dcesrv_read_fragment_done(struct tevent_req *subreq)
 {
 	struct dcesrv_connection *dce_conn = tevent_req_callback_data(subreq,
@@ -2540,6 +2772,63 @@ static void dcesrv_read_fragment_done(struct tevent_req *subreq)
 	}
 
 	status = dcesrv_process_ncacn_packet(dce_conn, pkt, buffer);
+	if (!NT_STATUS_IS_OK(status)) {
+		dcesrv_terminate_connection(dce_conn, nt_errstr(status));
+		return;
+	}
+
+	/*
+	 * This is used to block the connection during
+	 * pending authentication.
+	 */
+	if (dce_conn->wait_send != NULL) {
+		subreq = dce_conn->wait_send(dce_conn,
+					     dce_conn->event_ctx,
+					     dce_conn->wait_private);
+		if (!subreq) {
+			status = NT_STATUS_NO_MEMORY;
+			dcesrv_terminate_connection(dce_conn, nt_errstr(status));
+			return;
+		}
+		tevent_req_set_callback(subreq, dcesrv_conn_wait_done, dce_conn);
+		return;
+	}
+
+	subreq = dcerpc_read_ncacn_packet_send(dce_conn,
+					       dce_conn->event_ctx,
+					       dce_conn->stream);
+	if (!subreq) {
+		status = NT_STATUS_NO_MEMORY;
+		dcesrv_terminate_connection(dce_conn, nt_errstr(status));
+		return;
+	}
+	tevent_req_set_callback(subreq, dcesrv_read_fragment_done, dce_conn);
+}
+
+static void dcesrv_conn_wait_done(struct tevent_req *subreq)
+{
+	struct dcesrv_connection *dce_conn = tevent_req_callback_data(subreq,
+					     struct dcesrv_connection);
+	struct dcesrv_context *dce_ctx = dce_conn->dce_ctx;
+	NTSTATUS status;
+
+	if (dce_conn->terminate) {
+		/*
+		 * if the current connection is broken
+		 * we need to clean it up before any other connection
+		 */
+		dcesrv_terminate_connection(dce_conn, dce_conn->terminate);
+		dcesrv_cleanup_broken_connections(dce_ctx);
+		return;
+	}
+
+	dcesrv_cleanup_broken_connections(dce_ctx);
+
+	status = dce_conn->wait_recv(subreq);
+	dce_conn->wait_send = NULL;
+	dce_conn->wait_recv = NULL;
+	dce_conn->wait_private = NULL;
+	TALLOC_FREE(subreq);
 	if (!NT_STATUS_IS_OK(status)) {
 		dcesrv_terminate_connection(dce_conn, nt_errstr(status));
 		return;
@@ -2581,7 +2870,9 @@ static const struct stream_server_ops dcesrv_stream_ops = {
 static NTSTATUS dcesrv_add_ep_unix(struct dcesrv_context *dce_ctx, 
 				   struct loadparm_context *lp_ctx,
 				   struct dcesrv_endpoint *e,
-			    struct tevent_context *event_ctx, const struct model_ops *model_ops)
+				   struct tevent_context *event_ctx,
+				   const struct model_ops *model_ops,
+				   void *process_context)
 {
 	struct dcesrv_socket_context *dcesrv_sock;
 	uint16_t port = 1;
@@ -2601,7 +2892,7 @@ static NTSTATUS dcesrv_add_ep_unix(struct dcesrv_context *dce_ctx,
 				     model_ops, &dcesrv_stream_ops, 
 				     "unix", endpoint, &port,
 				     lpcfg_socket_options(lp_ctx),
-				     dcesrv_sock);
+				     dcesrv_sock, process_context);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("service_setup_stream_socket(path=%s) failed - %s\n",
 			 endpoint, nt_errstr(status)));
@@ -2613,7 +2904,9 @@ static NTSTATUS dcesrv_add_ep_unix(struct dcesrv_context *dce_ctx,
 static NTSTATUS dcesrv_add_ep_ncalrpc(struct dcesrv_context *dce_ctx, 
 				      struct loadparm_context *lp_ctx,
 				      struct dcesrv_endpoint *e,
-				      struct tevent_context *event_ctx, const struct model_ops *model_ops)
+				      struct tevent_context *event_ctx,
+				      const struct model_ops *model_ops,
+				      void *process_context)
 {
 	struct dcesrv_socket_context *dcesrv_sock;
 	uint16_t port = 1;
@@ -2655,7 +2948,7 @@ static NTSTATUS dcesrv_add_ep_ncalrpc(struct dcesrv_context *dce_ctx,
 				     model_ops, &dcesrv_stream_ops, 
 				     "unix", full_path, &port, 
 				     lpcfg_socket_options(lp_ctx),
-				     dcesrv_sock);
+				     dcesrv_sock, process_context);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("service_setup_stream_socket(identifier=%s,path=%s) failed - %s\n",
 			 endpoint, full_path, nt_errstr(status)));
@@ -2666,7 +2959,9 @@ static NTSTATUS dcesrv_add_ep_ncalrpc(struct dcesrv_context *dce_ctx,
 static NTSTATUS dcesrv_add_ep_np(struct dcesrv_context *dce_ctx,
 				 struct loadparm_context *lp_ctx,
 				 struct dcesrv_endpoint *e,
-				 struct tevent_context *event_ctx, const struct model_ops *model_ops)
+				 struct tevent_context *event_ctx,
+				 const struct model_ops *model_ops,
+				 void *process_context)
 {
 	struct dcesrv_socket_context *dcesrv_sock;
 	NTSTATUS status;
@@ -2688,7 +2983,7 @@ static NTSTATUS dcesrv_add_ep_np(struct dcesrv_context *dce_ctx,
 	status = tstream_setup_named_pipe(dce_ctx, event_ctx, lp_ctx,
 					  model_ops, &dcesrv_stream_ops,
 					  endpoint,
-					  dcesrv_sock);
+					  dcesrv_sock, process_context);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("stream_setup_named_pipe(pipe=%s) failed - %s\n",
 			 endpoint, nt_errstr(status)));
@@ -2701,9 +2996,12 @@ static NTSTATUS dcesrv_add_ep_np(struct dcesrv_context *dce_ctx,
 /*
   add a socket address to the list of events, one event per dcerpc endpoint
 */
-static NTSTATUS add_socket_rpc_tcp_iface(struct dcesrv_context *dce_ctx, struct dcesrv_endpoint *e,
-					 struct tevent_context *event_ctx, const struct model_ops *model_ops,
-					 const char *address)
+static NTSTATUS add_socket_rpc_tcp_iface(struct dcesrv_context *dce_ctx,
+					 struct dcesrv_endpoint *e,
+					 struct tevent_context *event_ctx,
+					 const struct model_ops *model_ops,
+					 const char *address,
+					 void *process_context)
 {
 	struct dcesrv_socket_context *dcesrv_sock;
 	uint16_t port = 0;
@@ -2727,7 +3025,7 @@ static NTSTATUS add_socket_rpc_tcp_iface(struct dcesrv_context *dce_ctx, struct 
 				     model_ops, &dcesrv_stream_ops, 
 				     "ip", address, &port,
 				     lpcfg_socket_options(dce_ctx->lp_ctx),
-				     dcesrv_sock);
+				     dcesrv_sock, process_context);
 	if (!NT_STATUS_IS_OK(status)) {
 		struct dcesrv_if_list *iface;
 		DEBUG(0,("service_setup_stream_socket(address=%s,port=%u) for ",
@@ -2766,7 +3064,9 @@ static NTSTATUS add_socket_rpc_tcp_iface(struct dcesrv_context *dce_ctx, struct 
 static NTSTATUS dcesrv_add_ep_tcp(struct dcesrv_context *dce_ctx, 
 				  struct loadparm_context *lp_ctx,
 				  struct dcesrv_endpoint *e,
-				  struct tevent_context *event_ctx, const struct model_ops *model_ops)
+				  struct tevent_context *event_ctx,
+				  const struct model_ops *model_ops,
+				  void *process_context)
 {
 	NTSTATUS status;
 
@@ -2781,17 +3081,21 @@ static NTSTATUS dcesrv_add_ep_tcp(struct dcesrv_context *dce_ctx,
 		num_interfaces = iface_list_count(ifaces);
 		for(i = 0; i < num_interfaces; i++) {
 			const char *address = iface_list_n_ip(ifaces, i);
-			status = add_socket_rpc_tcp_iface(dce_ctx, e, event_ctx, model_ops, address);
+			status = add_socket_rpc_tcp_iface(dce_ctx, e, event_ctx,
+					                  model_ops, address,
+							  process_context);
 			NT_STATUS_NOT_OK_RETURN(status);
 		}
 	} else {
 		char **wcard;
-		int i;
-		int num_binds = 0;
+		size_t i;
+		size_t num_binds = 0;
 		wcard = iface_list_wildcard(dce_ctx);
 		NT_STATUS_HAVE_NO_MEMORY(wcard);
 		for (i=0; wcard[i]; i++) {
-			status = add_socket_rpc_tcp_iface(dce_ctx, e, event_ctx, model_ops, wcard[i]);
+			status = add_socket_rpc_tcp_iface(dce_ctx, e, event_ctx,
+							  model_ops, wcard[i],
+							  process_context);
 			if (NT_STATUS_IS_OK(status)) {
 				num_binds++;
 			}
@@ -2809,23 +3113,28 @@ NTSTATUS dcesrv_add_ep(struct dcesrv_context *dce_ctx,
 		       struct loadparm_context *lp_ctx,
 		       struct dcesrv_endpoint *e,
 		       struct tevent_context *event_ctx,
-		       const struct model_ops *model_ops)
+		       const struct model_ops *model_ops,
+		       void *process_context)
 {
 	enum dcerpc_transport_t transport =
 		dcerpc_binding_get_transport(e->ep_description);
 
 	switch (transport) {
 	case NCACN_UNIX_STREAM:
-		return dcesrv_add_ep_unix(dce_ctx, lp_ctx, e, event_ctx, model_ops);
+		return dcesrv_add_ep_unix(dce_ctx, lp_ctx, e, event_ctx,
+					  model_ops, process_context);
 
 	case NCALRPC:
-		return dcesrv_add_ep_ncalrpc(dce_ctx, lp_ctx, e, event_ctx, model_ops);
+		return dcesrv_add_ep_ncalrpc(dce_ctx, lp_ctx, e, event_ctx,
+					     model_ops, process_context);
 
 	case NCACN_IP_TCP:
-		return dcesrv_add_ep_tcp(dce_ctx, lp_ctx, e, event_ctx, model_ops);
+		return dcesrv_add_ep_tcp(dce_ctx, lp_ctx, e, event_ctx,
+					 model_ops, process_context);
 
 	case NCACN_NP:
-		return dcesrv_add_ep_np(dce_ctx, lp_ctx, e, event_ctx, model_ops);
+		return dcesrv_add_ep_np(dce_ctx, lp_ctx, e, event_ctx,
+					model_ops, process_context);
 
 	default:
 		return NT_STATUS_NOT_SUPPORTED;

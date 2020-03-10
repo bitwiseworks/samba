@@ -3,6 +3,16 @@ import Logs, Options, sys
 # Check for kerberos
 have_gssapi=False
 
+krb5_min_required_version = "1.9"
+
+# Requried versions
+krb5_required_version = krb5_min_required_version
+if conf.CONFIG_SET('AD_DC_BUILD_IS_ENABLED'):
+    krb5_required_version = "1.15.1"
+
+def parse_version(v):
+    return tuple(map(int, (v.split("."))))
+
 def krb5_define_syslib(conf, lib, deps):
     found = 'FOUND_SYSTEMLIB_' + lib
     if found in conf.env:
@@ -26,6 +36,10 @@ if conf.env.KRB5_CONFIG:
     krb5_define_syslib(conf, "krb5", conf.env['LIB_KRB5'])
 
     conf.CHECK_CFG(path=conf.env.KRB5_CONFIG, args="--cflags --libs",
+                   package="kadm-server", uselib_store="KADM-SERVER")
+    conf.CHECK_FUNCS_IN('kadm5_init', 'kadm5srv_mit')
+
+    conf.CHECK_CFG(path=conf.env.KRB5_CONFIG, args="--cflags --libs",
                    package="kdb", uselib_store="KDB5")
     krb5_define_syslib(conf, "kdb5", conf.env['LIB_KDB5'])
 
@@ -44,19 +58,21 @@ if conf.env.KRB5_CONFIG:
     if conf.env.KRB5_VENDOR != 'heimdal':
         conf.define('USING_SYSTEM_KRB5', 1)
         del conf.env.HEIMDAL_KRB5_CONFIG
-        kversion = conf.cmd_and_log("%(path)s --version" % dict(path=conf.env.KRB5_CONFIG), dict()).strip()
-        kversion_split = kversion.split(' ')[-1].split('.')
+        krb5_conf_version = conf.cmd_and_log("%(path)s --version" % dict(path=conf.env.KRB5_CONFIG), dict()).strip()
+
+        krb5_version = krb5_conf_version.split()[-1]
+
         # drop '-prerelease' suffix
-        if kversion_split[-1].find('-') > 0:
-            last_digit = kversion_split[-1].split('-')[0]
-            kversion_split[-1] = last_digit
-        kversion_check = map(int, kversion_split)
-        if kversion_check < [1, 9]:
-            Logs.error('ERROR: MIT krb5 build requires at least 1.9.0. %s is found and cannot be used' % (kversion))
-            Logs.error('ERROR: You may try to build with embedded Heimdal Kerebros by not specifying --with-system-mitkrb5')
+        if krb5_version.find('-') > 0:
+            krb5_version = krb5_version.split("-")[0]
+
+        if parse_version(krb5_version) < parse_version(krb5_required_version):
+            Logs.error('ERROR: The MIT KRB5 build with Samba AD requires at least %s. %s has been found and cannot be used' % (krb5_required_version, krb5_version))
+            Logs.error('ERROR: If you want to just build Samba FS (File Server) use the option --without-ad-dc which requires version %s' % (krb5_min_required_version))
+            Logs.error('ERROR: You may try to build with embedded Heimdal Kerberos by not specifying --with-system-mitkrb5')
             sys.exit(1)
         else:
-            Logs.info('%s is detected, MIT krb5 build can proceed' % (kversion))
+            Logs.info('MIT Kerberos %s detected, MIT krb5 build can proceed' % (krb5_version))
 
 conf.CHECK_CFG(args="--cflags --libs", package="com_err", uselib_store="com_err")
 conf.CHECK_FUNCS_IN('_et_list', 'com_err')
@@ -64,6 +80,7 @@ conf.CHECK_HEADERS('com_err.h', lib='com_err')
 conf.CHECK_HEADERS('kdb.h', lib='kdb5')
 
 conf.CHECK_HEADERS('krb5.h krb5/locate_plugin.h', lib='krb5')
+conf.CHECK_HEADERS('krb5.h krb5/localauth_plugin.h', lib='krb5')
 possible_gssapi_headers="gssapi.h gssapi/gssapi_generic.h gssapi/gssapi.h gssapi/gssapi_ext.h gssapi/gssapi_krb5.h gssapi/gssapi_oid.h"
 conf.CHECK_HEADERS(possible_gssapi_headers, lib='gssapi')
 
@@ -266,7 +283,7 @@ conf.CHECK_CODE('''
        ''',
     'HAVE_WRFILE_KEYTAB',
     headers='krb5.h', lib='krb5', execute=True,
-    msg="Checking whether the WRFILE:-keytab is supported");
+    msg="Checking whether the WRFILE -keytab is supported");
 # Check for KRB5_DEPRECATED handling
 conf.CHECK_CODE('''#define KRB5_DEPRECATED 1
        #include <krb5.h>''',
@@ -281,3 +298,16 @@ conf.CHECK_CODE('''
     'HAVE_FLAGS_IN_KRB5_CREDS',
     headers='krb5.h', lib='krb5', execute=False,
     msg="Checking whether krb5_creds have flags property")
+
+# Check for MIT KDC
+if conf.CONFIG_SET('AD_DC_BUILD_IS_ENABLED'):
+    Logs.info("Looking for MIT KDC")
+    conf.DEFINE('SAMBA_USES_MITKDC', 1);
+
+    kdc_path_list = [ '/usr/sbin', '/usr/lib/mit/sbin']
+
+    if getattr(Options.options, 'with_system_mitkdc', None):
+        conf.DEFINE('MIT_KDC_PATH', '"' + Options.options.with_system_mitkdc + '"')
+    else:
+        conf.find_program('krb5kdc', path_list=kdc_path_list, var='MIT_KDC_BINARY', mandatory=True)
+        conf.DEFINE('MIT_KDC_PATH', '"' + conf.env.MIT_KDC_BINARY + '"')

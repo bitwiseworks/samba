@@ -42,6 +42,7 @@
 
 #include "protocol/protocol.h"
 #include "protocol/protocol_api.h"
+#include "protocol/protocol_util.h"
 #include "client/client.h"
 
 #include "common/logging.h"
@@ -88,11 +89,10 @@ determine_algorithm(const struct ctdb_tunable_list *tunables)
 /**********************************************************************/
 
 struct get_public_ips_state {
-	struct tevent_context *ev;
-	struct ctdb_client_context *client;
 	uint32_t *pnns;
 	int count, num_nodes;
 	struct ctdb_public_ip_list *ips;
+	uint32_t *ban_credits;
 };
 
 static void get_public_ips_done(struct tevent_req *subreq);
@@ -103,6 +103,7 @@ static struct tevent_req *get_public_ips_send(
 				struct ctdb_client_context *client,
 				uint32_t *pnns,
 				int count, int num_nodes,
+				uint32_t *ban_credits,
 				bool available_only)
 {
 	struct tevent_req *req, *subreq;
@@ -116,8 +117,20 @@ static struct tevent_req *get_public_ips_send(
 
 	state->pnns = pnns;
 	state->count = count;
-	state->num_nodes = num_nodes;
-	state->ips = NULL;
+	state->ban_credits = ban_credits;
+
+	state->ips  = talloc_zero_array(state,
+					struct ctdb_public_ip_list,
+					num_nodes);
+	if (tevent_req_nomem(state->ips, req)) {
+		return tevent_req_post(req, ev);
+	}
+
+	/* Short circuit if no nodes being asked for IPs */
+	if (state->count == 0) {
+		tevent_req_done(req);
+		return tevent_req_post(req, ev);
+	}
 
 	ctdb_req_control_get_public_ips(&request, available_only);
 	subreq = ctdb_client_control_multi_send(mem_ctx, ev, client,
@@ -141,35 +154,30 @@ static void get_public_ips_done(struct tevent_req *subreq)
 	struct ctdb_reply_control **reply;
 	int *err_list;
 	int ret, i;
-	bool status;
+	bool status, found_errors;
 
 	status = ctdb_client_control_multi_recv(subreq, &ret, state, &err_list,
 						&reply);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		int ret2;
-		uint32_t pnn;
+		found_errors = false;
+		for (i = 0; i < state->count; i++) {
+			if (err_list[i] != 0) {
+				uint32_t pnn = state->pnns[i];
 
-		ret2 = ctdb_client_control_multi_error(state->pnns,
-						       state->count,
-						       err_list, &pnn);
-		if (ret2 != 0) {
-			D_ERR("control GET_PUBLIC_IPS failed on "
-			      "node %u, ret=%d\n", pnn, ret2);
-		} else {
-			D_ERR("control GET_PUBLIC_IPS failed, "
-			      "ret=%d\n", ret);
+				D_ERR("control GET_PUBLIC_IPS failed on "
+				      "node %u, ret=%d\n", pnn, err_list[i]);
+
+				state->ban_credits[pnn]++;
+				found_errors = true;
+			}
 		}
+
 		tevent_req_error(req, ret);
 		return;
 	}
 
-	state->ips = talloc_zero_array(state, struct ctdb_public_ip_list,
-				       state->num_nodes);
-	if (tevent_req_nomem(state->ips, req)) {
-		return;
-	}
-
+	found_errors = false;
 	for (i = 0; i < state->count; i++) {
 		uint32_t pnn;
 		struct ctdb_public_ip_list *ips;
@@ -180,10 +188,18 @@ static void get_public_ips_done(struct tevent_req *subreq)
 		if (ret != 0) {
 			D_ERR("control GET_PUBLIC_IPS failed on "
 			      "node %u\n", pnn);
-			tevent_req_error(req, EIO);
-			return;
+			state->ban_credits[pnn]++;
+			found_errors = true;
+			continue;
 		}
+
+		D_INFO("Fetched public IPs from node %u\n", pnn);
 		state->ips[pnn] = *ips;
+	}
+
+	if (found_errors) {
+		tevent_req_error(req, EIO);
+		return;
 	}
 
 	talloc_free(reply);
@@ -279,13 +295,20 @@ static struct tevent_req *release_ip_send(TALLOC_CTX *mem_ctx,
 		substate->req = req;
 
 		substate->ip_str  = ctdb_sock_addr_to_string(substate,
-							     &tmp_ip->addr);
+							     &tmp_ip->addr,
+							     false);
 		if (tevent_req_nomem(substate->ip_str, req)) {
 			return tevent_req_post(req, ev);
 		}
 
 		for (i = 0; i < count; i++) {
 			uint32_t pnn = pnns[i];
+
+			/* Skip this node if IP is not known */
+			if (! bitmap_query(tmp_ip->known_on, pnn)) {
+				continue;
+			}
+
 			/* If pnn is not the node that should be
 			 * hosting the IP then add it to the list of
 			 * nodes that need to do a release. */
@@ -457,7 +480,8 @@ static struct tevent_req *take_ip_send(TALLOC_CTX *mem_ctx,
 		substate->pnn = tmp_ip->pnn;
 
 		substate->ip_str  = ctdb_sock_addr_to_string(substate,
-							     &tmp_ip->addr);
+							     &tmp_ip->addr,
+							     false);
 		if (tevent_req_nomem(substate->ip_str, req)) {
 			return tevent_req_post(req, ev);
 		}
@@ -648,7 +672,7 @@ static bool ipreallocated_recv(struct tevent_req *req, int *perr)
  * - Get nodemap
  * - Initialise IP allocation state.  Pass:
  *   + algorithm to be used;
- *   + various tunables (NoIPTakeover, NoIPFailback, NoIPHostOnAllDisabled)
+ *   + various tunables (NoIPTakeover, NoIPFailback)
  *   + list of nodes to force rebalance (internal structure, currently
  *     no way to fetch, only used by LCP2 for nodes that have had new
  *     IP addresses added).
@@ -775,6 +799,7 @@ static void takeover_nodemap_done(struct tevent_req *subreq)
 	bool status;
 	int ret;
 	struct ctdb_node_map *nodemap;
+	const char *ptr;
 
 	status = ctdb_client_control_recv(subreq, &ret, state, &reply);
 	TALLOC_FREE(subreq);
@@ -821,7 +846,8 @@ static void takeover_nodemap_done(struct tevent_req *subreq)
 		return;
 	}
 
-	if (state->tun_list->disable_ip_failover != 0) {
+	ptr = getenv("CTDB_DISABLE_IP_FAILOVER");
+	if (ptr != NULL) {
 		/* IP failover is completely disabled so just send out
 		 * ipreallocated event.
 		 */
@@ -835,17 +861,15 @@ static void takeover_nodemap_done(struct tevent_req *subreq)
 			determine_algorithm(state->tun_list),
 			(state->tun_list->no_ip_takeover != 0),
 			(state->tun_list->no_ip_failback != 0),
-			(state->tun_list->no_ip_host_on_all_disabled != 0),
 			state->force_rebalance_nodes);
 	if (tevent_req_nomem(state->ipalloc_state, req)) {
 		return;
 	}
 
-	ipalloc_set_node_flags(state->ipalloc_state, nodemap);
-
 	subreq = get_public_ips_send(state, state->ev, state->client,
-				     state->pnns_active, state->num_active,
-				     state->num_nodes, false);
+				     state->pnns_connected, state->num_connected,
+				     state->num_nodes, state->ban_credits,
+				     false);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
@@ -861,19 +885,40 @@ static void takeover_known_ips_done(struct tevent_req *subreq)
 		req, struct takeover_state);
 	int ret;
 	bool status;
+	uint32_t *pnns = NULL;
+	int count, i;
 
 	status = get_public_ips_recv(subreq, &ret, state, &state->known_ips);
 	TALLOC_FREE(subreq);
 
 	if (! status) {
 		D_ERR("Failed to fetch known public IPs\n");
-		tevent_req_error(req, ret);
+		takeover_failed(req, ret);
 		return;
 	}
 
+	/* Get available IPs from active nodes that actually have known IPs */
+
+	pnns = talloc_zero_array(state, uint32_t, state->num_active);
+	if (tevent_req_nomem(pnns, req)) {
+		return;
+	}
+
+	count = 0;
+	for (i = 0; i < state->num_active; i++) {
+		uint32_t pnn = state->pnns_active[i];
+
+		/* If pnn has IPs then fetch available IPs from it */
+		if (state->known_ips[pnn].num > 0) {
+			pnns[count] = pnn;
+			count++;
+		}
+	}
+
 	subreq = get_public_ips_send(state, state->ev, state->client,
-				     state->pnns_active, state->num_active,
-				     state->num_nodes, true);
+				     pnns, count,
+				     state->num_nodes, state->ban_credits,
+				     true);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
@@ -896,7 +941,7 @@ static void takeover_avail_ips_done(struct tevent_req *subreq)
 
 	if (! status) {
 		D_ERR("Failed to fetch available public IPs\n");
-		tevent_req_error(req, ret);
+		takeover_failed(req, ret);
 		return;
 	}
 

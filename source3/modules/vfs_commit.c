@@ -202,7 +202,7 @@ static int commit_open(
                                         MODULE, "eof mode", "none");
 
         if (dthresh > 0 || !strequal(eof_mode, "none")) {
-                c = (struct commit_info *)VFS_ADD_FSP_EXTENSION(
+                c = VFS_ADD_FSP_EXTENSION(
 			handle, fsp, struct commit_info, NULL);
                 /* Process main tunables */
                 if (c) {
@@ -246,24 +246,6 @@ static int commit_open(
         }
 
         return fd;
-}
-
-static ssize_t commit_write(
-        vfs_handle_struct * handle,
-        files_struct *      fsp,
-        const void *        data,
-        size_t              count)
-{
-        ssize_t ret;
-        ret = SMB_VFS_NEXT_WRITE(handle, fsp, data, count);
-
-        if (ret > 0) {
-                if (commit(handle, fsp, fsp->fh->pos, ret) == -1) {
-                        return -1;
-                }
-        }
-
-        return ret;
 }
 
 static ssize_t commit_pwrite(
@@ -395,7 +377,6 @@ static int commit_ftruncate(
 static struct vfs_fn_pointers vfs_commit_fns = {
         .open_fn = commit_open,
         .close_fn = commit_close,
-        .write_fn = commit_write,
         .pwrite_fn = commit_pwrite,
         .pwrite_send_fn = commit_pwrite_send,
         .pwrite_recv_fn = commit_pwrite_recv,
@@ -403,8 +384,8 @@ static struct vfs_fn_pointers vfs_commit_fns = {
         .ftruncate_fn = commit_ftruncate
 };
 
-NTSTATUS vfs_commit_init(void);
-NTSTATUS vfs_commit_init(void)
+static_decl_vfs;
+NTSTATUS vfs_commit_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, MODULE,
 				&vfs_commit_fns);

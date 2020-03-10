@@ -1,4 +1,4 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 usage() {
     cat <<EOF
@@ -14,7 +14,7 @@ Options:
   -H		No headers - for running single test with other wrapper
   -N		Don't print summary of tests results after running all tests
   -q		Quiet - don't show tests being run (hint: use with -s)
-  -S            Enable socket wrapper
+  -S <lib>      Use socket wrapper library <lib> for local integration tests
   -v		Verbose - print test output for non-failures (only some tests)
   -V <dir>	Use <dir> as TEST_VAR_DIR
   -x		Trace this script with the -x option
@@ -36,7 +36,6 @@ with_desc=false
 quiet=false
 exit_on_fail=false
 no_header=false
-socket_wrapper=false
 
 export TEST_VERBOSE=false
 export TEST_COMMAND_TRACE=false
@@ -46,33 +45,30 @@ export TEST_LOCAL_DAEMONS
 [ -n "$TEST_LOCAL_DAEMONS" ] || TEST_LOCAL_DAEMONS=3
 export TEST_VAR_DIR=""
 export TEST_CLEANUP=false
+export TEST_TIMEOUT=3600
+export TEST_SOCKET_WRAPPER_SO_PATH=""
 
-temp=$(getopt -n "$prog" -o "AcCdDehHNqSvV:xX" -l help -- "$@")
-
-[ $? != 0 ] && usage
-
-eval set -- "$temp"
-
-while true ; do
-    case "$1" in
-	-A) TEST_CAT_RESULTS_OPTS="-A" ; shift ;;
-	-c) TEST_LOCAL_DAEMONS="" ; shift ;;
-	-C) TEST_CLEANUP=true ; shift ;;
-	-d) with_desc=true ; shift ;;  # 4th line of output is description
-	-D) TEST_DIFF_RESULTS=true ; shift ;;
-	-e) exit_on_fail=true ; shift ;;
-	-H) no_header=true ; shift ;;
-	-N) with_summary=false ; shift ;;
-	-q) quiet=true ; shift ;;
-	-S) socket_wrapper=true ; shift ;;
-	-v) TEST_VERBOSE=true ; shift ;;
-	-V) TEST_VAR_DIR="$2" ; shift 2 ;;
-	-x) set -x; shift ;;
-	-X) TEST_COMMAND_TRACE=true ; shift ;;
-	--) shift ; break ;;
-	*) usage ;;
-    esac
+while getopts "AcCdDehHNqS:T:vV:xX?" opt ; do
+	case "$opt" in
+	A) TEST_CAT_RESULTS_OPTS="-A" ;;
+	c) TEST_LOCAL_DAEMONS="" ;;
+	C) TEST_CLEANUP=true ;;
+	d) with_desc=true ;;  # 4th line of output is description
+	D) TEST_DIFF_RESULTS=true ;;
+	e) exit_on_fail=true ;;
+	H) no_header=true ;;
+	N) with_summary=false ;;
+	q) quiet=true ;;
+	S) TEST_SOCKET_WRAPPER_SO_PATH="$OPTARG" ;;
+	T) TEST_TIMEOUT="$OPTARG" ;;
+	v) TEST_VERBOSE=true ;;
+	V) TEST_VAR_DIR="$OPTARG" ;;
+	x) set -x ;;
+	X) TEST_COMMAND_TRACE=true ;;
+	\?|h) usage ;;
+	esac
 done
+shift $((OPTIND - 1))
 
 case $(basename "$0") in
     *run_cluster_tests*)
@@ -114,6 +110,9 @@ ctdb_test_end ()
 	    interp="PASSED"
 	    statstr=""
 	    echo "ALL OK: $*"
+	elif [ $status -eq 124 ] ; then
+	    interp="TIMEOUT"
+	    statstr=" (status $status)"
 	else
 	    interp="FAILED"
 	    statstr=" (status $status)"
@@ -137,7 +136,12 @@ ctdb_test_run ()
     $no_header || ctdb_test_begin "$name"
 
     local status=0
-    "$@" || status=$?
+    if [ -x "$1" ] ; then
+	    timeout $TEST_TIMEOUT "$@" || status=$?
+    else
+	    echo "TEST IS NOT EXECUTABLE"
+	    status=1
+    fi
 
     $no_header || ctdb_test_end "$name" "$status" "$*"
 
@@ -172,8 +176,8 @@ if ! which mktemp >/dev/null 2>&1 ; then
     }
 fi
 
-tf=$(mktemp)
-sf=$(mktemp)
+tf=$(mktemp) || die "mktemp failed for tf - is TMPDIR missing?"
+sf=$(mktemp) || die "mktemp failed for sf - is TMPDIR missing?"
 
 set -o pipefail
 
@@ -181,7 +185,6 @@ run_one_test ()
 {
     local f="$1"
 
-    [ -x "$f" ] || die "test \"$f\" is not executable"
     tests_total=$(($tests_total + 1))
 
     ctdb_test_run "$f" | tee "$tf" | show_progress
@@ -230,15 +233,17 @@ find_and_run_one_test ()
     fi
 }
 
+export CTDB_TEST_MODE="yes"
+
 # Following 2 lines may be modified by installation script
 export CTDB_TESTS_ARE_INSTALLED=false
-test_dir=$(dirname "$0")
+export CTDB_TEST_DIR=$(dirname "$0")
 
 if [ -z "$TEST_VAR_DIR" ] ; then
     if $CTDB_TESTS_ARE_INSTALLED ; then
 	TEST_VAR_DIR=$(mktemp -d)
     else
-	TEST_VAR_DIR="${test_dir}/var"
+	TEST_VAR_DIR="${CTDB_TEST_DIR}/var"
     fi
 fi
 mkdir -p "$TEST_VAR_DIR"
@@ -247,20 +252,25 @@ mkdir -p "$TEST_VAR_DIR"
 TEST_VAR_DIR=$(cd "$TEST_VAR_DIR"; echo "$PWD")
 echo "TEST_VAR_DIR=$TEST_VAR_DIR"
 
-if $socket_wrapper ; then
-    export SOCKET_WRAPPER_DIR="${TEST_VAR_DIR}/sw"
-    mkdir -p "$SOCKET_WRAPPER_DIR"
-fi
+export TEST_SCRIPTS_DIR="${CTDB_TEST_DIR}/scripts"
 
-export TEST_SCRIPTS_DIR="${test_dir}/scripts"
+unit_tests="
+	cunit
+	eventd
+	eventscripts
+	onnode
+	shellcheck
+	takeover
+	takeover_helper
+	tool
+"
 
 # If no tests specified then run some defaults
 if [ -z "$1" ] ; then
-    if [ -n "$TEST_LOCAL_DAEMONS" ] ; then
-	set -- onnode takeover takeover_helper tool eventscripts \
-	    cunit eventd shellcheck simple
-    else
-	set -- simple complex
+	if [ -n "$TEST_LOCAL_DAEMONS" ] ; then
+		set -- UNIT simple
+	else
+		set -- simple complex
     fi
 fi
 
@@ -287,7 +297,19 @@ cleanup_handler ()
 
 trap cleanup_handler SIGINT SIGTERM
 
+declare -a tests
+i=0
 for f ; do
+	if [ "$f" = "UNIT" ] ; then
+		for t in $unit_tests ; do
+			tests[i++]="$t"
+		done
+	else
+		tests[i++]="$f"
+	fi
+done
+
+for f in "${tests[@]}" ; do
     find_and_run_one_test "$f"
 
     if [ $status -eq 127 ] ; then

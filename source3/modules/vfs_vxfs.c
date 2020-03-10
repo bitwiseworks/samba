@@ -408,7 +408,14 @@ static bool vxfs_compare(connection_struct *conn, char *name, SMB_ACL_T the_acl,
 	int status;
 
 	DEBUG(10, ("vfs_vxfs: Getting existing ACL for %s\n", name));
-	existing_acl = SMB_VFS_SYS_ACL_GET_FILE(conn, name, the_acl_type,
+
+	smb_fname = synthetic_smb_fname(mem_ctx, name, NULL, NULL, 0);
+	if (smb_fname == NULL) {
+		DEBUG(10, ("vfs_vxfs: Failed to create smb_fname\n"));
+		goto out;
+	}
+
+	existing_acl = SMB_VFS_SYS_ACL_GET_FILE(conn, smb_fname, the_acl_type,
 						mem_ctx);
 	if (existing_acl == NULL) {
 		DEBUG(10, ("vfs_vxfs: Failed to get ACL\n"));
@@ -420,12 +427,6 @@ static bool vxfs_compare(connection_struct *conn, char *name, SMB_ACL_T the_acl,
 
 	if (existing_acl->count == 0) {
 		DEBUG(10, ("vfs_vxfs: ACL count is 0, Need to set\n"));
-		goto out;
-	}
-
-	smb_fname = synthetic_smb_fname(mem_ctx, name, NULL, NULL, 0);
-	if (smb_fname == NULL) {
-		DEBUG(10, ("vfs_vxfs: Failed to create smb_fname\n"));
 		goto out;
 	}
 
@@ -498,26 +499,35 @@ static int vxfs_sys_acl_set_fd(vfs_handle_struct *handle, files_struct *fsp,
 	return SMB_VFS_NEXT_SYS_ACL_SET_FD(handle, fsp, theacl);
 }
 
-static int vxfs_sys_acl_set_file(vfs_handle_struct *handle,  const char *name,
-				 SMB_ACL_TYPE_T acltype, SMB_ACL_T theacl)
+static int vxfs_sys_acl_set_file(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				SMB_ACL_TYPE_T acltype,
+				SMB_ACL_T theacl)
 {
-	if (vxfs_compare(handle->conn, (char *)name, theacl, acltype)) {
+	if (vxfs_compare(handle->conn, (char *)smb_fname->base_name,
+			theacl, acltype)) {
 		return 0;
 	}
 
-	return SMB_VFS_NEXT_SYS_ACL_SET_FILE(handle, name, acltype, theacl);
+	return SMB_VFS_NEXT_SYS_ACL_SET_FILE(handle, smb_fname,
+			acltype, theacl);
 }
 
-static int vxfs_set_xattr(struct vfs_handle_struct *handle,  const char *path,
-			  const char *name, const void *value, size_t size,
-			  int flags){
-	struct smb_filename *smb_fname;
+static int vxfs_set_xattr(struct vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname_in,
+			const char *name,
+			const void *value,
+			size_t size,
+			int flags)
+{
+	struct smb_filename *smb_fname = NULL;
 	bool is_dir = false;
 	int ret = 0;
+	int saved_errno = 0;
 
 	DEBUG(10, ("In vxfs_set_xattr\n"));
 
-	smb_fname = synthetic_smb_fname(talloc_tos(), path, NULL, NULL, 0);
+	smb_fname = cp_smb_filename_nostream(talloc_tos(), smb_fname_in);
 	if (smb_fname == NULL) {
 		errno = ENOMEM;
 		return -1;
@@ -529,36 +539,56 @@ static int vxfs_set_xattr(struct vfs_handle_struct *handle,  const char *path,
 	}
 
 	is_dir = S_ISDIR(smb_fname->st.st_ex_mode);
-	TALLOC_FREE(smb_fname);
 
-	ret = vxfs_setxattr_path(path, name, value, size, flags,
-				  is_dir);
+	ret = vxfs_setxattr_path(smb_fname_in->base_name, name, value, size,
+				 flags, is_dir);
 	if ((ret == 0) ||
 	    ((ret == -1) && (errno != ENOTSUP) && (errno != ENOSYS))) {
 		/*
 		 * Now remve old style xattr if it exists
 		 */
-		SMB_VFS_NEXT_REMOVEXATTR(handle, path, name);
+		SMB_VFS_NEXT_REMOVEXATTR(handle, smb_fname, name);
 		/*
 		 * Do not bother about return value
 		 */
-
-		return ret;
+		if (ret != 0) {
+			saved_errno = errno;
+		}
+		goto fail;
 	}
 
 	DEBUG(10, ("Fallback to xattr\n"));
 	if (strcmp(name, XATTR_NTACL_NAME) == 0) {
-		return SMB_VFS_NEXT_SETXATTR(handle, path, XATTR_USER_NTACL,
-					     value, size, flags);
+		ret = SMB_VFS_NEXT_SETXATTR(handle, smb_fname,
+					    XATTR_USER_NTACL,
+					    value, size, flags);
+		if (ret != 0) {
+			saved_errno = errno;
+			goto fail;
+		}
+		return 0;
 	}
 
 	/* Clients can't set XATTR_USER_NTACL directly. */
 	if (strcasecmp(name, XATTR_USER_NTACL) == 0) {
-		errno = EACCES;
-		return -1;
+		saved_errno = EACCES;
+		ret = -1;
+		goto fail;
 	}
 
-	return SMB_VFS_NEXT_SETXATTR(handle, path, name, value, size, flags);
+	ret = SMB_VFS_NEXT_SETXATTR(handle, smb_fname,
+				    name, value, size, flags);
+	if (ret != 0) {
+		saved_errno = errno;
+		goto fail;
+	}
+
+fail:
+	TALLOC_FREE(smb_fname);
+	if (saved_errno != 0) {
+		saved_errno = errno;
+	}
+	return ret;
 }
 
 static int vxfs_fset_xattr(struct vfs_handle_struct *handle,
@@ -591,12 +621,14 @@ static int vxfs_fset_xattr(struct vfs_handle_struct *handle,
 }
 
 static ssize_t vxfs_get_xattr(struct vfs_handle_struct *handle,
-			      const char *path, const char *name,
-			      void *value, size_t size){
+				const struct smb_filename *smb_fname,
+				const char *name,
+				void *value,
+				size_t size){
 	int ret;
 
 	DEBUG(10, ("In vxfs_get_xattr\n"));
-	ret = vxfs_getxattr_path(path, name, value, size);
+	ret = vxfs_getxattr_path(smb_fname->base_name, name, value, size);
 	if ((ret != -1) || ((errno != ENOTSUP) &&
 			    (errno != ENOSYS) && (errno != ENODATA))) {
 		return ret;
@@ -604,8 +636,8 @@ static ssize_t vxfs_get_xattr(struct vfs_handle_struct *handle,
 
 	DEBUG(10, ("Fallback to xattr\n"));
 	if (strcmp(name, XATTR_NTACL_NAME) == 0) {
-		return SMB_VFS_NEXT_GETXATTR(handle, path, XATTR_USER_NTACL,
-					     value, size);
+		return SMB_VFS_NEXT_GETXATTR(handle, smb_fname,
+				XATTR_USER_NTACL, value, size);
 	}
 
 	/* Clients can't see XATTR_USER_NTACL directly. */
@@ -614,7 +646,7 @@ static ssize_t vxfs_get_xattr(struct vfs_handle_struct *handle,
 		return -1;
 	}
 
-	return SMB_VFS_NEXT_GETXATTR(handle, path, name, value, size);
+	return SMB_VFS_NEXT_GETXATTR(handle, smb_fname, name, value, size);
 }
 
 static ssize_t vxfs_fget_xattr(struct vfs_handle_struct *handle,
@@ -646,31 +678,33 @@ static ssize_t vxfs_fget_xattr(struct vfs_handle_struct *handle,
 }
 
 static int vxfs_remove_xattr(struct vfs_handle_struct *handle,
-			     const char *path, const char *name){
-	struct smb_filename *smb_fname;
+				const struct smb_filename *smb_fname_in,
+				const char *name)
+{
 	bool is_dir = false;
 	int ret = 0, ret_new = 0, old_errno;
+	struct smb_filename *smb_fname = NULL;
 
 	DEBUG(10, ("In vxfs_remove_xattr\n"));
 
-	/* Remove with old way */
-	if (strcmp(name, XATTR_NTACL_NAME) == 0) {
-		ret = SMB_VFS_NEXT_REMOVEXATTR(handle, path,
-					       XATTR_USER_NTACL);
-	} else {
-		if (strcasecmp(name, XATTR_USER_NTACL) != 0) {
-			ret = SMB_VFS_NEXT_REMOVEXATTR(handle, path,
-						       name);
-		}
-	}
-	old_errno = errno;
-
-	/* Remove with new way */
-	smb_fname = synthetic_smb_fname(talloc_tos(), path, NULL, NULL, 0);
+	smb_fname = cp_smb_filename_nostream(talloc_tos(), smb_fname_in);
 	if (smb_fname == NULL) {
 		errno = ENOMEM;
 		return -1;
 	}
+
+	/* Remove with old way */
+	if (strcmp(name, XATTR_NTACL_NAME) == 0) {
+		ret = SMB_VFS_NEXT_REMOVEXATTR(handle, smb_fname,
+					       XATTR_USER_NTACL);
+	} else {
+		if (strcasecmp(name, XATTR_USER_NTACL) != 0) {
+			ret = SMB_VFS_NEXT_REMOVEXATTR(handle, smb_fname,
+						       name);
+		}
+	}
+	/* Remove with new way */
+	old_errno = errno;
 
 	if (SMB_VFS_NEXT_STAT(handle, smb_fname) != 0) {
 		TALLOC_FREE(smb_fname);
@@ -682,7 +716,7 @@ static int vxfs_remove_xattr(struct vfs_handle_struct *handle,
 	/*
 	 * If both fail, return failuer else return whichever succeeded
 	 */
-	ret_new = vxfs_removexattr_path(path, name, is_dir);
+	ret_new = vxfs_removexattr_path(smb_fname_in->base_name, name, is_dir);
 	if (errno == ENOTSUP || errno == ENOSYS) {
 		errno = old_errno;
 	}
@@ -747,17 +781,19 @@ static size_t vxfs_filter_list(char *list, size_t size)
 	return size;
 }
 
-static ssize_t vxfs_listxattr(vfs_handle_struct *handle, const char *path,
-                              char *list, size_t size)
+static ssize_t vxfs_listxattr(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				char *list,
+				size_t size)
 {
 	ssize_t result;
 
-	result = vxfs_listxattr_path(path, list, size);
+	result = vxfs_listxattr_path(smb_fname->base_name, list, size);
 	if (result >= 0 || ((errno != ENOTSUP) && (errno != ENOSYS))) {
 		return result;
 	}
 
-	result = SMB_VFS_NEXT_LISTXATTR(handle, path, list, size);
+	result = SMB_VFS_NEXT_LISTXATTR(handle, smb_fname, list, size);
 
 	if (result <= 0) {
 		return result;
@@ -792,6 +828,95 @@ static ssize_t vxfs_flistxattr(struct vfs_handle_struct *handle,
         return result;
 }
 
+static NTSTATUS vxfs_set_ea_dos_attributes(struct vfs_handle_struct *handle,
+					   const struct smb_filename *smb_fname,
+					   uint32_t dosmode)
+{
+	NTSTATUS	err;
+	int			ret = 0;
+	bool		attrset = false;
+	bool		is_dir = false;
+
+	DBG_DEBUG("Entered function\n");
+
+	is_dir = S_ISDIR(smb_fname->st.st_ex_mode);
+	if (!(dosmode & FILE_ATTRIBUTE_READONLY)) {
+		ret = vxfs_checkwxattr_path(smb_fname->base_name);
+		if (ret == -1) {
+			DBG_DEBUG("ret:%d\n", ret);
+			if ((errno != EOPNOTSUPP) && (errno != ENOENT)) {
+				return map_nt_error_from_unix(errno);
+			}
+		}
+	}
+	if (dosmode & FILE_ATTRIBUTE_READONLY) {
+		ret = vxfs_setwxattr_path(smb_fname->base_name, is_dir);
+		DBG_DEBUG("ret:%d\n", ret);
+		if (ret == -1) {
+			if ((errno != EOPNOTSUPP) && (errno != EINVAL)) {
+				return map_nt_error_from_unix(errno);
+			}
+		} else {
+			attrset = true;
+		}
+	}
+	err = SMB_VFS_NEXT_SET_DOS_ATTRIBUTES(handle, smb_fname, dosmode);
+	if (!NT_STATUS_IS_OK(err)) {
+		if (attrset) {
+			ret = vxfs_clearwxattr_path(smb_fname->base_name, is_dir);
+			DBG_DEBUG("ret:%d\n", ret);
+			if ((ret == -1) && (errno != ENOENT)) {
+				return map_nt_error_from_unix(errno);
+			}
+		}
+	}
+
+	return err;
+}
+
+static NTSTATUS vxfs_fset_ea_dos_attributes(struct vfs_handle_struct *handle,
+					    struct files_struct *fsp,
+					    uint32_t dosmode)
+{
+	NTSTATUS	err;
+	int		ret = 0;
+	bool		attrset = false;
+
+	DBG_DEBUG("Entered function\n");
+
+	if (!(dosmode & FILE_ATTRIBUTE_READONLY)) {
+		ret = vxfs_checkwxattr_fd(fsp->fh->fd);
+		if (ret == -1) {
+			DBG_DEBUG("ret:%d\n", ret);
+			if ((errno != EOPNOTSUPP) && (errno != ENOENT)) {
+				return map_nt_error_from_unix(errno);
+			}
+		}
+	}
+	if (dosmode & FILE_ATTRIBUTE_READONLY) {
+		ret = vxfs_setwxattr_fd(fsp->fh->fd);
+		DBG_DEBUG("ret:%d\n", ret);
+		if (ret == -1) {
+			if ((errno != EOPNOTSUPP) && (errno != EINVAL)) {
+				return map_nt_error_from_unix(errno);
+			}
+		} else {
+			attrset = true;
+		}
+	}
+	err = SMB_VFS_NEXT_FSET_DOS_ATTRIBUTES(handle, fsp, dosmode);
+	if (!NT_STATUS_IS_OK(err)) {
+		if (attrset) {
+			ret = vxfs_clearwxattr_fd(fsp->fh->fd);
+			DBG_DEBUG("ret:%d\n", ret);
+			if ((ret == -1) && (errno != ENOENT)) {
+				return map_nt_error_from_unix(errno);
+			}
+		}
+	}
+	return err;
+}
+
 static int vfs_vxfs_connect(struct vfs_handle_struct *handle,
 			    const char *service, const char *user)
 {
@@ -816,6 +941,8 @@ static struct vfs_fn_pointers vfs_vxfs_fns = {
 	.sys_acl_set_fd_fn = vxfs_sys_acl_set_fd,
 #endif
 
+	.set_dos_attributes_fn = vxfs_set_ea_dos_attributes,
+	.fset_dos_attributes_fn = vxfs_fset_ea_dos_attributes,
 	.getxattr_fn = vxfs_get_xattr,
 	.fgetxattr_fn = vxfs_fget_xattr,
 	.listxattr_fn = vxfs_listxattr,
@@ -826,8 +953,8 @@ static struct vfs_fn_pointers vfs_vxfs_fns = {
 	.fsetxattr_fn = vxfs_fset_xattr,
 };
 
-NTSTATUS vfs_vxfs_init(void);
-NTSTATUS vfs_vxfs_init(void)
+static_decl_vfs;
+NTSTATUS vfs_vxfs_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "vxfs",
 				&vfs_vxfs_fns);

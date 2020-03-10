@@ -1085,7 +1085,11 @@ static int afsacl_connect(vfs_handle_struct *handle,
 }
 
 /* We don't have a linear form of the AFS ACL yet */
-static int afsacl_sys_acl_blob_get_file(vfs_handle_struct *handle, const char *path_p, TALLOC_CTX *mem_ctx, char **blob_description, DATA_BLOB *blob)
+static int afsacl_sys_acl_blob_get_file(vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			TALLOC_CTX *mem_ctx,
+			char **blob_description,
+			DATA_BLOB *blob)
 {
 	errno = ENOSYS;
 	return -1;
@@ -1107,8 +1111,8 @@ static struct vfs_fn_pointers vfs_afsacl_fns = {
 	.sys_acl_blob_get_fd_fn = afsacl_sys_acl_blob_get_fd
 };
 
-NTSTATUS vfs_afsacl_init(void);
-NTSTATUS vfs_afsacl_init(void)
+static_decl_vfs;
+NTSTATUS vfs_afsacl_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "afsacl",
 				&vfs_afsacl_fns);

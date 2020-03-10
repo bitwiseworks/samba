@@ -18,6 +18,7 @@
 */
 
 #include <Python.h>
+#include "python/py3compat.h"
 #include "includes.h"
 #include "libcli/util/pyerrors.h"
 #include "param/param.h"
@@ -32,9 +33,7 @@
 #include "librpc/rpc/pyrpc_util.h"
 #include "lib/events/events.h"
 
-void initauth(void);
-
-staticforward PyTypeObject PyAuthContext;
+static PyTypeObject PyAuthContext;
 
 static PyObject *PyAuthSession_FromSession(struct auth_session_info *session)
 {
@@ -73,13 +72,13 @@ static PyObject *py_system_session(PyObject *module, PyObject *args)
 static PyObject *py_admin_session(PyObject *module, PyObject *args)
 {
 	PyObject *py_lp_ctx;
-	PyObject *py_sid;
+	const char *sid;
 	struct loadparm_context *lp_ctx = NULL;
 	struct auth_session_info *session;
 	struct dom_sid *domain_sid = NULL;
 	TALLOC_CTX *mem_ctx;
 
-	if (!PyArg_ParseTuple(args, "OO", &py_lp_ctx, &py_sid))
+	if (!PyArg_ParseTuple(args, "Os", &py_lp_ctx, &sid))
 		return NULL;
 
 	mem_ctx = talloc_new(NULL);
@@ -94,10 +93,9 @@ static PyObject *py_admin_session(PyObject *module, PyObject *args)
 		return NULL;
 	}
 
-	domain_sid = dom_sid_parse_talloc(mem_ctx, PyString_AsString(py_sid));
+	domain_sid = dom_sid_parse_talloc(mem_ctx, sid);
 	if (domain_sid == NULL) {
-		PyErr_Format(PyExc_RuntimeError, "Unable to parse sid %s", 
-					 PyString_AsString(py_sid));
+		PyErr_Format(PyExc_RuntimeError, "Unable to parse sid %s", sid);
 		talloc_free(mem_ctx);
 		return NULL;
 	}
@@ -166,6 +164,63 @@ static PyObject *py_user_session(PyObject *module, PyObject *args, PyObject *kwa
 	return PyAuthSession_FromSession(session);
 }
 
+static PyObject *py_session_info_fill_unix(PyObject *module,
+					   PyObject *args,
+					   PyObject *kwargs)
+{
+	NTSTATUS nt_status;
+	char *user_name = NULL;
+	struct loadparm_context *lp_ctx = NULL;
+	struct auth_session_info *session_info;
+	PyObject *py_lp_ctx = Py_None;
+	PyObject *py_session = Py_None;
+	TALLOC_CTX *frame;
+
+	const char * const kwnames[] = { "session_info",
+					 "user_name",
+					 "lp_ctx",
+					 NULL };
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Oz|O",
+					 discard_const_p(char *, kwnames),
+					 &py_session,
+					 &user_name,
+					 &py_lp_ctx)) {
+		return NULL;
+	}
+
+	if (!py_check_dcerpc_type(py_session,
+				  "samba.dcerpc.auth",
+				  "session_info")) {
+		return NULL;
+	}
+	session_info = pytalloc_get_type(py_session,
+					 struct auth_session_info);
+	if (!session_info) {
+		PyErr_Format(PyExc_TypeError,
+			     "Expected auth_session_info for session_info argument got %s",
+			     talloc_get_name(pytalloc_get_ptr(py_session)));
+		return NULL;
+	}
+
+	frame = talloc_stackframe();
+	
+	lp_ctx = lpcfg_from_py_object(frame, py_lp_ctx);
+	if (lp_ctx == NULL) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	nt_status = auth_session_info_fill_unix(lp_ctx,
+					       user_name,
+					       session_info);
+	TALLOC_FREE(frame);
+	if (!NT_STATUS_IS_OK(nt_status)) {
+		PyErr_NTSTATUS_IS_ERR_RAISE(nt_status);
+	}
+
+	Py_RETURN_NONE;
+}
+
 
 static const char **PyList_AsStringList(TALLOC_CTX *mem_ctx, PyObject *list, 
 					const char *paramname)
@@ -183,13 +238,19 @@ static const char **PyList_AsStringList(TALLOC_CTX *mem_ctx, PyObject *list,
 	}
 
 	for (i = 0; i < PyList_Size(list); i++) {
+		const char *value;
+		Py_ssize_t size;
 		PyObject *item = PyList_GetItem(list, i);
-		if (!PyString_Check(item)) {
+		if (!(PyStr_Check(item) || PyUnicode_Check(item))) {
 			PyErr_Format(PyExc_TypeError, "%s should be strings", paramname);
 			return NULL;
 		}
-		ret[i] = talloc_strndup(ret, PyString_AsString(item),
-					PyString_Size(item));
+		value = PyStr_AsUTF8AndSize(item, &size);
+		if (value == NULL) {
+			talloc_free(ret);
+			return NULL;
+		}
+		ret[i] = talloc_strndup(ret, value, size);
 	}
 	ret[i] = NULL;
 	return ret;
@@ -300,27 +361,40 @@ static PyMethodDef py_auth_methods[] = {
 	{ "system_session", (PyCFunction)py_system_session, METH_VARARGS, NULL },
 	{ "admin_session", (PyCFunction)py_admin_session, METH_VARARGS, NULL },
 	{ "user_session", (PyCFunction)py_user_session, METH_VARARGS|METH_KEYWORDS, NULL },
+	{ "session_info_fill_unix",
+	  (PyCFunction)py_session_info_fill_unix,
+	  METH_VARARGS|METH_KEYWORDS,
+	  NULL },
 	{ NULL },
 };
 
-void initauth(void)
+static struct PyModuleDef moduledef = {
+	PyModuleDef_HEAD_INIT,
+	.m_name = "auth",
+	.m_doc = "Authentication and authorization support.",
+	.m_size = -1,
+	.m_methods = py_auth_methods,
+};
+
+MODULE_INIT_FUNC(auth)
 {
 	PyObject *m;
 
 	if (pytalloc_BaseObject_PyType_Ready(&PyAuthContext) < 0)
-		return;
+		return NULL;
 
-	m = Py_InitModule3("auth", py_auth_methods,
-					   "Authentication and authorization support.");
+	m = PyModule_Create(&moduledef);
 	if (m == NULL)
-		return;
+		return NULL;
 
 	Py_INCREF(&PyAuthContext);
 	PyModule_AddObject(m, "AuthContext", (PyObject *)&PyAuthContext);
 
-#define ADD_FLAG(val)  PyModule_AddObject(m, #val, PyInt_FromLong(val))
+#define ADD_FLAG(val)  PyModule_AddIntConstant(m, #val, val)
 	ADD_FLAG(AUTH_SESSION_INFO_DEFAULT_GROUPS);
 	ADD_FLAG(AUTH_SESSION_INFO_AUTHENTICATED);
 	ADD_FLAG(AUTH_SESSION_INFO_SIMPLE_PRIVILEGES);
+	ADD_FLAG(AUTH_SESSION_INFO_NTLM);
 
+	return m;
 }

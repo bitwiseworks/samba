@@ -40,7 +40,7 @@
 #include <kdc.h>
 #include <hdb.h>
 
-NTSTATUS server_service_kdc_init(void);
+NTSTATUS server_service_kdc_init(TALLOC_CTX *);
 
 extern struct krb5plugin_windc_ftable windc_plugin_table;
 
@@ -110,10 +110,11 @@ static kdc_code kdc_process(struct kdc_server *kdc,
 /*
   setup our listening sockets on the configured network interfaces
 */
-static NTSTATUS kdc_startup_interfaces(struct kdc_server *kdc, struct loadparm_context *lp_ctx,
-				       struct interface *ifaces)
+static NTSTATUS kdc_startup_interfaces(struct kdc_server *kdc,
+				       struct loadparm_context *lp_ctx,
+				       struct interface *ifaces,
+				       const struct model_ops *model_ops)
 {
-	const struct model_ops *model_ops;
 	int num_interfaces;
 	TALLOC_CTX *tmp_ctx = talloc_new(kdc);
 	NTSTATUS status;
@@ -121,15 +122,6 @@ static NTSTATUS kdc_startup_interfaces(struct kdc_server *kdc, struct loadparm_c
 	uint16_t kdc_port = lpcfg_krb5_port(lp_ctx);
 	uint16_t kpasswd_port = lpcfg_kpasswd_port(lp_ctx);
 	bool done_wildcard = false;
-
-	/* within the kdc task we want to be a single process, so
-	   ask for the single process model ops and pass these to the
-	   stream_setup_socket() call. */
-	model_ops = process_model_startup("single");
-	if (!model_ops) {
-		DEBUG(0,("Can't find 'single' process model_ops\n"));
-		return NT_STATUS_INTERNAL_ERROR;
-	}
 
 	num_interfaces = iface_list_count(ifaces);
 
@@ -313,8 +305,12 @@ static void kdc_task_init(struct task_server *task)
 
 
 	/* get a samdb connection */
-	kdc->samdb = samdb_connect(kdc, kdc->task->event_ctx, kdc->task->lp_ctx,
-				   system_session(kdc->task->lp_ctx), 0);
+	kdc->samdb = samdb_connect(kdc,
+				   kdc->task->event_ctx,
+				   kdc->task->lp_ctx,
+				   system_session(kdc->task->lp_ctx),
+				   NULL,
+				   0);
 	if (!kdc->samdb) {
 		DEBUG(1,("kdc_task_init: unable to connect to samdb\n"));
 		task_server_terminate(task, "kdc: krb5_init_context samdb connect failed", true);
@@ -391,6 +387,7 @@ static void kdc_task_init(struct task_server *task)
 
 	kdc->base_ctx->ev_ctx = task->event_ctx;
 	kdc->base_ctx->lp_ctx = task->lp_ctx;
+	kdc->base_ctx->msg_ctx = task->msg_ctx;
 
 	status = hdb_samba4_create_kdc(kdc->base_ctx,
 				       kdc->smb_krb5_context->krb5_context,
@@ -447,7 +444,8 @@ static void kdc_task_init(struct task_server *task)
 	kdc->private_data = kdc_config;
 
 	/* start listening on the configured network interfaces */
-	status = kdc_startup_interfaces(kdc, task->lp_ctx, ifaces);
+	status = kdc_startup_interfaces(kdc, task->lp_ctx, ifaces,
+					task->model_ops);
 	if (!NT_STATUS_IS_OK(status)) {
 		task_server_terminate(task, "kdc failed to setup interfaces", true);
 		return;
@@ -465,7 +463,22 @@ static void kdc_task_init(struct task_server *task)
 
 
 /* called at smbd startup - register ourselves as a server service */
-NTSTATUS server_service_kdc_init(void)
+NTSTATUS server_service_kdc_init(TALLOC_CTX *ctx)
 {
-	return register_server_service("kdc", kdc_task_init);
+	struct service_details details = {
+		.inhibit_fork_on_accept = true,
+		/* 
+		 * Need to prevent pre-forking on kdc.
+		 * The task_init function is run on the master process only
+		 * and the irpc process name is registered in it's event loop.
+		 * The child worker processes initialise their event loops on
+		 * fork, so are not listening for the irpc event.
+		 *
+		 * The master process does not wait on that event context
+		 * the master process is responsible for managing the worker
+		 * processes not performing work.
+		 */
+		.inhibit_pre_fork = true
+	};
+	return register_server_service(ctx, "kdc", kdc_task_init, &details);
 }

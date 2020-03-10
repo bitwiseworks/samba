@@ -83,7 +83,7 @@ static struct {
 		offsetof(struct ctdb_tunable_list,  reclock_ping_period) },
 	{ "NoIPFailback", 0, false,
 		offsetof(struct ctdb_tunable_list, no_ip_failback) },
-	{ "DisableIPFailover", 0, false,
+	{ "DisableIPFailover", 0, true,
 		offsetof(struct ctdb_tunable_list, disable_ip_failover) },
 	{ "VerboseMemoryNames", 0, false,
 		offsetof(struct ctdb_tunable_list, verbose_memory_names) },
@@ -141,11 +141,11 @@ static struct {
 		offsetof(struct ctdb_tunable_list, db_size_warn) },
 	{ "PullDBPreallocation", 10*1024*1024, false,
 		offsetof(struct ctdb_tunable_list, pulldb_preallocation_size) },
-	{ "NoIPHostOnAllDisabled", 0, false,
+	{ "NoIPHostOnAllDisabled", 1, true,
 		offsetof(struct ctdb_tunable_list, no_ip_host_on_all_disabled) },
 	{ "Samba3AvoidDeadlocks", 0, true,
 		offsetof(struct ctdb_tunable_list, samba3_hack) },
-	{ "TDBMutexEnabled", 0, false,
+	{ "TDBMutexEnabled", 1, true,
 		offsetof(struct ctdb_tunable_list, mutex_enabled) },
 	{ "LockProcessesPerDB", 200, false,
 		offsetof(struct ctdb_tunable_list, lock_processes_per_db) },
@@ -155,6 +155,8 @@ static struct {
 		offsetof(struct ctdb_tunable_list, queue_buffer_size) },
 	{ "IPAllocAlgorithm", 2, false,
 		offsetof(struct ctdb_tunable_list, ip_alloc_algorithm) },
+	{ "AllowMixedVersions", 0, false,
+		offsetof(struct ctdb_tunable_list, allow_mixed_versions) },
 	{ NULL, 0, true, }
 };
 

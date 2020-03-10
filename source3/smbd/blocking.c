@@ -135,7 +135,11 @@ static bool recalc_brl_timeout(struct smbd_server_connection *sconn)
 		    (int)from_now.tv_sec, (int)from_now.tv_usec));
 	}
 
-	sconn->smb1.locks.brl_timeout = tevent_add_timer(sconn->ev_ctx,
+	/*
+	 * brl_timeout_fn() calls change_to_root_user()
+	 * so we can use sconn->root_ev_ctx.
+	 */
+	sconn->smb1.locks.brl_timeout = tevent_add_timer(sconn->root_ev_ctx,
 							 NULL, next_timeout,
 							 brl_timeout_fn, sconn);
 	if (sconn->smb1.locks.brl_timeout == NULL) {
@@ -842,13 +846,10 @@ void process_blocking_lock_queue(struct smbd_server_connection *sconn)
 
 		DEBUG(10, ("Processing BLR = %p\n", blr));
 
-		/* We use set_current_service so connections with
-		 * pending locks are not marked as idle.
+		/*
+		 * Connections with pending locks are not marked as idle.
 		 */
-
-		set_current_service(blr->fsp->conn,
-				SVAL(blr->req->inbuf,smb_flg),
-				false);
+		blr->fsp->conn->lastused_count++;
 
 		/*
 		 * Remove the pending lock we're waiting on.

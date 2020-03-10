@@ -22,6 +22,7 @@
 #include "includes.h"
 #include "dynconfig/dynconfig.h"
 #include "lib/util/samba_modules.h"
+#include "lib/util/util_paths.h"
 #include "system/filesys.h"
 #include "system/dir.h"
 
@@ -40,7 +41,7 @@ init_module_fn load_module(const char *path, bool is_probe, void **handle_out)
 	handle = dlopen(path, RTLD_NOW);
 
 	/* This call should reset any possible non-fatal errors that
-	   occured since last call to dl* functions */
+	   occurred since last call to dl* functions */
 	error = dlerror();
 
 	if (handle == NULL) {
@@ -116,7 +117,7 @@ static init_module_fn *load_modules(TALLOC_CTX *mem_ctx, const char *path)
  *
  * @return true if all functions ran successfully, false otherwise
  */
-bool run_init_functions(init_module_fn *fns)
+bool run_init_functions(TALLOC_CTX *ctx, init_module_fn *fns)
 {
 	int i;
 	bool ret = true;
@@ -124,7 +125,7 @@ bool run_init_functions(init_module_fn *fns)
 	if (fns == NULL)
 		return true;
 
-	for (i = 0; fns[i]; i++) { ret &= (bool)NT_STATUS_IS_OK(fns[i]()); }
+	for (i = 0; fns[i]; i++) { ret &= (bool)NT_STATUS_IS_OK(fns[i](ctx)); }
 
 	return ret;
 }
@@ -147,73 +148,53 @@ init_module_fn *load_samba_modules(TALLOC_CTX *mem_ctx, const char *subsystem)
 	return ret;
 }
 
-
-/* Load a dynamic module.  Only log a level 0 error if we are not checking
-   for the existence of a module (probling). */
-
-static NTSTATUS do_smb_load_module(const char *subsystem,
-				   const char *module_name, bool is_probe)
+static NTSTATUS load_module_absolute_path(const char *module_path,
+					  bool is_probe)
 {
 	void *handle;
 	init_module_fn init;
 	NTSTATUS status;
 
-	char *full_path = NULL;
-	TALLOC_CTX *ctx = talloc_stackframe();
+	DBG_INFO("%s module '%s'\n",
+		 is_probe ? "Probing" : "Loading",
+		 module_path);
 
-	if (module_name == NULL) {
-		TALLOC_FREE(ctx);
-		return NT_STATUS_INVALID_PARAMETER;
-	}
-
-	/* Check for absolute path */
-
-	DEBUG(5, ("%s module '%s'\n", is_probe ? "Probing" : "Loading", module_name));
-
-	if (subsystem && module_name[0] != '/') {
-		full_path = talloc_asprintf(ctx,
-					    "%s/%s.%s",
-					    modules_path(ctx, subsystem),
-					    module_name,
-					    shlib_ext());
-		if (!full_path) {
-			TALLOC_FREE(ctx);
-			return NT_STATUS_NO_MEMORY;
-		}
-
-		DEBUG(5, ("%s module '%s': Trying to load from %s\n",
-			  is_probe ? "Probing": "Loading", module_name, full_path));
-		init = load_module(full_path, is_probe, &handle);
-	} else {
-		init = load_module(module_name, is_probe, &handle);
-	}
-
-	if (!init) {
-		TALLOC_FREE(ctx);
+	init = load_module(module_path, is_probe, &handle);
+	if (init == NULL) {
 		return NT_STATUS_UNSUCCESSFUL;
 	}
 
-	DEBUG(2, ("Module '%s' loaded\n", module_name));
+	DBG_NOTICE("Module '%s' loaded\n", module_path);
 
-	status = init();
+	status = init(NULL);
 	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0, ("Module '%s' initialization failed: %s\n",
-			  module_name, get_friendly_nt_error_msg(status)));
+		DBG_ERR("Module '%s' initialization failed: %s\n",
+			module_path,
+			get_friendly_nt_error_msg(status));
 		dlclose(handle);
+		return status;
 	}
-	TALLOC_FREE(ctx);
-	return status;
+
+	return NT_STATUS_OK;
 }
 
 /* Load all modules in list and return number of
  * modules that has been successfully loaded */
-int smb_load_modules(const char **modules)
+int smb_load_all_modules_absoute_path(const char **modules)
 {
 	int i;
 	int success = 0;
 
-	for(i = 0; modules[i]; i++){
-		if(NT_STATUS_IS_OK(do_smb_load_module(NULL, modules[i], false))) {
+	for(i = 0; modules[i] != NULL; i++) {
+		const char *module = modules[i];
+		NTSTATUS status;
+
+		if (module[0] != '/') {
+			continue;
+		}
+
+		status = load_module_absolute_path(module, false);
+		if (NT_STATUS_IS_OK(status)) {
 			success++;
 		}
 	}
@@ -223,12 +204,117 @@ int smb_load_modules(const char **modules)
 	return success;
 }
 
+/**
+ * @brief Check if a module exist and load it.
+ *
+ * @param[in]  subsystem  The name of the subsystem the module belongs too.
+ *
+ * @param[in]  module     The name of the module
+ *
+ * @return  A NTSTATUS code
+ */
 NTSTATUS smb_probe_module(const char *subsystem, const char *module)
 {
-	return do_smb_load_module(subsystem, module, true);
+	NTSTATUS status;
+	char *module_path = NULL;
+	TALLOC_CTX *tmp_ctx = talloc_stackframe();
+
+	if (subsystem == NULL) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto done;
+	}
+	if (module == NULL) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto done;
+	}
+
+	if (strchr(module, '/')) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto done;
+	}
+
+	module_path = talloc_asprintf(tmp_ctx,
+				      "%s/%s.%s",
+				      modules_path(tmp_ctx, subsystem),
+				      module,
+				      shlib_ext());
+	if (module_path == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto done;
+	}
+
+	status = load_module_absolute_path(module_path, true);
+
+done:
+	TALLOC_FREE(tmp_ctx);
+	return status;
 }
 
+/**
+ * @brief Check if a module exist and load it.
+ *
+ * Warning: Using this function can have security implecations!
+ *
+ * @param[in]  subsystem  The name of the subsystem the module belongs too.
+ *
+ * @param[in]  module     Load a module using an abolute path.
+ *
+ * @return  A NTSTATUS code
+ */
+NTSTATUS smb_probe_module_absolute_path(const char *module)
+{
+	if (module == NULL) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+	if (module[0] != '/') {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	return load_module_absolute_path(module, true);
+}
+
+/**
+ * @brief Load a module.
+ *
+ * @param[in]  subsystem  The name of the subsystem the module belongs too.
+ *
+ * @param[in]  module     Check if a module exists and load it.
+ *
+ * @return  A NTSTATUS code
+ */
 NTSTATUS smb_load_module(const char *subsystem, const char *module)
 {
-	return do_smb_load_module(subsystem, module, false);
+	NTSTATUS status;
+	char *module_path = NULL;
+	TALLOC_CTX *tmp_ctx = talloc_stackframe();
+
+	if (subsystem == NULL) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto done;
+	}
+	if (module == NULL) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto done;
+	}
+
+	if (strchr(module, '/')) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto done;
+	}
+
+	module_path = talloc_asprintf(tmp_ctx,
+				      "%s/%s.%s",
+				      modules_path(tmp_ctx, subsystem),
+				      module,
+				      shlib_ext());
+	if (module_path == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto done;
+	}
+
+	status = load_module_absolute_path(module_path, false);
+
+done:
+	TALLOC_FREE(tmp_ctx);
+	return status;
 }

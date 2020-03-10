@@ -20,6 +20,7 @@
 
 #include "includes.h"
 #include "ads.h"
+#include "libsmb/namequery.h"
 #include "librpc/gen_ndr/ndr_libnet_join.h"
 #include "libnet/libnet_join.h"
 #include "libcli/auth/libcli_auth.h"
@@ -43,6 +44,7 @@
 #include "libcli/auth/netlogon_creds_cli.h"
 #include "auth/credentials/credentials.h"
 #include "krb5_env.h"
+#include "libsmb/dsgetdcname.h"
 
 /****************************************************************
 ****************************************************************/
@@ -1134,8 +1136,8 @@ static NTSTATUS libnet_join_joindomain_rpc_unsecure(TALLOC_CTX *mem_ctx,
 	TALLOC_CTX *frame = talloc_stackframe();
 	struct rpc_pipe_client *authenticate_pipe = NULL;
 	struct rpc_pipe_client *passwordset_pipe = NULL;
+	struct cli_credentials *cli_creds;
 	struct netlogon_creds_cli_context *netlogon_creds = NULL;
-	struct cli_credentials *cli_creds = NULL;
 	struct netlogon_creds_CredentialState *creds = NULL;
 	uint32_t netlogon_flags = 0;
 	size_t len = 0;
@@ -1180,20 +1182,17 @@ static NTSTATUS libnet_join_joindomain_rpc_unsecure(TALLOC_CTX *mem_ctx,
 	cli_credentials_set_password(cli_creds, r->in.admin_password,
 				     CRED_SPECIFIED);
 
-	status = rpccli_create_netlogon_creds_with_creds(cli_creds,
-							 authenticate_pipe->desthost,
-							 r->in.msg_ctx,
-							 frame,
-							 &netlogon_creds);
+	status = rpccli_create_netlogon_creds_ctx(
+		cli_creds, authenticate_pipe->desthost, r->in.msg_ctx,
+		frame, &netlogon_creds);
 	if (!NT_STATUS_IS_OK(status)) {
 		TALLOC_FREE(frame);
 		return status;
 	}
 
-	status = rpccli_setup_netlogon_creds_with_creds(cli, NCACN_NP,
-							netlogon_creds,
-							true, /* force_reauth */
-							cli_creds);
+	status = rpccli_setup_netlogon_creds(
+		cli, NCACN_NP, netlogon_creds, true /* force_reauth */,
+		cli_creds);
 	if (!NT_STATUS_IS_OK(status)) {
 		TALLOC_FREE(frame);
 		return status;
@@ -1212,7 +1211,6 @@ static NTSTATUS libnet_join_joindomain_rpc_unsecure(TALLOC_CTX *mem_ctx,
 		status = cli_rpc_pipe_open_schannel_with_creds(cli,
 							       &ndr_table_netlogon,
 							       NCACN_NP,
-							       cli_creds,
 							       netlogon_creds,
 							       &passwordset_pipe);
 		if (!NT_STATUS_IS_OK(status)) {
@@ -1658,21 +1656,21 @@ NTSTATUS libnet_join_ok(struct messaging_context *msg_ctx,
 		return status;
 	}
 
-	status = rpccli_create_netlogon_creds_with_creds(cli_creds,
-							 dc_name,
-							 msg_ctx,
-							 frame,
-							 &netlogon_creds);
+	status = rpccli_create_netlogon_creds_ctx(cli_creds,
+						  dc_name,
+						  msg_ctx,
+						  frame,
+						  &netlogon_creds);
 	if (!NT_STATUS_IS_OK(status)) {
 		cli_shutdown(cli);
 		TALLOC_FREE(frame);
 		return status;
 	}
 
-	status = rpccli_setup_netlogon_creds_with_creds(cli, NCACN_NP,
-							netlogon_creds,
-							true, /* force_reauth */
-							cli_creds);
+	status = rpccli_setup_netlogon_creds(cli, NCACN_NP,
+					     netlogon_creds,
+					     true, /* force_reauth */
+					     cli_creds);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("connect_to_domain_password_server: "
 			 "unable to open the domain client session to "
@@ -1703,7 +1701,6 @@ NTSTATUS libnet_join_ok(struct messaging_context *msg_ctx,
 
 	status = cli_rpc_pipe_open_schannel_with_creds(
 		cli, &ndr_table_netlogon, NCACN_NP,
-		cli_creds,
 		netlogon_creds, &netlogon_pipe);
 
 	TALLOC_FREE(netlogon_pipe);
@@ -2242,6 +2239,18 @@ static void libnet_join_add_dom_rids_to_builtins(struct dom_sid *domain_sid)
 			  "BUILTIN\\Administrators during join: %s\n",
 			  nt_errstr(status)));
 	}
+
+	/* Try adding dom guests to builtin\guests. Only log failures. */
+	status = create_builtin_guests(domain_sid);
+	if (NT_STATUS_EQUAL(status, NT_STATUS_PROTOCOL_UNREACHABLE)) {
+		DEBUG(10,("Unable to auto-add domain guests to "
+			  "BUILTIN\\Guests during join because "
+			  "winbindd must be running.\n"));
+	} else if (!NT_STATUS_IS_OK(status)) {
+		DEBUG(5, ("Failed to auto-add domain guests to "
+			  "BUILTIN\\Guests during join: %s\n",
+			  nt_errstr(status)));
+	}
 }
 
 /****************************************************************
@@ -2423,7 +2432,8 @@ static WERROR libnet_join_check_config(TALLOC_CTX *mem_ctx,
 					valid_realm = true;
 					ignored_realm = true;
 				}
-				/* FALL THROUGH */
+
+				FALL_THROUGH;
 			case SEC_ADS:
 				valid_security = true;
 			}
@@ -2657,9 +2667,10 @@ static WERROR libnet_DomainJoin(TALLOC_CTX *mem_ctx,
 		DEBUG(5, ("failed to precreate account in ou %s: %s",
 			r->in.account_ou, ads_errstr(ads_status)));
 	}
+ rpc_join:
+
 #endif /* HAVE_ADS */
 
- rpc_join:
 	if ((r->in.join_flags & WKSSVC_JOIN_FLAGS_JOIN_UNSECURE) &&
 	    (r->in.join_flags & WKSSVC_JOIN_FLAGS_MACHINE_PWD_PASSED)) {
 		status = libnet_join_joindomain_rpc_unsecure(mem_ctx, r, cli);

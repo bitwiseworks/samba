@@ -1,6 +1,9 @@
 # Hey Emacs, this is a -*- shell-script -*- !!!  :-)
 
-# Augment PATH with stubs/ directory.
+[ -n "$TEST_VAR_DIR" ] || die "TEST_VAR_DIR unset"
+
+setup_ctdb_base "$TEST_VAR_DIR" "unit_tool" \
+		functions
 
 if "$TEST_VERBOSE" ; then
     debug () { echo "$@" ; }
@@ -8,8 +11,9 @@ else
     debug () { : ; }
 fi
 
-ctdbd_socket="${TEST_VAR_DIR}/ctdbd.socket.$$"
-ctdbd_pidfile="${TEST_VAR_DIR}/ctdbd.pid.$$"
+ctdbd_socket="${CTDB_BASE}/ctdbd.socket"
+ctdbd_pidfile="${CTDB_BASE}/ctdbd.pid"
+ctdbd_dbdir="${CTDB_BASE}/ctdbd.db"
 
 define_test ()
 {
@@ -19,7 +23,8 @@ define_test ()
 	ctdb.*)
 	    _cmd="${_f#ctdb.}"
 	    _cmd="${_cmd%.*}" # Strip test number
-	    export CTDB="ctdb --socket $ctdbd_socket"
+	    export CTDB_SOCKET="$ctdbd_socket"
+	    export CTDB="ctdb"
 	    export CTDB_DEBUGLEVEL=NOTICE
 	    if [ -z "$FAKE_CTDBD_DEBUGLEVEL" ] ; then
 		    FAKE_CTDBD_DEBUGLEVEL="ERR"
@@ -44,14 +49,17 @@ cleanup_ctdbd ()
 		rm -f "$ctdbd_pidfile"
 	fi
 	rm -f "$ctdbd_socket"
+	rm -rf "$ctdbd_dbdir"
 }
 
 setup_ctdbd ()
 {
 	echo "Setting up fake ctdbd"
 
+	mkdir -p "$ctdbd_dbdir"
 	$VALGRIND fake_ctdbd -d "$FAKE_CTDBD_DEBUGLEVEL" \
-		  -s "$ctdbd_socket" -p "$ctdbd_pidfile"
+		  -s "$ctdbd_socket" -p "$ctdbd_pidfile" \
+		  -D "$ctdbd_dbdir"
 	# Wait till fake_ctdbd is running
 	wait_until 10 test -S "$ctdbd_socket" || \
 		die "fake_ctdbd failed to start"
@@ -68,21 +76,8 @@ setup_natgw ()
 {
 	debug "Setting up NAT gateway"
 
-	# Use in-tree binaries if running against local daemons.
-	# Otherwise CTDB need to be installed on all nodes.
-	if [ -n "$ctdb_dir" -a -d "${ctdb_dir}/bin" ] ; then
-		if [ -z "$CTDB_NATGW_HELPER" ] ; then
-			export CTDB_NATGW_HELPER="${ctdb_dir}/tools/ctdb_natgw"
-		fi
-		# Only want to find functions file, so this is OK
-		export CTDB_BASE="${ctdb_dir}/config"
-	fi
-
-	natgw_config_dir="${TEST_VAR_DIR}/natgw_config"
-	mkdir -p "$natgw_config_dir"
-
-	export CTDB_NATGW_NODES=$(mktemp --tmpdir="$natgw_config_dir")
-	test_cleanup "rm -f $CTDB_NATGW_NODES"
+	export CTDB_NATGW_HELPER="${CTDB_SCRIPTS_TOOLS_HELPER_DIR}/ctdb_natgw"
+	export CTDB_NATGW_NODES="${CTDB_BASE}/natgw_nodes"
 
 	cat >"$CTDB_NATGW_NODES"
 }
@@ -91,21 +86,8 @@ setup_lvs ()
 {
 	debug "Setting up LVS"
 
-	# Use in-tree binaries if running against local daemons.
-	# Otherwise CTDB need to be installed on all nodes.
-	if [ -n "$ctdb_dir" -a -d "${ctdb_dir}/bin" ] ; then
-		if [ -z "$CTDB_LVS_HELPER" ] ; then
-			export CTDB_LVS_HELPER="${ctdb_dir}/tools/ctdb_lvs"
-		fi
-		# Only want to find functions file, so this is OK
-		export CTDB_BASE="${ctdb_dir}/config"
-	fi
-
-	lvs_config_dir="${TEST_VAR_DIR}/lvs_config"
-	mkdir -p "$lvs_config_dir"
-
-	export CTDB_LVS_NODES=$(mktemp --tmpdir="$lvs_config_dir")
-	test_cleanup "rm -f ${CTDB_LVS_NODES}"
+	export CTDB_LVS_HELPER="${CTDB_SCRIPTS_TOOLS_HELPER_DIR}/ctdb_lvs"
+	export CTDB_LVS_NODES="${CTDB_BASE}/lvs_nodes"
 
 	cat >"$CTDB_LVS_NODES"
 }
@@ -114,23 +96,9 @@ setup_nodes ()
 {
     _pnn="$1"
 
-    _v="CTDB_NODES${_pnn:+_}${_pnn}"
-    debug "Setting up ${_v}"
+    _f="${CTDB_BASE}/nodes${_pnn:+.}${_pnn}"
 
-    eval export "${_v}"=$(mktemp --tmpdir="$TEST_VAR_DIR")
-
-    eval _f="\${${_v}}"
-    test_cleanup "rm -f ${_f}"
     cat >"$_f"
-
-    # You can't be too careful about what might be in the
-    # environment...  so clean up when setting the default variable.
-    if [ -z "$_pnn" ] ; then
-	_n=$(wc -l "$CTDB_NODES" | awk '{ print $1 }')
-	for _i in $(seq 0 $_n) ; do
-	    eval unset "CTDB_NODES_${_i}"
-	done
-    fi
 }
 
 simple_test_other ()

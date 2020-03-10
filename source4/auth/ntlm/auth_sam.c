@@ -32,43 +32,18 @@
 #include "dsdb/common/util.h"
 #include "param/param.h"
 #include "librpc/gen_ndr/ndr_irpc_c.h"
+#include "librpc/gen_ndr/ndr_winbind_c.h"
 #include "lib/messaging/irpc.h"
 #include "libcli/auth/libcli_auth.h"
 #include "libds/common/roles.h"
+
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_AUTH
 
 NTSTATUS auth_sam_init(void);
 
 extern const char *user_attrs[];
 extern const char *domain_ref_attrs[];
-
-/****************************************************************************
- Look for the specified user in the sam, return ldb result structures
-****************************************************************************/
-
-static NTSTATUS authsam_search_account(TALLOC_CTX *mem_ctx, struct ldb_context *sam_ctx,
-				       const char *account_name,
-				       struct ldb_dn *domain_dn,
-				       struct ldb_message **ret_msg)
-{
-	int ret;
-
-	/* pull the user attributes */
-	ret = dsdb_search_one(sam_ctx, mem_ctx, ret_msg, domain_dn, LDB_SCOPE_SUBTREE,
-			      user_attrs,
-			      DSDB_SEARCH_SHOW_EXTENDED_DN,
-			      "(&(sAMAccountName=%s)(objectclass=user))",
-			      ldb_binary_encode_string(mem_ctx, account_name));
-	if (ret == LDB_ERR_NO_SUCH_OBJECT) {
-		DEBUG(3,("sam_search_user: Couldn't find user [%s] in samdb, under %s\n", 
-			 account_name, ldb_dn_get_linearized(domain_dn)));
-		return NT_STATUS_NO_SUCH_USER;		
-	}
-	if (ret != LDB_SUCCESS) {
-		return NT_STATUS_INTERNAL_DB_CORRUPTION;
-	}
-	
-	return NT_STATUS_OK;
-}
 
 /****************************************************************************
  Do a specific test for an smb password being correct, given a smb_password and
@@ -98,7 +73,7 @@ static NTSTATUS authsam_password_ok(struct auth4_context *auth_context,
 		}
 		user_info = user_info_temp;
 
-		/*fall through*/
+		FALL_THROUGH;
 	}
 	case AUTH_PASSWORD_HASH:
 		*lm_sess_key = data_blob(NULL, 0);
@@ -132,12 +107,57 @@ static NTSTATUS authsam_password_ok(struct auth4_context *auth_context,
 	return NT_STATUS_OK;
 }
 
+static void auth_sam_trigger_zero_password(TALLOC_CTX *mem_ctx,
+					   struct imessaging_context *msg_ctx,
+					   struct tevent_context *event_ctx,
+					   struct netr_SendToSamBase *send_to_sam)
+{
+	struct dcerpc_binding_handle *irpc_handle;
+	struct winbind_SendToSam r;
+	struct tevent_req *req;
+	TALLOC_CTX *tmp_ctx;
+
+	tmp_ctx = talloc_new(mem_ctx);
+	if (tmp_ctx == NULL) {
+		return;
+	}
+
+	irpc_handle = irpc_binding_handle_by_name(tmp_ctx, msg_ctx,
+						  "winbind_server",
+						  &ndr_table_winbind);
+	if (irpc_handle == NULL) {
+		DEBUG(1,(__location__ ": Unable to get binding handle for winbind\n"));
+		TALLOC_FREE(tmp_ctx);
+		return;
+	}
+
+	r.in.message = *send_to_sam;
+
+	/*
+	 * This seem to rely on the current IRPC implementation,
+	 * which delivers the message in the _send function.
+	 *
+	 * TODO: we need a ONE_WAY IRPC handle and register
+	 * a callback and wait for it to be triggered!
+	 */
+	req = dcerpc_winbind_SendToSam_r_send(tmp_ctx,
+					      event_ctx,
+					      irpc_handle,
+					      &r);
+
+	/* we aren't interested in a reply */
+	talloc_free(req);
+	TALLOC_FREE(tmp_ctx);
+
+}
 
 /*
   send a message to the drepl server telling it to initiate a
   REPL_SECRET getncchanges extended op to fetch the users secrets
  */
-static void auth_sam_trigger_repl_secret(struct auth4_context *auth_context,
+static void auth_sam_trigger_repl_secret(TALLOC_CTX *mem_ctx,
+					 struct imessaging_context *msg_ctx,
+					 struct tevent_context *event_ctx,
 					 struct ldb_dn *user_dn)
 {
 	struct dcerpc_binding_handle *irpc_handle;
@@ -145,12 +165,12 @@ static void auth_sam_trigger_repl_secret(struct auth4_context *auth_context,
 	struct tevent_req *req;
 	TALLOC_CTX *tmp_ctx;
 
-	tmp_ctx = talloc_new(auth_context);
+	tmp_ctx = talloc_new(mem_ctx);
 	if (tmp_ctx == NULL) {
 		return;
 	}
 
-	irpc_handle = irpc_binding_handle_by_name(tmp_ctx, auth_context->msg_ctx,
+	irpc_handle = irpc_binding_handle_by_name(tmp_ctx, msg_ctx,
 						  "dreplsrv",
 						  &ndr_table_irpc);
 	if (irpc_handle == NULL) {
@@ -169,7 +189,7 @@ static void auth_sam_trigger_repl_secret(struct auth4_context *auth_context,
 	 * a callback and wait for it to be triggered!
 	 */
 	req = dcerpc_drepl_trigger_repl_secret_r_send(tmp_ctx,
-						      auth_context->event_ctx,
+						      event_ctx,
 						      irpc_handle,
 						      &r);
 
@@ -190,7 +210,8 @@ static NTSTATUS authsam_password_check_and_record(struct auth4_context *auth_con
 						  uint16_t acct_flags,
 						  const struct auth_usersupplied_info *user_info,
 						  DATA_BLOB *user_sess_key,
-						  DATA_BLOB *lm_sess_key)
+						  DATA_BLOB *lm_sess_key,
+						  bool *authoritative)
 {
 	NTSTATUS nt_status;
 	NTSTATUS auth_status;
@@ -202,6 +223,7 @@ static NTSTATUS authsam_password_check_and_record(struct auth4_context *auth_con
 	struct ldb_message *dom_msg;
 	struct samr_Password *lm_pwd;
 	struct samr_Password *nt_pwd;
+	bool am_rodc;
 
 	tmp_ctx = talloc_new(mem_ctx);
 	if (tmp_ctx == NULL) {
@@ -224,7 +246,6 @@ static NTSTATUS authsam_password_check_and_record(struct auth4_context *auth_con
 	}
 
 	if (lm_pwd == NULL && nt_pwd == NULL) {
-		bool am_rodc;
 		if (samdb_rodc(auth_context->sam_ctx, &am_rodc) == LDB_SUCCESS && am_rodc) {
 			/*
 			 * we don't have passwords for this
@@ -237,8 +258,16 @@ static NTSTATUS authsam_password_check_and_record(struct auth4_context *auth_con
 			 * mechanism. We also send a message to our
 			 * drepl server to tell it to try and
 			 * replicate the secrets for this account.
+			 *
+			 * TODO: Should we only trigger this is detected
+			 * there's a chance that the password might be
+			 * replicated, we should be able to detect this
+			 * based on msDS-NeverRevealGroup.
 			 */
-			auth_sam_trigger_repl_secret(auth_context, msg->dn);
+			auth_sam_trigger_repl_secret(auth_context,
+						     auth_context->msg_ctx,
+						     auth_context->event_ctx,
+						     msg->dn);
 			TALLOC_FREE(tmp_ctx);
 			return NT_STATUS_NOT_IMPLEMENTED;
 		}
@@ -481,6 +510,10 @@ static NTSTATUS authsam_password_check_and_record(struct auth4_context *auth_con
 			  nt_errstr(nt_status)));
 	}
 
+	if (samdb_rodc(auth_context->sam_ctx, &am_rodc) == LDB_SUCCESS && am_rodc) {
+		*authoritative = false;
+	}
+
 	TALLOC_FREE(tmp_ctx);
 	return NT_STATUS_WRONG_PASSWORD;
 }
@@ -490,11 +523,13 @@ static NTSTATUS authsam_authenticate(struct auth4_context *auth_context,
 				     struct ldb_dn *domain_dn,
 				     struct ldb_message *msg,
 				     const struct auth_usersupplied_info *user_info,
-				     DATA_BLOB *user_sess_key, DATA_BLOB *lm_sess_key)
+				     DATA_BLOB *user_sess_key, DATA_BLOB *lm_sess_key,
+				     bool *authoritative)
 {
 	NTSTATUS nt_status;
 	bool interactive = (user_info->password_state == AUTH_PASSWORD_HASH);
 	uint32_t acct_flags = samdb_result_acct_flags(msg, NULL);
+	struct netr_SendToSamBase *send_to_sam = NULL;
 	TALLOC_CTX *tmp_ctx = talloc_new(mem_ctx);
 	if (!tmp_ctx) {
 		return NT_STATUS_NO_MEMORY;
@@ -525,7 +560,8 @@ static NTSTATUS authsam_authenticate(struct auth4_context *auth_context,
 	nt_status = authsam_password_check_and_record(auth_context, tmp_ctx,
 						      domain_dn, msg, acct_flags,
 						      user_info,
-						      user_sess_key, lm_sess_key);
+						      user_sess_key, lm_sess_key,
+						      authoritative);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		TALLOC_FREE(tmp_ctx);
 		return nt_status;
@@ -545,7 +581,16 @@ static NTSTATUS authsam_authenticate(struct auth4_context *auth_context,
 
 	nt_status = authsam_logon_success_accounting(auth_context->sam_ctx,
 						     msg, domain_dn,
-						     interactive);
+						     interactive,
+						     &send_to_sam);
+
+	if (send_to_sam != NULL) {
+		auth_sam_trigger_zero_password(tmp_ctx,
+					       auth_context->msg_ctx,
+					       auth_context->event_ctx,
+					       send_to_sam);
+	}
+
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		TALLOC_FREE(tmp_ctx);
 		return nt_status;
@@ -567,7 +612,8 @@ static NTSTATUS authsam_authenticate(struct auth4_context *auth_context,
 static NTSTATUS authsam_check_password_internals(struct auth_method_context *ctx,
 						 TALLOC_CTX *mem_ctx,
 						 const struct auth_usersupplied_info *user_info, 
-						 struct auth_user_info_dc **user_info_dc)
+						 struct auth_user_info_dc **user_info_dc,
+						 bool *authoritative)
 {
 	NTSTATUS nt_status;
 	const char *account_name = user_info->mapped.account_name;
@@ -575,6 +621,7 @@ static NTSTATUS authsam_check_password_internals(struct auth_method_context *ctx
 	struct ldb_dn *domain_dn;
 	DATA_BLOB user_sess_key, lm_sess_key;
 	TALLOC_CTX *tmp_ctx;
+	const char *p = NULL;
 
 	if (ctx->auth_ctx->sam_ctx == NULL) {
 		DEBUG(0, ("No SAM available, cannot log in users\n"));
@@ -597,6 +644,42 @@ static NTSTATUS authsam_check_password_internals(struct auth_method_context *ctx
 		return NT_STATUS_NO_SUCH_DOMAIN;
 	}
 
+	p = strchr_m(account_name, '@');
+	if (p != NULL) {
+		const char *nt4_domain = NULL;
+		const char *nt4_account = NULL;
+		bool is_my_domain = false;
+
+		nt_status = crack_name_to_nt4_name(mem_ctx,
+						   ctx->auth_ctx->sam_ctx,
+						   /*
+						    * DRSUAPI_DS_NAME_FORMAT_UPN_FOR_LOGON ?
+						    */
+						   DRSUAPI_DS_NAME_FORMAT_USER_PRINCIPAL,
+						   account_name,
+						   &nt4_domain, &nt4_account);
+		if (!NT_STATUS_IS_OK(nt_status)) {
+			talloc_free(tmp_ctx);
+			return NT_STATUS_NO_SUCH_USER;
+		}
+
+		is_my_domain = lpcfg_is_mydomain(ctx->auth_ctx->lp_ctx, nt4_domain);
+		if (!is_my_domain) {
+			/*
+			 * This is a user within our forest,
+			 * but in a different domain,
+			 * we're not authoritative
+			 */
+			talloc_free(tmp_ctx);
+			return NT_STATUS_NOT_IMPLEMENTED;
+		}
+
+		/*
+		 * Let's use the NT4 account name for the lookup.
+		 */
+		account_name = nt4_account;
+	}
+
 	nt_status = authsam_search_account(tmp_ctx, ctx->auth_ctx->sam_ctx, account_name, domain_dn, &msg);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		talloc_free(tmp_ctx);
@@ -604,7 +687,7 @@ static NTSTATUS authsam_check_password_internals(struct auth_method_context *ctx
 	}
 
 	nt_status = authsam_authenticate(ctx->auth_ctx, tmp_ctx, ctx->auth_ctx->sam_ctx, domain_dn, msg, user_info,
-					 &user_sess_key, &lm_sess_key);
+					 &user_sess_key, &lm_sess_key, authoritative);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		talloc_free(tmp_ctx);
 		return nt_status;
@@ -647,44 +730,130 @@ static NTSTATUS authsam_want_check(struct auth_method_context *ctx,
 				   TALLOC_CTX *mem_ctx,
 				   const struct auth_usersupplied_info *user_info)
 {
-	bool is_local_name, is_my_domain;
+	const char *effective_domain = user_info->mapped.domain_name;
+	bool is_local_name = false;
+	bool is_my_domain = false;
+	const char *p = NULL;
+	struct dsdb_trust_routing_table *trt = NULL;
+	const struct lsa_TrustDomainInfoInfoEx *tdo = NULL;
+	NTSTATUS status;
 
 	if (!user_info->mapped.account_name || !*user_info->mapped.account_name) {
 		return NT_STATUS_NOT_IMPLEMENTED;
 	}
 
+	if (effective_domain == NULL) {
+		effective_domain = "";
+	}
+
 	is_local_name = lpcfg_is_myname(ctx->auth_ctx->lp_ctx,
-				  user_info->mapped.domain_name);
-	is_my_domain  = lpcfg_is_mydomain(ctx->auth_ctx->lp_ctx,
-				       user_info->mapped.domain_name); 
+					effective_domain);
 
 	/* check whether or not we service this domain/workgroup name */
 	switch (lpcfg_server_role(ctx->auth_ctx->lp_ctx)) {
-		case ROLE_STANDALONE:
-			return NT_STATUS_OK;
+	case ROLE_STANDALONE:
+		return NT_STATUS_OK;
 
-		case ROLE_DOMAIN_MEMBER:
-			if (!is_local_name) {
-				DEBUG(6,("authsam_check_password: %s is not one of my local names (DOMAIN_MEMBER)\n",
-					user_info->mapped.domain_name));
-				return NT_STATUS_NOT_IMPLEMENTED;
-			}
+	case ROLE_DOMAIN_MEMBER:
+		if (is_local_name) {
 			return NT_STATUS_OK;
+		}
 
-		case ROLE_ACTIVE_DIRECTORY_DC:
-			if (!is_local_name && !is_my_domain) {
-				DEBUG(6,("authsam_check_password: %s is not one of my local names or domain name (DC)\n",
-					user_info->mapped.domain_name));
-				return NT_STATUS_NOT_IMPLEMENTED;
-			}
-			return NT_STATUS_OK;
+		DBG_DEBUG("%s is not one of my local names (DOMAIN_MEMBER)\n",
+			  effective_domain);
+		return NT_STATUS_NOT_IMPLEMENTED;
+
+	case ROLE_ACTIVE_DIRECTORY_DC:
+		/* handled later */
+		break;
+
+	default:
+		DBG_ERR("lpcfg_server_role() has an undefined value\n");
+		return NT_STATUS_INVALID_SERVER_STATE;
 	}
 
-	DEBUG(6,("authsam_check_password: lpcfg_server_role() has an undefined value\n"));
-	return NT_STATUS_NOT_IMPLEMENTED;
+	/*
+	 * Now we handle the AD DC case...
+	 */
+
+	is_my_domain = lpcfg_is_my_domain_or_realm(ctx->auth_ctx->lp_ctx,
+						   effective_domain);
+	if (is_my_domain) {
+		return NT_STATUS_OK;
+	}
+
+	if (user_info->mapped_state) {
+		/*
+		 * The caller already did a cracknames call.
+		 */
+		DBG_DEBUG("%s is not one domain name (DC)\n",
+			  effective_domain);
+		return NT_STATUS_NOT_IMPLEMENTED;
+	}
+
+	if (!strequal(effective_domain, "")) {
+		DBG_DEBUG("%s is not one domain name (DC)\n",
+			  effective_domain);
+		return NT_STATUS_NOT_IMPLEMENTED;
+	}
+
+	p = strchr_m(user_info->mapped.account_name, '@');
+	if (p == NULL) {
+		/*
+		 * An empty to domain name should be handled
+		 * as the local domain name.
+		 */
+		return NT_STATUS_OK;
+	}
+
+	effective_domain = p + 1;
+	is_my_domain = lpcfg_is_my_domain_or_realm(ctx->auth_ctx->lp_ctx,
+						   effective_domain);
+	if (is_my_domain) {
+		return NT_STATUS_OK;
+	}
+
+	if (strequal(effective_domain, "")) {
+		DBG_DEBUG("authsam_check_password: upn without realm (DC)\n");
+		return NT_STATUS_NOT_IMPLEMENTED;
+	}
+
+	/*
+	 * as last option we check the routing table if the
+	 * domain is within our forest.
+	 */
+	status = dsdb_trust_routing_table_load(ctx->auth_ctx->sam_ctx,
+					       mem_ctx, &trt);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("authsam_check_password: dsdb_trust_routing_table_load() %s\n",
+			 nt_errstr(status));
+		return status;
+	}
+
+	tdo = dsdb_trust_routing_by_name(trt, effective_domain);
+	if (tdo == NULL) {
+		DBG_DEBUG("%s is not a known TLN (DC)\n",
+			  effective_domain);
+		TALLOC_FREE(trt);
+		return NT_STATUS_NOT_IMPLEMENTED;
+	}
+
+	if (!(tdo->trust_attributes & LSA_TRUST_ATTRIBUTE_WITHIN_FOREST)) {
+		DBG_DEBUG("%s is not a TLN in our forest (DC)\n",
+			  effective_domain);
+		TALLOC_FREE(trt);
+		return NT_STATUS_NOT_IMPLEMENTED;
+	}
+
+	/*
+	 * This principal is within our forest.
+	 * we'll later do a crack_name_to_nt4_name()
+	 * to check if it's in our domain.
+	 */
+	TALLOC_FREE(trt);
+	return NT_STATUS_OK;
 }
 
-				   
 /* Wrapper for the auth subsystem pointer */
 static NTSTATUS authsam_get_user_info_dc_principal_wrapper(TALLOC_CTX *mem_ctx,
 							  struct auth4_context *auth_context,
@@ -700,7 +869,6 @@ static const struct auth_operations sam_ignoredomain_ops = {
 	.want_check	           = authsam_ignoredomain_want_check,
 	.check_password	           = authsam_check_password_internals,
 	.get_user_info_dc_principal = authsam_get_user_info_dc_principal_wrapper,
-	.flags                     = AUTH_METHOD_LOCAL_SAM
 };
 
 static const struct auth_operations sam_ops = {
@@ -708,21 +876,20 @@ static const struct auth_operations sam_ops = {
 	.want_check	           = authsam_want_check,
 	.check_password	           = authsam_check_password_internals,
 	.get_user_info_dc_principal = authsam_get_user_info_dc_principal_wrapper,
-	.flags                     = AUTH_METHOD_LOCAL_SAM
 };
 
-_PUBLIC_ NTSTATUS auth4_sam_init(void);
-_PUBLIC_ NTSTATUS auth4_sam_init(void)
+_PUBLIC_ NTSTATUS auth4_sam_init(TALLOC_CTX *);
+_PUBLIC_ NTSTATUS auth4_sam_init(TALLOC_CTX *ctx)
 {
 	NTSTATUS ret;
 
-	ret = auth_register(&sam_ops);
+	ret = auth_register(ctx, &sam_ops);
 	if (!NT_STATUS_IS_OK(ret)) {
 		DEBUG(0,("Failed to register 'sam' auth backend!\n"));
 		return ret;
 	}
 
-	ret = auth_register(&sam_ignoredomain_ops);
+	ret = auth_register(ctx, &sam_ignoredomain_ops);
 	if (!NT_STATUS_IS_OK(ret)) {
 		DEBUG(0,("Failed to register 'sam_ignoredomain' auth backend!\n"));
 		return ret;

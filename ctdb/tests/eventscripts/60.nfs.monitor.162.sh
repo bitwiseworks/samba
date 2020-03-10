@@ -4,10 +4,11 @@
 
 define_test "2nd share missing, skipping share checks"
 
-setup_nfs
-export CTDB_NFS_SKIP_SHARE_CHECK="yes"
+setup
 
-shares_missing "ERROR: nfs directory \"%s\" not available" 2
+setup_script_options <<EOF
+CTDB_NFS_SKIP_SHARE_CHECK="yes"
+EOF
 
 ok_null
 

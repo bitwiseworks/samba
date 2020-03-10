@@ -28,7 +28,10 @@
 #include "../libcli/auth/pam_errors.h"
 #include "param/param.h"
 
-_PUBLIC_ NTSTATUS auth4_unix_init(void);
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_AUTH
+
+_PUBLIC_ NTSTATUS auth4_unix_init(TALLOC_CTX *);
 
 /* TODO: look at how to best fill in parms retrieveing a struct passwd info
  * except in case USER_INFO_DONT_CHECK_UNIX_ACCOUNT is set
@@ -713,7 +716,8 @@ static NTSTATUS authunix_want_check(struct auth_method_context *ctx,
 static NTSTATUS authunix_check_password(struct auth_method_context *ctx,
 					TALLOC_CTX *mem_ctx,
 					const struct auth_usersupplied_info *user_info,
-					struct auth_user_info_dc **user_info_dc)
+					struct auth_user_info_dc **user_info_dc,
+					bool *authoritative)
 {
 	TALLOC_CTX *check_ctx;
 	NTSTATUS nt_status;
@@ -751,11 +755,11 @@ static const struct auth_operations unix_ops = {
 	.check_password	= authunix_check_password
 };
 
-_PUBLIC_ NTSTATUS auth4_unix_init(void)
+_PUBLIC_ NTSTATUS auth4_unix_init(TALLOC_CTX *ctx)
 {
 	NTSTATUS ret;
 
-	ret = auth_register(&unix_ops);
+	ret = auth_register(ctx, &unix_ops);
 	if (!NT_STATUS_IS_OK(ret)) {
 		DEBUG(0,("Failed to register unix auth backend!\n"));
 		return ret;

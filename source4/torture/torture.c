@@ -33,26 +33,26 @@ _PUBLIC_ int torture_numasync=100;
 
 struct torture_suite *torture_root = NULL;
 
-bool torture_register_suite(struct torture_suite *suite)
+bool torture_register_suite(TALLOC_CTX *mem_ctx, struct torture_suite *suite)
 {
 	if (!suite)
 		return true;
 
 	if (torture_root == NULL)
-		torture_root = talloc_zero(talloc_autofree_context(), struct torture_suite);
+		torture_root = talloc_zero(mem_ctx, struct torture_suite);
 
 	return torture_suite_add_suite(torture_root, suite);
 }
 
-_PUBLIC_ int torture_init(void)
+_PUBLIC_ int torture_init(TALLOC_CTX *mem_ctx)
 {
-#define _MODULE_PROTO(init) extern NTSTATUS init(void);
+#define _MODULE_PROTO(init) extern NTSTATUS init(TALLOC_CTX *);
 	STATIC_smbtorture_MODULES_PROTO;
 	init_module_fn static_init[] = { STATIC_smbtorture_MODULES };
-	init_module_fn *shared_init = load_samba_modules(NULL, "smbtorture");
+	init_module_fn *shared_init = load_samba_modules(mem_ctx, "smbtorture");
 
-	run_init_functions(static_init);
-	run_init_functions(shared_init);
+	run_init_functions(mem_ctx, static_init);
+	run_init_functions(mem_ctx, shared_init);
 
 	talloc_free(shared_init);
 

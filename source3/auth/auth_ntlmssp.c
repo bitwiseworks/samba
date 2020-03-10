@@ -65,10 +65,7 @@ NTSTATUS auth3_generate_session_info(struct auth4_context *auth_context,
 
 		cmp = dom_sid_compare(sid, &global_sid_Anonymous);
 		if (cmp == 0) {
-			/*
-			 * TODO: use auth_anonymous_session_info() here?
-			 */
-			return make_session_info_guest(mem_ctx, session_info);
+			return make_session_info_anonymous(mem_ctx, session_info);
 		}
 
 		return NT_STATUS_INTERNAL_ERROR;
@@ -136,6 +133,7 @@ NTSTATUS auth3_set_challenge(struct auth4_context *auth4_context, const uint8_t 
 NTSTATUS auth3_check_password(struct auth4_context *auth4_context,
 			      TALLOC_CTX *mem_ctx,
 			      const struct auth_usersupplied_info *user_info,
+			      uint8_t *pauthoritative,
 			      void **server_returned_info,
 			      DATA_BLOB *session_key, DATA_BLOB *lm_session_key)
 {
@@ -145,6 +143,11 @@ NTSTATUS auth3_check_password(struct auth4_context *auth4_context,
 	struct auth_serversupplied_info *server_info;
 	NTSTATUS nt_status;
 	bool username_was_mapped;
+
+	/*
+	 * Be authoritative by default.
+	 */
+	*pauthoritative = 1;
 
 	/* The client has given us its machine name (which we only get over NBT transport).
 	   We need to possibly reload smb.conf if smb.conf includes depend on the machine name. */
@@ -163,6 +166,8 @@ NTSTATUS auth3_check_password(struct auth4_context *auth4_context,
 				       user_info->client.domain_name,
 				       user_info->workstation_name,
 				       user_info->remote_host,
+				       user_info->local_host,
+				       user_info->service_description,
 	                               user_info->password.response.lanman.data ? &user_info->password.response.lanman : NULL,
 	                               user_info->password.response.nt.data ? &user_info->password.response.nt : NULL,
 				       NULL, NULL, NULL,
@@ -179,13 +184,16 @@ NTSTATUS auth3_check_password(struct auth4_context *auth4_context,
 	nt_status = auth_check_ntlm_password(mem_ctx,
 					     auth_context,
 					     mapped_user_info,
-					     &server_info);
+					     &server_info,
+					     pauthoritative);
 
 	if (!NT_STATUS_IS_OK(nt_status)) {
-		DEBUG(5,("Checking NTLMSSP password for %s\\%s failed: %s\n",
+		DEBUG(5,("Checking NTLMSSP password for %s\\%s failed: "
+			 "%s, authoritative=%u\n",
 			 user_info->client.domain_name,
 			 user_info->client.account_name,
-			 nt_errstr(nt_status)));
+			 nt_errstr(nt_status),
+			 *pauthoritative));
 	}
 
 	username_was_mapped = mapped_user_info->was_mapped;
@@ -199,6 +207,7 @@ NTSTATUS auth3_check_password(struct auth4_context *auth4_context,
 							user_info->client.domain_name,
 							&server_info);
 		if (NT_STATUS_IS_OK(nt_status)) {
+			*pauthoritative = 1;
 			*server_returned_info = talloc_steal(mem_ctx, server_info);
 		}
 		return nt_status;

@@ -37,9 +37,6 @@ struct gensec_security_ops {
 	*/
 	NTSTATUS (*magic)(struct gensec_security *gensec_security,
 			  const DATA_BLOB *first_packet);
-	NTSTATUS (*update)(struct gensec_security *gensec_security, TALLOC_CTX *out_mem_ctx,
-			   struct tevent_context *ev,
-			   const DATA_BLOB in, DATA_BLOB *out);
 	struct tevent_req *(*update_send)(TALLOC_CTX *mem_ctx,
 					  struct tevent_context *ev,
 					  struct gensec_security *gensec_security,
@@ -85,9 +82,11 @@ struct gensec_security_ops {
 	bool (*have_feature)(struct gensec_security *gensec_security,
 				    uint32_t feature);
 	NTTIME (*expire_time)(struct gensec_security *gensec_security);
+	const char *(*final_auth_type)(struct gensec_security *gensec_security);
 	bool enabled;
 	bool kerberos;
 	enum gensec_priority priority;
+	bool glue;
 };
 
 struct gensec_security_ops_wrapper {
@@ -113,7 +112,14 @@ struct gensec_security {
 	 * PAC is found) */
 	struct auth4_context *auth_context;
 
+	struct gensec_security *parent_security;
 	struct gensec_security *child_security;
+
+	/*
+	 * This is used to mark the context as being
+	 * busy in an async gensec_update_send().
+	 */
+	struct gensec_security **update_busy_ptr;
 };
 
 /* this structure is used by backends to determine the size of some critical types */
@@ -125,5 +131,52 @@ struct gensec_critical_sizes {
 
 NTSTATUS gensec_may_reset_crypto(struct gensec_security *gensec_security,
 				 bool full_reset);
+
+const char *gensec_final_auth_type(struct gensec_security *gensec_security);
+
+NTSTATUS gensec_child_ready(struct gensec_security *parent,
+			    struct gensec_security *child);
+void gensec_child_want_feature(struct gensec_security *gensec_security,
+			       uint32_t feature);
+bool gensec_child_have_feature(struct gensec_security *gensec_security,
+			       uint32_t feature);
+NTSTATUS gensec_child_unseal_packet(struct gensec_security *gensec_security,
+				    uint8_t *data, size_t length,
+				    const uint8_t *whole_pdu, size_t pdu_length,
+				    const DATA_BLOB *sig);
+NTSTATUS gensec_child_check_packet(struct gensec_security *gensec_security,
+				   const uint8_t *data, size_t length,
+				   const uint8_t *whole_pdu, size_t pdu_length,
+				   const DATA_BLOB *sig);
+NTSTATUS gensec_child_seal_packet(struct gensec_security *gensec_security,
+				  TALLOC_CTX *mem_ctx,
+				  uint8_t *data, size_t length,
+				  const uint8_t *whole_pdu, size_t pdu_length,
+				  DATA_BLOB *sig);
+NTSTATUS gensec_child_sign_packet(struct gensec_security *gensec_security,
+				  TALLOC_CTX *mem_ctx,
+				  const uint8_t *data, size_t length,
+				  const uint8_t *whole_pdu, size_t pdu_length,
+				  DATA_BLOB *sig);
+NTSTATUS gensec_child_wrap(struct gensec_security *gensec_security,
+			   TALLOC_CTX *mem_ctx,
+			   const DATA_BLOB *in,
+			   DATA_BLOB *out);
+NTSTATUS gensec_child_unwrap(struct gensec_security *gensec_security,
+			     TALLOC_CTX *mem_ctx,
+			     const DATA_BLOB *in,
+			     DATA_BLOB *out);
+size_t gensec_child_sig_size(struct gensec_security *gensec_security,
+			     size_t data_size);
+size_t gensec_child_max_input_size(struct gensec_security *gensec_security);
+size_t gensec_child_max_wrapped_size(struct gensec_security *gensec_security);
+NTSTATUS gensec_child_session_key(struct gensec_security *gensec_security,
+				  TALLOC_CTX *mem_ctx,
+				  DATA_BLOB *session_key);
+NTSTATUS gensec_child_session_info(struct gensec_security *gensec_security,
+				   TALLOC_CTX *mem_ctx,
+				   struct auth_session_info **session_info);
+NTTIME gensec_child_expire_time(struct gensec_security *gensec_security);
+const char *gensec_child_final_auth_type(struct gensec_security *gensec_security);
 
 #endif /* __GENSEC_H__ */

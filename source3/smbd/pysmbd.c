@@ -25,6 +25,7 @@
 
 #include <Python.h>
 #include "includes.h"
+#include "python/py3compat.h"
 #include "smbd/smbd.h"
 #include "libcli/util/pyerrors.h"
 #include "librpc/rpc/pyrpc_util.h"
@@ -36,44 +37,46 @@ extern const struct generic_mapping file_generic_mapping;
 #undef  DBGC_CLASS
 #define DBGC_CLASS DBGC_ACLS
 
-static int conn_free_wrapper(connection_struct *conn)
-{
-	conn_free(conn);
-	return 0;
-};
+#ifdef O_DIRECTORY
+#define DIRECTORY_FLAGS O_RDONLY|O_DIRECTORY
+#else
+/* POSIX allows us to open a directory with O_RDONLY. */
+#define DIRECTORY_FLAGS O_RDONLY
+#endif
 
-static connection_struct *get_conn(TALLOC_CTX *mem_ctx, const char *service)
+
+static connection_struct *get_conn_tos(
+	const char *service,
+	const struct auth_session_info *session_info)
 {
-	connection_struct *conn;
-	TALLOC_CTX *frame = talloc_stackframe();
+	struct conn_struct_tos *c = NULL;
 	int snum = -1;
 	NTSTATUS status;
 
 	if (!posix_locking_init(false)) {
 		PyErr_NoMemory();
-		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	if (service) {
 		snum = lp_servicenumber(service);
 		if (snum == -1) {
-			TALLOC_FREE(frame);
 			PyErr_SetString(PyExc_RuntimeError, "unknown service");
 			return NULL;
 		}
 	}
 
-	status = create_conn_struct(mem_ctx, NULL, NULL, &conn, snum, "/",
-					    NULL);
+	status = create_conn_struct_tos(NULL,
+					snum,
+					"/",
+					session_info,
+					&c);
 	PyErr_NTSTATUS_IS_ERR_RAISE(status);
 
-	TALLOC_FREE(frame);
 	/* Ignore read-only and share restrictions */
-	conn->read_only = false;
-	conn->share_access = SEC_RIGHTS_FILE_ALL;
-	talloc_set_destructor(conn, conn_free_wrapper);
-	return conn;
+	c->conn->read_only = false;
+	c->conn->share_access = SEC_RIGHTS_FILE_ALL;
+	return c->conn;
 }
 
 static int set_sys_acl_conn(const char *fname,
@@ -81,6 +84,7 @@ static int set_sys_acl_conn(const char *fname,
 				 SMB_ACL_T theacl, connection_struct *conn)
 {
 	int ret;
+	struct smb_filename *smb_fname = NULL;
 	mode_t saved_umask;
 
 	TALLOC_CTX *frame = talloc_stackframe();
@@ -89,7 +93,16 @@ static int set_sys_acl_conn(const char *fname,
 	   so set our umask to 0 */
 	saved_umask = umask(0);
 
-	ret = SMB_VFS_SYS_ACL_SET_FILE( conn, fname, acltype, theacl);
+	smb_fname = synthetic_smb_fname_split(frame,
+					fname,
+					lp_posix_pathnames());
+	if (smb_fname == NULL) {
+		TALLOC_FREE(frame);
+		umask(saved_umask);
+		return -1;
+	}
+
+	ret = SMB_VFS_SYS_ACL_SET_FILE( conn, smb_fname, acltype, theacl);
 
 	umask(saved_umask);
 
@@ -97,25 +110,24 @@ static int set_sys_acl_conn(const char *fname,
 	return ret;
 }
 
-static NTSTATUS set_nt_acl_conn(const char *fname,
-				uint32_t security_info_sent, const struct security_descriptor *sd,
-				connection_struct *conn)
-{
-	TALLOC_CTX *frame = talloc_stackframe();
-	NTSTATUS status = NT_STATUS_OK;
-	files_struct *fsp;
-	struct smb_filename *smb_fname = NULL;
-	int flags, ret;
-	mode_t saved_umask;
 
-	fsp = talloc_zero(frame, struct files_struct);
+static NTSTATUS init_files_struct(TALLOC_CTX *mem_ctx,
+				  const char *fname,
+				  struct connection_struct *conn,
+				  int flags,
+				  struct files_struct **_fsp)
+{
+	struct smb_filename *smb_fname = NULL;
+	int ret;
+	mode_t saved_umask;
+	struct files_struct *fsp;
+
+	fsp = talloc_zero(mem_ctx, struct files_struct);
 	if (fsp == NULL) {
-		TALLOC_FREE(frame);
 		return NT_STATUS_NO_MEMORY;
 	}
 	fsp->fh = talloc(fsp, struct fd_handle);
 	if (fsp->fh == NULL) {
-		TALLOC_FREE(frame);
 		return NT_STATUS_NO_MEMORY;
 	}
 	fsp->conn = conn;
@@ -125,42 +137,26 @@ static NTSTATUS set_nt_acl_conn(const char *fname,
 	saved_umask = umask(0);
 
 	smb_fname = synthetic_smb_fname_split(fsp,
-					fname,
-					lp_posix_pathnames());
+					      fname,
+					      lp_posix_pathnames());
 	if (smb_fname == NULL) {
-		TALLOC_FREE(frame);
 		umask(saved_umask);
 		return NT_STATUS_NO_MEMORY;
 	}
 
 	fsp->fsp_name = smb_fname;
-
-#ifdef O_DIRECTORY
-	flags = O_RDONLY|O_DIRECTORY;
-#else
-	/* POSIX allows us to open a directory with O_RDONLY. */
-	flags = O_RDONLY;
-#endif
-
-	fsp->fh->fd = SMB_VFS_OPEN(conn, smb_fname, fsp, O_RDWR, 00400);
-	if (fsp->fh->fd == -1 && errno == EISDIR) {
-		fsp->fh->fd = SMB_VFS_OPEN(conn, smb_fname, fsp, flags, 00400);
-	}
+	fsp->fh->fd = SMB_VFS_OPEN(conn, smb_fname, fsp, flags, 00644);
 	if (fsp->fh->fd == -1) {
-		printf("open: error=%d (%s)\n", errno, strerror(errno));
-		TALLOC_FREE(frame);
 		umask(saved_umask);
-		return NT_STATUS_UNSUCCESSFUL;
+		return NT_STATUS_INVALID_PARAMETER;
 	}
 
 	ret = SMB_VFS_FSTAT(fsp, &smb_fname->st);
 	if (ret == -1) {
 		/* If we have an fd, this stat should succeed. */
-		DEBUG(0,("Error doing fstat on open file %s "
-			"(%s)\n",
-			smb_fname_str_dbg(smb_fname),
-			strerror(errno) ));
-		TALLOC_FREE(frame);
+		DEBUG(0,("Error doing fstat on open file %s (%s)\n",
+			 smb_fname_str_dbg(smb_fname),
+			 strerror(errno) ));
 		umask(saved_umask);
 		return map_nt_error_from_unix(errno);
 	}
@@ -176,17 +172,49 @@ static NTSTATUS set_nt_acl_conn(const char *fname,
 	fsp->sent_oplock_break = NO_BREAK_SENT;
 	fsp->is_directory = S_ISDIR(smb_fname->st.st_ex_mode);
 
-	status = SMB_VFS_FSET_NT_ACL( fsp, security_info_sent, sd);
+	*_fsp = fsp;
+
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS set_nt_acl_conn(const char *fname,
+				uint32_t security_info_sent, const struct security_descriptor *sd,
+				connection_struct *conn)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct files_struct *fsp = NULL;
+	NTSTATUS status = NT_STATUS_OK;
+
+	/* first, try to open it as a file with flag O_RDWR */
+	status = init_files_struct(frame,
+				   fname,
+				   conn,
+				   O_RDWR,
+				   &fsp);
+	if (!NT_STATUS_IS_OK(status) && errno == EISDIR) {
+		/* if fail, try to open as dir */
+		status = init_files_struct(frame,
+					   fname,
+					   conn,
+					   DIRECTORY_FLAGS,
+					   &fsp);
+	}
+
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("open: error=%d (%s)\n", errno, strerror(errno));
+		SMB_VFS_CLOSE(fsp);
+		TALLOC_FREE(frame);
+		return status;
+	}
+
+	status = SMB_VFS_FSET_NT_ACL(fsp, security_info_sent, sd);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("set_nt_acl_no_snum: fset_nt_acl returned %s.\n", nt_errstr(status)));
 	}
 
 	SMB_VFS_CLOSE(fsp);
 
-	conn_free(conn);
 	TALLOC_FREE(frame);
-
-	umask(saved_umask);
 	return status;
 }
 
@@ -258,103 +286,104 @@ static int set_acl_entry_perms(SMB_ACL_ENTRY_T entry, mode_t perm_mask)
 	return 0;
 }
 
-static SMB_ACL_T make_simple_acl(gid_t gid, mode_t chmod_mode)
+static SMB_ACL_T make_simple_acl(TALLOC_CTX *mem_ctx,
+			gid_t gid,
+			mode_t chmod_mode)
 {
-	TALLOC_CTX *frame = talloc_stackframe();
-
 	mode_t mode = SMB_ACL_READ|SMB_ACL_WRITE|SMB_ACL_EXECUTE;
 
 	mode_t mode_user = (chmod_mode & 0700) >> 6;
 	mode_t mode_group = (chmod_mode & 070) >> 3;
 	mode_t mode_other = chmod_mode &  07;
 	SMB_ACL_ENTRY_T entry;
-	SMB_ACL_T acl = sys_acl_init(frame);
+	SMB_ACL_T acl = sys_acl_init(mem_ctx);
 
 	if (!acl) {
 		return NULL;
 	}
 
 	if (sys_acl_create_entry(&acl, &entry) != 0) {
-		TALLOC_FREE(frame);
+		TALLOC_FREE(acl);
 		return NULL;
 	}
 
 	if (sys_acl_set_tag_type(entry, SMB_ACL_USER_OBJ) != 0) {
-		TALLOC_FREE(frame);
+		TALLOC_FREE(acl);
 		return NULL;
 	}
 
 	if (set_acl_entry_perms(entry, mode_user) != 0) {
-		TALLOC_FREE(frame);
+		TALLOC_FREE(acl);
 		return NULL;
 	}
 
 	if (sys_acl_create_entry(&acl, &entry) != 0) {
-		TALLOC_FREE(frame);
+		TALLOC_FREE(acl);
 		return NULL;
 	}
 
 	if (sys_acl_set_tag_type(entry, SMB_ACL_GROUP_OBJ) != 0) {
-		TALLOC_FREE(frame);
+		TALLOC_FREE(acl);
 		return NULL;
 	}
 
 	if (set_acl_entry_perms(entry, mode_group) != 0) {
-		TALLOC_FREE(frame);
+		TALLOC_FREE(acl);
 		return NULL;
 	}
 
 	if (sys_acl_create_entry(&acl, &entry) != 0) {
-		TALLOC_FREE(frame);
+		TALLOC_FREE(acl);
 		return NULL;
 	}
 
 	if (sys_acl_set_tag_type(entry, SMB_ACL_OTHER) != 0) {
-		TALLOC_FREE(frame);
+		TALLOC_FREE(acl);
 		return NULL;
 	}
 
 	if (set_acl_entry_perms(entry, mode_other) != 0) {
-		TALLOC_FREE(frame);
+		TALLOC_FREE(acl);
 		return NULL;
 	}
 
 	if (gid != -1) {
 		if (sys_acl_create_entry(&acl, &entry) != 0) {
-			TALLOC_FREE(frame);
+			TALLOC_FREE(acl);
 			return NULL;
 		}
 
 		if (sys_acl_set_tag_type(entry, SMB_ACL_GROUP) != 0) {
-			TALLOC_FREE(frame);
+			TALLOC_FREE(acl);
 			return NULL;
 		}
 
 		if (sys_acl_set_qualifier(entry, &gid) != 0) {
-			TALLOC_FREE(frame);
+			TALLOC_FREE(acl);
 			return NULL;
 		}
 
 		if (set_acl_entry_perms(entry, mode_group) != 0) {
-			TALLOC_FREE(frame);
+			TALLOC_FREE(acl);
 			return NULL;
 		}
 	}
 
 	if (sys_acl_create_entry(&acl, &entry) != 0) {
-		TALLOC_FREE(frame);
+		TALLOC_FREE(acl);
 		return NULL;
 	}
 
 	if (sys_acl_set_tag_type(entry, SMB_ACL_MASK) != 0) {
-		TALLOC_FREE(frame);
+		TALLOC_FREE(acl);
 		return NULL;
 	}
 
 	if (set_acl_entry_perms(entry, mode) != 0) {
-		TALLOC_FREE(frame);
+		TALLOC_FREE(acl);
 		return NULL;
 	}
+
 	return acl;
 }
 
@@ -376,17 +405,21 @@ static PyObject *py_smbd_set_simple_acl(PyObject *self, PyObject *args, PyObject
 					 &fname, &mode, &gid, &service))
 		return NULL;
 
-	acl = make_simple_acl(gid, mode);
-
 	frame = talloc_stackframe();
 
-	conn = get_conn(frame, service);
+	acl = make_simple_acl(frame, gid, mode);
+	if (acl == NULL) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	conn = get_conn_tos(service, NULL);
 	if (!conn) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
 	ret = set_sys_acl_conn(fname, SMB_ACL_TYPE_ACCESS, acl, conn);
-	TALLOC_FREE(acl);
 
 	if (ret != 0) {
 		TALLOC_FREE(frame);
@@ -421,8 +454,9 @@ static PyObject *py_smbd_chown(PyObject *self, PyObject *args, PyObject *kwargs)
 
 	frame = talloc_stackframe();
 
-	conn = get_conn(frame, service);
+	conn = get_conn_tos(service, NULL);
 	if (!conn) {
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
@@ -479,7 +513,7 @@ static PyObject *py_smbd_unlink(PyObject *self, PyObject *args, PyObject *kwargs
 		return NULL;
 	}
 
-	conn = get_conn(frame, service);
+	conn = get_conn_tos(service, NULL);
 	if (!conn) {
 		TALLOC_FREE(frame);
 		return NULL;
@@ -522,20 +556,26 @@ static PyObject *py_smbd_have_posix_acls(PyObject *self)
  */
 static PyObject *py_smbd_set_nt_acl(PyObject *self, PyObject *args, PyObject *kwargs)
 {
-	const char * const kwnames[] = { "fname", "security_info_sent", "sd", "service", NULL };
+	const char * const kwnames[] = {
+		"fname", "security_info_sent", "sd",
+		"service", "session_info", NULL };
+
 	NTSTATUS status;
 	char *fname, *service = NULL;
 	int security_info_sent;
 	PyObject *py_sd;
 	struct security_descriptor *sd;
+	PyObject *py_session = Py_None;
+	struct auth_session_info *session_info = NULL;
 	connection_struct *conn;
 	TALLOC_CTX *frame;
 
 	frame = talloc_stackframe();
 
-	if (!PyArg_ParseTupleAndKeywords(args, kwargs,
-					 "siO|z", discard_const_p(char *, kwnames),
-					 &fname, &security_info_sent, &py_sd, &service)) {
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "siO|zO",
+				         discard_const_p(char *, kwnames),
+					 &fname, &security_info_sent, &py_sd,
+					 &service, &py_session)) {
 		TALLOC_FREE(frame);
 		return NULL;
 	}
@@ -545,7 +585,24 @@ static PyObject *py_smbd_set_nt_acl(PyObject *self, PyObject *args, PyObject *kw
 		return NULL;
 	}
 
-	conn = get_conn(frame, service);
+	if (py_session != Py_None) {
+		if (!py_check_dcerpc_type(py_session,
+					  "samba.dcerpc.auth",
+					  "session_info")) {
+			TALLOC_FREE(frame);
+			return NULL;
+		}
+		session_info = pytalloc_get_type(py_session,
+						 struct auth_session_info);
+		if (!session_info) {
+			PyErr_Format(PyExc_TypeError,
+				     "Expected auth_session_info for session_info argument got %s",
+				     talloc_get_name(pytalloc_get_ptr(py_session)));
+			return NULL;
+		}
+	}
+
+	conn = get_conn_tos(service, session_info);
 	if (!conn) {
 		TALLOC_FREE(frame);
 		return NULL;
@@ -570,28 +627,28 @@ static PyObject *py_smbd_get_nt_acl(PyObject *self, PyObject *args, PyObject *kw
 	int security_info_wanted;
 	PyObject *py_sd;
 	struct security_descriptor *sd;
-	TALLOC_CTX *tmp_ctx = talloc_new(NULL);
+	TALLOC_CTX *frame = talloc_stackframe();
 	connection_struct *conn;
 	NTSTATUS status;
 
 	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "si|z", discard_const_p(char *, kwnames),
 					 &fname, &security_info_wanted, &service)) {
-		TALLOC_FREE(tmp_ctx);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	conn = get_conn(tmp_ctx, service);
+	conn = get_conn_tos(service, NULL);
 	if (!conn) {
-		TALLOC_FREE(tmp_ctx);
+		TALLOC_FREE(frame);
 		return NULL;
 	}
 
-	status = get_nt_acl_conn(tmp_ctx, fname, conn, security_info_wanted, &sd);
+	status = get_nt_acl_conn(frame, fname, conn, security_info_wanted, &sd);
 	PyErr_NTSTATUS_IS_ERR_RAISE(status);
 
 	py_sd = py_return_ndr_struct("samba.dcerpc.security", "descriptor", sd, sd);
 
-	TALLOC_FREE(tmp_ctx);
+	TALLOC_FREE(frame);
 
 	return py_sd;
 }
@@ -622,7 +679,7 @@ static PyObject *py_smbd_set_sys_acl(PyObject *self, PyObject *args, PyObject *k
 		return NULL;
 	}
 
-	conn = get_conn(frame, service);
+	conn = get_conn_tos(service, NULL);
 	if (!conn) {
 		TALLOC_FREE(frame);
 		return NULL;
@@ -652,43 +709,135 @@ static PyObject *py_smbd_get_sys_acl(PyObject *self, PyObject *args, PyObject *k
 	struct smb_acl_t *acl;
 	int acl_type;
 	TALLOC_CTX *frame = talloc_stackframe();
-	TALLOC_CTX *tmp_ctx = talloc_new(NULL);
 	connection_struct *conn;
 	char *service = NULL;
-	if (!tmp_ctx) {
-		PyErr_NoMemory();
-		return NULL;
-	}
+	struct smb_filename *smb_fname = NULL;
 
 	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "si|z",
 					 discard_const_p(char *, kwnames),
 					 &fname, &acl_type, &service)) {
 		TALLOC_FREE(frame);
-		TALLOC_FREE(tmp_ctx);
 		return NULL;
 	}
 
-	conn = get_conn(frame, service);
+	conn = get_conn_tos(service, NULL);
 	if (!conn) {
 		TALLOC_FREE(frame);
-		TALLOC_FREE(tmp_ctx);
 		return NULL;
 	}
 
-	acl = SMB_VFS_SYS_ACL_GET_FILE( conn, fname, acl_type, tmp_ctx);
+	smb_fname = synthetic_smb_fname_split(frame,
+					fname,
+					lp_posix_pathnames());
+	if (smb_fname == NULL) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+	acl = SMB_VFS_SYS_ACL_GET_FILE( conn, smb_fname, acl_type, frame);
 	if (!acl) {
 		TALLOC_FREE(frame);
-		TALLOC_FREE(tmp_ctx);
 		return PyErr_SetFromErrno(PyExc_OSError);
 	}
 
 	py_acl = py_return_ndr_struct("samba.dcerpc.smb_acl", "t", acl, acl);
 
 	TALLOC_FREE(frame);
-	TALLOC_FREE(tmp_ctx);
 
 	return py_acl;
 }
+
+static PyObject *py_smbd_mkdir(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+	const char * const kwnames[] = { "fname", "service", NULL };
+	char *fname, *service = NULL;
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct connection_struct *conn = NULL;
+	struct smb_filename *smb_fname = NULL;
+
+	if (!PyArg_ParseTupleAndKeywords(args,
+					 kwargs,
+					 "s|z",
+					 discard_const_p(char *,
+							 kwnames),
+					 &fname,
+					 &service)) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	conn = get_conn_tos(service, NULL);
+	if (!conn) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	smb_fname = synthetic_smb_fname(talloc_tos(),
+					fname,
+					NULL,
+					NULL,
+					lp_posix_pathnames() ?
+					SMB_FILENAME_POSIX_PATH : 0);
+
+	if (smb_fname == NULL) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+
+	if (SMB_VFS_MKDIR(conn, smb_fname, 00755) == -1) {
+		DBG_ERR("mkdir error=%d (%s)\n", errno, strerror(errno));
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	TALLOC_FREE(frame);
+	Py_RETURN_NONE;
+}
+
+
+/*
+  Create an empty file
+ */
+static PyObject *py_smbd_create_file(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+	const char * const kwnames[] = { "fname", "service", NULL };
+	char *fname, *service = NULL;
+	TALLOC_CTX *frame = talloc_stackframe();
+	struct connection_struct *conn = NULL;
+	struct files_struct *fsp = NULL;
+	NTSTATUS status;
+
+	if (!PyArg_ParseTupleAndKeywords(args,
+					 kwargs,
+					 "s|z",
+					 discard_const_p(char *,
+							 kwnames),
+					 &fname,
+					 &service)) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	conn = get_conn_tos(service, NULL);
+	if (!conn) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	status = init_files_struct(frame,
+				   fname,
+				   conn,
+				   O_CREAT|O_EXCL|O_RDWR,
+				   &fsp);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("init_files_struct failed: %s\n",
+			nt_errstr(status));
+	}
+
+	TALLOC_FREE(frame);
+	Py_RETURN_NONE;
+}
+
 
 static PyMethodDef py_smbd_methods[] = {
 	{ "have_posix_acls",
@@ -715,17 +864,29 @@ static PyMethodDef py_smbd_methods[] = {
 	{ "unlink",
 		(PyCFunction)py_smbd_unlink, METH_VARARGS|METH_KEYWORDS,
 		NULL },
+	{ "mkdir",
+		(PyCFunction)py_smbd_mkdir, METH_VARARGS|METH_KEYWORDS,
+		NULL },
+	{ "create_file",
+		(PyCFunction)py_smbd_create_file, METH_VARARGS|METH_KEYWORDS,
+		NULL },
 	{ NULL }
 };
 
 void initsmbd(void);
-void initsmbd(void)
+
+static struct PyModuleDef moduledef = {
+    PyModuleDef_HEAD_INIT,
+    .m_name = "smbd",
+    .m_doc = "Python bindings for the smbd file server.",
+    .m_size = -1,
+    .m_methods = py_smbd_methods,
+};
+
+MODULE_INIT_FUNC(smbd)
 {
-	PyObject *m;
+	PyObject *m = NULL;
 
-	m = Py_InitModule3("smbd", py_smbd_methods,
-			   "Python bindings for the smbd file server.");
-	if (m == NULL)
-		return;
-
+	m = PyModule_Create(&moduledef);
+	return m;
 }

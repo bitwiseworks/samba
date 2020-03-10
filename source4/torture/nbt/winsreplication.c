@@ -101,7 +101,7 @@ static bool test_assoc_ctx1(struct torture_context *tctx)
 	if (!torture_nbt_get_name(tctx, &name, &address))
 		return false;
 
-	torture_comment(tctx, "Test if assoc_ctx is only valid on the conection it was created on\n");
+	torture_comment(tctx, "Test if assoc_ctx is only valid on the connection it was created on\n");
 
 	wrepl_socket1 = wrepl_socket_init(tctx, tctx->ev);
 	wrepl_socket2 = wrepl_socket_init(tctx, tctx->ev);
@@ -125,7 +125,7 @@ static bool test_assoc_ctx1(struct torture_context *tctx)
 
 	torture_comment(tctx, "association context (conn2): 0x%x\n", associate2.out.assoc_ctx);
 
-	torture_comment(tctx, "Send a replication table query, with assoc 1 (conn2), the anwser should be on conn1\n");
+	torture_comment(tctx, "Send a replication table query, with assoc 1 (conn2), the answer should be on conn1\n");
 	ZERO_STRUCT(packet);
 	packet.opcode                      = WREPL_OPCODE_BITS;
 	packet.assoc_ctx                   = associate1.out.assoc_ctx;

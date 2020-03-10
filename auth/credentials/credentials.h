@@ -113,7 +113,7 @@ void cli_credentials_set_machine_account_pending(struct cli_credentials *cred,
 						 struct loadparm_context *lp_ctx);
 void cli_credentials_set_conf(struct cli_credentials *cred, 
 			      struct loadparm_context *lp_ctx);
-const char *cli_credentials_get_principal(struct cli_credentials *cred, TALLOC_CTX *mem_ctx);
+char *cli_credentials_get_principal(struct cli_credentials *cred, TALLOC_CTX *mem_ctx);
 int cli_credentials_get_server_gss_creds(struct cli_credentials *cred, 
 					 struct loadparm_context *lp_ctx,
 					 struct gssapi_creds_container **_gcc);
@@ -158,8 +158,9 @@ void cli_credentials_set_secure_channel_type(struct cli_credentials *cred,
 				     enum netr_SchannelType secure_channel_type);
 void cli_credentials_set_password_last_changed_time(struct cli_credentials *cred,
 							     time_t last_change_time);
-void cli_credentials_set_netlogon_creds(struct cli_credentials *cred, 
-					struct netlogon_creds_CredentialState *netlogon_creds);
+void cli_credentials_set_netlogon_creds(
+	struct cli_credentials *cred,
+	const struct netlogon_creds_CredentialState *netlogon_creds);
 NTSTATUS cli_credentials_set_krb5_context(struct cli_credentials *cred, 
 					  struct smb_krb5_context *smb_krb5_context);
 NTSTATUS cli_credentials_set_stored_principal(struct cli_credentials *cred,
@@ -189,7 +190,7 @@ bool cli_credentials_set_bind_dn(struct cli_credentials *cred,
 				 const char *bind_dn);
 const char *cli_credentials_get_bind_dn(struct cli_credentials *cred);
 bool cli_credentials_parse_file(struct cli_credentials *cred, const char *file, enum credentials_obtained obtained);
-const char *cli_credentials_get_unparsed_name(struct cli_credentials *credentials, TALLOC_CTX *mem_ctx);
+char *cli_credentials_get_unparsed_name(struct cli_credentials *credentials, TALLOC_CTX *mem_ctx);
 bool cli_credentials_set_password_callback(struct cli_credentials *cred,
 					   const char *(*password_cb) (struct cli_credentials *));
 enum netr_SchannelType cli_credentials_get_secure_channel_type(struct cli_credentials *cred);
@@ -257,7 +258,7 @@ bool cli_credentials_set_username_callback(struct cli_credentials *cred,
  * @retval The username set on this context.
  * @note Return value will never be NULL except by programmer error.
  */
-const char *cli_credentials_get_principal_and_obtained(struct cli_credentials *cred, TALLOC_CTX *mem_ctx, enum credentials_obtained *obtained);
+char *cli_credentials_get_principal_and_obtained(struct cli_credentials *cred, TALLOC_CTX *mem_ctx, enum credentials_obtained *obtained);
 bool cli_credentials_set_principal(struct cli_credentials *cred, 
 				   const char *val, 
 				   enum credentials_obtained obtained);
@@ -292,5 +293,9 @@ void *_cli_credentials_callback_data(struct cli_credentials *cred);
  * Return attached NETLOGON credentials 
  */
 struct netlogon_creds_CredentialState *cli_credentials_get_netlogon_creds(struct cli_credentials *cred);
+
+NTSTATUS netlogon_creds_session_encrypt(
+	struct netlogon_creds_CredentialState *state,
+	DATA_BLOB data);
 
 #endif /* __CREDENTIALS_H__ */

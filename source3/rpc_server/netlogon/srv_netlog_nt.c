@@ -47,6 +47,7 @@
 #include "messages.h"
 #include "../lib/tsocket/tsocket.h"
 #include "lib/param/param.h"
+#include "libsmb/dsgetdcname.h"
 
 extern userdom_struct current_user_info;
 
@@ -424,6 +425,7 @@ NTSTATUS _netr_NetrEnumerateTrustedDomains(struct pipes_struct *p,
 	status = rpcint_binding_handle(p->mem_ctx,
 				       &ndr_table_lsarpc,
 				       p->remote_address,
+				       p->local_address,
 				       p->session_info,
 				       p->msg_ctx,
 				       &h);
@@ -704,6 +706,7 @@ static NTSTATUS get_md4pw(struct samr_Password *md4pw, const char *mach_acct,
 	status = rpcint_binding_handle(mem_ctx,
 				       &ndr_table_samr,
 				       local,
+				       NULL,
 				       session_info,
 				       msg_ctx,
 				       &h);
@@ -1197,6 +1200,7 @@ static NTSTATUS netr_set_machine_account_password(TALLOC_CTX *mem_ctx,
 	status = rpcint_binding_handle(mem_ctx,
 				       &ndr_table_samr,
 				       local,
+				       NULL,
 				       session_info,
 				       msg_ctx,
 				       &h);
@@ -1559,7 +1563,7 @@ static NTSTATUS _netr_LogonSamLogon_base(struct pipes_struct *p,
 			return NT_STATUS_INTERNAL_ERROR;
 	}
 
-	*r->out.authoritative = true; /* authoritative response */
+	*r->out.authoritative = 1; /* authoritative response */
 
 	switch (r->in.validation_level) {
 	case 2:
@@ -1629,17 +1633,23 @@ static NTSTATUS _netr_LogonSamLogon_base(struct pipes_struct *p,
 					      r->in.logon_level,
 					      logon);
 
+	status = make_auth3_context_for_netlogon(talloc_tos(), &auth_context);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
 	switch (r->in.logon_level) {
 	case NetlogonNetworkInformation:
 	case NetlogonNetworkTransitiveInformation:
 	{
 		const char *wksname = nt_workstation;
 		const char *workgroup = lp_workgroup();
+		bool ok;
 
-		status = make_auth_context_fixed(talloc_tos(), &auth_context,
-						 logon->network->challenge);
-		if (!NT_STATUS_IS_OK(status)) {
-			return status;
+		ok = auth3_context_set_challenge(
+			auth_context, logon->network->challenge, "fixed");
+		if (!ok) {
+			return NT_STATUS_NO_MEMORY;
 		}
 
 		/* For a network logon, the workstation name comes in with two
@@ -1654,6 +1664,7 @@ static NTSTATUS _netr_LogonSamLogon_base(struct pipes_struct *p,
 						     nt_username, nt_domain,
 						     wksname,
 						     p->remote_address,
+						     p->local_address,
 						     logon->network->identity_info.parameter_control,
 						     logon->network->lm.data,
 						     logon->network->lm.length,
@@ -1700,11 +1711,6 @@ static NTSTATUS _netr_LogonSamLogon_base(struct pipes_struct *p,
 		DEBUG(100,("decrypt of nt owf password:"));
 		dump_data(100, logon->password->ntpassword.hash, 16);
 #endif
-		status = make_auth_context_subsystem(talloc_tos(),
-						     &auth_context);
-		if (!NT_STATUS_IS_OK(status)) {
-			return status;
-		}
 
 		auth_get_ntlm_challenge(auth_context, chal);
 
@@ -1713,6 +1719,7 @@ static NTSTATUS _netr_LogonSamLogon_base(struct pipes_struct *p,
 							 nt_username, nt_domain,
 							 nt_workstation,
 							 p->remote_address,
+							 p->local_address,
 							 logon->password->identity_info.parameter_control,
 							 chal,
 							 logon->password->lmpassword.hash,
@@ -1730,7 +1737,8 @@ static NTSTATUS _netr_LogonSamLogon_base(struct pipes_struct *p,
 		status = auth_check_ntlm_password(p->mem_ctx,
 						  auth_context,
 						  user_info,
-						  &server_info);
+						  &server_info,
+						  r->out.authoritative);
 	}
 
 	TALLOC_FREE(auth_context);
@@ -1742,15 +1750,6 @@ static NTSTATUS _netr_LogonSamLogon_base(struct pipes_struct *p,
 	/* Check account and password */
 
 	if (!NT_STATUS_IS_OK(status)) {
-		/* If we don't know what this domain is, we need to
-		   indicate that we are not authoritative.  This
-		   allows the client to decide if it needs to try
-		   a local user.  Fix by jpjanosi@us.ibm.com, #2976 */
-                if ( NT_STATUS_EQUAL(status, NT_STATUS_NO_SUCH_USER)
-		     && !strequal(nt_domain, get_global_sam_name())
-		     && !is_trusted_domain(nt_domain) )
-			*r->out.authoritative = false; /* We are not authoritative */
-
 		TALLOC_FREE(server_info);
 		return status;
 	}
@@ -2279,11 +2278,11 @@ NTSTATUS _netr_ServerPasswordGet(struct pipes_struct *p,
 /****************************************************************
 ****************************************************************/
 
-WERROR _netr_NETRLOGONSENDTOSAM(struct pipes_struct *p,
-				struct netr_NETRLOGONSENDTOSAM *r)
+NTSTATUS _netr_NetrLogonSendToSam(struct pipes_struct *p,
+				struct netr_NetrLogonSendToSam *r)
 {
 	p->fault_state = DCERPC_FAULT_OP_RNG_ERROR;
-	return WERR_NOT_SUPPORTED;
+	return NT_STATUS_NOT_IMPLEMENTED;
 }
 
 /****************************************************************

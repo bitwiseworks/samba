@@ -19,6 +19,7 @@
 import uuid
 import ldb
 from ldb import LdbError
+from samba import werror
 from samba.ndr import ndr_unpack
 from samba.dcerpc import misc, dnsp
 from samba.dcerpc.dnsp import DNS_TYPE_NS, DNS_TYPE_A, DNS_TYPE_AAAA, \
@@ -53,7 +54,8 @@ def remove_sysvol_references(samdb, logger, dc_name):
         try:
             logger.info("Removing Sysvol reference: %s" % dn)
             samdb.delete(dn)
-        except ldb.LdbError as (enum, estr):
+        except ldb.LdbError as e:
+            (enum, estr) = e.args
             if enum == ldb.ERR_NO_SUCH_OBJECT:
                 pass
             else:
@@ -69,21 +71,22 @@ def remove_sysvol_references(samdb, logger, dc_name):
             raise DemoteException("Failed constructing DN %s by adding base" % \
                                   (dn, samdb.get_default_basedn()))
         if dn.add_child("CN=X") == False:
-            raise DemoteException("Failed constructing DN %s by adding child %s"\
-                                  % (dn, rdn))
+            raise DemoteException("Failed constructing DN %s by adding child "
+                                  "CN=X (soon to be CN=%s)" % (dn, dc_name))
         dn.set_component(0, "CN", dc_name)
 
         try:
             logger.info("Removing Sysvol reference: %s" % dn)
             samdb.delete(dn)
-        except ldb.LdbError as (enum, estr):
+        except ldb.LdbError as e1:
+            (enum, estr) = e1.args
             if enum == ldb.ERR_NO_SUCH_OBJECT:
                 pass
             else:
                 raise
 
 
-def remove_dns_references(samdb, logger, dnsHostName):
+def remove_dns_references(samdb, logger, dnsHostName, ignore_no_name=False):
 
     # Check we are using in-database DNS
     zones = samdb.search(base="", scope=ldb.SCOPE_SUBTREE,
@@ -96,10 +99,16 @@ def remove_dns_references(samdb, logger, dnsHostName):
     dnsHostNameUpper = dnsHostName.upper()
 
     try:
-        primary_recs = samdb.dns_lookup(dnsHostName)
-    except RuntimeError as (enum, estr):
-        if enum == 0x000025F2: #WERR_DNS_ERROR_NAME_DOES_NOT_EXIST
-              return
+        (dn, primary_recs) = samdb.dns_lookup(dnsHostName)
+    except RuntimeError as e4:
+        (enum, estr) = e4.args
+        if (enum == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST or
+            enum == werror.WERR_DNS_ERROR_RCODE_NAME_ERROR):
+            if ignore_no_name:
+                remove_hanging_dns_references(samdb, logger,
+                                              dnsHostNameUpper,
+                                              zones)
+            return
         raise DemoteException("lookup of %s failed: %s" % (dnsHostName, estr))
     samdb.dns_replace(dnsHostName, [])
 
@@ -139,9 +148,10 @@ def remove_dns_references(samdb, logger, dnsHostName):
     for a_name in a_names_to_remove_from:
         try:
             logger.debug("checking for DNS records to remove on %s" % a_name)
-            a_recs = samdb.dns_lookup(a_name)
-        except RuntimeError as (enum, estr):
-            if enum == 0x000025F2: #WERR_DNS_ERROR_NAME_DOES_NOT_EXIST
+            (a_rec_dn, a_recs) = samdb.dns_lookup(a_name)
+        except RuntimeError as e2:
+            (enum, estr) = e2.args
+            if enum == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST:
                 return
             raise DemoteException("lookup of %s failed: %s" % (a_name, estr))
 
@@ -152,6 +162,11 @@ def remove_dns_references(samdb, logger, dnsHostName):
             logger.info("updating %s keeping %d values, removing %s values" % \
                 (a_name, len(a_recs), orig_num_recs - len(a_recs)))
             samdb.dns_replace(a_name, a_recs)
+
+    remove_hanging_dns_references(samdb, logger, dnsHostNameUpper, zones)
+
+
+def remove_hanging_dns_references(samdb, logger, dnsHostNameUpper, zones):
 
     # Find all the CNAME, NS, PTR and SRV records that point at the
     # name we are removing
@@ -193,6 +208,7 @@ def remove_dns_references(samdb, logger, dnsHostName):
                 # has been done in the list comprehension above
                 samdb.dns_replace_by_dn(record.dn, values)
 
+
 def offline_remove_server(samdb, logger,
                           server_dn,
                           remove_computer_obj=False,
@@ -215,7 +231,7 @@ def offline_remove_server(samdb, logger,
     dc_name = str(msgs[0]["cn"][0])
 
     try:
-        computer_dn = ldb.Dn(samdb, msgs[0]["serverReference"][0])
+        computer_dn = ldb.Dn(samdb, msgs[0]["serverReference"][0].decode('utf8'))
     except KeyError:
         computer_dn = None
 
@@ -225,8 +241,9 @@ def offline_remove_server(samdb, logger,
         dnsHostName = None
 
     if remove_server_obj:
-        # Remove the server DN
-        samdb.delete(server_dn)
+        # Remove the server DN (do a tree-delete as it could still have a
+        # 'DNS Settings' child object if it's a Windows DC)
+        samdb.delete(server_dn, ["tree_delete:0"])
 
     if computer_dn is not None:
         computer_msgs = samdb.search(base=computer_dn,
@@ -280,7 +297,7 @@ def offline_remove_ntds_dc(samdb,
     res = samdb.search("",
                        scope=ldb.SCOPE_BASE, attrs=["dsServiceName"])
     assert len(res) == 1
-    my_serviceName = ldb.Dn(samdb, res[0]["dsServiceName"][0])
+    my_serviceName = ldb.Dn(samdb, res[0]["dsServiceName"][0].decode('utf8'))
     server_dn = ntds_dn.parent()
 
     if my_serviceName == ntds_dn:
@@ -289,7 +306,8 @@ def offline_remove_ntds_dc(samdb,
     try:
         msgs = samdb.search(base=ntds_dn, expression="objectClass=ntdsDSA",
                         attrs=["objectGUID"], scope=ldb.SCOPE_BASE)
-    except LdbError as (enum, estr):
+    except LdbError as e5:
+        (enum, estr) = e5.args
         if enum == ldb.ERR_NO_SUCH_OBJECT:
               raise DemoteException("Given DN %s doesn't exist" % ntds_dn)
         else:
@@ -338,7 +356,8 @@ def offline_remove_ntds_dc(samdb,
     try:
         logger.info("Removing nTDSDSA: %s (and any children)" % ntds_dn)
         samdb.delete(ntds_dn, ["tree_delete:0"])
-    except LdbError as (enum, estr):
+    except LdbError as e6:
+        (enum, estr) = e6.args
         raise DemoteException("Failed to remove the DCs NTDS DSA object: %s"
                               % estr)
 
@@ -370,12 +389,14 @@ def remove_dc(samdb, logger, dc_name):
                                        expression="(&(objectClass=server)"
                                        "(cn=%s))"
                                     % ldb.binary_encode(dc_name))
-        except LdbError as (enum, estr):
+        except LdbError as e3:
+            (enum, estr) = e3.args
             raise DemoteException("Failure checking if %s is an server "
                                   "object in %s: "
                                   % (dc_name, samdb.domain_dns_name()), estr)
 
         if (len(server_msgs) == 0):
+            samdb.transaction_cancel()
             raise DemoteException("%s is not an AD DC in %s"
                                   % (dc_name, samdb.domain_dns_name()))
         server_dn = server_msgs[0].dn
@@ -388,11 +409,13 @@ def remove_dc(samdb, logger, dc_name):
     try:
         ntds_msgs = samdb.search(base=ntds_dn, attrs=[], scope=ldb.SCOPE_BASE,
                                  expression="(objectClass=ntdsdsa)")
-    except LdbError as (enum, estr):
+    except LdbError as e7:
+        (enum, estr) = e7.args
         if enum == ldb.ERR_NO_SUCH_OBJECT:
             ntds_msgs = []
             pass
         else:
+            samdb.transaction_cancel()
             raise DemoteException("Failure checking if %s is an NTDS DSA in %s: "
                                   % (ntds_dn, samdb.domain_dns_name()), estr)
 
@@ -400,6 +423,7 @@ def remove_dc(samdb, logger, dc_name):
     # object, just remove the server object located above
     if (len(ntds_msgs) == 0):
         if server_dn is None:
+            samdb.transaction_cancel()
             raise DemoteException("%s is not an AD DC in %s"
                                   % (dc_name, samdb.domain_dns_name()))
 

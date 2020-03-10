@@ -28,7 +28,7 @@ struct dsdb_extended_replicated_object;
 struct dsdb_extended_replicated_objects;
 struct loadparm_context;
 struct tevent_context;
-
+struct tsocket_address;
 struct dsdb_trust_routing_table;
 
 #include "librpc/gen_ndr/security.h"
@@ -40,6 +40,7 @@ struct dsdb_trust_routing_table;
 #include "dsdb/schema/schema.h"
 #include "dsdb/samdb/samdb_proto.h"
 #include "dsdb/common/dsdb_dn.h"
+#include "dsdb/common/util_links.h"
 #include "dsdb/common/proto.h"
 #include "../libds/common/flags.h"
 
@@ -63,7 +64,8 @@ struct dsdb_control_current_partition {
 #define DSDB_REPL_FLAG_PARTIAL_REPLICA     2
 #define DSDB_REPL_FLAG_ADD_NCNAME	   4
 #define DSDB_REPL_FLAG_EXPECT_NO_SECRETS   8
-
+#define DSDB_REPL_FLAG_OBJECT_SUBSET       16
+#define DSDB_REPL_FLAG_TARGETS_UPTODATE    32
 
 #define DSDB_CONTROL_REPLICATED_UPDATE_OID "1.3.6.1.4.1.7165.4.3.3"
 
@@ -74,18 +76,20 @@ struct dsdb_control_current_partition {
 
 #define DSDB_CONTROL_PASSWORD_CHANGE_STATUS_OID "1.3.6.1.4.1.7165.4.3.8"
 
+struct dsdb_user_pwd_settings {
+	uint32_t pwdProperties;
+	uint32_t pwdHistoryLength;
+	int64_t maxPwdAge;
+	int64_t minPwdAge;
+	uint32_t minPwdLength;
+	bool store_cleartext;
+	const char *netbios_domain;
+	const char *dns_domain;
+	const char *realm;
+};
+
 struct dsdb_control_password_change_status {
-	struct {
-		uint32_t pwdProperties;
-		uint32_t pwdHistoryLength;
-		int64_t maxPwdAge;
-		int64_t minPwdAge;
-		uint32_t minPwdLength;
-		bool store_cleartext;
-		const char *netbios_domain;
-		const char *dns_domain;
-		const char *realm;
-	} domain_data;
+	struct dsdb_user_pwd_settings domain_data;
 	enum samPwdChangeReason reject_reason;
 };
 
@@ -124,6 +128,12 @@ struct dsdb_control_password_change {
 
 /* passed when dbcheck wants to modify a read only replica (very special case) */
 #define DSDB_CONTROL_DBCHECK_MODIFY_RO_REPLICA "1.3.6.1.4.1.7165.4.3.19.1"
+
+/* passed by dbcheck to fix duplicate linked attributes (bug #13095) */
+#define DSDB_CONTROL_DBCHECK_FIX_DUPLICATE_LINKS "1.3.6.1.4.1.7165.4.3.19.2"
+
+/* passed by dbcheck to fix the DN strong of a one-way-link (bug #13495) */
+#define DSDB_CONTROL_DBCHECK_FIX_LINK_DN_NAME "1.3.6.1.4.1.7165.4.3.19.3"
 
 /* passed when importing plain text password on upgrades */
 #define DSDB_CONTROL_PASSWORD_BYPASS_LAST_SET_OID "1.3.6.1.4.1.7165.4.3.20"
@@ -183,12 +193,29 @@ struct dsdb_control_password_user_account_control {
 #define DSDB_CONTROL_REPLMD_VANISH_LINKS "1.3.6.1.4.1.7165.4.3.29"
 
 /*
+ * lockoutTime is a replicated attribute, but must be modified before
+ * connectivity occurs to allow password lockouts.
+ */
+#define DSDB_CONTROL_FORCE_RODC_LOCAL_CHANGE "1.3.6.1.4.1.7165.4.3.31"
+
+#define DSDB_CONTROL_INVALID_NOT_IMPLEMENTED "1.3.6.1.4.1.7165.4.3.32"
+
+/*
  * Used to pass "user password change" vs "password reset" from the ACL to the
  * password_hash module, ensuring both modules treat the request identical.
  */
 #define DSDB_CONTROL_PASSWORD_ACL_VALIDATION_OID "1.3.6.1.4.1.7165.4.3.33"
 struct dsdb_control_password_acl_validation {
 	bool pwd_reset;
+};
+
+/*
+ * Used to pass the current transaction identifier from the audit_log
+ * module to group membership auditing module
+ */
+#define DSDB_CONTROL_TRANSACTION_IDENTIFIER_OID "1.3.6.1.4.1.7165.4.3.34"
+struct dsdb_control_transaction_identifier {
+	struct GUID transaction_guid;
 };
 
 #define DSDB_EXTENDED_REPLICATED_OBJECTS_OID "1.3.6.1.4.1.7165.4.4.1"
@@ -325,4 +352,18 @@ struct dsdb_extended_sec_desc_propagation_op {
 
 #define SAMBA_COMPATIBLE_FEATURES_ATTR "compatibleFeatures"
 #define SAMBA_REQUIRED_FEATURES_ATTR "requiredFeatures"
+#define SAMBA_FEATURES_SUPPORTED_FLAG "@SAMBA_FEATURES_SUPPORTED"
+
+#define SAMBA_SORTED_LINKS_FEATURE "sortedLinks"
+#define SAMBA_ENCRYPTED_SECRETS_FEATURE "encryptedSecrets"
+/*
+ * lmdb level one feature is an experimental release with basic support
+ * for lmdb database files, instead of tdb.
+ * - Keys are limited to 511 bytes long so GUID indexes are required
+ * - Currently only the:
+ *     partition data files
+ *   are in lmdb format.
+ */
+#define SAMBA_LMDB_LEVEL_ONE_FEATURE "lmdbLevelOne"
+
 #endif /* __SAMDB_H__ */

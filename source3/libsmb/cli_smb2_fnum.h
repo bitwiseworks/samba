@@ -54,6 +54,13 @@ struct tevent_req *cli_smb2_close_fnum_send(TALLOC_CTX *mem_ctx,
 					    uint16_t fnum);
 NTSTATUS cli_smb2_close_fnum_recv(struct tevent_req *req);
 NTSTATUS cli_smb2_close_fnum(struct cli_state *cli, uint16_t fnum);
+struct tevent_req *cli_smb2_delete_on_close_send(TALLOC_CTX *mem_ctx,
+					struct tevent_context *ev,
+					struct cli_state *cli,
+					uint16_t fnum,
+					bool flag);
+NTSTATUS cli_smb2_delete_on_close_recv(struct tevent_req *req);
+NTSTATUS cli_smb2_delete_on_close(struct cli_state *cli, uint16_t fnum, bool flag);
 NTSTATUS cli_smb2_mkdir(struct cli_state *cli, const char *dirname);
 NTSTATUS cli_smb2_rmdir(struct cli_state *cli, const char *dirname);
 NTSTATUS cli_smb2_unlink(struct cli_state *cli,const char *fname);
@@ -72,6 +79,8 @@ NTSTATUS cli_smb2_qpathinfo_basic(struct cli_state *cli,
 NTSTATUS cli_smb2_qpathinfo_alt_name(struct cli_state *cli,
 			const char *name,
 			fstring alt_name);
+NTSTATUS cli_smb2_chkpath(struct cli_state *cli,
+			const char *name);
 NTSTATUS cli_smb2_qfileinfo_basic(struct cli_state *cli,
 			uint16_t fnum,
 			uint16_t *mode,
@@ -148,8 +157,9 @@ NTSTATUS cli_smb2_set_security_descriptor(struct cli_state *cli,
 			uint32_t sec_info,
 			const struct security_descriptor *sd);
 NTSTATUS cli_smb2_rename(struct cli_state *cli,
-			const char *fname_src,
-			const char *fname_dst);
+			 const char *fname_src,
+			 const char *fname_dst,
+			 bool replace);
 NTSTATUS cli_smb2_set_ea_fnum(struct cli_state *cli,
 			uint16_t fnum,
 			const char *ea_name,
@@ -227,4 +237,26 @@ NTSTATUS cli_smb2_shadow_copy_data(TALLOC_CTX *mem_ctx,
 NTSTATUS cli_smb2_ftruncate(struct cli_state *cli,
 			uint16_t fnum,
 			uint64_t newsize);
+NTSTATUS cli_smb2_notify(struct cli_state *cli, uint16_t fnum,
+			 uint32_t buffer_size, uint32_t completion_filter,
+			 bool recursive, TALLOC_CTX *mem_ctx,
+			 struct notify_change **pchanges,
+			 uint32_t *pnum_changes);
+struct tevent_req *cli_smb2_set_reparse_point_fnum_send(
+			TALLOC_CTX *mem_ctx,
+			struct tevent_context *ev,
+			struct cli_state *cli,
+			uint16_t fnum,
+			DATA_BLOB in_buf);
+NTSTATUS cli_smb2_set_reparse_point_fnum_recv(struct tevent_req *req);
+
+struct tevent_req *cli_smb2_get_reparse_point_fnum_send(
+			TALLOC_CTX *mem_ctx,
+			struct tevent_context *ev,
+			struct cli_state *cli,
+			uint16_t fnum);
+NTSTATUS cli_smb2_get_reparse_point_fnum_recv(struct tevent_req *req,
+			TALLOC_CTX *mem_ctx,
+			DATA_BLOB *output);
+
 #endif /* __SMB2CLI_FNUM_H__ */

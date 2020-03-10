@@ -107,6 +107,10 @@ bool dns_records_match(struct dnsp_DnssrvRpcRecord *rec1,
 	return false;
 }
 
+/*
+ * Lookup a DNS record, performing an exact match.
+ * i.e. DNS wild card records are not considered.
+ */
 WERROR dns_lookup_records(struct dns_server *dns,
 			  TALLOC_CTX *mem_ctx,
 			  struct ldb_dn *dn,
@@ -115,6 +119,20 @@ WERROR dns_lookup_records(struct dns_server *dns,
 {
 	return dns_common_lookup(dns->samdb, mem_ctx, dn,
 				 records, rec_count, NULL);
+}
+
+/*
+ * Lookup a DNS record, will match DNS wild card records if an exact match
+ * is not found.
+ */
+WERROR dns_lookup_records_wildcard(struct dns_server *dns,
+			  TALLOC_CTX *mem_ctx,
+			  struct ldb_dn *dn,
+			  struct dnsp_DnssrvRpcRecord **records,
+			  uint16_t *rec_count)
+{
+	return dns_common_wildcard_lookup(dns->samdb, mem_ctx, dn,
+				 records, rec_count);
 }
 
 WERROR dns_replace_records(struct dns_server *dns,
@@ -183,23 +201,3 @@ WERROR dns_name2dn(struct dns_server *dns,
 				  mem_ctx, name, dn);
 }
 
-WERROR dns_generate_options(struct dns_server *dns,
-			    TALLOC_CTX *mem_ctx,
-			    struct dns_res_rec **options)
-{
-	struct dns_res_rec *o;
-
-	o = talloc_zero(mem_ctx, struct dns_res_rec);
-	if (o == NULL) {
-		return WERR_NOT_ENOUGH_MEMORY;
-	}
-	o->name = NULL;
-	o->rr_type = DNS_QTYPE_OPT;
-	/* This is ugly, but RFC2671 wants the payload size in this field */
-	o->rr_class = (enum dns_qclass) dns->max_payload;
-	o->ttl = 0;
-	o->length = 0;
-
-	*options = o;
-	return WERR_OK;
-}

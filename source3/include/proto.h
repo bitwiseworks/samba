@@ -158,10 +158,6 @@ int smbrun_no_sanitize(const char *cmd, int *outfd, char * const *env);
 int smbrun(const char *cmd, int *outfd, char * const *env);
 int smbrunsecret(const char *cmd, const char *secret);
 
-/* The following definitions come from lib/sock_exec.c  */
-
-int sock_exec(const char *prog);
-
 /* The following definitions come from lib/substitute.c  */
 
 void free_local_machine_name(void);
@@ -243,14 +239,6 @@ void sys_srandom(unsigned int seed);
 int groups_max(void);
 int sys_getgroups(int setlen, gid_t *gidset);
 int sys_setgroups(gid_t UNUSED(primary_gid), int setlen, gid_t *gidset);
-ssize_t sys_getxattr (const char *path, const char *name, void *value, size_t size);
-ssize_t sys_fgetxattr (int filedes, const char *name, void *value, size_t size);
-ssize_t sys_listxattr (const char *path, char *list, size_t size);
-ssize_t sys_flistxattr (int filedes, char *list, size_t size);
-int sys_removexattr (const char *path, const char *name);
-int sys_fremovexattr (int filedes, const char *name);
-int sys_setxattr (const char *path, const char *name, const void *value, size_t size, int flags);
-int sys_fsetxattr (int filedes, const char *name, const void *value, size_t size, int flags);
 uint32_t unix_dev_major(SMB_DEV_T dev);
 uint32_t unix_dev_minor(SMB_DEV_T dev);
 char *sys_realpath(const char *path);
@@ -363,14 +351,11 @@ char *get_mydnsdomname(TALLOC_CTX *ctx);
 char *automount_lookup(TALLOC_CTX *ctx, const char *user_name);
 char *automount_lookup(TALLOC_CTX *ctx, const char *user_name);
 bool process_exists(const struct server_id pid);
-bool processes_exist(const struct server_id *pids, int num_pids,
-		     bool *results);
 const char *uidtoname(uid_t uid);
 char *gidtoname(gid_t gid);
 uid_t nametouid(const char *name);
 gid_t nametogid(const char *name);
 void smb_panic_s3(const char *why);
-void log_stack_trace(void);
 const char *readdirname(DIR *p);
 bool is_in_path(const char *name, name_compare_entry *namelist, bool case_sensitive);
 void set_namearray(name_compare_entry **ppname_array, const char *namelist);
@@ -433,7 +418,6 @@ bool map_open_params_to_ntcreate(const char *smb_base_fname,
 				 uint32_t *pprivate_flags);
 struct security_unix_token *copy_unix_token(TALLOC_CTX *ctx, const struct security_unix_token *tok);
 bool dir_check_ftype(uint32_t mode, uint32_t dirtype);
-void init_modules(void);
 
 /* The following definitions come from lib/util_builtin.c  */
 
@@ -580,13 +564,6 @@ int create_pipe_sock(const char *socket_dir,
 int create_tcpip_socket(const struct sockaddr_storage *ifss, uint16_t *port);
 const char *get_mydnsfullname(void);
 bool is_myname_or_ipaddr(const char *s);
-struct tevent_req *getaddrinfo_send(TALLOC_CTX *mem_ctx,
-				    struct tevent_context *ev,
-				    struct fncall_context *ctx,
-				    const char *node,
-				    const char *service,
-				    const struct addrinfo *hints);
-int getaddrinfo_recv(struct tevent_req *req, struct addrinfo **res);
 int poll_one_fd(int fd, int events, int timeout, int *revents);
 int poll_intr_one_fd(int fd, int events, int timeout, int *revents);
 
@@ -698,18 +675,6 @@ NTSTATUS check_negative_conn_cache( const char *domain, const char *server);
 void add_failed_connection_entry(const char *domain, const char *server, NTSTATUS result) ;
 void flush_negative_conn_cache_for_domain(const char *domain);
 
-/* The following definitions come from libsmb/dsgetdcname.c  */
-
-struct netr_DsRGetDCNameInfo;
-
-NTSTATUS dsgetdcname(TALLOC_CTX *mem_ctx,
-		     struct messaging_context *msg_ctx,
-		     const char *domain_name,
-		     const struct GUID *domain_guid,
-		     const char *site_name,
-		     uint32_t flags,
-		     struct netr_DsRGetDCNameInfo **info);
-
 /* The following definitions come from libsmb/errormap.c  */
 
 NTSTATUS dos_to_ntstatus(uint8_t eclass, uint32_t ecode);
@@ -735,96 +700,6 @@ bool namecache_status_fetch(const char *keyname,
 				const struct sockaddr_storage *keyip,
 				char *srvname_out);
 
-/* The following definitions come from libsmb/namequery.c  */
-
-bool saf_store( const char *domain, const char *servername );
-bool saf_join_store( const char *domain, const char *servername );
-bool saf_delete( const char *domain );
-char *saf_fetch(TALLOC_CTX *mem_ctx, const char *domain );
-struct tevent_req *node_status_query_send(TALLOC_CTX *mem_ctx,
-					  struct tevent_context *ev,
-					  struct nmb_name *name,
-					  const struct sockaddr_storage *addr);
-NTSTATUS node_status_query_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
-				struct node_status **pnode_status,
-				int *pnum_names,
-				struct node_status_extra *extra);
-NTSTATUS node_status_query(TALLOC_CTX *mem_ctx, struct nmb_name *name,
-			   const struct sockaddr_storage *addr,
-			   struct node_status **pnode_status,
-			   int *pnum_names,
-			   struct node_status_extra *extra);
-bool name_status_find(const char *q_name,
-			int q_type,
-			int type,
-			const struct sockaddr_storage *to_ss,
-			fstring name);
-int remove_duplicate_addrs2(struct ip_service *iplist, int count );
-struct tevent_req *name_query_send(TALLOC_CTX *mem_ctx,
-				   struct tevent_context *ev,
-				   const char *name, int name_type,
-				   bool bcast, bool recurse,
-				   const struct sockaddr_storage *addr);
-NTSTATUS name_query_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
-			 struct sockaddr_storage **addrs, int *num_addrs,
-			 uint8_t *flags);
-NTSTATUS name_query(const char *name, int name_type,
-		    bool bcast, bool recurse,
-		    const struct sockaddr_storage *to_ss,
-		    TALLOC_CTX *mem_ctx,
-		    struct sockaddr_storage **addrs,
-		    int *num_addrs, uint8_t *flags);
-struct tevent_req *name_resolve_bcast_send(TALLOC_CTX *mem_ctx,
-					   struct tevent_context *ev,
-					   const char *name,
-					   int name_type);
-NTSTATUS name_resolve_bcast_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
-				 struct sockaddr_storage **addrs,
-				 int *num_addrs);
-NTSTATUS name_resolve_bcast(const char *name,
-			int name_type,
-			TALLOC_CTX *mem_ctx,
-			struct sockaddr_storage **return_iplist,
-			int *return_count);
-struct tevent_req *resolve_wins_send(TALLOC_CTX *mem_ctx,
-				     struct tevent_context *ev,
-				     const char *name,
-				     int name_type);
-NTSTATUS resolve_wins_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
-			   struct sockaddr_storage **addrs,
-			   int *num_addrs, uint8_t *flags);
-NTSTATUS resolve_wins(const char *name,
-		int name_type,
-		TALLOC_CTX *mem_ctx,
-		struct sockaddr_storage **return_iplist,
-		int *return_count);
-NTSTATUS internal_resolve_name(const char *name,
-			        int name_type,
-				const char *sitename,
-				struct ip_service **return_iplist,
-				int *return_count,
-				const char **resolve_order);
-bool resolve_name(const char *name,
-		struct sockaddr_storage *return_ss,
-		int name_type,
-		bool prefer_ipv4);
-NTSTATUS resolve_name_list(TALLOC_CTX *ctx,
-		const char *name,
-		int name_type,
-		struct sockaddr_storage **return_ss_arr,
-		unsigned int *p_num_entries);
-bool find_master_ip(const char *group, struct sockaddr_storage *master_ss);
-bool get_pdc_ip(const char *domain, struct sockaddr_storage *pss);
-NTSTATUS get_sorted_dc_list( const char *domain,
-			const char *sitename,
-			struct ip_service **ip_list,
-			int *count,
-			bool ads_only );
-NTSTATUS get_kdc_list( const char *realm,
-			const char *sitename,
-			struct ip_service **ip_list,
-			int *count);
-
 /* The following definitions come from libsmb/namequery_dc.c  */
 
 bool get_dc_name(const char *domain,
@@ -838,18 +713,6 @@ const char *smb_dos_err_name(uint8_t e_class, uint16_t num);
 const char *get_dos_error_msg(WERROR result);
 const char *smb_dos_err_class(uint8_t e_class);
 WERROR map_werror_from_unix(int error);
-
-/* The following definitions come from libsmb/trustdom_cache.c  */
-
-bool trustdom_cache_enable(void);
-bool trustdom_cache_shutdown(void);
-bool trustdom_cache_store(const char *name, const char *alt_name,
-			  const struct dom_sid *sid, time_t timeout);
-bool trustdom_cache_fetch(const char* name, struct dom_sid* sid);
-uint32_t trustdom_cache_fetch_timestamp( void );
-bool trustdom_cache_store_timestamp( uint32_t t, time_t timeout );
-void trustdom_cache_flush(void);
-void update_trustdom_cache( void );
 
 /* The following definitions come from libsmb/trusts_util.c  */
 
@@ -887,6 +750,9 @@ int lp_client_ipc_signing(void);
 int lp_smb2_max_credits(void);
 int lp_cups_encrypt(void);
 bool lp_widelinks(int );
+int lp_rpc_low_port(void);
+int lp_rpc_high_port(void);
+bool lp_lanman_auth(void);
 
 int lp_wi_scan_global_parametrics(
 	const char *regex, size_t max_matches,
@@ -1044,16 +910,6 @@ char *get_pass( const char *prompt, bool stdin_get);
 struct AvahiPoll *tevent_avahi_poll(TALLOC_CTX *mem_ctx,
 				    struct tevent_context *ev);
 
-/* The following definitions come from lib/fncall.c */
-
-struct fncall_context *fncall_context_init(TALLOC_CTX *mem_ctx,
-					   int max_threads);
-struct tevent_req *fncall_send(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
-			       struct fncall_context *ctx,
-			       void (*fn)(void *private_data),
-			       void *private_data);
-int fncall_recv(struct tevent_req *req, int *perr);
-
 /* The following definitions come from libsmb/smbsock_connect.c */
 
 struct tevent_req *smbsock_connect_send(TALLOC_CTX *mem_ctx,
@@ -1122,6 +978,8 @@ const char *smb_fname_str_dbg(const struct smb_filename *smb_fname);
 const char *fsp_str_dbg(const struct files_struct *fsp);
 const char *fsp_fnum_dbg(const struct files_struct *fsp);
 struct smb_filename *cp_smb_filename(TALLOC_CTX *mem_ctx,
+				     const struct smb_filename *in);
+struct smb_filename *cp_smb_filename_nostream(TALLOC_CTX *mem_ctx,
 				     const struct smb_filename *in);
 bool is_ntfs_stream_smb_fname(const struct smb_filename *smb_fname);
 bool is_ntfs_default_stream_smb_fname(const struct smb_filename *smb_fname);

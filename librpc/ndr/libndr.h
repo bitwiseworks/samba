@@ -1,25 +1,25 @@
-/* 
+/*
    Unix SMB/CIFS implementation.
    rpc interface definitions
 
    Copyright (C) Andrew Tridgell 2003
-   
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
    (at your option) any later version.
-   
+
    This program is distributed in the hope that it will be useful,
    but WITHOUT ANY WARRANTY; without even the implied warranty of
    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
    GNU General Public License for more details.
-   
+
    You should have received a copy of the GNU General Public License
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-/* This is a public header file that is installed as part of Samba. 
- * If you remove any functions or change their signature, update 
+/* This is a public header file that is installed as part of Samba.
+ * If you remove any functions or change their signature, update
  * the so version number. */
 
 #ifndef __LIBNDR_H__
@@ -38,16 +38,19 @@
 
 
 /*
-  this is used by the token store/retrieve code
+  We store the token mapping in an array that is resized as necessary.
 */
+struct ndr_token;
+
 struct ndr_token_list {
-	struct ndr_token_list *next, *prev;
-	const void *key;
-	uint32_t value;
+	struct ndr_token *tokens;
+	uint32_t count;
 };
 
-/* this is the base structure passed to routines that 
-   parse MSRPC formatted data 
+struct ndr_compression_state;
+
+/* this is the base structure passed to routines that
+   parse MSRPC formatted data
 
    note that in Samba4 we use separate routines and structures for
    MSRPC marshalling and unmarshalling. Also note that these routines
@@ -63,12 +66,14 @@ struct ndr_pull {
 	uint32_t relative_highest_offset;
 	uint32_t relative_base_offset;
 	uint32_t relative_rap_convert;
-	struct ndr_token_list *relative_base_list;
+	struct ndr_token_list relative_base_list;
 
-	struct ndr_token_list *relative_list;
-	struct ndr_token_list *array_size_list;
-	struct ndr_token_list *array_length_list;
-	struct ndr_token_list *switch_list;
+	struct ndr_token_list relative_list;
+	struct ndr_token_list array_size_list;
+	struct ndr_token_list array_length_list;
+	struct ndr_token_list switch_list;
+
+	struct ndr_compression_state *cstate;
 
 	TALLOC_CTX *current_mem_ctx;
 
@@ -84,17 +89,19 @@ struct ndr_push {
 	uint32_t alloc_size;
 	uint32_t offset;
 	bool fixed_buf_size;
-	
+
 	uint32_t relative_base_offset;
 	uint32_t relative_end_offset;
-	struct ndr_token_list *relative_base_list;
+	struct ndr_token_list relative_base_list;
 
-	struct ndr_token_list *switch_list;
-	struct ndr_token_list *relative_list;
-	struct ndr_token_list *relative_begin_list;
-	struct ndr_token_list *nbt_string_list;
-	struct ndr_token_list *dns_string_list;
-	struct ndr_token_list *full_ptr_list;
+	struct ndr_token_list switch_list;
+	struct ndr_token_list relative_list;
+	struct ndr_token_list relative_begin_list;
+	struct ndr_token_list nbt_string_list;
+	struct ndr_token_list dns_string_list;
+	struct ndr_token_list full_ptr_list;
+
+	struct ndr_compression_state *cstate;
 
 	/* this is used to ensure we generate unique reference IDs */
 	uint32_t ptr_count;
@@ -104,7 +111,7 @@ struct ndr_push {
 struct ndr_print {
 	uint32_t flags; /* LIBNDR_FLAG_* */
 	uint32_t depth;
-	struct ndr_token_list *switch_list;
+	struct ndr_token_list switch_list;
 	void (*print)(struct ndr_print *, const char *, ...) PRINTF_ATTRIBUTE(2,3);
 	void *private_data;
 	bool no_newline;
@@ -255,6 +262,7 @@ enum ndr_err_code {
 } while (0)
 
 enum ndr_compression_alg {
+	NDR_COMPRESSION_MSZIP_CAB = 1,
 	NDR_COMPRESSION_MSZIP	= 2,
 	NDR_COMPRESSION_XPRESS	= 3
 };
@@ -485,7 +493,7 @@ void ndr_print_dom_sid0(struct ndr_print *ndr, const char *name, const struct do
 size_t ndr_size_dom_sid0(const struct dom_sid *sid, int flags);
 void ndr_print_GUID(struct ndr_print *ndr, const char *name, const struct GUID *guid);
 void ndr_print_sockaddr_storage(struct ndr_print *ndr, const char *name, const struct sockaddr_storage *ss);
-bool ndr_syntax_id_equal(const struct ndr_syntax_id *i1, const struct ndr_syntax_id *i2); 
+bool ndr_syntax_id_equal(const struct ndr_syntax_id *i1, const struct ndr_syntax_id *i2);
 char *ndr_syntax_id_to_string(TALLOC_CTX *mem_ctx, const struct ndr_syntax_id *id);
 bool ndr_syntax_id_from_string(const char *s, struct ndr_syntax_id *id);
 enum ndr_err_code ndr_push_struct_blob(DATA_BLOB *blob, TALLOC_CTX *mem_ctx, const void *p, ndr_push_flags_fn_t fn);
@@ -530,7 +538,7 @@ void ndr_print_function_debug(ndr_print_function_t fn, const char *name, int fla
 char *ndr_print_struct_string(TALLOC_CTX *mem_ctx, ndr_print_fn_t fn, const char *name, void *ptr);
 char *ndr_print_union_string(TALLOC_CTX *mem_ctx, ndr_print_fn_t fn, const char *name, uint32_t level, void *ptr);
 char *ndr_print_function_string(TALLOC_CTX *mem_ctx,
-				ndr_print_function_t fn, const char *name, 
+				ndr_print_function_t fn, const char *name,
 				int flags, void *ptr);
 void ndr_set_flags(uint32_t *pflags, uint32_t new_flags);
 enum ndr_err_code ndr_pull_error(struct ndr_pull *ndr,
@@ -556,12 +564,13 @@ enum ndr_err_code ndr_push_subcontext_end(struct ndr_push *ndr,
 				 size_t header_size,
 				 ssize_t size_is);
 enum ndr_err_code ndr_token_store(TALLOC_CTX *mem_ctx,
-			 struct ndr_token_list **list, 
-			 const void *key, 
+			 struct ndr_token_list *list,
+			 const void *key,
 			 uint32_t value);
-enum ndr_err_code ndr_token_retrieve_cmp_fn(struct ndr_token_list **list, const void *key, uint32_t *v, int(*_cmp_fn)(const void*,const void*), bool _remove_tok);
-enum ndr_err_code ndr_token_retrieve(struct ndr_token_list **list, const void *key, uint32_t *v);
-uint32_t ndr_token_peek(struct ndr_token_list **list, const void *key);
+enum ndr_err_code ndr_token_retrieve_cmp_fn(struct ndr_token_list *list, const void *key, uint32_t *v,
+					    int(*_cmp_fn)(const void*,const void*), bool erase);
+enum ndr_err_code ndr_token_retrieve(struct ndr_token_list *list, const void *key, uint32_t *v);
+uint32_t ndr_token_peek(struct ndr_token_list *list, const void *key);
 enum ndr_err_code ndr_pull_array_size(struct ndr_pull *ndr, const void *p);
 uint32_t ndr_get_array_size(struct ndr_pull *ndr, const void *p);
 enum ndr_err_code ndr_check_array_size(struct ndr_pull *ndr, void *p, uint32_t size);
@@ -588,7 +597,7 @@ enum ndr_err_code ndr_pull_union_blob_all(const DATA_BLOB *blob, TALLOC_CTX *mem
 #define NDR_SCALAR_PROTO(name, type) \
 enum ndr_err_code ndr_push_ ## name(struct ndr_push *ndr, int ndr_flags, type v); \
 enum ndr_err_code ndr_pull_ ## name(struct ndr_pull *ndr, int ndr_flags, type *v); \
-void ndr_print_ ## name(struct ndr_print *ndr, const char *var_name, type v); 
+void ndr_print_ ## name(struct ndr_print *ndr, const char *var_name, type v);
 
 #define NDR_SCALAR_PTR_PROTO(name, type) \
 enum ndr_err_code ndr_push_ ## name(struct ndr_push *ndr, int ndr_flags, const type *v); \
@@ -598,7 +607,7 @@ void ndr_print_ ## name(struct ndr_print *ndr, const char *var_name, const type 
 #define NDR_BUFFER_PROTO(name, type) \
 enum ndr_err_code ndr_push_ ## name(struct ndr_push *ndr, int ndr_flags, const type *v); \
 enum ndr_err_code ndr_pull_ ## name(struct ndr_pull *ndr, int ndr_flags, type *v); \
-void ndr_print_ ## name(struct ndr_print *ndr, const char *var_name, const type *v); 
+void ndr_print_ ## name(struct ndr_print *ndr, const char *var_name, const type *v);
 
 NDR_SCALAR_PROTO(uint8, uint8_t)
 NDR_SCALAR_PROTO(int8, int8_t)
@@ -678,6 +687,7 @@ enum ndr_err_code ndr_check_string_terminator(struct ndr_pull *ndr, uint32_t cou
 enum ndr_err_code ndr_pull_charset(struct ndr_pull *ndr, int ndr_flags, const char **var, uint32_t length, uint8_t byte_mul, charset_t chset);
 enum ndr_err_code ndr_pull_charset_to_null(struct ndr_pull *ndr, int ndr_flags, const char **var, uint32_t length, uint8_t byte_mul, charset_t chset);
 enum ndr_err_code ndr_push_charset(struct ndr_push *ndr, int ndr_flags, const char *var, uint32_t length, uint8_t byte_mul, charset_t chset);
+enum ndr_err_code ndr_push_charset_to_null(struct ndr_push *ndr, int ndr_flags, const char *var, uint32_t length, uint8_t byte_mul, charset_t chset);
 
 /* GUIDs */
 bool GUID_equal(const struct GUID *u1, const struct GUID *u2);

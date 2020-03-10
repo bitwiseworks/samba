@@ -25,7 +25,7 @@
 
 #include "includes.h"
 #include "winbindd.h"
-#include "ads.h"
+#include "winbindd_ads.h"
 #include "idmap.h"
 #include "smbldap.h"
 #include "nsswitch/winbind_client.h"
@@ -109,15 +109,15 @@ static NTSTATUS idmap_rfc2307_ads_search(struct idmap_rfc2307_context *ctx,
 }
 
 static NTSTATUS idmap_rfc2307_init_ads(struct idmap_rfc2307_context *ctx,
-				       const char *cfg_opt)
+				       const char *domain_name)
 {
 	const char *ldap_domain;
 
 	ctx->search = idmap_rfc2307_ads_search;
 	ctx->check_connection = idmap_rfc2307_ads_check_connection;
 
-	ldap_domain = lp_parm_const_string(-1, cfg_opt, "ldap_domain",
-					      NULL);
+	ldap_domain = idmap_config_const_string(domain_name, "ldap_domain",
+						NULL);
 	if (ldap_domain) {
 		ctx->ldap_domain = talloc_strdup(ctx, ldap_domain);
 		if (ctx->ldap_domain == NULL) {
@@ -142,7 +142,7 @@ static NTSTATUS idmap_rfc2307_ldap_search(struct idmap_rfc2307_context *ctx,
 
 	ret = smbldap_search(ctx->smbldap_state, bind_path, LDAP_SCOPE_SUBTREE,
 			     expr, attrs, 0, result);
-	ctx->ldap = ctx->smbldap_state->ldap_struct;
+	ctx->ldap = smbldap_get_ldap(ctx->smbldap_state);
 
 	if (ret == LDAP_SUCCESS) {
 		return NT_STATUS_OK;
@@ -167,8 +167,7 @@ static bool idmap_rfc2307_get_uint32(LDAP *ldap, LDAPMessage *entry,
 }
 
 static NTSTATUS idmap_rfc2307_init_ldap(struct idmap_rfc2307_context *ctx,
-					struct idmap_domain *dom,
-					const char *config_option)
+					const char *domain_name)
 {
 	NTSTATUS ret;
 	char *url;
@@ -176,7 +175,7 @@ static NTSTATUS idmap_rfc2307_init_ldap(struct idmap_rfc2307_context *ctx,
 	const char *ldap_url, *user_dn;
 	TALLOC_CTX *mem_ctx = ctx;
 
-	ldap_url = lp_parm_const_string(-1, config_option, "ldap_url", NULL);
+	ldap_url = idmap_config_const_string(domain_name, "ldap_url", NULL);
 	if (!ldap_url) {
 		DEBUG(1, ("ERROR: missing idmap ldap url\n"));
 		return NT_STATUS_UNSUCCESSFUL;
@@ -184,9 +183,9 @@ static NTSTATUS idmap_rfc2307_init_ldap(struct idmap_rfc2307_context *ctx,
 
 	url = talloc_strdup(talloc_tos(), ldap_url);
 
-	user_dn = lp_parm_const_string(-1, config_option, "ldap_user_dn", NULL);
+	user_dn = idmap_config_const_string(domain_name, "ldap_user_dn", NULL);
 	if (user_dn) {
-		secret = idmap_fetch_secret("ldap", dom->name, user_dn);
+		secret = idmap_fetch_secret("ldap", domain_name, user_dn);
 		if (!secret) {
 			ret = NT_STATUS_ACCESS_DENIED;
 			goto done;
@@ -761,7 +760,6 @@ static int idmap_rfc2307_context_destructor(struct idmap_rfc2307_context *ctx)
 static NTSTATUS idmap_rfc2307_initialize(struct idmap_domain *domain)
 {
 	struct idmap_rfc2307_context *ctx;
-	char *cfg_opt;
 	const char *bind_path_user, *bind_path_group, *ldap_server, *realm;
 	NTSTATUS status;
 
@@ -771,49 +769,42 @@ static NTSTATUS idmap_rfc2307_initialize(struct idmap_domain *domain)
 	}
 	talloc_set_destructor(ctx, idmap_rfc2307_context_destructor);
 
-	cfg_opt = talloc_asprintf(ctx, "idmap config %s", domain->name);
-	if (cfg_opt == NULL) {
+	bind_path_user = idmap_config_const_string(
+		domain->name, "bind_path_user", NULL);
+	if (bind_path_user == NULL) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto err;
+	}
+	ctx->bind_path_user = talloc_strdup(ctx, bind_path_user);
+	if (ctx->bind_path_user == NULL) {
 		status = NT_STATUS_NO_MEMORY;
 		goto err;
 	}
 
-	bind_path_user = lp_parm_const_string(-1, cfg_opt, "bind_path_user",
-					      NULL);
-	if (bind_path_user) {
-		ctx->bind_path_user = talloc_strdup(ctx, bind_path_user);
-		if (ctx->bind_path_user == NULL) {
-			status = NT_STATUS_NO_MEMORY;
-			goto err;
-		}
-	} else {
+	bind_path_group = idmap_config_const_string(
+		domain->name, "bind_path_group", NULL);
+	if (bind_path_group == NULL) {
 		status = NT_STATUS_INVALID_PARAMETER;
 		goto err;
 	}
-
-	bind_path_group = lp_parm_const_string(-1, cfg_opt, "bind_path_group",
-					       NULL);
-	if (bind_path_group) {
-		ctx->bind_path_group = talloc_strdup(ctx, bind_path_group);
-		if (ctx->bind_path_group == NULL) {
-			status = NT_STATUS_NO_MEMORY;
-			goto err;
-		}
-	} else {
-		status = NT_STATUS_INVALID_PARAMETER;
+	ctx->bind_path_group = talloc_strdup(ctx, bind_path_group);
+	if (ctx->bind_path_group == NULL) {
+		status = NT_STATUS_NO_MEMORY;
 		goto err;
 	}
 
-	ldap_server = lp_parm_const_string(-1, cfg_opt, "ldap_server", NULL);
+	ldap_server = idmap_config_const_string(
+		domain->name, "ldap_server", NULL);
 	if (!ldap_server) {
 		status = NT_STATUS_INVALID_PARAMETER;
 		goto err;
 	}
 
 	if (strcmp(ldap_server, "stand-alone") == 0) {
-		status = idmap_rfc2307_init_ldap(ctx, domain, cfg_opt);
+		status = idmap_rfc2307_init_ldap(ctx, domain->name);
 
 	} else if (strcmp(ldap_server, "ad") == 0) {
-		status = idmap_rfc2307_init_ads(ctx, cfg_opt);
+		status = idmap_rfc2307_init_ads(ctx, domain->name);
 
 	} else {
 		status = NT_STATUS_INVALID_PARAMETER;
@@ -823,7 +814,7 @@ static NTSTATUS idmap_rfc2307_initialize(struct idmap_domain *domain)
 		goto err;
 	}
 
-	realm = lp_parm_const_string(-1, cfg_opt, "realm", NULL);
+	realm = idmap_config_const_string(domain->name, "realm", NULL);
 	if (realm) {
 		ctx->realm = talloc_strdup(ctx, realm);
 		if (ctx->realm == NULL) {
@@ -832,14 +823,12 @@ static NTSTATUS idmap_rfc2307_initialize(struct idmap_domain *domain)
 		}
 	}
 
-	ctx->user_cn = lp_parm_bool(-1, cfg_opt, "user_cn", false);
+	ctx->user_cn = idmap_config_bool(domain->name, "user_cn", false);
 
 	domain->private_data = ctx;
-	talloc_free(cfg_opt);
 	return NT_STATUS_OK;
 
 err:
-	talloc_free(cfg_opt);
 	talloc_free(ctx);
 	return status;
 }
@@ -851,7 +840,7 @@ static struct idmap_methods rfc2307_methods = {
 };
 
 static_decl_idmap;
-NTSTATUS idmap_rfc2307_init(void)
+NTSTATUS idmap_rfc2307_init(TALLOC_CTX *ctx)
 {
 	return smb_register_idmap(SMB_IDMAP_INTERFACE_VERSION, "rfc2307",
 				  &rfc2307_methods);

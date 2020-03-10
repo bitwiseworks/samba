@@ -183,7 +183,16 @@ DATA_BLOB negprot_spnego(TALLOC_CTX *ctx, struct smbXsrv_connection *xconn)
 	/* See if we can get an SPNEGO blob */
 	status = auth_generic_prepare(talloc_tos(),
 				      xconn->remote_address,
+				      xconn->local_address,
+				      "SMB",
 				      &gensec_security);
+
+	/*
+	 * Despite including it above, there is no need to set a
+	 * remote address or similar as we are just interested in the
+	 * SPNEGO blob, we never keep this context.
+	 */
+
 	if (NT_STATUS_IS_OK(status)) {
 		status = gensec_start_mech_by_oid(gensec_security, GENSEC_OID_SPNEGO);
 		if (NT_STATUS_IS_OK(status)) {
@@ -286,7 +295,6 @@ static void reply_nt1(struct smb_request *req, uint16_t choice)
 	   supports it and we can do encrypted passwords */
 
 	if (xconn->smb1.negprot.encrypted_passwords &&
-	    lp_use_spnego() &&
 	    (req->flags2 & FLAGS2_EXTENDED_SECURITY)) {
 		negotiate_spnego = True;
 		capabilities |= CAP_EXTENDED_SECURITY;
@@ -549,14 +557,15 @@ static const struct {
 
 void reply_negprot(struct smb_request *req)
 {
-	int choice= -1;
+	size_t choice = 0;
 	int chosen_level = -1;
+	bool choice_set = false;
 	int protocol;
 	const char *p;
 	int protocols = 0;
 	int num_cliprotos;
 	char **cliprotos;
-	int i;
+	size_t i;
 	size_t converted_size;
 	struct smbXsrv_connection *xconn = req->xconn;
 	struct smbd_server_connection *sconn = req->sconn;
@@ -699,13 +708,22 @@ void reply_negprot(struct smb_request *req)
 	/* possibly reload - change of architecture */
 	reload_services(sconn, conn_snum_used, true);
 
-	/* moved from the netbios session setup code since we don't have that 
-	   when the client connects to port 445.  Of course there is a small
-	   window where we are listening to messages   -- jerry */
-
-	serverid_register(messaging_server_id(sconn->msg_ctx),
-			  FLAG_MSG_GENERAL|FLAG_MSG_SMBD
-			  |FLAG_MSG_PRINT_GENERAL);
+	/*
+	 * Anything higher than PROTOCOL_SMB2_10 still
+	 * needs to go via "SMB 2.???", which is marked
+	 * as PROTOCOL_SMB2_10.
+	 *
+	 * The real negotiation happens via reply_smb20ff()
+	 * using SMB2 Negotiation.
+	 */
+	max_proto = lp_server_max_protocol();
+	if (max_proto > PROTOCOL_SMB2_10) {
+		max_proto = PROTOCOL_SMB2_10;
+	}
+	min_proto = lp_server_min_protocol();
+	if (min_proto > PROTOCOL_SMB2_10) {
+		min_proto = PROTOCOL_SMB2_10;
+	}
 
 	/*
 	 * Anything higher than PROTOCOL_SMB2_10 still
@@ -733,14 +751,16 @@ void reply_negprot(struct smb_request *req)
 				if (strequal(cliprotos[i],supported_protocols[protocol].proto_name)) {
 					choice = i;
 					chosen_level = supported_protocols[protocol].protocol_level;
+					choice_set = true;
 				}
 				i++;
 			}
-		if(choice != -1)
+		if (choice_set) {
 			break;
+		}
 	}
 
-	if (choice == -1) {
+	if (!choice_set) {
 		bool ok;
 
 		DBG_NOTICE("No protocol supported !\n");
@@ -760,7 +780,7 @@ void reply_negprot(struct smb_request *req)
 	supported_protocols[protocol].proto_reply_fn(req, choice);
 	DEBUG(3,("Selected protocol %s\n",supported_protocols[protocol].proto_name));
 
-	DEBUG( 5, ( "negprot index=%d\n", choice ) );
+	DBG_INFO("negprot index=%zu\n", choice);
 
 	/* We always have xconn->smb1.signing_state also for >= SMB2_02 */
 	signing_required = smb_signing_is_mandatory(xconn->smb1.signing_state);

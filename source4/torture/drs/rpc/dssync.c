@@ -34,6 +34,7 @@
 #include "torture/drs/proto.h"
 #include "lib/tsocket/tsocket.h"
 #include "libcli/resolve/resolve.h"
+#include "lib/util/util_paths.h"
 
 struct DsSyncBindInfo {
 	struct dcerpc_pipe *drs_pipe;
@@ -123,7 +124,7 @@ static struct DsSyncTest *test_create_context(struct torture_context *tctx)
 	}
 
 	/* ctx->admin ...*/
-	ctx->admin.credentials				= cmdline_credentials;
+	ctx->admin.credentials	= popt_get_cmdline_credentials();
 
 	our_bind_info28				= &ctx->admin.drsuapi.our_bind_info28;
 	our_bind_info28->supported_extensions	= 0xFFFFFFFF;
@@ -143,7 +144,7 @@ static struct DsSyncTest *test_create_context(struct torture_context *tctx)
 	ctx->admin.drsuapi.req.out.bind_handle		= &ctx->admin.drsuapi.bind_handle;
 
 	/* ctx->new_dc ...*/
-	ctx->new_dc.credentials			= cmdline_credentials;
+	ctx->new_dc.credentials	= popt_get_cmdline_credentials();
 
 	our_bind_info28				= &ctx->new_dc.drsuapi.our_bind_info28;
 	our_bind_info28->supported_extensions	|= DRSUAPI_SUPPORTED_EXTENSION_BASE;
@@ -934,11 +935,9 @@ static bool test_FetchNT4Data(struct torture_context *tctx,
 	union drsuapi_DsGetNT4ChangeLogInfo info;
 	uint32_t level_out = 0;
 	struct GUID null_guid;
-	struct dom_sid null_sid;
 	DATA_BLOB cookie;
 
 	ZERO_STRUCT(null_guid);
-	ZERO_STRUCT(null_sid);
 	ZERO_STRUCT(cookie);
 
 	ZERO_STRUCT(r);

@@ -662,7 +662,7 @@ static WERROR dsdb_syntax_NTTIME_UTC_validate_ldb(const struct dsdb_syntax_ctx *
 		}
 
 		if (attr->rangeUpper) {
-			if ((int32_t)t > (int32_t)*attr->rangeLower) {
+			if ((int32_t)t > (int32_t)*attr->rangeUpper) {
 				return WERR_DS_INVALID_ATTRIBUTE_SYNTAX;
 			}
 		}
@@ -2676,7 +2676,7 @@ const struct dsdb_syntax *dsdb_syntax_for_attribute(const struct dsdb_attribute 
 
 	for (i=0; i < ARRAY_SIZE(dsdb_syntaxes); i++) {
 		/*
-		 * We must pretend that userParamters was declared
+		 * We must pretend that userParameters was declared
 		 * binary string, so we can store the 'UTF16' (not
 		 * really string) structure as given over SAMR to samba
 		 */

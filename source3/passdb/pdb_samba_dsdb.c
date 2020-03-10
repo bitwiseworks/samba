@@ -40,6 +40,8 @@
 #include "source4/auth/auth_sam.h"
 #include "auth/credentials/credentials.h"
 #include "lib/util/base64.h"
+#include "libcli/ldap/ldap_ndr.h"
+#include "lib/util/util_ldb.h"
 
 struct pdb_samba_dsdb_state {
 	struct tevent_context *ev;
@@ -2132,7 +2134,7 @@ static bool pdb_samba_dsdb_sid_to_id(struct pdb_methods *m, const struct dom_sid
 
 static uint32_t pdb_samba_dsdb_capabilities(struct pdb_methods *m)
 {
-	return PDB_CAP_STORE_RIDS | PDB_CAP_ADS;
+	return PDB_CAP_STORE_RIDS | PDB_CAP_ADS | PDB_CAP_TRUSTED_DOMAINS_EX;
 }
 
 static bool pdb_samba_dsdb_new_rid(struct pdb_methods *m, uint32_t *rid)
@@ -2234,7 +2236,7 @@ static bool pdb_samba_dsdb_get_trusteddom_pw(struct pdb_methods *m,
 				(ndr_pull_flags_fn_t)ndr_pull_trustAuthInOutBlob);
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
 		DEBUG(0, ("Failed to get trusted domain password for %s, "
-			  "attribute trustAuthOutgoing coult not be parsed %s.\n",
+			  "attribute trustAuthOutgoing could not be parsed %s.\n",
 			  domain,
 			  ndr_map_error2string(ndr_err)));
 		TALLOC_FREE(tmp_ctx);
@@ -2389,7 +2391,7 @@ static NTSTATUS pdb_samba_dsdb_get_trusteddom_creds(struct pdb_methods *m,
 				(ndr_pull_flags_fn_t)ndr_pull_trustAuthInOutBlob);
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
 		DEBUG(0, ("Failed to get trusted domain password for %s, "
-			  "attribute trustAuthOutgoing coult not be parsed %s.\n",
+			  "attribute trustAuthOutgoing could not be parsed %s.\n",
 			  domain,
 			  ndr_map_error2string(ndr_err)));
 		TALLOC_FREE(tmp_ctx);
@@ -2676,7 +2678,7 @@ static bool pdb_samba_dsdb_set_trusteddom_pw(struct pdb_methods *m,
 				(ndr_pull_flags_fn_t)ndr_pull_trustAuthInOutBlob);
 		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
 			DEBUG(0, ("Failed to get trusted domain password for %s, "
-				  "attribute trustAuthOutgoing coult not be parsed %s.\n",
+				  "attribute trustAuthOutgoing could not be parsed %s.\n",
 				  domain,
 				  ndr_map_error2string(ndr_err)));
 			TALLOC_FREE(tmp_ctx);
@@ -2878,11 +2880,838 @@ static bool pdb_samba_dsdb_del_trusteddom_pw(struct pdb_methods *m,
 
 static NTSTATUS pdb_samba_dsdb_enum_trusteddoms(struct pdb_methods *m,
 					 TALLOC_CTX *mem_ctx,
-					 uint32_t *num_domains,
-					 struct trustdom_info ***domains)
+					 uint32_t *_num_domains,
+					 struct trustdom_info ***_domains)
 {
-	*num_domains = 0;
-	*domains = NULL;
+	struct pdb_samba_dsdb_state *state = talloc_get_type_abort(
+		m->private_data, struct pdb_samba_dsdb_state);
+	TALLOC_CTX *tmp_ctx = talloc_stackframe();
+	const char * const attrs[] = {
+		"securityIdentifier",
+		"flatName",
+		"trustDirection",
+		NULL
+	};
+	struct ldb_result *res = NULL;
+	unsigned int i;
+	struct trustdom_info **domains = NULL;
+	NTSTATUS status;
+	uint32_t di = 0;
+
+	*_num_domains = 0;
+	*_domains = NULL;
+
+	status = dsdb_trust_search_tdos(state->ldb, NULL,
+					attrs, tmp_ctx, &res);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("dsdb_trust_search_tdos() - %s ", nt_errstr(status));
+		TALLOC_FREE(tmp_ctx);
+		return status;
+	}
+
+	if (res->count == 0) {
+		TALLOC_FREE(tmp_ctx);
+		return NT_STATUS_OK;
+	}
+
+	domains = talloc_zero_array(tmp_ctx, struct trustdom_info *,
+				    res->count);
+	if (domains == NULL) {
+		TALLOC_FREE(tmp_ctx);
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	for (i = 0; i < res->count; i++) {
+		struct ldb_message *msg = res->msgs[i];
+		struct trustdom_info *d = NULL;
+		const char *name = NULL;
+		struct dom_sid *sid = NULL;
+		uint32_t direction;
+
+		d = talloc_zero(domains, struct trustdom_info);
+		if (d == NULL) {
+			TALLOC_FREE(tmp_ctx);
+			return NT_STATUS_NO_MEMORY;
+		}
+
+		name = ldb_msg_find_attr_as_string(msg, "flatName", NULL);
+		if (name == NULL) {
+			TALLOC_FREE(tmp_ctx);
+			return NT_STATUS_INTERNAL_DB_CORRUPTION;
+		}
+		sid = samdb_result_dom_sid(msg, msg, "securityIdentifier");
+		if (sid == NULL) {
+			continue;
+		}
+
+		direction = ldb_msg_find_attr_as_uint(msg, "trustDirection", 0);
+		if (!(direction & LSA_TRUST_DIRECTION_OUTBOUND)) {
+			continue;
+		}
+
+		d->name = talloc_strdup(d, name);
+		if (d->name == NULL) {
+			TALLOC_FREE(tmp_ctx);
+			return NT_STATUS_NO_MEMORY;
+		}
+		d->sid = *sid;
+
+		domains[di++] = d;
+	}
+
+	domains = talloc_realloc(domains, domains, struct trustdom_info *, di);
+	*_domains = talloc_move(mem_ctx, &domains);
+	*_num_domains = di;
+	TALLOC_FREE(tmp_ctx);
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS pdb_samba_dsdb_msg_to_trusted_domain(const struct ldb_message *msg,
+						TALLOC_CTX *mem_ctx,
+						struct pdb_trusted_domain **_d)
+{
+	struct pdb_trusted_domain *d = NULL;
+	const char *str = NULL;
+	struct dom_sid *sid = NULL;
+	const struct ldb_val *val = NULL;
+	uint64_t val64;
+
+	*_d = NULL;
+
+	d = talloc_zero(mem_ctx, struct pdb_trusted_domain);
+	if (d == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	str = ldb_msg_find_attr_as_string(msg, "flatName", NULL);
+	if (str == NULL) {
+		TALLOC_FREE(d);
+		return NT_STATUS_INTERNAL_DB_CORRUPTION;
+	}
+	d->netbios_name = talloc_strdup(d, str);
+	if (d->netbios_name == NULL) {
+		TALLOC_FREE(d);
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	str = ldb_msg_find_attr_as_string(msg, "trustPartner", NULL);
+	if (str != NULL) {
+		d->domain_name = talloc_strdup(d, str);
+		if (d->domain_name == NULL) {
+			TALLOC_FREE(d);
+			return NT_STATUS_NO_MEMORY;
+		}
+	}
+
+	sid = samdb_result_dom_sid(d, msg, "securityIdentifier");
+	if (sid != NULL) {
+		d->security_identifier = *sid;
+		TALLOC_FREE(sid);
+	}
+
+	val = ldb_msg_find_ldb_val(msg, "trustAuthOutgoing");
+	if (val != NULL) {
+		d->trust_auth_outgoing = data_blob_dup_talloc(d, *val);
+		if (d->trust_auth_outgoing.data == NULL) {
+			TALLOC_FREE(d);
+			return NT_STATUS_NO_MEMORY;
+		}
+	}
+	val = ldb_msg_find_ldb_val(msg, "trustAuthIncoming");
+	if (val != NULL) {
+		d->trust_auth_incoming = data_blob_dup_talloc(d, *val);
+		if (d->trust_auth_incoming.data == NULL) {
+			TALLOC_FREE(d);
+			return NT_STATUS_NO_MEMORY;
+		}
+	}
+
+	d->trust_direction = ldb_msg_find_attr_as_uint(msg, "trustDirection", 0);
+	d->trust_type = ldb_msg_find_attr_as_uint(msg, "trustType", 0);
+	d->trust_attributes = ldb_msg_find_attr_as_uint(msg, "trustAttributes", 0);
+
+	val64 = ldb_msg_find_attr_as_uint64(msg, "trustPosixOffset", UINT64_MAX);
+	if (val64 != UINT64_MAX) {
+		d->trust_posix_offset = talloc(d, uint32_t);
+		if (d->trust_posix_offset == NULL) {
+			TALLOC_FREE(d);
+			return NT_STATUS_NO_MEMORY;
+		}
+		*d->trust_posix_offset = (uint32_t)val64;
+	}
+
+	val64 = ldb_msg_find_attr_as_uint64(msg, "msDS-SupportedEncryptionTypes", UINT64_MAX);
+	if (val64 != UINT64_MAX) {
+		d->supported_enc_type = talloc(d, uint32_t);
+		if (d->supported_enc_type == NULL) {
+			TALLOC_FREE(d);
+			return NT_STATUS_NO_MEMORY;
+		}
+		*d->supported_enc_type = (uint32_t)val64;
+	}
+
+	val = ldb_msg_find_ldb_val(msg, "msDS-TrustForestTrustInfo");
+	if (val != NULL) {
+		d->trust_forest_trust_info = data_blob_dup_talloc(d, *val);
+		if (d->trust_forest_trust_info.data == NULL) {
+			TALLOC_FREE(d);
+			return NT_STATUS_NO_MEMORY;
+		}
+	}
+
+	*_d = d;
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS pdb_samba_dsdb_get_trusted_domain(struct pdb_methods *m,
+						  TALLOC_CTX *mem_ctx,
+						  const char *domain,
+						  struct pdb_trusted_domain **td)
+{
+	struct pdb_samba_dsdb_state *state = talloc_get_type_abort(
+		m->private_data, struct pdb_samba_dsdb_state);
+	TALLOC_CTX *tmp_ctx = talloc_stackframe();
+	const char * const attrs[] = {
+		"securityIdentifier",
+		"flatName",
+		"trustPartner",
+		"trustAuthOutgoing",
+		"trustAuthIncoming",
+		"trustAttributes",
+		"trustDirection",
+		"trustType",
+		"trustPosixOffset",
+		"msDS-SupportedEncryptionTypes",
+		"msDS-TrustForestTrustInfo",
+		NULL
+	};
+	struct ldb_message *msg = NULL;
+	struct pdb_trusted_domain *d = NULL;
+	NTSTATUS status;
+
+	status = dsdb_trust_search_tdo(state->ldb, domain, NULL,
+				       attrs, tmp_ctx, &msg);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("dsdb_trust_search_tdo(%s) - %s ",
+			domain, nt_errstr(status));
+		TALLOC_FREE(tmp_ctx);
+		return status;
+	}
+
+	status = pdb_samba_dsdb_msg_to_trusted_domain(msg, mem_ctx, &d);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("pdb_samba_dsdb_msg_to_trusted_domain(%s) - %s ",
+			domain, nt_errstr(status));
+		TALLOC_FREE(tmp_ctx);
+		return status;
+	}
+
+	*td = d;
+	TALLOC_FREE(tmp_ctx);
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS pdb_samba_dsdb_get_trusted_domain_by_sid(struct pdb_methods *m,
+							 TALLOC_CTX *mem_ctx,
+							 struct dom_sid *sid,
+							 struct pdb_trusted_domain **td)
+{
+	struct pdb_samba_dsdb_state *state = talloc_get_type_abort(
+		m->private_data, struct pdb_samba_dsdb_state);
+	TALLOC_CTX *tmp_ctx = talloc_stackframe();
+	const char * const attrs[] = {
+		"securityIdentifier",
+		"flatName",
+		"trustPartner",
+		"trustAuthOutgoing",
+		"trustAuthIncoming",
+		"trustAttributes",
+		"trustDirection",
+		"trustType",
+		"trustPosixOffset",
+		"msDS-SupportedEncryptionTypes",
+		"msDS-TrustForestTrustInfo",
+		NULL
+	};
+	struct ldb_message *msg = NULL;
+	struct pdb_trusted_domain *d = NULL;
+	NTSTATUS status;
+
+	status = dsdb_trust_search_tdo_by_sid(state->ldb, sid,
+					      attrs, tmp_ctx, &msg);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("dsdb_trust_search_tdo_by_sid(%s) - %s ",
+			dom_sid_string(tmp_ctx, sid), nt_errstr(status));
+		TALLOC_FREE(tmp_ctx);
+		return status;
+	}
+
+	status = pdb_samba_dsdb_msg_to_trusted_domain(msg, mem_ctx, &d);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("pdb_samba_dsdb_msg_to_trusted_domain(%s) - %s ",
+			dom_sid_string(tmp_ctx, sid), nt_errstr(status));
+		TALLOC_FREE(tmp_ctx);
+		return status;
+	}
+
+	*td = d;
+	TALLOC_FREE(tmp_ctx);
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS add_trust_user(TALLOC_CTX *mem_ctx,
+			       struct ldb_context *sam_ldb,
+			       struct ldb_dn *base_dn,
+			       const char *netbios_name,
+			       struct trustAuthInOutBlob *taiob)
+{
+	struct ldb_request *req = NULL;
+	struct ldb_message *msg = NULL;
+	struct ldb_dn *dn = NULL;
+	uint32_t i;
+	int ret;
+	bool ok;
+
+	dn = ldb_dn_copy(mem_ctx, base_dn);
+	if (dn == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	ok = ldb_dn_add_child_fmt(dn, "cn=%s$,cn=users", netbios_name);
+	if (!ok) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	msg = ldb_msg_new(mem_ctx);
+	if (msg == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	msg->dn = dn;
+
+	ret = ldb_msg_add_string(msg, "objectClass", "user");
+	if (ret != LDB_SUCCESS) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	ret = ldb_msg_add_fmt(msg, "samAccountName", "%s$", netbios_name);
+	if (ret != LDB_SUCCESS) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	ret = samdb_msg_add_uint(sam_ldb, msg, msg, "userAccountControl",
+				 UF_INTERDOMAIN_TRUST_ACCOUNT);
+	if (ret != LDB_SUCCESS) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	for (i = 0; i < taiob->count; i++) {
+		struct AuthenticationInformation *auth_info =
+			&taiob->current.array[i];
+		const char *attribute = NULL;
+		struct ldb_val v;
+
+		switch (taiob->current.array[i].AuthType) {
+		case TRUST_AUTH_TYPE_NT4OWF:
+			attribute = "unicodePwd";
+			v.data = (uint8_t *)&auth_info->AuthInfo.nt4owf.password;
+			v.length = 16;
+			break;
+
+		case TRUST_AUTH_TYPE_CLEAR:
+			attribute = "clearTextPassword";
+			v.data = auth_info->AuthInfo.clear.password;
+			v.length = auth_info->AuthInfo.clear.size;
+			break;
+
+		default:
+			continue;
+		}
+
+		ret = ldb_msg_add_value(msg, attribute, &v, NULL);
+		if (ret != LDB_SUCCESS) {
+			return NT_STATUS_NO_MEMORY;
+		}
+	}
+
+	/* create the trusted_domain user account */
+	ret = ldb_build_add_req(&req, sam_ldb, mem_ctx, msg, NULL, NULL,
+				ldb_op_default_callback, NULL);
+	if (ret != LDB_SUCCESS) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	ret = ldb_request_add_control(
+		req, DSDB_CONTROL_PERMIT_INTERDOMAIN_TRUST_UAC_OID,
+		false, NULL);
+	if (ret != LDB_SUCCESS) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	ret = dsdb_autotransaction_request(sam_ldb, req);
+	if (ret != LDB_SUCCESS) {
+		DEBUG(0,("Failed to create user record %s: %s\n",
+			 ldb_dn_get_linearized(msg->dn),
+			 ldb_errstring(sam_ldb)));
+
+		switch (ret) {
+		case LDB_ERR_ENTRY_ALREADY_EXISTS:
+			return NT_STATUS_DOMAIN_EXISTS;
+		case LDB_ERR_INSUFFICIENT_ACCESS_RIGHTS:
+			return NT_STATUS_ACCESS_DENIED;
+		default:
+			return NT_STATUS_INTERNAL_DB_CORRUPTION;
+		}
+	}
+
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS pdb_samba_dsdb_set_trusted_domain(struct pdb_methods *methods,
+						  const char* domain,
+						  const struct pdb_trusted_domain *td)
+{
+	struct pdb_samba_dsdb_state *state = talloc_get_type_abort(
+		methods->private_data, struct pdb_samba_dsdb_state);
+	TALLOC_CTX *tmp_ctx = talloc_stackframe();
+	bool in_txn = false;
+	struct ldb_dn *base_dn = NULL;
+	struct ldb_message *msg = NULL;
+	const char *attrs[] = {
+		NULL
+	};
+	char *netbios_encoded = NULL;
+	char *dns_encoded = NULL;
+	char *sid_encoded = NULL;
+	int ret;
+	struct trustAuthInOutBlob taiob;
+	enum ndr_err_code ndr_err;
+	NTSTATUS status;
+	bool ok;
+
+	base_dn = ldb_dn_copy(tmp_ctx, ldb_get_default_basedn(state->ldb));
+	if (base_dn == NULL) {
+		TALLOC_FREE(tmp_ctx);
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+	/*
+	 * We expect S-1-5-21-A-B-C, but we don't
+	 * allow S-1-5-21-0-0-0 as this is used
+	 * for claims and compound identities.
+	 */
+	ok = dom_sid_is_valid_account_domain(&td->security_identifier);
+	if (!ok) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
+	}
+
+	if (strequal(td->netbios_name, "BUILTIN")) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
+	}
+	if (strequal(td->domain_name, "BUILTIN")) {
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
+	}
+
+	dns_encoded = ldb_binary_encode_string(tmp_ctx, td->domain_name);
+	if (dns_encoded == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+	netbios_encoded = ldb_binary_encode_string(tmp_ctx, td->netbios_name);
+	if (netbios_encoded == NULL) {
+		status =NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+	sid_encoded = ldap_encode_ndr_dom_sid(tmp_ctx, &td->security_identifier);
+	if (sid_encoded == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	ok = samdb_is_pdc(state->ldb);
+	if (!ok) {
+		DBG_ERR("Adding TDO is only allowed on a PDC.\n");
+		TALLOC_FREE(tmp_ctx);
+		status = NT_STATUS_INVALID_DOMAIN_ROLE;
+		goto out;
+	}
+
+	status = dsdb_trust_search_tdo(state->ldb,
+				       td->netbios_name,
+				       td->domain_name,
+				       attrs,
+				       tmp_ctx,
+				       &msg);
+	if (!NT_STATUS_EQUAL(status, NT_STATUS_OBJECT_NAME_NOT_FOUND)) {
+		DBG_ERR("dsdb_trust_search_tdo returned %s\n",
+			nt_errstr(status));
+		status = NT_STATUS_INVALID_DOMAIN_STATE;
+		goto out;
+	}
+
+	ret = ldb_transaction_start(state->ldb);
+	if (ret != LDB_SUCCESS) {
+		status = NT_STATUS_INTERNAL_DB_CORRUPTION;
+		goto out;
+	}
+	in_txn = true;
+
+	msg = ldb_msg_new(tmp_ctx);
+	if (msg == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	msg->dn = ldb_dn_copy(tmp_ctx, base_dn);
+
+	ok = ldb_dn_add_child_fmt(msg->dn, "cn=%s,cn=System", td->domain_name);
+	if (!ok) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	ret = ldb_msg_add_string(msg, "objectClass", "trustedDomain");
+	if (ret != LDB_SUCCESS) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	ret = ldb_msg_add_string(msg, "flatname", td->netbios_name);
+	if (ret != LDB_SUCCESS) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	ret = ldb_msg_add_string(msg, "trustPartner", td->domain_name);
+	if (ret != LDB_SUCCESS) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	ret = samdb_msg_add_dom_sid(state->ldb,
+				    tmp_ctx,
+				    msg,
+				    "securityIdentifier",
+				    &td->security_identifier);
+	if (ret != LDB_SUCCESS) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	ret = samdb_msg_add_int(state->ldb,
+				tmp_ctx,
+				msg,
+				"trustType",
+				td->trust_type);
+	if (ret != LDB_SUCCESS) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	ret = samdb_msg_add_int(state->ldb,
+				tmp_ctx,
+				msg,
+				"trustAttributes",
+				td->trust_attributes);
+	if (ret != LDB_SUCCESS) {
+		status =NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	ret = samdb_msg_add_int(state->ldb,
+				tmp_ctx,
+				msg,
+				"trustDirection",
+				td->trust_direction);
+	if (ret != LDB_SUCCESS) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	if (td->trust_auth_incoming.data != NULL) {
+		ret = ldb_msg_add_value(msg,
+					"trustAuthIncoming",
+					&td->trust_auth_incoming,
+					NULL);
+		if (ret != LDB_SUCCESS) {
+			status = NT_STATUS_NO_MEMORY;
+			goto out;
+		}
+	}
+	if (td->trust_auth_outgoing.data != NULL) {
+		ret = ldb_msg_add_value(msg,
+					"trustAuthOutgoing",
+					&td->trust_auth_outgoing,
+					NULL);
+		if (ret != LDB_SUCCESS) {
+			status = NT_STATUS_NO_MEMORY;
+			goto out;
+		}
+	}
+
+	/* create the trusted_domain */
+	ret = ldb_add(state->ldb, msg);
+	switch (ret) {
+	case  LDB_SUCCESS:
+		break;
+
+	case  LDB_ERR_ENTRY_ALREADY_EXISTS:
+		DBG_ERR("Failed to create trusted domain record %s: %s\n",
+			ldb_dn_get_linearized(msg->dn),
+			ldb_errstring(state->ldb));
+		status = NT_STATUS_DOMAIN_EXISTS;
+		goto out;
+
+	case  LDB_ERR_INSUFFICIENT_ACCESS_RIGHTS:
+		DBG_ERR("Failed to create trusted domain record %s: %s\n",
+			ldb_dn_get_linearized(msg->dn),
+			ldb_errstring(state->ldb));
+		status = NT_STATUS_ACCESS_DENIED;
+		goto out;
+
+	default:
+		DBG_ERR("Failed to create trusted domain record %s: %s\n",
+			ldb_dn_get_linearized(msg->dn),
+			ldb_errstring(state->ldb));
+		status = NT_STATUS_INTERNAL_DB_CORRUPTION;
+		goto out;
+	}
+
+	ndr_err = ndr_pull_struct_blob(
+		&td->trust_auth_outgoing,
+		tmp_ctx,
+		&taiob,
+		(ndr_pull_flags_fn_t)ndr_pull_trustAuthInOutBlob);
+	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		status = ndr_map_error2ntstatus(ndr_err);
+		goto out;
+	}
+
+	if (td->trust_direction == LSA_TRUST_DIRECTION_INBOUND) {
+		status = add_trust_user(tmp_ctx,
+					state->ldb,
+					base_dn,
+					td->netbios_name,
+					&taiob);
+		if (!NT_STATUS_IS_OK(status)) {
+			goto out;
+		}
+	}
+
+	ret = ldb_transaction_commit(state->ldb);
+	if (ret != LDB_SUCCESS) {
+		return NT_STATUS_INTERNAL_DB_CORRUPTION;
+	}
+	in_txn = false;
+
+	/*
+	 * TODO: Notify winbindd that we have a new trust
+	 */
+
+	status = NT_STATUS_OK;
+
+out:
+	if (in_txn) {
+		ldb_transaction_cancel(state->ldb);
+	}
+	TALLOC_FREE(tmp_ctx);
+	return status;
+}
+
+static NTSTATUS delete_trust_user(TALLOC_CTX *mem_ctx,
+				  struct pdb_samba_dsdb_state *state,
+				  const char *trust_user)
+{
+	const char *attrs[] = { "userAccountControl", NULL };
+	struct ldb_message **msgs;
+	uint32_t uac;
+	int ret;
+
+	ret = gendb_search(state->ldb,
+			   mem_ctx,
+			   ldb_get_default_basedn(state->ldb),
+			   &msgs,
+			   attrs,
+			   "samAccountName=%s$",
+			   trust_user);
+	if (ret > 1) {
+		return NT_STATUS_INTERNAL_DB_CORRUPTION;
+	}
+
+	if (ret == 0) {
+		return NT_STATUS_OK;
+	}
+
+	uac = ldb_msg_find_attr_as_uint(msgs[0],
+					"userAccountControl",
+					0);
+	if (!(uac & UF_INTERDOMAIN_TRUST_ACCOUNT)) {
+		return NT_STATUS_OBJECT_NAME_COLLISION;
+	}
+
+	ret = ldb_delete(state->ldb, msgs[0]->dn);
+	switch (ret) {
+	case LDB_SUCCESS:
+		break;
+	case LDB_ERR_INSUFFICIENT_ACCESS_RIGHTS:
+		return NT_STATUS_ACCESS_DENIED;
+	default:
+		return NT_STATUS_INTERNAL_DB_CORRUPTION;
+	}
+
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS pdb_samba_dsdb_del_trusted_domain(struct pdb_methods *methods,
+						  const char *domain)
+{
+	struct pdb_samba_dsdb_state *state = talloc_get_type_abort(
+		methods->private_data, struct pdb_samba_dsdb_state);
+	TALLOC_CTX *tmp_ctx = talloc_stackframe();
+	struct pdb_trusted_domain *td = NULL;
+	struct ldb_dn *tdo_dn = NULL;
+	bool in_txn = false;
+	NTSTATUS status;
+	int ret;
+	bool ok;
+
+	status = pdb_samba_dsdb_get_trusted_domain(methods,
+						   tmp_ctx,
+						   domain,
+						   &td);
+	if (!NT_STATUS_IS_OK(status)) {
+		if (!NT_STATUS_EQUAL(status, NT_STATUS_OBJECT_NAME_NOT_FOUND)) {
+			DBG_ERR("Searching TDO for %s returned %s\n",
+				domain, nt_errstr(status));
+			return status;
+		}
+		DBG_NOTICE("No TDO object for %s\n", domain);
+		return NT_STATUS_OK;
+	}
+
+	tdo_dn = ldb_dn_copy(tmp_ctx, ldb_get_default_basedn(state->ldb));
+	if (tdo_dn == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	ok = ldb_dn_add_child_fmt(tdo_dn, "cn=%s,cn=System", domain);
+	if (!ok) {
+		TALLOC_FREE(tmp_ctx);
+		status = NT_STATUS_NO_MEMORY;
+		goto out;
+	}
+
+	ret = ldb_transaction_start(state->ldb);
+	if (ret != LDB_SUCCESS) {
+		status = NT_STATUS_INTERNAL_DB_CORRUPTION;
+		goto out;
+	}
+	in_txn = true;
+
+	ret = ldb_delete(state->ldb, tdo_dn);
+	if (ret != LDB_SUCCESS) {
+		status = NT_STATUS_INVALID_HANDLE;
+		goto out;
+	}
+
+	if (td->trust_direction == LSA_TRUST_DIRECTION_INBOUND) {
+		status = delete_trust_user(tmp_ctx, state, domain);
+		if (!NT_STATUS_IS_OK(status)) {
+			goto out;
+		}
+	}
+
+	ret = ldb_transaction_commit(state->ldb);
+	if (ret != LDB_SUCCESS) {
+		status = NT_STATUS_INTERNAL_DB_CORRUPTION;
+		goto out;
+	}
+	in_txn = false;
+
+	status = NT_STATUS_OK;
+
+out:
+	if (in_txn) {
+		ldb_transaction_cancel(state->ldb);
+	}
+	TALLOC_FREE(tmp_ctx);
+
+	return status;
+}
+
+static NTSTATUS pdb_samba_dsdb_enum_trusted_domains(struct pdb_methods *m,
+						    TALLOC_CTX *mem_ctx,
+						    uint32_t *_num_domains,
+						    struct pdb_trusted_domain ***_domains)
+{
+	struct pdb_samba_dsdb_state *state = talloc_get_type_abort(
+		m->private_data, struct pdb_samba_dsdb_state);
+	TALLOC_CTX *tmp_ctx = talloc_stackframe();
+	const char * const attrs[] = {
+		"securityIdentifier",
+		"flatName",
+		"trustPartner",
+		"trustAuthOutgoing",
+		"trustAuthIncoming",
+		"trustAttributes",
+		"trustDirection",
+		"trustType",
+		"trustPosixOffset",
+		"msDS-SupportedEncryptionTypes",
+		"msDS-TrustForestTrustInfo",
+		NULL
+	};
+	struct ldb_result *res = NULL;
+	unsigned int i;
+	struct pdb_trusted_domain **domains = NULL;
+	NTSTATUS status;
+	uint32_t di = 0;
+
+	*_num_domains = 0;
+	*_domains = NULL;
+
+	status = dsdb_trust_search_tdos(state->ldb, NULL,
+					attrs, tmp_ctx, &res);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("dsdb_trust_search_tdos() - %s ", nt_errstr(status));
+		TALLOC_FREE(tmp_ctx);
+		return status;
+	}
+
+	if (res->count == 0) {
+		TALLOC_FREE(tmp_ctx);
+		return NT_STATUS_OK;
+	}
+
+	domains = talloc_zero_array(tmp_ctx, struct pdb_trusted_domain *,
+				    res->count);
+	if (domains == NULL) {
+		TALLOC_FREE(tmp_ctx);
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	for (i = 0; i < res->count; i++) {
+		struct ldb_message *msg = res->msgs[i];
+		struct pdb_trusted_domain *d = NULL;
+
+		status = pdb_samba_dsdb_msg_to_trusted_domain(msg, domains, &d);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("pdb_samba_dsdb_msg_to_trusted_domain() - %s ",
+				nt_errstr(status));
+			TALLOC_FREE(tmp_ctx);
+			return status;
+		}
+
+		domains[di++] = d;
+	}
+
+	domains = talloc_realloc(domains, domains, struct pdb_trusted_domain *,
+				 di);
+	*_domains = talloc_move(mem_ctx, &domains);
+	*_num_domains = di;
+	TALLOC_FREE(tmp_ctx);
 	return NT_STATUS_OK;
 }
 
@@ -2947,6 +3776,11 @@ static void pdb_samba_dsdb_init_methods(struct pdb_methods *m)
 	m->set_trusteddom_pw = pdb_samba_dsdb_set_trusteddom_pw;
 	m->del_trusteddom_pw = pdb_samba_dsdb_del_trusteddom_pw;
 	m->enum_trusteddoms = pdb_samba_dsdb_enum_trusteddoms;
+	m->get_trusted_domain = pdb_samba_dsdb_get_trusted_domain;
+	m->get_trusted_domain_by_sid = pdb_samba_dsdb_get_trusted_domain_by_sid;
+	m->set_trusted_domain = pdb_samba_dsdb_set_trusted_domain;
+	m->del_trusted_domain = pdb_samba_dsdb_del_trusted_domain;
+	m->enum_trusted_domains = pdb_samba_dsdb_enum_trusted_domains;
 	m->is_responsible_for_wellknown =
 				pdb_samba_dsdb_is_responsible_for_wellknown;
 	m->is_responsible_for_everything_else =
@@ -3023,6 +3857,8 @@ static NTSTATUS pdb_init_samba_dsdb(struct pdb_methods **pdb_method,
 	struct pdb_methods *m;
 	struct pdb_samba_dsdb_state *state;
 	NTSTATUS status;
+	char *errstring = NULL;
+	int ret;
 
 	if ( !NT_STATUS_IS_OK(status = make_pdb_method( &m )) ) {
 		return status;
@@ -3048,21 +3884,23 @@ static NTSTATUS pdb_init_samba_dsdb(struct pdb_methods **pdb_method,
 		goto nomem;
 	}
 
-	if (location) {
-		state->ldb = samdb_connect_url(state,
-				   state->ev,
-				   state->lp_ctx,
-				   system_session(state->lp_ctx),
-				   0, location);
-	} else {
-		state->ldb = samdb_connect(state,
-				   state->ev,
-				   state->lp_ctx,
-				   system_session(state->lp_ctx), 0);
+	if (location == NULL) {
+		location = "sam.ldb";
 	}
 
+	ret = samdb_connect_url(state,
+				state->ev,
+				state->lp_ctx,
+				system_session(state->lp_ctx),
+				0,
+				location,
+				NULL,
+				&state->ldb,
+				&errstring);
+
 	if (!state->ldb) {
-		DEBUG(0, ("samdb_connect failed\n"));
+		DEBUG(0, ("samdb_connect failed: %s: %s\n",
+			  errstring, ldb_strerror(ret)));
 		status = NT_STATUS_INTERNAL_ERROR;
 		goto fail;
 	}
@@ -3090,8 +3928,8 @@ fail:
 	return status;
 }
 
-NTSTATUS pdb_samba_dsdb_init(void);
-NTSTATUS pdb_samba_dsdb_init(void)
+NTSTATUS pdb_samba_dsdb_init(TALLOC_CTX *);
+NTSTATUS pdb_samba_dsdb_init(TALLOC_CTX *ctx)
 {
 	NTSTATUS status = smb_register_passdb(PASSDB_INTERFACE_VERSION, "samba_dsdb",
 					      pdb_init_samba_dsdb);

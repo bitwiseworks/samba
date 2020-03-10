@@ -33,6 +33,7 @@
 #include "protocol/protocol_api.h"
 #include "client/client_private.h"
 #include "client/client.h"
+#include "client/client_sync.h"
 
 int list_of_nodes(struct ctdb_node_map *nodemap,
 		  uint32_t flags_mask, uint32_t exclude_pnn,
@@ -78,40 +79,6 @@ int list_of_connected_nodes(struct ctdb_node_map *nodemap,
 			     mem_ctx, pnn_list);
 }
 
-int ctdb_ctrl_modflags(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
-		       struct ctdb_client_context *client,
-		       uint32_t destnode, struct timeval timeout,
-		       uint32_t set, uint32_t clear)
-{
-	struct ctdb_node_map *nodemap;
-	struct ctdb_node_flag_change flag_change;
-	struct ctdb_req_control request;
-	uint32_t *pnn_list;
-	int ret, count;
-
-	ret = ctdb_ctrl_get_nodemap(mem_ctx, ev, client, destnode,
-				    tevent_timeval_zero(), &nodemap);
-	if (ret != 0) {
-		return ret;
-	}
-
-	flag_change.pnn = destnode;
-	flag_change.old_flags = nodemap->node[destnode].flags;
-	flag_change.new_flags = flag_change.old_flags | set;
-	flag_change.new_flags &= ~clear;
-
-	count = list_of_connected_nodes(nodemap, -1, mem_ctx, &pnn_list);
-	if (count == -1) {
-		return ENOMEM;
-	}
-
-	ctdb_req_control_modify_flags(&request, &flag_change);
-	ret = ctdb_client_control_multi(mem_ctx, ev, client, pnn_list, count,
-					tevent_timeval_zero(), &request,
-					NULL, NULL);
-	return ret;
-}
-
 struct ctdb_server_id ctdb_client_get_server_id(
 				struct ctdb_client_context *client,
 				uint32_t task_id)
@@ -150,17 +117,17 @@ int ctdb_server_id_exists(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 			  struct ctdb_client_context *client,
 			  struct ctdb_server_id *sid, bool *exists)
 {
-	uint8_t *result;
+	int result;
 	int ret;
 
-	ret = ctdb_ctrl_check_srvids(mem_ctx, ev, client, sid->vnn,
-				     tevent_timeval_zero(),
-				     &sid->unique_id, 1, &result);
+	ret = ctdb_ctrl_process_exists(mem_ctx, ev, client, sid->vnn,
+				       tevent_timeval_zero(),
+				       sid->pid, &result);
 	if (ret != 0) {
 		return ret;
 	}
 
-	if (result[0] == 1) {
+	if (result == 1) {
 		*exists = true;
 	} else {
 		*exists = false;

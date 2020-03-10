@@ -159,29 +159,34 @@ static struct dptr_struct *dptr_get(struct smbd_server_connection *sconn,
 				    int key, bool forclose)
 {
 	struct dptr_struct *dptr;
+	const int dirhandles_open = sconn->searches.dirhandles_open;
 
-	for(dptr = sconn->searches.dirptrs; dptr; dptr = dptr->next) {
-		if(dptr->dnum == key) {
-			if (!forclose && !dptr->dir_hnd) {
-				if (sconn->searches.dirhandles_open >= MAX_OPEN_DIRECTORIES)
-					dptr_idleoldest(sconn);
-				DEBUG(4,("dptr_get: Reopening dptr key %d\n",key));
-
-				if (!(dptr->dir_hnd = OpenDir(NULL,
-							dptr->conn,
-							dptr->smb_dname,
-							dptr->wcard,
-							dptr->attr))) {
-					DEBUG(4,("dptr_get: Failed to "
-						"open %s (%s)\n",
-						dptr->smb_dname->base_name,
-						strerror(errno)));
-					return NULL;
-				}
-			}
-			DLIST_PROMOTE(sconn->searches.dirptrs,dptr);
-			return dptr;
+	for (dptr = sconn->searches.dirptrs; dptr != NULL; dptr = dptr->next) {
+		if(dptr->dnum != key) {
+			continue;
 		}
+
+		if (!forclose && (dptr->dir_hnd == NULL)) {
+			if (dirhandles_open >= MAX_OPEN_DIRECTORIES) {
+				dptr_idleoldest(sconn);
+			}
+			DBG_INFO("Reopening dptr key %d\n",key);
+
+			dptr->dir_hnd = OpenDir(NULL,
+						dptr->conn,
+						dptr->smb_dname,
+						dptr->wcard,
+						dptr->attr);
+
+			if (dptr->dir_hnd == NULL) {
+				DBG_INFO("Failed to open %s (%s)\n",
+				      dptr->smb_dname->base_name,
+				      strerror(errno));
+				return NULL;
+			}
+		}
+		DLIST_PROMOTE(sconn->searches.dirptrs, dptr);
+		return dptr;
 	}
 	return(NULL);
 }
@@ -399,16 +404,16 @@ static struct smb_Dir *open_dir_with_privilege(connection_struct *conn,
 					uint32_t attr)
 {
 	struct smb_Dir *dir_hnd = NULL;
-	struct smb_filename *smb_fname_cwd;
-	char *saved_dir = vfs_GetWd(talloc_tos(), conn);
+	struct smb_filename *smb_fname_cwd = NULL;
+	struct smb_filename *saved_dir_fname = vfs_GetWd(talloc_tos(), conn);
 	struct privilege_paths *priv_paths = req->priv_paths;
 	int ret;
 
-	if (saved_dir == NULL) {
+	if (saved_dir_fname == NULL) {
 		return NULL;
 	}
 
-	if (vfs_ChDir(conn, smb_dname->base_name) == -1) {
+	if (vfs_ChDir(conn, smb_dname) == -1) {
 		return NULL;
 	}
 
@@ -438,7 +443,8 @@ static struct smb_Dir *open_dir_with_privilege(connection_struct *conn,
 
   out:
 
-	vfs_ChDir(conn, saved_dir);
+	vfs_ChDir(conn, saved_dir_fname);
+	TALLOC_FREE(saved_dir_fname);
 	return dir_hnd;
 }
 
@@ -886,14 +892,6 @@ bool dptr_SearchDir(struct dptr_struct *dptr, const char *name, long *poffset, S
 }
 
 /****************************************************************************
- Initialize variables & state data at the beginning of all search SMB requests.
-****************************************************************************/
-void dptr_init_search_op(struct dptr_struct *dptr)
-{
-	SMB_VFS_INIT_SEARCH_OP(dptr->conn, dptr->dir_hnd->dir);
-}
-
-/****************************************************************************
  Map a native directory offset to a 32-bit cookie.
 ****************************************************************************/
 
@@ -1226,7 +1224,15 @@ bool smbd_dirptr_get_entry(TALLOC_CTX *ctx,
 			mask, smb_fname_str_dbg(&smb_fname),
 			dname, fname));
 
-		DirCacheAdd(dirptr->dir_hnd, dname, cur_offset);
+		if (!conn->sconn->using_smb2) {
+			/*
+			 * The dircache is only needed for SMB1 because SMB1
+			 * uses a name for the resume wheras SMB2 always
+			 * continues from the next position (unless it's told to
+			 * restart or close-and-reopen the listing).
+			 */
+			DirCacheAdd(dirptr->dir_hnd, dname, cur_offset);
+		}
 
 		TALLOC_FREE(dname);
 
@@ -1653,7 +1659,16 @@ static struct smb_Dir *OpenDir_internal(TALLOC_CTX *mem_ctx,
 	}
 
 	dirp->conn = conn;
-	dirp->name_cache_size = lp_directory_name_cache_size(SNUM(conn));
+
+	if (!conn->sconn->using_smb2) {
+		/*
+		 * The dircache is only needed for SMB1 because SMB1 uses a name
+		 * for the resume wheras SMB2 always continues from the next
+		 * position (unless it's told to restart or close-and-reopen the
+		 * listing).
+		 */
+		dirp->name_cache_size = lp_directory_name_cache_size(SNUM(conn));
+	}
 
 	if (sconn && !sconn->using_smb2) {
 		sconn->searches.dirhandles_open++;
@@ -1679,14 +1694,14 @@ static struct smb_Dir *open_dir_safely(TALLOC_CTX *ctx,
 {
 	struct smb_Dir *dir_hnd = NULL;
 	struct smb_filename *smb_fname_cwd = NULL;
-	char *saved_dir = vfs_GetWd(ctx, conn);
+	struct smb_filename *saved_dir_fname = vfs_GetWd(ctx, conn);
 	NTSTATUS status;
 
-	if (saved_dir == NULL) {
+	if (saved_dir_fname == NULL) {
 		return NULL;
 	}
 
-	if (vfs_ChDir(conn, smb_dname->base_name) == -1) {
+	if (vfs_ChDir(conn, smb_dname) == -1) {
 		goto out;
 	}
 
@@ -1703,7 +1718,7 @@ static struct smb_Dir *open_dir_safely(TALLOC_CTX *ctx,
 	 * Now the directory is pinned, use
 	 * REALPATH to ensure we can access it.
 	 */
-	status = check_name(conn, ".");
+	status = check_name(conn, smb_fname_cwd);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto out;
 	}
@@ -1731,8 +1746,8 @@ static struct smb_Dir *open_dir_safely(TALLOC_CTX *ctx,
 
   out:
 
-	vfs_ChDir(conn, saved_dir);
-	TALLOC_FREE(saved_dir);
+	vfs_ChDir(conn, saved_dir_fname);
+	TALLOC_FREE(saved_dir_fname);
 	return dir_hnd;
 }
 
@@ -1775,7 +1790,16 @@ static struct smb_Dir *OpenDir_fsp(TALLOC_CTX *mem_ctx, connection_struct *conn,
 	}
 
 	dirp->conn = conn;
-	dirp->name_cache_size = lp_directory_name_cache_size(SNUM(conn));
+
+	if (!conn->sconn->using_smb2) {
+		/*
+		 * The dircache is only needed for SMB1 because SMB1 uses a name
+		 * for the resume wheras SMB2 always continues from the next
+		 * position (unless it's told to restart or close-and-reopen the
+		 * listing).
+		 */
+		dirp->name_cache_size = lp_directory_name_cache_size(SNUM(conn));
+	}
 
 	dirp->dir_smb_fname = cp_smb_filename(dirp, fsp->fsp_name);
 	if (!dirp->dir_smb_fname) {
@@ -2030,24 +2054,29 @@ static int files_below_forall_fn(struct file_id fid,
 		/*
 		 * Filter files above dirpath
 		 */
-		return 0;
+		goto out;
 	}
 	if (fullpath[state->dirpath_len] != '/') {
 		/*
 		 * Filter file that don't have a path separator at the end of
 		 * dirpath's length
 		 */
-		return 0;
+		goto out;
 	}
 
 	if (memcmp(state->dirpath, fullpath, state->dirpath_len) != 0) {
 		/*
 		 * Not a parent
 		 */
-		return 0;
+		goto out;
 	}
 
+	TALLOC_FREE(to_free);
 	return state->fn(fid, data, state->private_data);
+
+out:
+	TALLOC_FREE(to_free);
+	return 0;
 }
 
 static int files_below_forall(connection_struct *conn,

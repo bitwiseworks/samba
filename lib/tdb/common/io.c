@@ -52,28 +52,67 @@ static bool tdb_adjust_offset(struct tdb_context *tdb, off_t *off)
 static ssize_t tdb_pwrite(struct tdb_context *tdb, const void *buf,
 			  size_t count, off_t offset)
 {
+	ssize_t ret;
+
 	if (!tdb_adjust_offset(tdb, &offset)) {
 		return -1;
 	}
-	return pwrite(tdb->fd, buf, count, offset);
+
+	do {
+		ret = pwrite(tdb->fd, buf, count, offset);
+	} while ((ret == -1) && (errno == EINTR));
+
+	return ret;
 }
 
 static ssize_t tdb_pread(struct tdb_context *tdb, void *buf,
 			 size_t count, off_t offset)
 {
+	ssize_t ret;
+
 	if (!tdb_adjust_offset(tdb, &offset)) {
 		return -1;
 	}
-	return pread(tdb->fd, buf, count, offset);
+
+	do {
+		ret = pread(tdb->fd, buf, count, offset);
+	} while ((ret == -1) && (errno == EINTR));
+
+	return ret;
 }
 
 static int tdb_ftruncate(struct tdb_context *tdb, off_t length)
 {
+	ssize_t ret;
+
 	if (!tdb_adjust_offset(tdb, &length)) {
 		return -1;
 	}
-	return ftruncate(tdb->fd, length);
+
+	do {
+		ret = ftruncate(tdb->fd, length);
+	} while ((ret == -1) && (errno == EINTR));
+
+	return ret;
 }
+
+#if HAVE_POSIX_FALLOCATE
+static int tdb_posix_fallocate(struct tdb_context *tdb, off_t offset,
+			       off_t len)
+{
+	ssize_t ret;
+
+	if (!tdb_adjust_offset(tdb, &offset)) {
+		return -1;
+	}
+
+	do {
+		ret = posix_fallocate(tdb->fd, offset, len);
+	} while ((ret == -1) && (errno == EINTR));
+
+	return ret;
+}
+#endif
 
 static int tdb_fstat(struct tdb_context *tdb, struct stat *buf)
 {
@@ -358,6 +397,7 @@ static int tdb_expand_file(struct tdb_context *tdb, tdb_off_t size, tdb_off_t ad
 {
 	char buf[8192];
 	tdb_off_t new_size;
+	int ret;
 
 	if (tdb->read_only || tdb->traverse_read) {
 		tdb->ecode = TDB_ERR_RDONLY;
@@ -373,7 +413,36 @@ static int tdb_expand_file(struct tdb_context *tdb, tdb_off_t size, tdb_off_t ad
 		return -1;
 	}
 
-	if (tdb_ftruncate(tdb, new_size) == -1) {
+#if HAVE_POSIX_FALLOCATE
+	ret = tdb_posix_fallocate(tdb, size, addition);
+	if (ret == 0) {
+		return 0;
+	}
+	if (ret == ENOSPC) {
+		/*
+		 * The Linux glibc (at least as of 2.24) fallback if
+		 * the file system does not support fallocate does not
+		 * reset the file size back to where it was. Also, to
+		 * me it is unclear from the posix spec of
+		 * posix_fallocate whether this is allowed or
+		 * not. Better be safe than sorry and "goto fail" but
+		 * "return -1" here, leaving the EOF pointer too
+		 * large.
+		 */
+		goto fail;
+	}
+
+	/*
+	 * Retry the "old" way. Possibly unnecessary, but looking at
+	 * our configure script there seem to be weird failure modes
+	 * for posix_fallocate. See commit 3264a98ff16de, which
+	 * probably refers to
+	 * https://sourceware.org/bugzilla/show_bug.cgi?id=1083.
+	 */
+#endif
+
+	ret = tdb_ftruncate(tdb, new_size);
+	if (ret == -1) {
 		char b = 0;
 		ssize_t written = tdb_pwrite(tdb, &b, 1, new_size - 1);
 		if (written == 0) {
@@ -409,14 +478,14 @@ static int tdb_expand_file(struct tdb_context *tdb, tdb_off_t size, tdb_off_t ad
 			TDB_LOG((tdb, TDB_DEBUG_FATAL, "expand_file write "
 				"returned 0 twice: giving up!\n"));
 			errno = ENOSPC;
-			return -1;
+			goto fail;
 		}
 		if (written == -1) {
 			tdb->ecode = TDB_ERR_OOM;
 			TDB_LOG((tdb, TDB_DEBUG_FATAL, "expand_file write of "
 				 "%u bytes failed (%s)\n", (int)n,
 				 strerror(errno)));
-			return -1;
+			goto fail;
 		}
 		if (written != n) {
 			TDB_LOG((tdb, TDB_DEBUG_WARNING, "expand_file: wrote "
@@ -427,6 +496,28 @@ static int tdb_expand_file(struct tdb_context *tdb, tdb_off_t size, tdb_off_t ad
 		size += written;
 	}
 	return 0;
+
+fail:
+	{
+		int err = errno;
+
+		/*
+		 * We're holding the freelist lock or are inside a
+		 * transaction. Cutting the file is safe, the space we
+		 * tried to allocate can't have been used anywhere in
+		 * the meantime.
+		 */
+
+		ret = tdb_ftruncate(tdb, size);
+		if (ret == -1) {
+			TDB_LOG((tdb, TDB_DEBUG_WARNING, "expand_file: "
+				 "retruncate to %ju failed\n",
+				 (uintmax_t)size));
+		}
+		errno = err;
+	}
+
+	return -1;
 }
 
 
@@ -642,6 +733,9 @@ int tdb_parse_data(struct tdb_context *tdb, TDB_DATA key,
 /* read/write a record */
 int tdb_rec_read(struct tdb_context *tdb, tdb_off_t offset, struct tdb_record *rec)
 {
+	int ret;
+	tdb_len_t overall_len;
+
 	if (tdb->methods->tdb_read(tdb, offset, rec, sizeof(*rec),DOCONV()) == -1)
 		return -1;
 	if (TDB_BAD_MAGIC(rec)) {
@@ -650,6 +744,31 @@ int tdb_rec_read(struct tdb_context *tdb, tdb_off_t offset, struct tdb_record *r
 		TDB_LOG((tdb, TDB_DEBUG_FATAL,"tdb_rec_read bad magic 0x%x at offset=%u\n", rec->magic, offset));
 		return -1;
 	}
+
+	overall_len = rec->key_len + rec->data_len;
+	if (overall_len < rec->data_len) {
+		/* overflow */
+		return -1;
+	}
+
+	if (overall_len > rec->rec_len) {
+		/* invalid record */
+		return -1;
+	}
+
+	ret = tdb->methods->tdb_oob(tdb, offset, rec->key_len, 1);
+	if (ret == -1) {
+		return -1;
+	}
+	ret = tdb->methods->tdb_oob(tdb, offset, rec->data_len, 1);
+	if (ret == -1) {
+		return -1;
+	}
+	ret = tdb->methods->tdb_oob(tdb, offset, rec->rec_len, 1);
+	if (ret == -1) {
+		return -1;
+	}
+
 	return tdb->methods->tdb_oob(tdb, rec->next, sizeof(*rec), 0);
 }
 

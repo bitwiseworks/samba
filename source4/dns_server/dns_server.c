@@ -52,7 +52,7 @@
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_DNS
 
-NTSTATUS server_service_dns_init(void);
+NTSTATUS server_service_dns_init(TALLOC_CTX *);
 
 /* hold information about one dns socket */
 struct dns_socket {
@@ -117,6 +117,8 @@ static void dns_process_done(struct tevent_req *subreq);
 static struct tevent_req *dns_process_send(TALLOC_CTX *mem_ctx,
 					   struct tevent_context *ev,
 					   struct dns_server *dns,
+					   const struct tsocket_address *remote_address,
+					   const struct tsocket_address *local_address,
 					   DATA_BLOB *in)
 {
 	struct tevent_req *req, *subreq;
@@ -161,6 +163,8 @@ static struct tevent_req *dns_process_send(TALLOC_CTX *mem_ctx,
 	state->state.flags = state->in_packet.operation;
 	state->state.flags |= DNS_FLAG_REPLY;
 
+	state->state.local_address = local_address;
+	state->state.remote_address = remote_address;
 
 	if (forwarder && *forwarder && **forwarder) {
 		state->state.flags |= DNS_FLAG_RECURSION_AVAIL;
@@ -168,7 +172,8 @@ static struct tevent_req *dns_process_send(TALLOC_CTX *mem_ctx,
 
 	state->out_packet = state->in_packet;
 
-	ret = dns_verify_tsig(dns, state, &state->state, &state->out_packet, in);
+	ret = dns_verify_tsig(dns, state, &state->state,
+			      &state->out_packet, in);
 	if (!W_ERROR_IS_OK(ret)) {
 		state->dns_err = werr_to_dns_err(ret);
 		tevent_req_done(req);
@@ -178,7 +183,8 @@ static struct tevent_req *dns_process_send(TALLOC_CTX *mem_ctx,
 	switch (state->in_packet.operation & DNS_OPCODE) {
 	case DNS_OPCODE_QUERY:
 		subreq = dns_server_process_query_send(
-			state, ev, dns, &state->state, &state->in_packet);
+			state, ev, dns,
+			&state->state, &state->in_packet);
 		if (tevent_req_nomem(subreq, req)) {
 			return tevent_req_post(req, ev);
 		}
@@ -333,6 +339,8 @@ static void dns_tcp_call_loop(struct tevent_req *subreq)
 	call->in.length -= 2;
 
 	subreq = dns_process_send(call, dns->task->event_ctx, dns,
+				  dns_conn->conn->remote_address,
+				  dns_conn->conn->local_address,
 				  &call->in);
 	if (subreq == NULL) {
 		dns_tcp_terminate_connection(
@@ -534,6 +542,8 @@ static void dns_udp_call_loop(struct tevent_req *subreq)
 		 tsocket_address_string(call->src, call)));
 
 	subreq = dns_process_send(call, dns->task->event_ctx, dns,
+				  call->src,
+				  sock->dns_socket->local_address,
 				  &call->in);
 	if (subreq == NULL) {
 		TALLOC_FREE(call);
@@ -632,7 +642,8 @@ static NTSTATUS dns_add_socket(struct dns_server *dns,
 				     &dns_tcp_stream_ops,
 				     "ip", address, &port,
 				     lpcfg_socket_options(dns->task->lp_ctx),
-				     dns_socket);
+				     dns_socket,
+				     dns->task->process_context);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("Failed to bind to %s:%u TCP - %s\n",
 			 address, port, nt_errstr(status)));
@@ -673,22 +684,13 @@ static NTSTATUS dns_add_socket(struct dns_server *dns,
   setup our listening sockets on the configured network interfaces
 */
 static NTSTATUS dns_startup_interfaces(struct dns_server *dns,
-				       struct interface *ifaces)
+				       struct interface *ifaces,
+				       const struct model_ops *model_ops)
 {
-	const struct model_ops *model_ops;
-	int num_interfaces;
+	size_t num_interfaces;
 	TALLOC_CTX *tmp_ctx = talloc_new(dns);
 	NTSTATUS status;
 	int i;
-
-	/* within the dns task we want to be a single process, so
-	   ask for the single process model ops and pass these to the
-	   stream_setup_socket() call. */
-	model_ops = process_model_startup("single");
-	if (!model_ops) {
-		DEBUG(0,("Can't find 'single' process model_ops\n"));
-		return NT_STATUS_INTERNAL_ERROR;
-	}
 
 	if (ifaces != NULL) {
 		num_interfaces = iface_list_count(ifaces);
@@ -702,7 +704,7 @@ static NTSTATUS dns_startup_interfaces(struct dns_server *dns,
 			NT_STATUS_NOT_OK_RETURN(status);
 		}
 	} else {
-		int num_binds = 0;
+		size_t num_binds = 0;
 		char **wcard;
 		wcard = iface_list_wildcard(tmp_ctx);
 		if (wcard == NULL) {
@@ -754,7 +756,7 @@ static NTSTATUS dns_server_reload_zones(struct dns_server *dns)
 	struct dns_server_zone *new_list = NULL;
 	struct dns_server_zone *old_list = NULL;
 	struct dns_server_zone *old_zone;
-	status = dns_common_zones(dns->samdb, dns, &new_list);
+	status = dns_common_zones(dns->samdb, dns, NULL, &new_list);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
@@ -829,8 +831,6 @@ static void dns_task_init(struct task_server *task)
 	}
 
 	dns->task = task;
-	/*FIXME: Make this a configurable option */
-	dns->max_payload = 4096;
 
 	dns->server_credentials = cli_credentials_init(dns);
 	if (!dns->server_credentials) {
@@ -838,8 +838,12 @@ static void dns_task_init(struct task_server *task)
 		return;
 	}
 
-	dns->samdb = samdb_connect(dns, dns->task->event_ctx, dns->task->lp_ctx,
-			      system_session(dns->task->lp_ctx), 0);
+	dns->samdb = samdb_connect(dns,
+				   dns->task->event_ctx,
+				   dns->task->lp_ctx,
+				   system_session(dns->task->lp_ctx),
+				   NULL,
+				   0);
 	if (!dns->samdb) {
 		task_server_terminate(task, "dns: samdb_connect failed", true);
 		return;
@@ -896,7 +900,7 @@ static void dns_task_init(struct task_server *task)
 		return;
 	}
 
-	status = dns_startup_interfaces(dns, ifaces);
+	status = dns_startup_interfaces(dns, ifaces, task->model_ops);
 	if (!NT_STATUS_IS_OK(status)) {
 		task_server_terminate(task, "dns failed to setup interfaces", true);
 		return;
@@ -917,7 +921,11 @@ static void dns_task_init(struct task_server *task)
 	}
 }
 
-NTSTATUS server_service_dns_init(void)
+NTSTATUS server_service_dns_init(TALLOC_CTX *ctx)
 {
-	return register_server_service("dns", dns_task_init);
+	struct service_details details = {
+		.inhibit_fork_on_accept = true,
+		.inhibit_pre_fork = true,
+	};
+	return register_server_service(ctx, "dns", dns_task_init, &details);
 }

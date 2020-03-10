@@ -99,6 +99,24 @@ struct lsa_trusted_domain_state {
 	struct ldb_dn *trusted_domain_user_dn;
 };
 
+static bool dcesrc_lsa_valid_AccountRight(const char *right)
+{
+	enum sec_privilege priv_id;
+	uint32_t right_bit;
+
+	priv_id = sec_privilege_id(right);
+	if (priv_id != SEC_PRIV_INVALID) {
+		return true;
+	}
+
+	right_bit = sec_right_bit(right);
+	if (right_bit != 0) {
+		return true;
+	}
+
+	return false;
+}
+
 /*
   this is based on the samba3 function make_lsa_object_sd()
   It uses the same logic, but with samba4 helper functions
@@ -1044,9 +1062,6 @@ static NTSTATUS dcesrv_lsa_CreateTrustedDomain_base(struct dcesrv_call_state *dc
 	struct server_id *server_ids = NULL;
 	uint32_t num_server_ids = 0;
 	NTSTATUS status;
-	struct dom_sid *tmp_sid1;
-	struct dom_sid *tmp_sid2;
-	uint32_t tmp_rid;
 	bool ok;
 	char *dns_encoded = NULL;
 	char *netbios_encoded = NULL;
@@ -1076,35 +1091,8 @@ static NTSTATUS dcesrv_lsa_CreateTrustedDomain_base(struct dcesrv_call_state *dc
 	 * We expect S-1-5-21-A-B-C, but we don't
 	 * allow S-1-5-21-0-0-0 as this is used
 	 * for claims and compound identities.
-	 *
-	 * So we call dom_sid_split_rid() 3 times
-	 * and compare the result to S-1-5-21
 	 */
-	status = dom_sid_split_rid(mem_ctx, r->in.info->sid, &tmp_sid1, &tmp_rid);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
-	}
-	status = dom_sid_split_rid(mem_ctx, tmp_sid1, &tmp_sid2, &tmp_rid);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
-	}
-	status = dom_sid_split_rid(mem_ctx, tmp_sid2, &tmp_sid1, &tmp_rid);
-	if (!NT_STATUS_IS_OK(status)) {
-		return status;
-	}
-	ok = dom_sid_parse("S-1-5-21", tmp_sid2);
-	if (!ok) {
-		return NT_STATUS_INTERNAL_ERROR;
-	}
-	ok = dom_sid_equal(tmp_sid1, tmp_sid2);
-	if (!ok) {
-		return NT_STATUS_INVALID_PARAMETER;
-	}
-	ok = dom_sid_parse("S-1-5-21-0-0-0", tmp_sid2);
-	if (!ok) {
-		return NT_STATUS_INTERNAL_ERROR;
-	}
-	ok = !dom_sid_equal(r->in.info->sid, tmp_sid2);
+	ok = dom_sid_is_valid_account_domain(r->in.info->sid);
 	if (!ok) {
 		return NT_STATUS_INVALID_PARAMETER;
 	}
@@ -1342,15 +1330,8 @@ static NTSTATUS dcesrv_lsa_CreateTrustedDomain_base(struct dcesrv_call_state *dc
 				     "winbind_server",
 				     &num_server_ids, &server_ids);
 	if (NT_STATUS_IS_OK(status) && num_server_ids >= 1) {
-		enum ndr_err_code ndr_err;
-		DATA_BLOB b = {};
-
-		ndr_err = ndr_push_struct_blob(&b, mem_ctx, r->in.info,
-			(ndr_push_flags_fn_t)ndr_push_lsa_TrustDomainInfoInfoEx);
-		if (NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-			imessaging_send(dce_call->msg_ctx, server_ids[0],
-				MSG_WINBIND_NEW_TRUSTED_DOMAIN, &b);
-		}
+		imessaging_send(dce_call->msg_ctx, server_ids[0],
+				MSG_WINBIND_RELOAD_TRUSTED_DOMAINS, NULL);
 	}
 	TALLOC_FREE(server_ids);
 
@@ -2582,7 +2563,6 @@ static NTSTATUS dcesrv_lsa_EnumTrustDom(struct dcesrv_call_state *dce_call, TALL
 				 1+(r->in.max_size/LSA_ENUM_TRUST_DOMAIN_MULTIPLIER));
 
 	r->out.domains->domains = entries + *r->in.resume_handle;
-	r->out.domains->count = r->out.domains->count;
 
 	if (r->out.domains->count < count - *r->in.resume_handle) {
 		*r->out.resume_handle = *r->in.resume_handle + r->out.domains->count;
@@ -2677,7 +2657,6 @@ static NTSTATUS dcesrv_lsa_EnumTrustedDomainsEx(struct dcesrv_call_state *dce_ca
 				 1+(r->in.max_size/LSA_ENUM_TRUST_DOMAIN_EX_MULTIPLIER));
 
 	r->out.domains->domains = entries + *r->in.resume_handle;
-	r->out.domains->count = r->out.domains->count;
 
 	if (r->out.domains->count < count - *r->in.resume_handle) {
 		*r->out.resume_handle = *r->in.resume_handle + r->out.domains->count;
@@ -2949,12 +2928,10 @@ static NTSTATUS dcesrv_lsa_AddRemoveAccountRights(struct dcesrv_call_state *dce_
 	}
 
 	for (i=0;i<rights->count;i++) {
-		if (sec_privilege_id(rights->names[i].string) == SEC_PRIV_INVALID) {
-			if (sec_right_bit(rights->names[i].string) == 0) {
-				talloc_free(msg);
-				return NT_STATUS_NO_SUCH_PRIVILEGE;
-			}
+		bool ok;
 
+		ok = dcesrc_lsa_valid_AccountRight(rights->names[i].string);
+		if (!ok) {
 			talloc_free(msg);
 			return NT_STATUS_NO_SUCH_PRIVILEGE;
 		}
@@ -3190,8 +3167,6 @@ static NTSTATUS dcesrv_lsa_SetSystemAccessAccount(struct dcesrv_call_state *dce_
 {
 	DCESRV_FAULT(DCERPC_FAULT_OP_RNG_ERROR);
 }
-
-
 /*
   lsa_CreateSecret
 */
@@ -3203,6 +3178,7 @@ static NTSTATUS dcesrv_lsa_CreateSecret(struct dcesrv_call_state *dce_call, TALL
 	struct lsa_secret_state *secret_state;
 	struct dcesrv_handle *handle;
 	struct ldb_message **msgs, *msg;
+	struct ldb_context *samdb = NULL;
 	const char *attrs[] = {
 		NULL
 	};
@@ -3253,11 +3229,18 @@ static NTSTATUS dcesrv_lsa_CreateSecret(struct dcesrv_call_state *dce_call, TALL
 					ldb_binary_encode_string(mem_ctx, name));
 		NT_STATUS_HAVE_NO_MEMORY(name2);
 
-		/* We need to connect to the database as system, as this is one
-		 * of the rare RPC calls that must read the secrets (and this
-		 * is denied otherwise) */
-		secret_state->sam_ldb = talloc_reference(secret_state,
-							 samdb_connect(mem_ctx, dce_call->event_ctx, dce_call->conn->dce_ctx->lp_ctx, system_session(dce_call->conn->dce_ctx->lp_ctx), 0));
+		/*
+		 * We need to connect to the database as system, as this is
+		 * one of the rare RPC calls that must read the secrets
+		 * (and this is denied otherwise)
+		 *
+		 * We also save the current remote session details so they can
+		 * used by the audit logging module. This allows the audit
+		 * logging to report the remote users details, rather than the
+		 * system users details.
+		 */
+		samdb = dcesrv_samdb_connect_as_system(mem_ctx, dce_call);
+		secret_state->sam_ldb = talloc_reference(secret_state, samdb);
 		NT_STATUS_HAVE_NO_MEMORY(secret_state->sam_ldb);
 
 		/* search for the secret record */
@@ -3360,6 +3343,7 @@ static NTSTATUS dcesrv_lsa_OpenSecret(struct dcesrv_call_state *dce_call, TALLOC
 	struct lsa_secret_state *secret_state;
 	struct dcesrv_handle *handle;
 	struct ldb_message **msgs;
+	struct ldb_context *samdb = NULL;
 	const char *attrs[] = {
 		NULL
 	};
@@ -3394,9 +3378,18 @@ static NTSTATUS dcesrv_lsa_OpenSecret(struct dcesrv_call_state *dce_call, TALLOC
 
 	if (strncmp("G$", r->in.name.string, 2) == 0) {
 		name = &r->in.name.string[2];
-		/* We need to connect to the database as system, as this is one of the rare RPC calls that must read the secrets (and this is denied otherwise) */
-		secret_state->sam_ldb = talloc_reference(secret_state,
-							 samdb_connect(mem_ctx, dce_call->event_ctx, dce_call->conn->dce_ctx->lp_ctx, system_session(dce_call->conn->dce_ctx->lp_ctx), 0));
+		/*
+		 * We need to connect to the database as system, as this is
+		 * one of the rare RPC calls that must read the secrets
+		 * (and this is denied otherwise)
+		 *
+		 * We also save the current remote session details so they can
+		 * used by the audit logging module. This allows the audit
+		 * logging to report the remote users details, rather than the
+		 * system users details.
+		 */
+		samdb = dcesrv_samdb_connect_as_system(mem_ctx, dce_call);
+		secret_state->sam_ldb = talloc_reference(secret_state, samdb);
 		secret_state->global = true;
 
 		if (strlen(name) < 1) {
@@ -3856,6 +3849,7 @@ static NTSTATUS dcesrv_lsa_EnumAccountsWithUserRight(struct dcesrv_call_state *d
 	struct ldb_message **res;
 	const char * const attrs[] = { "objectSid", NULL};
 	const char *privname;
+	bool ok;
 
 	DCESRV_PULL_HANDLE(h, r->in.handle, LSA_HANDLE_POLICY);
 
@@ -3866,7 +3860,9 @@ static NTSTATUS dcesrv_lsa_EnumAccountsWithUserRight(struct dcesrv_call_state *d
 	}
 
 	privname = r->in.name->string;
-	if (sec_privilege_id(privname) == SEC_PRIV_INVALID && sec_right_bit(privname) == 0) {
+
+	ok = dcesrc_lsa_valid_AccountRight(privname);
+	if (!ok) {
 		return NT_STATUS_NO_SUCH_PRIVILEGE;
 	}
 
@@ -4022,7 +4018,8 @@ static NTSTATUS dcesrv_lsa_SetInfoPolicy2(struct dcesrv_call_state *dce_call,
 	DCESRV_FAULT(DCERPC_FAULT_OP_RNG_ERROR);
 }
 
-static void kdc_get_policy(struct loadparm_context *lp_ctx,
+static void kdc_get_policy(TALLOC_CTX *mem_ctx,
+			   struct loadparm_context *lp_ctx,
 			   struct smb_krb5_context *smb_krb5_context,
 			   struct lsa_DomainInfoKerberos *k)
 {
@@ -4030,12 +4027,10 @@ static void kdc_get_policy(struct loadparm_context *lp_ctx,
 	time_t usr_tkt_lifetime;
 	time_t renewal_lifetime;
 
-	/* These should be set and stored via Group Policy, but until then, some defaults are in order */
-
 	/* Our KDC always re-validates the client */
 	k->authentication_options = LSA_POLICY_KERBEROS_VALIDATE_CLIENT;
 
-	lpcfg_default_kdc_policy(lp_ctx, &svc_tkt_lifetime,
+	lpcfg_default_kdc_policy(mem_ctx, lp_ctx, &svc_tkt_lifetime,
 				 &usr_tkt_lifetime, &renewal_lifetime);
 
 	unix_to_nt_time(&k->service_tkt_lifetime, svc_tkt_lifetime);
@@ -4084,7 +4079,7 @@ static NTSTATUS dcesrv_lsa_QueryDomainInformationPolicy(struct dcesrv_call_state
 			*r->out.info = NULL;
 			return NT_STATUS_INTERNAL_ERROR;
 		}
-		kdc_get_policy(dce_call->conn->dce_ctx->lp_ctx,
+		kdc_get_policy(mem_ctx, dce_call->conn->dce_ctx->lp_ctx,
 			       smb_krb5_context,
 			       k);
 		talloc_free(smb_krb5_context);
@@ -4352,6 +4347,8 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 	struct lsa_ForestTrustCollisionInfo *c_info = NULL;
 	DATA_BLOB ft_blob = {};
 	struct ldb_message *msg = NULL;
+	struct server_id *server_ids = NULL;
+	uint32_t num_server_ids = 0;
 	NTSTATUS status;
 	enum ndr_err_code ndr_err;
 	int ret;
@@ -4591,6 +4588,21 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 		goto done;
 	}
 
+	/*
+	 * Notify winbindd that we have a acquired forest trust info
+	 */
+	status = irpc_servers_byname(dce_call->msg_ctx,
+				     mem_ctx,
+				     "winbind_server",
+				     &num_server_ids, &server_ids);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("irpc_servers_byname failed\n");
+		goto done;
+	}
+
+	imessaging_send(dce_call->msg_ctx, server_ids[0],
+			MSG_WINBIND_RELOAD_TRUSTED_DOMAINS, NULL);
+
 	status = NT_STATUS_OK;
 
 done:
@@ -4771,15 +4783,15 @@ static WERROR dcesrv_dssetup_DsRoleAbortDownlevelServerUpgrade(struct dcesrv_cal
 /* include the generated boilerplate */
 #include "librpc/gen_ndr/ndr_dssetup_s.c"
 
-NTSTATUS dcerpc_server_lsa_init(void)
+NTSTATUS dcerpc_server_lsa_init(TALLOC_CTX *ctx)
 {
 	NTSTATUS ret;
 
-	ret = dcerpc_server_dssetup_init();
+	ret = dcerpc_server_dssetup_init(ctx);
 	if (!NT_STATUS_IS_OK(ret)) {
 		return ret;
 	}
-	ret = dcerpc_server_lsarpc_init();
+	ret = dcerpc_server_lsarpc_init(ctx);
 	if (!NT_STATUS_IS_OK(ret)) {
 		return ret;
 	}

@@ -19,10 +19,11 @@
 */
 
 #include "includes.h"
+#include "libsmb/unexpected.h"
 #include "../lib/util/tevent_ntstatus.h"
 #include "lib/util_tsock.h"
-#include "lib/tsocket/tsocket.h"
 #include "libsmb/nmblib.h"
+#include "lib/tsocket/tsocket.h"
 #include "lib/util/sys_rw.h"
 
 static const char *nmbd_socket_dir(void)
@@ -157,6 +158,7 @@ static void nb_packet_server_listener(struct tevent_context *ev,
 	if (sock == -1) {
 		return;
 	}
+	smb_set_close_on_exec(sock);
 	DEBUG(6,("accepted socket %d\n", sock));
 
 	client = talloc_zero(server, struct nb_packet_client);
@@ -168,12 +170,12 @@ static void nb_packet_server_listener(struct tevent_context *ev,
 	ret = tstream_bsd_existing_socket(client, sock, &client->sock);
 	if (ret != 0) {
 		DEBUG(10, ("tstream_bsd_existing_socket failed\n"));
+		TALLOC_FREE(client);
 		close(sock);
 		return;
 	}
 
 	client->server = server;
-	talloc_set_destructor(client, nb_packet_client_destructor);
 
 	client->out_queue = tevent_queue_create(
 		client, "unexpected packet output");
@@ -195,6 +197,8 @@ static void nb_packet_server_listener(struct tevent_context *ev,
 
 	DLIST_ADD(server->clients, client);
 	server->num_clients += 1;
+
+	talloc_set_destructor(client, nb_packet_client_destructor);
 
 	if (server->num_clients > server->max_clients) {
 		DEBUG(10, ("Too many clients, dropping oldest\n"));
@@ -255,7 +259,8 @@ static void nb_packet_got_query(struct tevent_req *req)
 	/* Take care of alignment */
 	memcpy(&q, buf, sizeof(q));
 
-	if (nread != sizeof(struct nb_packet_query) + q.mailslot_namelen) {
+	if ((size_t)nread !=
+	    sizeof(struct nb_packet_query) + q.mailslot_namelen) {
 		DEBUG(10, ("nb_packet_got_query: Invalid mailslot namelength\n"));
 		TALLOC_FREE(client);
 		return;
@@ -479,7 +484,6 @@ struct nb_packet_reader_state {
 	struct nb_packet_query query;
 	const char *mailslot_name;
 	struct iovec iov[2];
-	char c;
 	struct nb_packet_reader *reader;
 };
 
@@ -519,7 +523,7 @@ struct tevent_req *nb_packet_reader_send(TALLOC_CTX *mem_ctx,
 		return tevent_req_post(req, ev);
 	}
 
-	ret = tsocket_address_unix_from_path(state, "", &laddr);
+	ret = tsocket_address_unix_from_path(state, NULL, &laddr);
 	if (ret != 0) {
 		tevent_req_nterror(req, map_nt_error_from_unix(errno));
 		return tevent_req_post(req, ev);
@@ -594,13 +598,14 @@ static void nb_packet_reader_sent_query(struct tevent_req *subreq)
 		tevent_req_nterror(req, map_nt_error_from_unix(err));
 		return;
 	}
-	if (written != sizeof(state->query) + state->query.mailslot_namelen) {
+	if ((size_t)written !=
+	    sizeof(state->query) + state->query.mailslot_namelen) {
 		tevent_req_nterror(req, NT_STATUS_UNEXPECTED_IO_ERROR);
 		return;
 	}
 	subreq = tstream_read_packet_send(state, state->ev,
 					  state->reader->sock,
-					  sizeof(state->c), NULL, NULL);
+					  1, NULL, NULL);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
@@ -625,9 +630,8 @@ static void nb_packet_reader_got_ack(struct tevent_req *subreq)
 		tevent_req_nterror(req, map_nt_error_from_unix(err));
 		return;
 	}
-	if (nread != sizeof(state->c)) {
-		DEBUG(10, ("read = %d, expected %d\n", (int)nread,
-			   (int)sizeof(state->c)));
+	if (nread != 1) {
+		DBG_DEBUG("read = %zd, expected 1\n", nread);
 		tevent_req_nterror(req, NT_STATUS_UNEXPECTED_IO_ERROR);
 		return;
 	}
@@ -713,7 +717,7 @@ static void nb_packet_read_done(struct tevent_req *subreq)
 	tevent_req_done(req);
 }
 
-NTSTATUS nb_packet_read_recv(struct tevent_req *req,
+NTSTATUS nb_packet_read_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
 			     struct packet_struct **ppacket)
 {
 	struct nb_packet_read_state *state = tevent_req_data(
@@ -729,7 +733,8 @@ NTSTATUS nb_packet_read_recv(struct tevent_req *req,
 
 	memcpy(&hdr, state->buf, sizeof(hdr));
 
-	packet = parse_packet(
+	packet = parse_packet_talloc(
+		mem_ctx,
 		(char *)state->buf + sizeof(struct nb_packet_client_header),
 		state->buflen - sizeof(struct nb_packet_client_header),
 		state->hdr.type, state->hdr.ip, state->hdr.port);
@@ -737,6 +742,7 @@ NTSTATUS nb_packet_read_recv(struct tevent_req *req,
 		tevent_req_received(req);
 		return NT_STATUS_INVALID_NETWORK_RESPONSE;
 	}
+
 	*ppacket = packet;
 	tevent_req_received(req);
 	return NT_STATUS_OK;

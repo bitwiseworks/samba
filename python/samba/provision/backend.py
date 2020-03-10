@@ -25,6 +25,7 @@
 
 """Functions for setting up a Samba configuration (LDB and LDAP backends)."""
 
+from samba.compat import urllib_quote
 from base64 import b64encode
 import errno
 import ldb
@@ -183,7 +184,7 @@ class LDAPBackend(ProvisionBackend):
         if ldap_backend_forced_uri is not None:
             self.ldap_uri = ldap_backend_forced_uri
         else:
-            self.ldap_uri = "ldapi://%s" % urllib.quote(
+            self.ldap_uri = "ldapi://%s" % urllib_quote(
                 os.path.join(self.ldapdir, "ldapi"), safe="")
 
         if not os.path.exists(self.ldapdir):
@@ -200,7 +201,7 @@ class LDAPBackend(ProvisionBackend):
                 expression="(objectClass=OpenLDAProotDSE)")
             try:
                 f = open(self.slapd_pid, "r")
-            except IOError, err:
+            except IOError as err:
                 if err != errno.ENOENT:
                     raise
             else:
@@ -223,7 +224,7 @@ class LDAPBackend(ProvisionBackend):
                 self.slapd_path)
 
         if not os.path.isdir(self.ldapdir):
-            os.makedirs(self.ldapdir, 0700)
+            os.makedirs(self.ldapdir, 0o700)
 
         # Put the LDIF of the schema into a database so we can search on
         # it to generate schema-dependent configurations in Fedora DS and
@@ -259,7 +260,7 @@ class LDAPBackend(ProvisionBackend):
         finally:
             f.close()
 
-        os.chmod(ldap_backend_script, 0755)
+        os.chmod(ldap_backend_script, 0o755)
 
         # Now start the slapd, so we can provision onto it.  We keep the
         # subprocess context around, to kill this off at the successful
@@ -346,7 +347,7 @@ class OpenLDAPBackend(LDAPBackend):
         :param dbdir: Database directory.
         """
         if not os.path.exists(dbdir):
-            os.makedirs(dbdir, 0700)
+            os.makedirs(dbdir, 0o700)
 
     def provision(self):
         from samba.provision import ProvisioningError, setup_path
@@ -578,7 +579,7 @@ class OpenLDAPBackend(LDAPBackend):
 
         # Wipe the old sam.ldb databases away
         shutil.rmtree(self.olcdir, True)
-        os.makedirs(self.olcdir, 0770)
+        os.makedirs(self.olcdir, 0o770)
 
         # If we were just looking for crashes up to this point, it's a
         # good time to exit before we realise we don't have OpenLDAP on
@@ -609,10 +610,11 @@ class OpenLDAPBackend(LDAPBackend):
 class FDSBackend(LDAPBackend):
 
     def __init__(self, backend_type, paths=None, lp=None,
-            names=None, logger=None, domainsid=None,
-            schema=None, hostname=None, ldapadminpass=None, slapd_path=None,
-            ldap_backend_extra_port=None, ldap_dryrun_mode=False, root=None,
-            setup_ds_path=None):
+                 names=None, logger=None, domainsid=None,
+                 schema=None, hostname=None, ldapadminpass=None,
+                 slapd_path=None, ldap_backend_extra_port=None,
+                 ldap_backend_forced_uri=None, ldap_dryrun_mode=False,
+                 root=None, setup_ds_path=None):
 
         from samba.provision import setup_path
 

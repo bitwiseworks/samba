@@ -100,7 +100,8 @@ try_command_on_node all "$CTDB setvar TakeoverTimeout ${new_takeover_timeout}"
 
 ####################
 
-addresses=$(get_ctdbd_command_line_option $test_node "public-addresses")
+try_command_on_node $test_node $CTDB_TEST_WRAPPER ctdb_base_show
+addresses="${out}/public_addresses"
 echo "Public addresses file on node $test_node is \"$addresses\""
 backup="${addresses}.$$"
 
@@ -199,6 +200,8 @@ try_command_on_node $test_node "$CTDB reloadips"
 
 check_ips $test_node "$iface" "$prefix" 1 $new_ip_max
 
+try_command_on_node any $CTDB sync
+
 ####################
 
 # This should be the primary.  Ensure that no other IPs are lost
@@ -210,6 +213,8 @@ add_ips_to_original_config \
 try_command_on_node $test_node "$CTDB reloadips"
 
 check_ips $test_node "$iface" "$prefix" 2 $new_ip_max
+
+try_command_on_node any $CTDB sync
 
 ####################
 
@@ -223,6 +228,8 @@ add_ips_to_original_config \
 try_command_on_node $test_node "$CTDB reloadips"
 
 check_ips $test_node "$iface" "$prefix" $start $new_ip_max
+
+try_command_on_node any $CTDB sync
 
 ####################
 

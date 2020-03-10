@@ -48,15 +48,15 @@ bool init_systemtime(struct spoolss_Time *r,
 
 time_t spoolss_Time_to_time_t(const struct spoolss_Time *r)
 {
-	struct tm unixtime;
-
-	unixtime.tm_year	= r->year - 1900;
-	unixtime.tm_mon		= r->month - 1;
-	unixtime.tm_wday	= r->day_of_week;
-	unixtime.tm_mday	= r->day;
-	unixtime.tm_hour	= r->hour;
-	unixtime.tm_min		= r->minute;
-	unixtime.tm_sec		= r->second;
+	struct tm unixtime = {
+		.tm_year	= r->year - 1900,
+		.tm_mon		= r->month - 1,
+		.tm_wday	= r->day_of_week,
+		.tm_mday	= r->day,
+		.tm_hour	= r->hour,
+		.tm_min		= r->minute,
+		.tm_sec		= r->second,
+	};
 
 	return mktime(&unixtime);
 }
@@ -97,9 +97,11 @@ bool spoolss_timestr_to_NTTIME(const char *str,
 bool spoolss_driver_version_to_qword(const char *str,
 				     uint64_t *data)
 {
-	unsigned int v1, v2, v3, v4;
+	unsigned int v1, v2, v3, v4 = 0;
 
-	if (sscanf(str, "%u.%u.%u.%u", &v1, &v2, &v3, &v4) != 4) {
+	if ((sscanf(str, "%u.%u.%u.%u", &v1, &v2, &v3, &v4) != 4) &&
+	    (sscanf(str, "%u.%u.%u", &v1, &v2, &v3) != 3))
+	{
 		return false;
 	}
 
@@ -432,4 +434,15 @@ WERROR spoolss_create_default_secdesc(TALLOC_CTX *mem_ctx,
 	*secdesc = psd;
 
 	return WERR_OK;
+}
+
+const char *spoolss_get_short_filesys_environment(const char *environment)
+{
+	if (strequal(environment, SPOOLSS_ARCHITECTURE_x64)) {
+		return "amd64";
+	} else if (strequal(environment, SPOOLSS_ARCHITECTURE_NT_X86)) {
+		return "x86";
+	} else {
+		return NULL;
+	}
 }

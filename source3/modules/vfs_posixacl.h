@@ -22,7 +22,7 @@
 #define __VFS_POSIXACL_H__
 
 SMB_ACL_T posixacl_sys_acl_get_file(vfs_handle_struct *handle,
-				    const char *path_p,
+				    const struct smb_filename *smb_fname,
 				    SMB_ACL_TYPE_T type,
 				    TALLOC_CTX *mem_ctx);
 
@@ -31,7 +31,7 @@ SMB_ACL_T posixacl_sys_acl_get_fd(vfs_handle_struct *handle,
 				  TALLOC_CTX *mem_ctx);
 
 int posixacl_sys_acl_set_file(vfs_handle_struct *handle,
-			      const char *name,
+			      const struct smb_filename *smb_fname,
 			      SMB_ACL_TYPE_T type,
 			      SMB_ACL_T theacl);
 
@@ -40,9 +40,9 @@ int posixacl_sys_acl_set_fd(vfs_handle_struct *handle,
 			    SMB_ACL_T theacl);
 
 int posixacl_sys_acl_delete_def_file(vfs_handle_struct *handle,
-				     const char *path);
+				const struct smb_filename *smb_fname);
 
-NTSTATUS vfs_posixacl_init(void);
+NTSTATUS vfs_posixacl_init(TALLOC_CTX *);
 
 #endif
 

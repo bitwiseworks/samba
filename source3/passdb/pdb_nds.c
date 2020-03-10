@@ -183,15 +183,19 @@ static int berEncodeLoginData(
 		err = (ber_printf(requestBer, "}}", 0) < 0) ? LDAP_ENCODING_ERROR : 0;
 	}
 
-	if(putData)
-	{
+	if (!err) {
+		if (putData) {
 		/* BER Encode the the tag and data */
-		err = (ber_printf(requestBer, "oio}", utf8TagPtr, utf8TagSize, putDataLen, putData, putDataLen) < 0) ? LDAP_ENCODING_ERROR : 0;
-	}
-	else
-	{
+			err = (ber_printf(requestBer, "oio}", utf8TagPtr,
+					  utf8TagSize, putDataLen, putData,
+					  putDataLen) < 0)
+				? LDAP_ENCODING_ERROR : 0;
+		} else {
 		/* BER Encode the the tag */
-		err = (ber_printf(requestBer, "o}", utf8TagPtr, utf8TagSize) < 0) ? LDAP_ENCODING_ERROR : 0;
+			err = (ber_printf(requestBer, "o}", utf8TagPtr,
+					  utf8TagSize) < 0)
+				? LDAP_ENCODING_ERROR : 0;
+		}
 	}
 
 	if (err)
@@ -667,7 +671,7 @@ int pdb_nds_get_password(
 	size_t *pwd_len,
 	char *pwd )
 {
-	LDAP *ld = ldap_state->ldap_struct;
+	LDAP *ld = smbldap_get_ldap(ldap_state);
 	int rc = -1;
 
 	rc = nmasldap_get_password(ld, object_dn, pwd_len, (unsigned char *)pwd);
@@ -707,7 +711,7 @@ int pdb_nds_set_password(
 	char *object_dn,
 	const char *pwd )
 {
-	LDAP *ld = ldap_state->ldap_struct;
+	LDAP *ld = smbldap_get_ldap(ldap_state);
 	int rc = -1;
 	LDAPMod **tmpmods = NULL;
 
@@ -784,13 +788,19 @@ static NTSTATUS pdb_nds_update_login_attempts(struct pdb_methods *methods,
 			smbldap_talloc_autofree_ldapmsg(sam_acct, result);
 		}
 
-		if (ldap_count_entries(ldap_state->smbldap_state->ldap_struct, result) == 0) {
+		if (ldap_count_entries(
+			    smbldap_get_ldap(ldap_state->smbldap_state),
+			    result) == 0) {
 			DEBUG(0, ("pdb_nds_update_login_attempts: No user to modify!\n"));
 			return NT_STATUS_OBJECT_NAME_NOT_FOUND;
 		}
 
-		entry = ldap_first_entry(ldap_state->smbldap_state->ldap_struct, result);
-		dn = smbldap_talloc_dn(talloc_tos(), ldap_state->smbldap_state->ldap_struct, entry);
+		entry = ldap_first_entry(
+			smbldap_get_ldap(ldap_state->smbldap_state), result);
+		dn = smbldap_talloc_dn(talloc_tos(),
+				       smbldap_get_ldap(
+					       ldap_state->smbldap_state),
+				       entry);
 		if (!dn) {
 			return NT_STATUS_OBJECT_NAME_NOT_FOUND;
 		}
@@ -887,7 +897,7 @@ static NTSTATUS pdb_init_NDS_ldapsam(struct pdb_methods **pdb_method, const char
 	return nt_status;
 }
 
-NTSTATUS pdb_nds_init(void)
+NTSTATUS pdb_nds_init(TALLOC_CTX *ctx)
 {
 	NTSTATUS nt_status;
 	if (!NT_STATUS_IS_OK(nt_status = smb_register_passdb(PASSDB_INTERFACE_VERSION, "NDS_ldapsam", pdb_init_NDS_ldapsam)))

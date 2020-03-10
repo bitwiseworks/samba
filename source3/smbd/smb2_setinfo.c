@@ -28,6 +28,10 @@
 #include "../librpc/gen_ndr/open_files.h"
 #include "source3/lib/dbwrap/dbwrap_watch.h"
 #include "messages.h"
+#include "librpc/gen_ndr/ndr_quota.h"
+
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_SMB2
 
 static struct tevent_req *smbd_smb2_setinfo_send(TALLOC_CTX *mem_ctx,
 						 struct tevent_context *ev,
@@ -104,7 +108,7 @@ NTSTATUS smbd_smb2_request_process_setinfo(struct smbd_smb2_request *req)
 		return smbd_smb2_request_error(req, NT_STATUS_FILE_CLOSED);
 	}
 
-	subreq = smbd_smb2_setinfo_send(req, req->sconn->ev_ctx,
+	subreq = smbd_smb2_setinfo_send(req, req->ev_ctx,
 					req, in_fsp,
 					in_info_type,
 					in_file_info_class,
@@ -226,7 +230,8 @@ static struct tevent_req *delay_rename_for_lease_break(struct tevent_req *req,
 		delay = true;
 		break_to = (e_lease_type & ~SMB2_LEASE_HANDLE);
 
-		send_break_message(fsp->conn->sconn->msg_ctx, e, break_to);
+		send_break_message(fsp->conn->sconn->msg_ctx, &fsp->file_id,
+				   e, break_to);
 	}
 
 	if (!delay) {
@@ -279,8 +284,7 @@ static void defer_rename_done(struct tevent_req *subreq)
 	int ret_size = 0;
 	bool ok;
 
-	status = dbwrap_watched_watch_recv(subreq, state->req, NULL, NULL,
-					   NULL);
+	status = dbwrap_watched_watch_recv(subreq, NULL, NULL);
 	TALLOC_FREE(subreq);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(5, ("dbwrap_record_watch_recv returned %s\n",
@@ -294,12 +298,6 @@ static void defer_rename_done(struct tevent_req *subreq)
 	 */
 	ok = change_to_user(state->smb2req->tcon->compat,
 			    state->smb2req->session->compat->vuid);
-	if (!ok) {
-		tevent_req_nterror(state->req, NT_STATUS_ACCESS_DENIED);
-		return;
-	}
-
-	ok = set_current_service(state->smb2req->tcon->compat, 0, true);
 	if (!ok) {
 		tevent_req_nterror(state->req, NT_STATUS_ACCESS_DENIED);
 		return;
@@ -567,6 +565,46 @@ static struct tevent_req *smbd_smb2_setinfo_send(TALLOC_CTX *mem_ctx,
 		break;
 	}
 
+	case 0x04:/* SMB2_SETINFO_QUOTA */
+	{
+#ifdef HAVE_SYS_QUOTAS
+		struct file_quota_information info = {0};
+		SMB_NTQUOTA_STRUCT qt = {0};
+		enum ndr_err_code err;
+		int ret;
+
+		if (!fsp->fake_file_handle) {
+			tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER);
+			return tevent_req_post(req, ev);
+		}
+		err = ndr_pull_struct_blob(
+			&in_input_buffer, state, &info,
+			(ndr_pull_flags_fn_t)ndr_pull_file_quota_information);
+		if (!NDR_ERR_CODE_IS_SUCCESS(err)) {
+			tevent_req_nterror(req, NT_STATUS_UNSUCCESSFUL);
+			return tevent_req_post(req, ev);
+		}
+
+		qt.usedspace = info.quota_used;
+
+		qt.softlim = info.quota_threshold;
+
+		qt.hardlim = info.quota_limit;
+
+		qt.sid = info.sid;
+		ret = vfs_set_ntquota(fsp, SMB_USER_QUOTA_TYPE, &qt.sid, &qt);
+		if (ret !=0 ) {
+			status = map_nt_error_from_unix(errno);
+			tevent_req_nterror(req, status);
+			return tevent_req_post(req, ev);
+		}
+		status = NT_STATUS_OK;
+		break;
+#else
+		tevent_req_nterror(req, NT_STATUS_NOT_SUPPORTED);
+		return tevent_req_post(req, ev);
+#endif
+	}
 	default:
 		tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER);
 		return tevent_req_post(req, ev);

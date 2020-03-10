@@ -29,6 +29,7 @@
 #include "auth/auth.h"
 #include "param/param.h"
 #include "dsdb/samdb/samdb.h"
+#include "dsdb/common/util.h"
 #include "ldb_wrap.h"
 #include "popt.h"
 
@@ -84,10 +85,15 @@ static int extensions_hook(struct ldb_context *ldb, enum ldb_module_hook_type t)
 		}
 		gensec_init();
 
-		if (ldb_set_opaque(ldb, "sessionInfo", system_session(cmdline_lp_ctx))) {
+		if (ldb_set_opaque(
+			ldb,
+			DSDB_SESSION_INFO,
+			system_session(cmdline_lp_ctx))) {
+
 			return ldb_operr(ldb);
 		}
-		if (ldb_set_opaque(ldb, "credentials", cmdline_credentials)) {
+		if (ldb_set_opaque(ldb, "credentials",
+				popt_get_cmdline_credentials())) {
 			return ldb_operr(ldb);
 		}
 		if (ldb_set_opaque(ldb, "loadparm", cmdline_lp_ctx)) {

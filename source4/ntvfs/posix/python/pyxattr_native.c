@@ -19,12 +19,11 @@
 */
 
 #include <Python.h>
+#include "python/py3compat.h"
 #include "includes.h"
 #include "librpc/ndr/libndr.h"
 #include "system/filesys.h"
 #include "lib/util/base64.h"
-
-void initxattr_native(void);
 
 static PyObject *py_is_xattr_supported(PyObject *self)
 {
@@ -42,7 +41,7 @@ static PyObject *py_wrap_setxattr(PyObject *self, PyObject *args)
 	Py_ssize_t blobsize;
 	DATA_BLOB blob;
 
-	if (!PyArg_ParseTuple(args, "sss#", &filename, &attribute, &blob.data, 
+	if (!PyArg_ParseTuple(args, "ss"PYARG_BYTES_LEN, &filename, &attribute, &blob.data,
         &blobsize))
 		return NULL;
 
@@ -91,7 +90,7 @@ static PyObject *py_wrap_getxattr(PyObject *self, PyObject *args)
 		talloc_free(mem_ctx);
 		return NULL;
 	}
-	ret = PyString_FromStringAndSize(buf, len);
+	ret = Py_BuildValue(PYARG_BYTES_LEN, buf, len);
 	talloc_free(mem_ctx);
 	return ret;
 }
@@ -108,14 +107,22 @@ static PyMethodDef py_xattr_methods[] = {
 	{ NULL }
 };
 
-void initxattr_native(void)
+static struct PyModuleDef moduledef = {
+    PyModuleDef_HEAD_INIT,
+    .m_name = "xattr_native",
+    .m_doc = "Python bindings for xattr manipulation.",
+    .m_size = -1,
+    .m_methods = py_xattr_methods,
+};
+
+MODULE_INIT_FUNC(xattr_native)
 {
 	PyObject *m;
 
-	m = Py_InitModule3("xattr_native", py_xattr_methods,
-			   "Python bindings for xattr manipulation.");
+	m = PyModule_Create(&moduledef);
 
 	if (m == NULL)
-		return;
-}
+		return NULL;
 
+	return m;
+}

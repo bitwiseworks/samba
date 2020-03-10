@@ -18,11 +18,15 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "includes.h"
-#include "../lib/util/dlinklist.h"
+#include "replace.h"
 #include "system/iconv.h"
 #include "system/filesys.h"
-#include "charset_proto.h"
+#include "lib/util/byteorder.h"
+#include "lib/util/dlinklist.h"
+#include "lib/util/charset/charset.h"
+#include "lib/util/charset/charset_proto.h"
+#include "libcli/util/ntstatus.h"
+#include "lib/util/util_str_hex.h"
 
 #ifdef strcasecmp
 #undef strcasecmp
@@ -480,8 +484,8 @@ static size_t ucs2hex_pull(void *cd, const char **inbuf, size_t *inbytesleft,
 			 char **outbuf, size_t *outbytesleft)
 {
 	while (*inbytesleft >= 1 && *outbytesleft >= 2) {
-		unsigned int v;
-
+		uint64_t v;
+		NTSTATUS status;
 		if ((*inbuf)[0] != '@') {
 			/* seven bit ascii case */
 			(*outbuf)[0] = (*inbuf)[0];
@@ -497,8 +501,9 @@ static size_t ucs2hex_pull(void *cd, const char **inbuf, size_t *inbytesleft,
 			errno = EINVAL;
 			return -1;
 		}
+		status = read_hex_bytes(&(*inbuf)[1], 4, &v);
 
-		if (sscanf(&(*inbuf)[1], "%04x", &v) != 1) {
+		if (!NT_STATUS_IS_OK(status)) {
 			errno = EILSEQ;
 			return -1;
 		}
@@ -768,12 +773,12 @@ static size_t utf8_push(void *cd, const char **inbuf, size_t *inbytesleft,
 		}
 
 		if ((uc[1] & 0xfc) == 0xdc) {
-			/* its the second part of a 4 byte sequence. Illegal */
+			errno = EILSEQ;
+#ifndef HAVE_ICONV_ERRNO_ILLEGAL_MULTIBYTE
 			if (in_left < 4) {
 				errno = EINVAL;
-			} else {
-				errno = EILSEQ;
 			}
+#endif
 			goto error;
 		}
 

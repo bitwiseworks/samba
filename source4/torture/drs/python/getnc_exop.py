@@ -35,6 +35,7 @@ from drs_base import AbstractLink
 
 import samba.tests
 import random
+from samba import werror, WERRORError
 
 import ldb
 from ldb import SCOPE_BASE
@@ -88,7 +89,8 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
     def tearDown(self):
         try:
             self.ldb_dc1.delete(self.ou, ["tree_delete:1"])
-        except ldb.LdbError as (enum, string):
+        except ldb.LdbError as e:
+            (enum, string) = e.args
             if enum == ldb.ERR_NO_SUCH_OBJECT:
                 pass
         super(DrsReplicaSyncTestCase, self).tearDown()
@@ -108,11 +110,11 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
                        "server_dn": self.ldb_dc2.get_serverName()}
 
         msgs = self.ldb_dc1.search(scope=ldb.SCOPE_BASE, base=fsmo_info_1["server_dn"], attrs=["serverReference"])
-        fsmo_info_1["server_acct_dn"] = ldb.Dn(self.ldb_dc1, msgs[0]["serverReference"][0])
+        fsmo_info_1["server_acct_dn"] = ldb.Dn(self.ldb_dc1, msgs[0]["serverReference"][0].decode('utf8'))
         fsmo_info_1["rid_set_dn"] = ldb.Dn(self.ldb_dc1, "CN=RID Set") + fsmo_info_1["server_acct_dn"]
 
         msgs = self.ldb_dc2.search(scope=ldb.SCOPE_BASE, base=fsmo_info_2["server_dn"], attrs=["serverReference"])
-        fsmo_info_2["server_acct_dn"] = ldb.Dn(self.ldb_dc2, msgs[0]["serverReference"][0])
+        fsmo_info_2["server_acct_dn"] = ldb.Dn(self.ldb_dc2, msgs[0]["serverReference"][0].decode('utf8'))
         fsmo_info_2["rid_set_dn"] = ldb.Dn(self.ldb_dc2, "CN=RID Set") + fsmo_info_2["server_acct_dn"]
 
         # determine the owner dc
@@ -137,8 +139,8 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
 
     def test_do_single_repl(self):
         """
-        Make sure that DRSU_EXOP_REPL_OBJ never replicates more than
-        one object, even when we use DRS_GET_ANC.
+	Make sure that DRSUAPI_EXOP_REPL_OBJ never replicates more than
+        one object, even when we use DRS_GET_ANC/GET_TGT.
         """
 
         ou1 = "OU=get_anc1,%s" % self.ou
@@ -146,52 +148,95 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             "dn": ou1,
             "objectclass": "organizationalUnit"
             })
-        ou1_id = self._get_indentifier(self.ldb_dc1, ou1)
+        ou1_id = self._get_identifier(self.ldb_dc1, ou1)
         ou2 = "OU=get_anc2,%s" % ou1
         self.ldb_dc1.add({
             "dn": ou2,
             "objectclass": "organizationalUnit"
             })
-        ou2_id = self._get_indentifier(self.ldb_dc1, ou2)
+        ou2_id = self._get_identifier(self.ldb_dc1, ou2)
         dc3 = "CN=test_anc_dc_%u,%s" % (random.randint(0, 4294967295), ou2)
         self.ldb_dc1.add({
             "dn": dc3,
             "objectclass": "computer",
             "userAccountControl": "%d" % (samba.dsdb.UF_ACCOUNTDISABLE | samba.dsdb.UF_SERVER_TRUST_ACCOUNT)
             })
-        dc3_id = self._get_indentifier(self.ldb_dc1, dc3)
+        dc3_id = self._get_identifier(self.ldb_dc1, dc3)
 
-        req8 = self._exop_req8(dest_dsa=None,
-                               invocation_id=self.ldb_dc1.get_invocation_id(),
-                               nc_dn_str=ou1,
-                               exop=drsuapi.DRSUAPI_EXOP_REPL_OBJ,
-                               replica_flags=drsuapi.DRSUAPI_DRS_WRIT_REP)
-        (level, ctr) = self.drs.DsGetNCChanges(self.drs_handle, 8, req8)
-        self._check_ctr6(ctr, [ou1])
+        # Add some linked attributes (for checking GET_TGT behaviour)
+        m = ldb.Message()
+        m.dn = ldb.Dn(self.ldb_dc2, ou1)
+        m["managedBy"] = ldb.MessageElement(ou2, ldb.FLAG_MOD_ADD, "managedBy")
+        self.ldb_dc1.modify(m)
+        ou1_link = AbstractLink(drsuapi.DRSUAPI_ATTID_managedBy,
+                                drsuapi.DRSUAPI_DS_LINKED_ATTRIBUTE_FLAG_ACTIVE,
+                                ou1_id.guid, ou2_id.guid)
+
+        m.dn = ldb.Dn(self.ldb_dc2, dc3)
+        m["managedBy"] = ldb.MessageElement(ou2, ldb.FLAG_MOD_ADD, "managedBy")
+        self.ldb_dc1.modify(m)
+        dc3_link = AbstractLink(drsuapi.DRSUAPI_ATTID_managedBy,
+                                drsuapi.DRSUAPI_DS_LINKED_ATTRIBUTE_FLAG_ACTIVE,
+                                dc3_id.guid, ou2_id.guid)
+
+        req = self._getnc_req10(dest_dsa=None,
+                                invocation_id=self.ldb_dc1.get_invocation_id(),
+                                nc_dn_str=ou1,
+                                exop=drsuapi.DRSUAPI_EXOP_REPL_OBJ,
+                                replica_flags=drsuapi.DRSUAPI_DRS_WRIT_REP,
+                                more_flags=drsuapi.DRSUAPI_DRS_GET_TGT)
+        (level, ctr) = self.drs.DsGetNCChanges(self.drs_handle, 10, req)
+        self._check_ctr6(ctr, [ou1], expected_links=[ou1_link])
 
         # DRSUAPI_DRS_WRIT_REP means that we should only replicate the dn we give (dc3).
         # DRSUAPI_DRS_GET_ANC means that we should also replicate its ancestors, but
         # Windows doesn't do this if we use both.
-        req8 = self._exop_req8(dest_dsa=None,
-                               invocation_id=self.ldb_dc1.get_invocation_id(),
-                               nc_dn_str=dc3,
-                               exop=drsuapi.DRSUAPI_EXOP_REPL_OBJ,
-                               replica_flags=drsuapi.DRSUAPI_DRS_WRIT_REP |
-                                             drsuapi.DRSUAPI_DRS_GET_ANC)
-        (level, ctr) = self.drs.DsGetNCChanges(self.drs_handle, 8, req8)
-        self._check_ctr6(ctr, [dc3])
+        req = self._getnc_req10(dest_dsa=None,
+                                invocation_id=self.ldb_dc1.get_invocation_id(),
+                                nc_dn_str=dc3,
+                                exop=drsuapi.DRSUAPI_EXOP_REPL_OBJ,
+                                replica_flags=drsuapi.DRSUAPI_DRS_WRIT_REP |
+                                              drsuapi.DRSUAPI_DRS_GET_ANC,
+                                more_flags=drsuapi.DRSUAPI_DRS_GET_TGT)
+        (level, ctr) = self.drs.DsGetNCChanges(self.drs_handle, 10, req)
+        self._check_ctr6(ctr, [dc3], expected_links=[dc3_link])
 
         # Even though the ancestor of ou2 (ou1) has changed since last hwm, and we're
         # sending DRSUAPI_DRS_GET_ANC, the expected response is that it will only try
         # and replicate the single object still.
+        req = self._getnc_req10(dest_dsa=None,
+                                invocation_id=self.ldb_dc1.get_invocation_id(),
+                                nc_dn_str=ou2,
+                                exop=drsuapi.DRSUAPI_EXOP_REPL_OBJ,
+                                replica_flags=drsuapi.DRSUAPI_DRS_CRITICAL_ONLY |
+                                              drsuapi.DRSUAPI_DRS_GET_ANC,
+                                more_flags=drsuapi.DRSUAPI_DRS_GET_TGT)
+        (level, ctr) = self.drs.DsGetNCChanges(self.drs_handle, 10, req)
+        self._check_ctr6(ctr, [ou2])
+
+    def test_do_full_repl_on_ou(self):
+        """
+        Make sure that a full replication on a not-an-nc fails with
+        the right error code
+        """
+
+        non_nc_ou = "OU=not-an-NC,%s" % self.ou
+        self.ldb_dc1.add({
+            "dn": non_nc_ou,
+            "objectclass": "organizationalUnit"
+            })
         req8 = self._exop_req8(dest_dsa=None,
                                invocation_id=self.ldb_dc1.get_invocation_id(),
-                               nc_dn_str=ou2,
-                               exop=drsuapi.DRSUAPI_EXOP_REPL_OBJ,
-                               replica_flags=drsuapi.DRSUAPI_DRS_CRITICAL_ONLY |
-                                             drsuapi.DRSUAPI_DRS_GET_ANC)
-        (level, ctr) = self.drs.DsGetNCChanges(self.drs_handle, 8, req8)
-        self._check_ctr6(ctr, [ou2])
+                               nc_dn_str=non_nc_ou,
+                               exop=drsuapi.DRSUAPI_EXOP_NONE,
+                               replica_flags=drsuapi.DRSUAPI_DRS_WRIT_REP)
+
+        try:
+            (level, ctr) = self.drs.DsGetNCChanges(self.drs_handle, 8, req8)
+            self.fail("Expected DsGetNCChanges to fail with WERR_DS_CANT_FIND_EXPECTED_NC")
+        except WERRORError as e1:
+            (enum, estr) = e1.args
+            self.assertEquals(enum, werror.WERR_DS_CANT_FIND_EXPECTED_NC)
 
     def test_link_utdv_hwm(self):
         """Test verify the DRS_GET_ANC behavior."""
@@ -201,20 +246,20 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             "dn": ou1,
             "objectclass": "organizationalUnit"
             })
-        ou1_id = self._get_indentifier(self.ldb_dc1, ou1)
+        ou1_id = self._get_identifier(self.ldb_dc1, ou1)
         ou2 = "OU=get_anc2,%s" % ou1
         self.ldb_dc1.add({
             "dn": ou2,
             "objectclass": "organizationalUnit"
             })
-        ou2_id = self._get_indentifier(self.ldb_dc1, ou2)
+        ou2_id = self._get_identifier(self.ldb_dc1, ou2)
         dc3 = "CN=test_anc_dc_%u,%s" % (random.randint(0, 4294967295), ou2)
         self.ldb_dc1.add({
             "dn": dc3,
             "objectclass": "computer",
             "userAccountControl": "%d" % (samba.dsdb.UF_ACCOUNTDISABLE | samba.dsdb.UF_SERVER_TRUST_ACCOUNT)
             })
-        dc3_id = self._get_indentifier(self.ldb_dc1, dc3)
+        dc3_id = self._get_identifier(self.ldb_dc1, dc3)
 
         (hwm1, utdv1) = self._check_replication([ou1,ou2,dc3],
                                                 drsuapi.DRSUAPI_DRS_WRIT_REP)
@@ -325,7 +370,21 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             "dn": cn3,
             "objectclass": "container",
             })
-        cn3_id = self._get_indentifier(self.ldb_dc1, cn3)
+        cn3_id = self._get_identifier(self.ldb_dc1, cn3)
+
+        (hwm5, utdv5) = self._check_replication([dc3,ou1,ou2,self.ou,cn3],
+                            drsuapi.DRSUAPI_DRS_WRIT_REP)
+
+        self._check_replication([self.ou,ou1,ou2,dc3,cn3],
+            drsuapi.DRSUAPI_DRS_WRIT_REP|
+            drsuapi.DRSUAPI_DRS_GET_ANC)
+
+        self._check_replication([dc3],
+            drsuapi.DRSUAPI_DRS_CRITICAL_ONLY)
+
+        self._check_replication([self.ou,ou1,ou2,dc3],
+            drsuapi.DRSUAPI_DRS_CRITICAL_ONLY|
+            drsuapi.DRSUAPI_DRS_GET_ANC)
 
         (hwm5, utdv5) = self._check_replication([dc3,ou1,ou2,self.ou,cn3],
                             drsuapi.DRSUAPI_DRS_WRIT_REP)
@@ -410,11 +469,16 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             drsuapi.DRSUAPI_DRS_GET_ANC,
             expected_links=[dc3_managedBy_ou1])
 
-        self._check_replication([dc3],
+        # GET_TGT seems to override DRS_CRITICAL_ONLY and also returns any
+        # object(s) that relate to the linked attributes (similar to GET_ANC)
+        self._check_replication([ou1, dc3],
             drsuapi.DRSUAPI_DRS_CRITICAL_ONLY,
             more_flags=drsuapi.DRSUAPI_DRS_GET_TGT,
-            expected_links=[dc3_managedBy_ou1])
+            expected_links=[dc3_managedBy_ou1], dn_ordered=False)
 
+        # Change DC3's managedBy to OU2 instead of OU1
+        # Note that the OU1 managedBy linked attribute will still exist as
+        # a tombstone object (and so will be returned in the replication still)
         m = ldb.Message()
         m.dn = ldb.Dn(self.ldb_dc1, dc3)
         m["managedBy"] = ldb.MessageElement(ou2, ldb.FLAG_MOD_REPLACE, "managedBy")
@@ -443,11 +507,16 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             drsuapi.DRSUAPI_DRS_GET_ANC,
             expected_links=[dc3_managedBy_ou1,dc3_managedBy_ou2])
 
-        self._check_replication([dc3],
+        # GET_TGT will also return any DNs referenced by the linked attributes
+        # (including the Tombstone attribute)
+        self._check_replication([ou1, ou2, dc3],
             drsuapi.DRSUAPI_DRS_CRITICAL_ONLY,
             more_flags=drsuapi.DRSUAPI_DRS_GET_TGT,
-            expected_links=[dc3_managedBy_ou1,dc3_managedBy_ou2])
+            expected_links=[dc3_managedBy_ou1,dc3_managedBy_ou2], dn_ordered=False)
 
+        # Use the highwater-mark prior to changing ManagedBy - this should
+        # only return the old/Tombstone and new linked attributes (we already
+        # know all the DNs)
         self._check_replication([],
             drsuapi.DRSUAPI_DRS_WRIT_REP,
             expected_links=[dc3_managedBy_ou1,dc3_managedBy_ou2],
@@ -476,6 +545,8 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             expected_links=[dc3_managedBy_ou1,dc3_managedBy_ou2],
             highwatermark=hwm7)
 
+        # Repeat the above set of tests using the uptodateness_vector
+        # instead of the highwater-mark
         self._check_replication([],
             drsuapi.DRSUAPI_DRS_WRIT_REP,
             expected_links=[dc3_managedBy_ou1,dc3_managedBy_ou2],
@@ -555,15 +626,10 @@ class DrsReplicaPrefixMapTestCase(drs_base.DrsBaseTestCase):
         super(DrsReplicaPrefixMapTestCase, self).tearDown()
         try:
             self.ldb_dc1.delete(self.ou, ["tree_delete:1"])
-        except ldb.LdbError as (enum, string):
+        except ldb.LdbError as e2:
+            (enum, string) = e2.args
             if enum == ldb.ERR_NO_SUCH_OBJECT:
                 pass
-
-    def get_partial_attribute_set(self, attids=[drsuapi.DRSUAPI_ATTID_objectClass]):
-        partial_attribute_set = drsuapi.DsPartialAttributeSet()
-        partial_attribute_set.attids = attids
-        partial_attribute_set.num_attids = len(attids)
-        return partial_attribute_set
 
     def test_missing_prefix_map_dsa(self):
         partial_attribute_set = self.get_partial_attribute_set()
@@ -612,7 +678,8 @@ class DrsReplicaPrefixMapTestCase(drs_base.DrsBaseTestCase):
         try:
             (level, ctr) = drs.DsGetNCChanges(drs_handle, 8, req8)
             self.fail("Invalid attid (99999) should have triggered an error")
-        except RuntimeError as (ecode, emsg):
+        except RuntimeError as e3:
+            (ecode, emsg) = e3.args
             self.assertEqual(ecode, 0x000020E2, "Error code should have been "
                              "WERR_DS_DRA_SCHEMA_MISMATCH")
 
@@ -901,7 +968,8 @@ class DrsReplicaSyncSortTestCase(drs_base.DrsBaseTestCase):
         # tidyup groups and users
         try:
             self.ldb_dc1.delete(self.ou, ["tree_delete:1"])
-        except ldb.LdbError as (enum, string):
+        except ldb.LdbError as e4:
+            (enum, string) = e4.args
             if enum == ldb.ERR_NO_SUCH_OBJECT:
                 pass
 

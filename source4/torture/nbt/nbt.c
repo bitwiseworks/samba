@@ -48,10 +48,10 @@ bool torture_nbt_get_name(struct torture_context *tctx,
 	return true;
 }
 
-NTSTATUS torture_nbt_init(void)
+NTSTATUS torture_nbt_init(TALLOC_CTX *ctx)
 {
 	struct torture_suite *suite = torture_suite_create(
-		talloc_autofree_context(), "nbt");
+		ctx, "nbt");
 	/* nbt tests */
 	torture_suite_add_suite(suite, torture_nbt_register(suite));
 	torture_suite_add_suite(suite, torture_nbt_wins(suite));
@@ -63,7 +63,7 @@ NTSTATUS torture_nbt_init(void)
 	suite->description = talloc_strdup(suite, 
 					 "NetBIOS over TCP/IP and WINS tests");
 
-	torture_register_suite(suite);
+	torture_register_suite(ctx, suite);
 
 	return NT_STATUS_OK;
 }

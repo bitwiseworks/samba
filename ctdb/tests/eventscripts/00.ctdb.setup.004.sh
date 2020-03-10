@@ -4,17 +4,17 @@
 
 define_test "setup, known and obsolete tunables in config"
 
-setup_ctdb
+setup
 
-setup_config <<EOF
-CTDB_SET_MonitorInterval=5
-CTDB_SET_EventScriptUnhealthyOnTimeout=0
+setup_tunable_config <<EOF
+MonitorInterval=5
+EventScriptUnhealthyOnTimeout=0
 EOF
 
 required_result 0 <<EOF
+Set MonitorInterval to 5
 Setting obsolete tunable variable 'EventScriptUnhealthyOnTimeout'
 Set EventScriptUnhealthyOnTimeout to 0
-Set MonitorInterval to 5
 EOF
 
 simple_test

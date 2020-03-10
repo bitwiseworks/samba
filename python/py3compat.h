@@ -78,6 +78,23 @@
 #define PyStr_AsUTF8 PyUnicode_AsUTF8
 #define PyStr_AsUTF8AndSize PyUnicode_AsUTF8AndSize
 
+/* description of bytes and string objects */
+#define PY_DESC_PY3_BYTES "bytes"
+#define PY_DESC_PY3_STRING "string"
+
+/* Determine if object is really bytes, for code that runs
+ * in python2 & python3 (note: PyBytes_Check is replaced by
+ * PyString_Check in python2) so care needs to be taken when
+ * writing code that will check if incoming type is bytes that
+ * will work as expected in python2 & python3
+ */
+
+#define IsPy3Bytes PyBytes_Check
+
+#define IsPy3BytesOrString(pystr) \
+    (PyStr_Check(pystr) || PyBytes_Check(pystr))
+
+
 /* Ints */
 
 #define PyInt_Type PyLong_Type
@@ -97,6 +114,10 @@
 #define MODULE_INIT_FUNC(name) \
     PyMODINIT_FUNC PyInit_ ## name(void); \
     PyMODINIT_FUNC PyInit_ ## name(void)
+
+/* PyArg_ParseTuple/Py_BuildValue argument */
+
+#define PYARG_BYTES_LEN "y#"
 
 #else
 
@@ -139,6 +160,25 @@
 #define PyBytes_Concat PyString_Concat
 #define PyBytes_ConcatAndDel PyString_ConcatAndDel
 #define _PyBytes_Resize _PyString_Resize
+
+/* description of bytes and string objects */
+#define PY_DESC_PY3_BYTES "string"
+#define PY_DESC_PY3_STRING "unicode"
+
+/* Determine if object is really bytes, for code that runs
+ * in python2 & python3 (note: PyBytes_Check is replaced by
+ * PyString_Check in python2) so care needs to be taken when
+ * writing code that will check if incoming type is bytes that
+ * will work as expected in python2 & python3
+ */
+
+#define IsPy3Bytes(pystr) false
+
+#define IsPy3BytesOrString PyStr_Check
+
+/* PyArg_ParseTuple/Py_BuildValue argument */
+
+#define PYARG_BYTES_LEN "s#"
 
 /* Module init */
 

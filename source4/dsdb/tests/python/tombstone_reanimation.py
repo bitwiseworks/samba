@@ -18,6 +18,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import print_function
 import sys
 import unittest
 
@@ -29,6 +30,7 @@ from samba.dcerpc import misc
 from samba.dcerpc import security
 from samba.dcerpc import drsblobs
 from samba.dcerpc.drsuapi import *
+from samba.tests.password_test import PasswordCommon
 
 import samba.tests
 from ldb import (SCOPE_BASE, FLAG_MOD_ADD, FLAG_MOD_DELETE, FLAG_MOD_REPLACE, Dn, Message,
@@ -48,21 +50,12 @@ class RestoredObjectAttributesBaseTestCase(samba.tests.TestCase):
         self.base_dn = self.samdb.domain_dn()
         self.schema_dn = self.samdb.get_schema_basedn().get_linearized()
         self.configuration_dn = self.samdb.get_config_basedn().get_linearized()
-        # Get the old "dSHeuristics" if it was set
-        self.dsheuristics = self.samdb.get_dsheuristics()
-        # Set the "dSHeuristics" to activate the correct "userPassword" behaviour
-        self.samdb.set_dsheuristics("000000001")
-        # Get the old "minPwdAge"
-        self.minPwdAge = self.samdb.get_minPwdAge()
-        # Set it temporary to "0"
-        self.samdb.set_minPwdAge("0")
+
+        # permit password changes during this test
+        PasswordCommon.allow_password_changes(self, self.samdb)
 
     def tearDown(self):
         super(RestoredObjectAttributesBaseTestCase, self).tearDown()
-        # Reset the "dSHeuristics" as they were before
-        self.samdb.set_dsheuristics(self.dsheuristics)
-        # Reset the "minPwdAge" as it was before
-        self.samdb.set_minPwdAge(self.minPwdAge)
 
     def GUID_string(self, guid):
         return self.samdb.schema_format_value("objectGUID", guid)
@@ -205,11 +198,12 @@ class BaseRestoreObjectTestCase(RestoredObjectAttributesBaseTestCase):
             FLAG_MOD_ADD, "enableOptionalFeature")
         try:
             self.samdb.modify(msg)
-        except LdbError, (num, _):
+        except LdbError as e:
+            (num, _) = e.args
             self.assertEquals(num, ERR_ATTRIBUTE_OR_VALUE_EXISTS)
 
     def test_undelete(self):
-        print "Testing standard undelete operation"
+        print("Testing standard undelete operation")
         usr1 = "cn=testuser,cn=users," + self.base_dn
         samba.tests.delete_force(self.samdb, usr1)
         self.samdb.add({
@@ -227,7 +221,7 @@ class BaseRestoreObjectTestCase(RestoredObjectAttributesBaseTestCase):
         samba.tests.delete_force(self.samdb, usr1)
 
     def test_rename(self):
-        print "Testing attempt to rename deleted object"
+        print("Testing attempt to rename deleted object")
         usr1 = "cn=testuser,cn=users," + self.base_dn
         self.samdb.add({
             "dn": usr1,
@@ -242,17 +236,19 @@ class BaseRestoreObjectTestCase(RestoredObjectAttributesBaseTestCase):
         try:
             self.samdb.rename(str(objDeleted1.dn), usr1)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e1:
+            (num, _) = e1.args
             self.assertEquals(num, ERR_NO_SUCH_OBJECT)
 
         try:
             self.samdb.rename(str(objDeleted1.dn), usr1, ["show_deleted:1"])
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e2:
+            (num, _) = e2.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
     def test_undelete_with_mod(self):
-        print "Testing standard undelete operation with modification of additional attributes"
+        print("Testing standard undelete operation with modification of additional attributes")
         usr1 = "cn=testuser,cn=users," + self.base_dn
         self.samdb.add({
             "dn": usr1,
@@ -269,7 +265,7 @@ class BaseRestoreObjectTestCase(RestoredObjectAttributesBaseTestCase):
         samba.tests.delete_force(self.samdb, usr1)
 
     def test_undelete_newuser(self):
-        print "Testing undelete user with a different dn"
+        print("Testing undelete user with a different dn")
         usr1 = "cn=testuser,cn=users," + self.base_dn
         usr2 = "cn=testuser2,cn=users," + self.base_dn
         samba.tests.delete_force(self.samdb, usr1)
@@ -288,7 +284,7 @@ class BaseRestoreObjectTestCase(RestoredObjectAttributesBaseTestCase):
         samba.tests.delete_force(self.samdb, usr2)
 
     def test_undelete_existing(self):
-        print "Testing undelete user after a user with the same dn has been created"
+        print("Testing undelete user after a user with the same dn has been created")
         usr1 = "cn=testuser,cn=users," + self.base_dn
         self.samdb.add({
             "dn": usr1,
@@ -307,11 +303,12 @@ class BaseRestoreObjectTestCase(RestoredObjectAttributesBaseTestCase):
         try:
             self.restore_deleted_object(self.samdb, objDeleted1.dn, usr1)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e3:
+            (num, _) = e3.args
             self.assertEquals(num, ERR_ENTRY_ALREADY_EXISTS)
 
     def test_undelete_cross_nc(self):
-        print "Cross NC undelete"
+        print("Cross NC undelete")
         c1 = "cn=ldaptestcontainer," + self.base_dn
         c2 = "cn=ldaptestcontainer2," + self.configuration_dn
         c3 = "cn=ldaptestcontainer," + self.configuration_dn
@@ -338,13 +335,15 @@ class BaseRestoreObjectTestCase(RestoredObjectAttributesBaseTestCase):
         try:
             self.restore_deleted_object(self.samdb, objDeleted1.dn, c3)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e4:
+            (num, _) = e4.args
             self.assertEquals(num, ERR_OPERATIONS_ERROR)
         #try to undelete from config to base dn
         try:
             self.restore_deleted_object(self.samdb, objDeleted2.dn, c4)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e5:
+            (num, _) = e5.args
             self.assertEquals(num, ERR_OPERATIONS_ERROR)
         #assert undeletion will work in same nc
         self.restore_deleted_object(self.samdb, objDeleted1.dn, c4)
@@ -519,7 +518,7 @@ class RestoreUserObjectTestCase(RestoredObjectAttributesBaseTestCase):
             (DRSUAPI_ATTID_isRecycled, 2)]
 
     def test_restore_user(self):
-        print "Test restored user attributes"
+        print("Test restored user attributes")
         username = "restore_user"
         usr_dn = "CN=%s,CN=Users,%s" % (username, self.base_dn)
         samba.tests.delete_force(self.samdb, usr_dn)
@@ -726,7 +725,7 @@ class RestoreUserPwdObjectTestCase(RestoredObjectAttributesBaseTestCase):
             (DRSUAPI_ATTID_isRecycled, 2)]
 
     def test_restorepw_user(self):
-        print "Test restored user attributes"
+        print("Test restored user attributes")
         username = "restorepw_user"
         usr_dn = "CN=%s,CN=Users,%s" % (username, self.base_dn)
         samba.tests.delete_force(self.samdb, usr_dn)
@@ -821,7 +820,7 @@ class RestoreGroupObjectTestCase(RestoredObjectAttributesBaseTestCase):
                 'cn': groupname }
 
     def test_plain_group(self):
-        print "Test restored Group attributes"
+        print("Test restored Group attributes")
         # create test group
         obj = self._create_test_group("r_group")
         guid = obj["objectGUID"][0]
@@ -840,7 +839,7 @@ class RestoreGroupObjectTestCase(RestoredObjectAttributesBaseTestCase):
         self.assertAttributesExists(self._expected_group_attributes("r_group", str(obj.dn), "Group"), obj_restore)
 
     def test_group_with_members(self):
-        print "Test restored Group with members attributes"
+        print("Test restored Group with members attributes")
         # create test group
         usr1 = self._create_test_user("r_user_1")
         usr2 = self._create_test_user("r_user_2")
@@ -894,7 +893,7 @@ class RestoreContainerObjectTestCase(RestoredObjectAttributesBaseTestCase):
         return self.search_dn(ou_dn)
 
     def test_ou_with_name_description(self):
-        print "Test OU reanimation"
+        print("Test OU reanimation")
         # create OU to test with
         obj = self._create_test_ou(rdn="r_ou",
                                    name="r_ou name",
@@ -918,7 +917,7 @@ class RestoreContainerObjectTestCase(RestoredObjectAttributesBaseTestCase):
         self.assertAttributesExists(expected_attrs, obj_restore)
 
     def test_container(self):
-        print "Test Container reanimation"
+        print("Test Container reanimation")
         # create test Container
         obj = self._create_object({
             "dn": "CN=r_container,CN=Users,%s" % self.base_dn,

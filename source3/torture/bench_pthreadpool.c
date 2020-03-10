@@ -19,7 +19,7 @@
  */
 
 #include "includes.h"
-#include "lib/pthreadpool/pthreadpool_pipe.h"
+#include "../lib/pthreadpool/pthreadpool_pipe.h"
 #include "proto.h"
 
 extern int torture_numops;
@@ -58,7 +58,11 @@ bool run_bench_pthreadpool(int dummy)
 		}
 	}
 
-	pthreadpool_pipe_destroy(pool);
+	if (ret != 1) {
+		return false;
+	}
 
-	return (ret == 1);
+	ret = pthreadpool_pipe_destroy(pool);
+
+	return (ret == 0);
 }

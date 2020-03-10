@@ -23,6 +23,10 @@
 #include "smbd/globals.h"
 #include "../libcli/smb/smb_common.h"
 #include "../lib/util/tevent_ntstatus.h"
+#include "libcli/security/security.h"
+
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_SMB2
 
 static struct tevent_req *smbd_smb2_flush_send(TALLOC_CTX *mem_ctx,
 					       struct tevent_context *ev,
@@ -54,7 +58,7 @@ NTSTATUS smbd_smb2_request_process_flush(struct smbd_smb2_request *req)
 		return smbd_smb2_request_error(req, NT_STATUS_FILE_CLOSED);
 	}
 
-	subreq = smbd_smb2_flush_send(req, req->sconn->ev_ctx,
+	subreq = smbd_smb2_flush_send(req, req->ev_ctx,
 				      req, in_fsp);
 	if (subreq == NULL) {
 		return smbd_smb2_request_error(req, NT_STATUS_NO_MEMORY);
@@ -144,8 +148,29 @@ static struct tevent_req *smbd_smb2_flush_send(TALLOC_CTX *mem_ctx,
 	}
 
 	if (!CHECK_WRITE(fsp)) {
-		tevent_req_nterror(req, NT_STATUS_ACCESS_DENIED);
-		return tevent_req_post(req, ev);
+		bool allow_dir_flush = false;
+		uint32_t flush_access = FILE_ADD_FILE | FILE_ADD_SUBDIRECTORY;
+
+		if (!fsp->is_directory) {
+			tevent_req_nterror(req, NT_STATUS_ACCESS_DENIED);
+			return tevent_req_post(req, ev);
+		}
+
+		/*
+		 * Directories are not writable in the conventional
+		 * sense, but if opened with *either*
+		 * FILE_ADD_FILE or FILE_ADD_SUBDIRECTORY
+		 * they can be flushed.
+		 */
+
+		if ((fsp->access_mask & flush_access) != 0) {
+			allow_dir_flush = true;
+		}
+
+		if (allow_dir_flush == false) {
+			tevent_req_nterror(req, NT_STATUS_ACCESS_DENIED);
+			return tevent_req_post(req, ev);
+		}
 	}
 
 	if (fsp->fh->fd == -1) {
@@ -181,7 +206,6 @@ static struct tevent_req *smbd_smb2_flush_send(TALLOC_CTX *mem_ctx,
 		return tevent_req_post(req, ev);
 	}
 
-	increment_outstanding_aio_calls();
 	return req;
 
 }
@@ -192,8 +216,6 @@ static void smbd_smb2_flush_done(struct tevent_req *subreq)
 		subreq, struct tevent_req);
 	int ret;
 	struct vfs_aio_state vfs_aio_state;
-
-	decrement_outstanding_aio_calls();
 
 	ret = SMB_VFS_FSYNC_RECV(subreq, &vfs_aio_state);
 	TALLOC_FREE(subreq);

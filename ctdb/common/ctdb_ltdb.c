@@ -33,6 +33,43 @@
 #include "common/common.h"
 #include "common/logging.h"
 
+
+/*
+ * Calculate tdb flags based on databse type
+ */
+int ctdb_db_tdb_flags(uint8_t db_flags, bool with_valgrind, bool with_mutex)
+{
+	int tdb_flags = 0;
+
+	if (db_flags & CTDB_DB_FLAGS_PERSISTENT) {
+		tdb_flags = TDB_DEFAULT;
+
+	} else if (db_flags & CTDB_DB_FLAGS_REPLICATED) {
+		tdb_flags = TDB_NOSYNC |
+			    TDB_CLEAR_IF_FIRST |
+			    TDB_INCOMPATIBLE_HASH;
+
+	} else {
+		tdb_flags = TDB_NOSYNC |
+			    TDB_CLEAR_IF_FIRST |
+			    TDB_INCOMPATIBLE_HASH;
+
+#ifdef TDB_MUTEX_LOCKING
+		if (with_mutex && tdb_runtime_check_for_robust_mutexes()) {
+			tdb_flags |= TDB_MUTEX_LOCKING;
+		}
+#endif
+
+	}
+
+	tdb_flags |= TDB_DISALLOW_NESTING;
+	if (with_valgrind) {
+		tdb_flags |= TDB_NOMMAP;
+	}
+
+	return tdb_flags;
+}
+
 /*
   find an attached ctdb_db handle given a name
  */
@@ -47,6 +84,61 @@ struct ctdb_db_context *ctdb_db_handle(struct ctdb_context *ctdb, const char *na
 	return NULL;
 }
 
+bool ctdb_db_persistent(struct ctdb_db_context *ctdb_db)
+{
+	if (ctdb_db->db_flags & CTDB_DB_FLAGS_PERSISTENT) {
+		return true;
+	}
+	return false;
+}
+
+bool ctdb_db_replicated(struct ctdb_db_context *ctdb_db)
+{
+	if (ctdb_db->db_flags & CTDB_DB_FLAGS_REPLICATED) {
+		return true;
+	}
+	return false;
+}
+
+bool ctdb_db_volatile(struct ctdb_db_context *ctdb_db)
+{
+	if ((ctdb_db->db_flags & CTDB_DB_FLAGS_PERSISTENT) ||
+	    (ctdb_db->db_flags & CTDB_DB_FLAGS_REPLICATED)) {
+		return false;
+	}
+	return true;
+}
+
+bool ctdb_db_readonly(struct ctdb_db_context *ctdb_db)
+{
+	if (ctdb_db->db_flags & CTDB_DB_FLAGS_READONLY) {
+		return true;
+	}
+	return false;
+}
+
+void ctdb_db_set_readonly(struct ctdb_db_context *ctdb_db)
+{
+	ctdb_db->db_flags |= CTDB_DB_FLAGS_READONLY;
+}
+
+void ctdb_db_reset_readonly(struct ctdb_db_context *ctdb_db)
+{
+	ctdb_db->db_flags &= ~CTDB_DB_FLAGS_READONLY;
+}
+
+bool ctdb_db_sticky(struct ctdb_db_context *ctdb_db)
+{
+	if (ctdb_db->db_flags & CTDB_DB_FLAGS_STICKY) {
+		return true;
+	}
+	return false;
+}
+
+void ctdb_db_set_sticky(struct ctdb_db_context *ctdb_db)
+{
+	ctdb_db->db_flags |= CTDB_DB_FLAGS_STICKY;
+}
 
 /*
   return the lmaster given a key
@@ -102,7 +194,8 @@ int ctdb_ltdb_fetch(struct ctdb_db_context *ctdb_db,
 		if (data) {
 			*data = tdb_null;
 		}
-		if (ctdb_db->persistent || header->dmaster == ctdb_db->ctdb->pnn) {
+		if (ctdb_db_persistent(ctdb_db) ||
+		    header->dmaster == ctdb_db->ctdb->pnn) {
 			if (ctdb_ltdb_store(ctdb_db, key, header, tdb_null) != 0) {
 				DEBUG(DEBUG_NOTICE,
 				      (__location__ "failed to store initial header\n"));
@@ -254,8 +347,10 @@ int ctdb_ltdb_unlock(struct ctdb_db_context *ctdb_db, TDB_DATA key)
 */
 int ctdb_ltdb_delete(struct ctdb_db_context *ctdb_db, TDB_DATA key)
 {
-	if (ctdb_db->persistent != 0) {
-		DEBUG(DEBUG_ERR,("Trying to delete emty record in persistent database\n"));
+	if (! ctdb_db_volatile(ctdb_db)) {
+		DEBUG(DEBUG_WARNING,
+		      ("Ignored deletion of empty record from "
+		       "non-volatile database\n"));
 		return 0;
 	}
 	if (tdb_delete(ctdb_db->ltdb->tdb, key) != 0) {

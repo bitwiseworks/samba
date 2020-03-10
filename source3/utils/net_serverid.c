@@ -19,6 +19,7 @@
 
 #include "includes.h"
 #include "utils/net.h"
+#include "lib/util/server_id.h"
 #include "dbwrap/dbwrap.h"
 #include "dbwrap/dbwrap_rbt.h"
 #include "serverid.h"
@@ -27,48 +28,6 @@
 #include "smbd/globals.h"
 #include "util_tdb.h"
 #include "librpc/gen_ndr/ndr_open_files.h"
-
-static int net_serverid_list_fn(const struct server_id *id,
-				uint32_t msg_flags, void *priv)
-{
-	struct server_id_buf idbuf;
-	d_printf("%s %llu 0x%x\n", server_id_str_buf(*id, &idbuf),
-		 (unsigned long long)id->unique_id,
-		 (unsigned int)msg_flags);
-	return 0;
-}
-
-static int net_serverid_list(struct net_context *c, int argc,
-			     const char **argv)
-{
-	d_printf("pid unique_id msg_flags\n");
-	return serverid_traverse_read(net_serverid_list_fn, NULL) ? 0 : -1;
-}
-
-static int net_serverid_wipe_fn(struct db_record *rec,
-				const struct server_id *id,
-				uint32_t msg_flags, void *private_data)
-{
-	NTSTATUS status;
-
-	if (!procid_is_local(id)) {
-		return 0;
-	}
-	status = dbwrap_record_delete(rec);
-	if (!NT_STATUS_IS_OK(status)) {
-		struct server_id_buf idbuf;
-		DEBUG(1, ("Could not delete serverid.tdb record %s: %s\n",
-			  server_id_str_buf(*id, &idbuf), nt_errstr(status)));
-	}
-	return 0;
-}
-
-static int net_serverid_wipe(struct net_context *c, int argc,
-			     const char **argv)
-{
-	return serverid_traverse(net_serverid_wipe_fn, NULL) ? 0 : -1;
-}
-
 
 struct wipedbs_record_marker {
 	struct wipedbs_record_marker *prev, *next;
@@ -695,22 +654,6 @@ static int net_serverid_exists(struct net_context *c, int argc,
 int net_serverid(struct net_context *c, int argc, const char **argv)
 {
 	struct functable func[] = {
-		{
-			"list",
-			net_serverid_list,
-			NET_TRANSPORT_LOCAL,
-			N_("List all entries from serverid.tdb"),
-			N_("net serverid list\n"
-			   "    List all entries from serverid.tdb")
-		},
-		{
-			"wipe",
-			net_serverid_wipe,
-			NET_TRANSPORT_LOCAL,
-			N_("Wipe the serverid.tdb for the current node"),
-			N_("net serverid wipe\n"
-			   "    Wipe the serverid.tdb for the current node")
-		},
 		{
 			"wipedbs",
 			net_serverid_wipedbs,

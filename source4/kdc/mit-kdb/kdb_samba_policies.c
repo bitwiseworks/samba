@@ -155,11 +155,10 @@ done:
 
 static krb5_error_code ks_get_pac(krb5_context context,
 				  krb5_db_entry *client,
+				  krb5_keyblock *client_key,
 				  krb5_pac *pac)
 {
 	struct mit_samba_context *mit_ctx;
-	DATA_BLOB pac_data;
-	krb5_data data;
 	krb5_error_code code;
 
 	mit_ctx = ks_get_context(context);
@@ -167,27 +166,15 @@ static krb5_error_code ks_get_pac(krb5_context context,
 		return KRB5_KDB_DBNOTINITED;
 	}
 
-	code = mit_samba_get_pac_data(mit_ctx,
-				      client,
-				      &pac_data);
+	code = mit_samba_get_pac(mit_ctx,
+				 context,
+				 client,
+				 client_key,
+				 pac);
 	if (code != 0) {
 		return code;
 	}
 
-	code = krb5_pac_init(context, pac);
-	if (code != 0) {
-		goto done;
-	}
-
-	data = ks_make_data(pac_data.data, pac_data.length);
-
-	code = krb5_pac_add_buffer(context, *pac, PAC_LOGON_INFO, &data);
-	if (code != 0) {
-		goto done;
-	}
-
-done:
-	free(pac_data.data);
 	return code;
 }
 
@@ -195,6 +182,8 @@ static krb5_error_code ks_verify_pac(krb5_context context,
 				     unsigned int flags,
 				     krb5_const_principal client_princ,
 				     krb5_db_entry *client,
+				     krb5_db_entry *server,
+				     krb5_db_entry *krbtgt,
 				     krb5_keyblock *server_key,
 				     krb5_keyblock *krbtgt_key,
 				     krb5_timestamp authtime,
@@ -204,9 +193,7 @@ static krb5_error_code ks_verify_pac(krb5_context context,
 	struct mit_samba_context *mit_ctx;
 	krb5_authdata **authdata = NULL;
 	krb5_pac ipac = NULL;
-	DATA_BLOB pac_data = { NULL, 0 };
 	DATA_BLOB logon_data = { NULL, 0 };
-	krb5_data data;
 	krb5_error_code code;
 
 	mit_ctx = ks_get_context(context);
@@ -270,28 +257,23 @@ static krb5_error_code ks_verify_pac(krb5_context context,
 	}
 
 	/* check and update PAC */
-	pac_data.data = authdata[0]->contents;
-	pac_data.length = authdata[0]->length;
-
-	code = mit_samba_update_pac_data(mit_ctx,
-					 client,
-					 &pac_data,
-					 &logon_data);
+	code = krb5_pac_parse(context,
+			      authdata[0]->contents,
+			      authdata[0]->length,
+			      pac);
 	if (code != 0) {
 		goto done;
 	}
 
-	code = krb5_pac_init(context, pac);
-	if (code != 0) {
-		goto done;
-	}
-
-	data = ks_make_data(logon_data.data, logon_data.length);
-
-	code = krb5_pac_add_buffer(context, *pac, PAC_LOGON_INFO, &data);
-	if (code != 0) {
-		goto done;
-	}
+	code = mit_samba_reget_pac(mit_ctx,
+				   context,
+				   flags,
+				   client_princ,
+				   client,
+				   server,
+				   krbtgt,
+				   krbtgt_key,
+				   pac);
 
 done:
 	krb5_free_authdata(context, authdata);
@@ -332,17 +314,24 @@ krb5_error_code kdb_samba_db_sign_auth_data(krb5_context context,
 	is_as_req = ((flags & KRB5_KDB_FLAG_CLIENT_REFERRALS_ONLY) != 0);
 
 	if (is_as_req && (flags & KRB5_KDB_FLAG_INCLUDE_PAC)) {
-
-		code = ks_get_pac(context, client, &pac);
+		code = ks_get_pac(context, client, client_key, &pac);
 		if (code != 0) {
 			goto done;
 		}
 	}
 
 	if (!is_as_req) {
-		code = ks_verify_pac(context, flags, ks_client_princ, client,
-				server_key, krbtgt_key, authtime,
-				tgt_auth_data, &pac);
+		code = ks_verify_pac(context,
+				     flags,
+				     ks_client_princ,
+				     client,
+				     server,
+				     krbtgt,
+				     server_key,
+				     krbtgt_key,
+				     authtime,
+				     tgt_auth_data,
+				     &pac);
 		if (code != 0) {
 			goto done;
 		}
@@ -350,7 +339,7 @@ krb5_error_code kdb_samba_db_sign_auth_data(krb5_context context,
 
 	if (pac == NULL && client != NULL) {
 
-		code = ks_get_pac(context, client, &pac);
+		code = ks_get_pac(context, client, client_key, &pac);
 		if (code != 0) {
 			goto done;
 		}
@@ -364,6 +353,7 @@ krb5_error_code kdb_samba_db_sign_auth_data(krb5_context context,
 	code = krb5_pac_sign(context, pac, authtime, ks_client_princ,
 			server_key, krbtgt_key, &pac_data);
 	if (code != 0) {
+		DBG_ERR("krb5_pac_sign failed: %d\n", code);
 		goto done;
 	}
 
@@ -442,20 +432,10 @@ done:
 	return code;
 }
 
-void kdb_samba_db_audit_as_req(krb5_context context,
-			       krb5_kdc_req *request,
-			       krb5_db_entry *client,
-			       krb5_db_entry *server,
-			       krb5_timestamp authtime,
-			       krb5_error_code error_code)
+
+static void samba_bad_password_count(krb5_db_entry *client,
+				     krb5_error_code error_code)
 {
-	struct mit_samba_context *mit_ctx;
-
-	mit_ctx = ks_get_context(context);
-	if (mit_ctx == NULL) {
-		return;
-	}
-
 	switch (error_code) {
 	case 0:
 		mit_samba_zero_bad_password_count(client);
@@ -466,3 +446,29 @@ void kdb_samba_db_audit_as_req(krb5_context context,
 		break;
 	}
 }
+
+#if KRB5_KDB_API_VERSION >= 9
+void kdb_samba_db_audit_as_req(krb5_context context,
+			       krb5_kdc_req *request,
+			       const krb5_address *local_addr,
+			       const krb5_address *remote_addr,
+			       krb5_db_entry *client,
+			       krb5_db_entry *server,
+			       krb5_timestamp authtime,
+			       krb5_error_code error_code)
+{
+	samba_bad_password_count(client, error_code);
+
+	/* TODO: perform proper audit logging for addresses */
+}
+#else
+void kdb_samba_db_audit_as_req(krb5_context context,
+			       krb5_kdc_req *request,
+			       krb5_db_entry *client,
+			       krb5_db_entry *server,
+			       krb5_timestamp authtime,
+			       krb5_error_code error_code)
+{
+	samba_bad_password_count(client, error_code);
+}
+#endif

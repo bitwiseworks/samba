@@ -17,14 +17,22 @@
 */
 
 #include <Python.h>
+#include "python/py3compat.h"
 #include "includes.h"
 #include "pycredentials.h"
 #include "param/param.h"
 #include "lib/cmdline/credentials.h"
+#include "auth/credentials/credentials_internal.h"
 #include "librpc/gen_ndr/samr.h" /* for struct samr_Password */
+#include "librpc/gen_ndr/netlogon.h"
 #include "libcli/util/pyerrors.h"
+#include "libcli/auth/libcli_auth.h"
 #include "param/pyparam.h"
 #include <tevent.h>
+#include "libcli/auth/libcli_auth.h"
+#include "auth/credentials/credentials_internal.h"
+#include "system/kerberos.h"
+#include "auth/kerberos/kerberos.h"
 
 void initcredentials(void);
 
@@ -32,7 +40,7 @@ static PyObject *PyString_FromStringOrNULL(const char *str)
 {
 	if (str == NULL)
 		Py_RETURN_NONE;
-	return PyString_FromString(str);
+	return PyStr_FromString(str);
 }
 
 static PyObject *py_creds_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
@@ -70,6 +78,66 @@ static PyObject *py_creds_get_ntlm_username_domain(PyObject *self, PyObject *unu
 	ret = Py_BuildValue("(OO)",
 			    PyString_FromStringOrNULL(user),
 			    PyString_FromStringOrNULL(domain));
+	TALLOC_FREE(frame);
+	return ret;
+}
+
+static PyObject *py_creds_get_ntlm_response(PyObject *self, PyObject *args, PyObject *kwargs)
+{
+	TALLOC_CTX *frame = talloc_stackframe();
+	PyObject *ret = NULL;
+	int flags;
+	struct timeval tv_now;
+	NTTIME server_timestamp;
+	DATA_BLOB challenge = data_blob_null;
+	DATA_BLOB target_info = data_blob_null;
+	NTSTATUS status;
+	DATA_BLOB lm_response = data_blob_null;
+	DATA_BLOB nt_response = data_blob_null;
+	DATA_BLOB lm_session_key = data_blob_null;
+	DATA_BLOB nt_session_key = data_blob_null;
+	const char *kwnames[] = { "flags", "challenge",
+				  "target_info",
+				  NULL };
+
+	tv_now = timeval_current();
+	server_timestamp = timeval_to_nttime(&tv_now);
+
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "is#|s#",
+					 discard_const_p(char *, kwnames),
+					 &flags,
+					 &challenge.data,
+					 &challenge.length,
+					 &target_info.data,
+					 &target_info.length)) {
+		return NULL;
+	}
+
+	status = cli_credentials_get_ntlm_response(PyCredentials_AsCliCredentials(self),
+						   frame, &flags,
+						   challenge,
+						   &server_timestamp,
+						   target_info,
+						   &lm_response, &nt_response,
+						   &lm_session_key, &nt_session_key);
+
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	ret = Py_BuildValue("{sis" PYARG_BYTES_LEN "s" PYARG_BYTES_LEN
+			            "s" PYARG_BYTES_LEN "s" PYARG_BYTES_LEN "}",
+			    "flags", flags,
+			    "lm_response",
+			    (const char *)lm_response.data, lm_response.length,
+			    "nt_response",
+			    (const char *)nt_response.data, nt_response.length,
+			    "lm_session_key",
+			    (const char *)lm_session_key.data, lm_session_key.length,
+			    "nt_session_key",
+			    (const char *)nt_session_key.data, nt_session_key.length);
 	TALLOC_FREE(frame);
 	return ret;
 }
@@ -335,7 +403,7 @@ static PyObject *py_creds_get_nt_hash(PyObject *self, PyObject *unused)
 	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
 	struct samr_Password *ntpw = cli_credentials_get_nt_hash(creds, creds);
 
-	ret = PyString_FromStringAndSize(discard_const_p(char, ntpw->hash), 16);
+	ret = PyBytes_FromStringAndSize(discard_const_p(char, ntpw->hash), 16);
 	TALLOC_FREE(ntpw);
 	return ret;
 }
@@ -460,7 +528,7 @@ static PyObject *PyCredentialCacheContainer_from_ccache_container(struct ccache_
 static PyObject *py_creds_get_named_ccache(PyObject *self, PyObject *args)
 {
 	PyObject *py_lp_ctx = Py_None;
-	char *ccache_name;
+	char *ccache_name = NULL;
 	struct loadparm_context *lp_ctx;
 	struct ccache_container *ccc;
 	struct tevent_context *event_ctx;
@@ -503,6 +571,48 @@ static PyObject *py_creds_get_named_ccache(PyObject *self, PyObject *args)
 	return NULL;
 }
 
+static PyObject *py_creds_set_named_ccache(PyObject *self, PyObject *args)
+{
+	struct loadparm_context *lp_ctx = NULL;
+	enum credentials_obtained obt = CRED_SPECIFIED;
+	const char *error_string = NULL;
+	TALLOC_CTX *mem_ctx = NULL;
+	char *newval = NULL;
+	PyObject *py_lp_ctx = Py_None;
+	int _obt = obt;
+	int ret;
+
+	if (!PyArg_ParseTuple(args, "s|iO", &newval, &_obt, &py_lp_ctx))
+		return NULL;
+
+	mem_ctx = talloc_new(NULL);
+	if (mem_ctx == NULL) {
+		PyErr_NoMemory();
+		return NULL;
+	}
+
+	lp_ctx = lpcfg_from_py_object(mem_ctx, py_lp_ctx);
+	if (lp_ctx == NULL) {
+		talloc_free(mem_ctx);
+		return NULL;
+	}
+
+	ret = cli_credentials_set_ccache(PyCredentials_AsCliCredentials(self),
+					 lp_ctx,
+					 newval, CRED_SPECIFIED,
+					 &error_string);
+
+	if (ret != 0) {
+		PyErr_SetString(PyExc_RuntimeError,
+				error_string != NULL ? error_string : "NULL");
+		talloc_free(mem_ctx);
+		return NULL;
+	}
+
+	talloc_free(mem_ctx);
+	Py_RETURN_NONE;
+}
+
 static PyObject *py_creds_set_gensec_features(PyObject *self, PyObject *args)
 {
 	unsigned int gensec_features;
@@ -523,6 +633,86 @@ static PyObject *py_creds_get_gensec_features(PyObject *self, PyObject *args)
 	return PyInt_FromLong(gensec_features);
 }
 
+static PyObject *py_creds_new_client_authenticator(PyObject *self,
+						   PyObject *args)
+{
+	struct netr_Authenticator auth;
+	struct cli_credentials *creds = NULL;
+	struct netlogon_creds_CredentialState *nc = NULL;
+	PyObject *ret = NULL;
+
+	creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_SetString(PyExc_RuntimeError,
+				"Failed to get credentials from python");
+		return NULL;
+	}
+
+	nc = creds->netlogon_creds;
+	if (nc == NULL) {
+		PyErr_SetString(PyExc_ValueError,
+				"No netlogon credentials cannot make "
+				"client authenticator");
+		return NULL;
+	}
+
+	netlogon_creds_client_authenticator(
+		nc,
+		&auth);
+	ret = Py_BuildValue("{ss#si}",
+			    "credential",
+			    (const char *) &auth.cred, sizeof(auth.cred),
+			    "timestamp", auth.timestamp);
+	return ret;
+}
+
+static PyObject *py_creds_set_secure_channel_type(PyObject *self, PyObject *args)
+{
+	unsigned int channel_type;
+
+	if (!PyArg_ParseTuple(args, "I", &channel_type))
+		return NULL;
+
+	cli_credentials_set_secure_channel_type(
+		PyCredentials_AsCliCredentials(self),
+		channel_type);
+
+	Py_RETURN_NONE;
+}
+
+static PyObject *py_creds_get_secure_channel_type(PyObject *self, PyObject *args)
+{
+	enum netr_SchannelType channel_type = SEC_CHAN_NULL;
+
+	channel_type = cli_credentials_get_secure_channel_type(
+		PyCredentials_AsCliCredentials(self));
+
+	return PyInt_FromLong(channel_type);
+}
+
+static PyObject *py_creds_encrypt_netr_crypt_password(PyObject *self,
+						      PyObject *args)
+{
+	DATA_BLOB data = data_blob_null;
+	struct cli_credentials    *creds  = NULL;
+	struct netr_CryptPassword *pwd    = NULL;
+	NTSTATUS status;
+	PyObject *py_cp = Py_None;
+
+	creds = PyCredentials_AsCliCredentials(self);
+
+	if (!PyArg_ParseTuple(args, "|O", &py_cp)) {
+		return NULL;
+	}
+	pwd = pytalloc_get_type(py_cp, struct netr_CryptPassword);
+	data.length = sizeof(struct netr_CryptPassword);
+	data.data   = (uint8_t *)pwd;
+	status = netlogon_creds_session_encrypt(creds->netlogon_creds, data);
+
+	PyErr_NTSTATUS_IS_ERR_RAISE(status);
+
+	Py_RETURN_NONE;
+}
 
 static PyMethodDef py_creds_methods[] = {
 	{ "get_username", py_creds_get_username, METH_NOARGS,
@@ -541,6 +731,11 @@ static PyMethodDef py_creds_methods[] = {
 	{ "get_ntlm_username_domain", py_creds_get_ntlm_username_domain, METH_NOARGS,
 		"S.get_ntlm_username_domain() -> (domain, username)\n"
 		"Obtain NTLM username and domain, split up either as (DOMAIN, user) or (\"\", \"user@realm\")." },
+	{ "get_ntlm_response", (PyCFunction)py_creds_get_ntlm_response, METH_VARARGS | METH_KEYWORDS,
+		"S.get_ntlm_response"
+	        "(flags, challenge[, target_info]) -> "
+	        "(flags, lm_response, nt_response, lm_session_key, nt_session_key)\n"
+		"Obtain LM or NTLM response." },
 	{ "set_password", py_creds_set_password, METH_VARARGS,
 		"S.set_password(password[, credentials.SPECIFIED]) -> None\n"
 		"Change password." },
@@ -613,6 +808,9 @@ static PyMethodDef py_creds_methods[] = {
 	{ "guess", py_creds_guess, METH_VARARGS, NULL },
 	{ "set_machine_account", py_creds_set_machine_account, METH_VARARGS, NULL },
 	{ "get_named_ccache", py_creds_get_named_ccache, METH_VARARGS, NULL },
+	{ "set_named_ccache", py_creds_set_named_ccache, METH_VARARGS,
+		"S.set_named_ccache(krb5_ccache_name, obtained, lp) -> None\n"
+		"Set credentials to KRB5 Credentials Cache (by name)." },
 	{ "set_gensec_features", py_creds_set_gensec_features, METH_VARARGS, NULL },
 	{ "get_gensec_features", py_creds_get_gensec_features, METH_NOARGS, NULL },
 	{ "get_forced_sasl_mech", py_creds_get_forced_sasl_mech, METH_NOARGS,
@@ -620,7 +818,31 @@ static PyMethodDef py_creds_methods[] = {
 	{ "set_forced_sasl_mech", py_creds_set_forced_sasl_mech, METH_VARARGS,
 		"S.set_forced_sasl_mech(name) -> None\n"
 		"Set forced SASL mechanism." },
+	{ "new_client_authenticator",
+		py_creds_new_client_authenticator,
+		METH_NOARGS,
+		"S.new_client_authenticator() -> Authenticator\n"
+		"Get a new client NETLOGON_AUTHENTICATOR"},
+	{ "set_secure_channel_type", py_creds_set_secure_channel_type,
+	  METH_VARARGS, NULL },
+	{ "get_secure_channel_type", py_creds_get_secure_channel_type,
+	  METH_VARARGS },
+	{ "encrypt_netr_crypt_password",
+		py_creds_encrypt_netr_crypt_password,
+		METH_VARARGS,
+		"S.encrypt_netr_crypt_password(password) -> NTSTATUS\n"
+		"Encrypt the supplied password using the session key and\n"
+		"the negotiated encryption algorithm in place\n"
+		"i.e. it overwrites the original data"},
 	{ NULL }
+};
+
+static struct PyModuleDef moduledef = {
+    PyModuleDef_HEAD_INIT,
+    .m_name = "credentials",
+    .m_doc = "Credentials management.",
+    .m_size = -1,
+    .m_methods = py_creds_methods,
 };
 
 PyTypeObject PyCredentials = {
@@ -630,24 +852,52 @@ PyTypeObject PyCredentials = {
 	.tp_methods = py_creds_methods,
 };
 
+static PyObject *py_ccache_name(PyObject *self, PyObject *unused)
+{
+	struct ccache_container *ccc = NULL;
+	char *name = NULL;
+	PyObject *py_name = NULL;
+	int ret;
+
+	ccc = pytalloc_get_type(self, struct ccache_container);
+
+	ret = krb5_cc_get_full_name(ccc->smb_krb5_context->krb5_context,
+				    ccc->ccache, &name);
+	if (ret == 0) {
+		py_name = PyString_FromStringOrNULL(name);
+		SAFE_FREE(name);
+	} else {
+		PyErr_SetString(PyExc_RuntimeError,
+				"Failed to get ccache name");
+		return NULL;
+	}
+	return py_name;
+}
+
+static PyMethodDef py_ccache_container_methods[] = {
+	{ "get_name", py_ccache_name, METH_NOARGS,
+	  "S.get_name() -> name\nObtain KRB5 credentials cache name." },
+	{ NULL }
+};
 
 PyTypeObject PyCredentialCacheContainer = {
 	.tp_name = "credentials.CredentialCacheContainer",
 	.tp_flags = Py_TPFLAGS_DEFAULT,
+	.tp_methods = py_ccache_container_methods,
 };
 
-void initcredentials(void)
+MODULE_INIT_FUNC(credentials)
 {
 	PyObject *m;
 	if (pytalloc_BaseObject_PyType_Ready(&PyCredentials) < 0)
-		return;
+		return NULL;
 
 	if (pytalloc_BaseObject_PyType_Ready(&PyCredentialCacheContainer) < 0)
-		return;
+		return NULL;
 
-	m = Py_InitModule3("credentials", NULL, "Credentials management.");
+	m = PyModule_Create(&moduledef);
 	if (m == NULL)
-		return;
+		return NULL;
 
 	PyModule_AddObject(m, "UNINITIALISED", PyInt_FromLong(CRED_UNINITIALISED));
 	PyModule_AddObject(m, "CALLBACK", PyInt_FromLong(CRED_CALLBACK));
@@ -663,9 +913,15 @@ void initcredentials(void)
 	PyModule_AddObject(m, "AUTO_KRB_FORWARDABLE",  PyInt_FromLong(CRED_AUTO_KRB_FORWARDABLE));
 	PyModule_AddObject(m, "NO_KRB_FORWARDABLE",    PyInt_FromLong(CRED_NO_KRB_FORWARDABLE));
 	PyModule_AddObject(m, "FORCE_KRB_FORWARDABLE", PyInt_FromLong(CRED_FORCE_KRB_FORWARDABLE));
+	PyModule_AddObject(m, "CLI_CRED_NTLM2", PyInt_FromLong(CLI_CRED_NTLM2));
+	PyModule_AddObject(m, "CLI_CRED_NTLMv2_AUTH", PyInt_FromLong(CLI_CRED_NTLMv2_AUTH));
+	PyModule_AddObject(m, "CLI_CRED_LANMAN_AUTH", PyInt_FromLong(CLI_CRED_LANMAN_AUTH));
+	PyModule_AddObject(m, "CLI_CRED_NTLM_AUTH", PyInt_FromLong(CLI_CRED_NTLM_AUTH));
+	PyModule_AddObject(m, "CLI_CRED_CLEAR_AUTH", PyInt_FromLong(CLI_CRED_CLEAR_AUTH));
 
 	Py_INCREF(&PyCredentials);
 	PyModule_AddObject(m, "Credentials", (PyObject *)&PyCredentials);
 	Py_INCREF(&PyCredentialCacheContainer);
 	PyModule_AddObject(m, "CredentialCacheContainer", (PyObject *)&PyCredentialCacheContainer);
+	return m;
 }

@@ -22,7 +22,7 @@
 #include "lib/com/com.h"
 #include "librpc/gen_ndr/com_dcom.h"
 
-NTSTATUS com_simple_init(void);
+NTSTATUS com_simple_init(TALLOC_CTX *);
 
 static struct IClassFactory_vtable simple_classobject_vtable;
 static struct IStream_vtable simple_IStream_vtable;
@@ -43,13 +43,22 @@ static uint32_t simple_IUnknown_Release (struct IUnknown *d, TALLOC_CTX *mem_ctx
 	return 1;
 }
 
-static WERROR simple_IStream_Read (struct IStream *d, TALLOC_CTX *mem_ctx, uint8_t *pv, uint32_t num_requested, uint32_t *num_readx, uint32_t num_read)
+static WERROR simple_IStream_Read(struct IStream *d,
+				  TALLOC_CTX *mem_ctx,
+				  uint8_t *pv,
+				  uint32_t num_requested,
+				  uint32_t *num_readx,
+				  uint32_t *num_read)
 {
-	printf("%d bytes are being read\n", num_read);
+	printf("%d bytes are being read\n", *num_read);
 	return WERR_OK;
 }
 
-static WERROR simple_IStream_Write (struct IStream *d, TALLOC_CTX *mem_ctx, uint8_t *data, uint32_t num_requested, uint32_t num_written)
+static WERROR simple_IStream_Write(struct IStream *d,
+				   TALLOC_CTX *mem_ctx,
+				   uint8_t *data,
+				   uint32_t num_requested,
+				   uint32_t *num_written)
 {
 	printf("%d bytes are being written\n", num_requested);
 	return WERR_OK;
@@ -62,7 +71,11 @@ static WERROR simpleclass_IUnknown_QueryInterface (struct IUnknown *d, TALLOC_CT
 	return WERR_OK;
 }
 
-static WERROR simpleclass_IClassFactory_CreateInstance (struct IClassFactory *d, TALLOC_CTX *mem_ctx, struct IUnknown *iunk, struct GUID *iid, struct IUnknown **ppv)
+static WERROR simpleclass_IClassFactory_CreateInstance(struct IClassFactory *d,
+						       TALLOC_CTX *mem_ctx,
+						       struct MInterfacePointer *pUnknown,
+						       struct GUID *iid,
+						       struct MInterfacePointer **ppv)
 {
 	struct IStream *ret;
 	/* FIXME: Check whether IID == ISTREAM_IID */
@@ -71,8 +84,8 @@ static WERROR simpleclass_IClassFactory_CreateInstance (struct IClassFactory *d,
 	ret->vtable = &simple_IStream_vtable;
 	ret->object_data = NULL;
 
-	*ppv = (struct IUnknown *)ret;
-	
+	*ppv = (struct MInterfacePointer *)ret;
+
 	return WERR_OK;
 }
 
@@ -107,10 +120,10 @@ static struct IStream_vtable simple_IStream_vtable = {
 	simple_IStream_Write
 };
 
-NTSTATUS com_simple_init(void)
+NTSTATUS com_simple_init(TALLOC_CTX *ctx)
 {
 	struct GUID clsid;
-	struct IUnknown *class_object = talloc(talloc_autofree_context(), struct IUnknown);
+	struct IUnknown *class_object = talloc(ctx, struct IUnknown);
 
 	class_object->ctx = NULL;
 	class_object->object_data = NULL;
@@ -120,5 +133,5 @@ NTSTATUS com_simple_init(void)
 	GUID_from_string(COM_ICLASSFACTORY_UUID, &simple_classobject_vtable.iid);
 	GUID_from_string(COM_ISTREAM_UUID, &simple_IStream_vtable.iid);
 
-	return com_register_running_class(&clsid, PROGID_SIMPLE, class_object);
+	return com_register_running_class(ctx, &clsid, PROGID_SIMPLE, class_object);
 }

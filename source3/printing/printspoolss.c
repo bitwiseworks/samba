@@ -154,6 +154,7 @@ NTSTATUS print_spool_open(files_struct *fsp,
 					 &ndr_table_spoolss,
 					 fsp->conn->session_info,
 					 fsp->conn->sconn->remote_address,
+					 fsp->conn->sconn->local_address,
 					 fsp->conn->sconn->msg_ctx,
 					 &fsp->conn->spoolss_pipe);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -308,6 +309,23 @@ void print_spool_end(files_struct *fsp, enum file_close_type close_type)
 	WERROR werr;
 	struct dcerpc_binding_handle *b = NULL;
 
+	if (fsp->fh->private_options &
+	    NTCREATEX_OPTIONS_PRIVATE_DELETE_ON_CLOSE) {
+		int ret;
+
+		/*
+		 * Job was requested to be cancelled by setting
+		 * delete on close so truncate the job file.
+		 * print_job_end() which is called from
+		 * _spoolss_EndDocPrinter() will take
+		 * care of deleting it for us.
+		 */
+		ret = ftruncate(fsp->fh->fd, 0);
+		if (ret == -1) {
+			DBG_ERR("ftruncate failed: %s\n", strerror(errno));
+		}
+	}
+
 	b = fsp->conn->spoolss_pipe->binding_handle;
 
 	switch (close_type) {
@@ -343,6 +361,7 @@ void print_spool_terminate(struct connection_struct *conn,
 					 &ndr_table_spoolss,
 					 conn->session_info,
 					 conn->sconn->remote_address,
+					 conn->sconn->local_address,
 					 conn->sconn->msg_ctx,
 					 &conn->spoolss_pipe);
 	if (!NT_STATUS_IS_OK(status)) {

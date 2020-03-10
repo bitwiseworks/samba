@@ -506,7 +506,12 @@ static void wreplsrv_task_init(struct task_server *task)
 /*
   register ourselves as a available server
 */
-NTSTATUS server_service_wrepl_init(void)
+NTSTATUS server_service_wrepl_init(TALLOC_CTX *ctx)
 {
-	return register_server_service("wrepl", wreplsrv_task_init);
+	struct service_details details = {
+		.inhibit_fork_on_accept = true,
+		.inhibit_pre_fork = true
+	};
+	return register_server_service(ctx, "wrepl", wreplsrv_task_init,
+				       &details);
 }

@@ -20,12 +20,14 @@
 
 %{
 #include "includes.h"
-#include "sparql_parser.h"
+#include "rpc_server/mdssvc/sparql_parser.tab.h"
 
 #define YY_NO_INPUT
+#define yyalloc SMB_MALLOC
+#define yyrealloc SMB_REALLOC
 %}
 
-%option nounput
+%option nounput noyyalloc noyyrealloc prefix="mdsyy"
 
 ASC     [a-zA-Z0-9_\*\:\-\.]
 U       [\x80-\xbf]
@@ -39,8 +41,8 @@ UONLY   {U2}{U}|{U3}{U}{U}|{U4}{U}{U}{U}
 %%
 InRange           return FUNC_INRANGE;
 \$time\.iso       return DATE_ISO;
-false             {yylval.bval = false; return BOOL;}
-true              {yylval.bval = true; return BOOL;}
+false             {mdsyylval.bval = false; return BOOL;}
+true              {mdsyylval.bval = true; return BOOL;}
 \"                return QUOTE;
 \(                return OBRACE;
 \)                return CBRACE;
@@ -52,6 +54,6 @@ true              {yylval.bval = true; return BOOL;}
 \<                return LT;
 \>                return GT;
 \,                return COMMA;
-{UANY}+           {yylval.sval = talloc_strdup(talloc_tos(), yytext); return WORD;}
+{UANY}+           {mdsyylval.sval = talloc_strdup(talloc_tos(), mdsyytext); return WORD;}
 [ \t\n]           /* ignore */
 %%

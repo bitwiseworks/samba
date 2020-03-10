@@ -24,6 +24,7 @@
 #include "includes.h"
 #include "system/passwd.h"
 #include "system/filesys.h"
+#include "lib/util/server_id.h"
 #include "util_tdb.h"
 #include "ctdbd_conn.h"
 #include "../lib/util/util_pw.h"
@@ -34,6 +35,7 @@
 #include "lib/util/sys_rw.h"
 #include "lib/util/sys_rw_data.h"
 #include "lib/util/util_process.h"
+#include "lib/dbwrap/dbwrap_ctdb.h"
 
 #ifdef HAVE_SYS_PRCTL_H
 #include <sys/prctl.h>
@@ -43,6 +45,17 @@
 #define MAX_ALLOC_SIZE (1024*1024*256)
 
 #if (defined(HAVE_NETGROUP) && defined (WITH_AUTOMOUNT))
+/* rpc/xdr.h uses TRUE and FALSE */
+#ifdef TRUE
+#undef TRUE
+#endif
+
+#ifdef FALSE
+#undef FALSE
+#endif
+
+#include "system/nis.h"
+
 #ifdef WITH_NISPLUS_HOME
 #ifdef BROKEN_NISPLUS_INCLUDE_FILES
 /*
@@ -429,6 +442,7 @@ static void reinit_after_fork_pipe_handler(struct tevent_context *ev,
 		 * we have reached EOF on stdin, which means the
 		 * parent has exited. Shutdown the server
 		 */
+		TALLOC_FREE(fde);
 		(void)kill(getpid(), SIGTERM);
 	}
 }
@@ -440,6 +454,7 @@ NTSTATUS reinit_after_fork(struct messaging_context *msg_ctx,
 			   const char *comment)
 {
 	NTSTATUS status = NT_STATUS_OK;
+	int ret;
 
 	if (reinit_after_fork_pipe[1] != -1) {
 		close(reinit_after_fork_pipe[1]);
@@ -480,6 +495,16 @@ NTSTATUS reinit_after_fork(struct messaging_context *msg_ctx,
 		if (!NT_STATUS_IS_OK(status)) {
 			DEBUG(0,("messaging_reinit() failed: %s\n",
 				 nt_errstr(status)));
+		}
+
+		if (lp_clustering()) {
+			ret = ctdb_async_ctx_reinit(
+				NULL, messaging_tevent_context(msg_ctx));
+			if (ret != 0) {
+				DBG_ERR("db_ctdb_async_ctx_reinit failed: %s\n",
+					strerror(errno));
+				return map_nt_error_from_unix(ret);
+			}
 		}
 	}
 
@@ -816,145 +841,6 @@ void smb_panic_s3(const char *why)
 	}
 
 	dump_core();
-}
-
-/*******************************************************************
- Print a backtrace of the stack to the debug log. This function
- DELIBERATELY LEAKS MEMORY. The expectation is that you should
- exit shortly after calling it.
-********************************************************************/
-
-#ifdef HAVE_LIBUNWIND_H
-#include <libunwind.h>
-#endif
-
-#ifdef HAVE_EXECINFO_H
-#include <execinfo.h>
-#endif
-
-#ifdef HAVE_LIBEXC_H
-#include <libexc.h>
-#endif
-
-void log_stack_trace(void)
-{
-#ifdef HAVE_LIBUNWIND
-	/* Try to use libunwind before any other technique since on ia64
-	 * libunwind correctly walks the stack in more circumstances than
-	 * backtrace.
-	 */ 
-	unw_cursor_t cursor;
-	unw_context_t uc;
-	unsigned i = 0;
-
-	char procname[256];
-	unw_word_t ip, sp, off;
-
-	procname[sizeof(procname) - 1] = '\0';
-
-	if (unw_getcontext(&uc) != 0) {
-		goto libunwind_failed;
-	}
-
-	if (unw_init_local(&cursor, &uc) != 0) {
-		goto libunwind_failed;
-	}
-
-	DEBUG(0, ("BACKTRACE:\n"));
-
-	do {
-	    ip = sp = 0;
-	    unw_get_reg(&cursor, UNW_REG_IP, &ip);
-	    unw_get_reg(&cursor, UNW_REG_SP, &sp);
-
-	    switch (unw_get_proc_name(&cursor,
-			procname, sizeof(procname) - 1, &off) ) {
-	    case 0:
-		    /* Name found. */
-	    case -UNW_ENOMEM:
-		    /* Name truncated. */
-		    DEBUGADD(0, (" #%u %s + %#llx [ip=%#llx] [sp=%#llx]\n",
-			    i, procname, (long long)off,
-			    (long long)ip, (long long) sp));
-		    break;
-	    default:
-	    /* case -UNW_ENOINFO: */
-	    /* case -UNW_EUNSPEC: */
-		    /* No symbol name found. */
-		    DEBUGADD(0, (" #%u %s [ip=%#llx] [sp=%#llx]\n",
-			    i, "<unknown symbol>",
-			    (long long)ip, (long long) sp));
-	    }
-	    ++i;
-	} while (unw_step(&cursor) > 0);
-
-	return;
-
-libunwind_failed:
-	DEBUG(0, ("unable to produce a stack trace with libunwind\n"));
-
-#elif HAVE_BACKTRACE_SYMBOLS
-	void *backtrace_stack[BACKTRACE_STACK_SIZE];
-	size_t backtrace_size;
-	char **backtrace_strings;
-
-	/* get the backtrace (stack frames) */
-	backtrace_size = backtrace(backtrace_stack,BACKTRACE_STACK_SIZE);
-	backtrace_strings = backtrace_symbols(backtrace_stack, backtrace_size);
-
-	DEBUG(0, ("BACKTRACE: %lu stack frames:\n", 
-		  (unsigned long)backtrace_size));
-
-	if (backtrace_strings) {
-		int i;
-
-		for (i = 0; i < backtrace_size; i++)
-			DEBUGADD(0, (" #%u %s\n", i, backtrace_strings[i]));
-
-		/* Leak the backtrace_strings, rather than risk what free() might do */
-	}
-
-#elif HAVE_LIBEXC
-
-	/* The IRIX libexc library provides an API for unwinding the stack. See
-	 * libexc(3) for details. Apparantly trace_back_stack leaks memory, but
-	 * since we are about to abort anyway, it hardly matters.
-	 */
-
-#define NAMESIZE 32 /* Arbitrary */
-
-	__uint64_t	addrs[BACKTRACE_STACK_SIZE];
-	char *      	names[BACKTRACE_STACK_SIZE];
-	char		namebuf[BACKTRACE_STACK_SIZE * NAMESIZE];
-
-	int		i;
-	int		levels;
-
-	ZERO_ARRAY(addrs);
-	ZERO_ARRAY(names);
-	ZERO_ARRAY(namebuf);
-
-	/* We need to be root so we can open our /proc entry to walk
-	 * our stack. It also helps when we want to dump core.
-	 */
-	become_root();
-
-	for (i = 0; i < BACKTRACE_STACK_SIZE; i++) {
-		names[i] = namebuf + (i * NAMESIZE);
-	}
-
-	levels = trace_back_stack(0, addrs, names,
-			BACKTRACE_STACK_SIZE, NAMESIZE - 1);
-
-	DEBUG(0, ("BACKTRACE: %d stack frames:\n", levels));
-	for (i = 0; i < levels; i++) {
-		DEBUGADD(0, (" #%d 0x%llx %s\n", i, addrs[i], names[i]));
-	}
-#undef NAMESIZE
-
-#else
-	DEBUG(0, ("unable to produce a stack trace on this platform\n"));
-#endif
 }
 
 /*******************************************************************
@@ -1756,7 +1642,7 @@ bool mask_match(const char *string, const char *pattern, bool is_case_sensitive)
 	if (ISDOT(pattern))
 		return False;
 
-	return ms_fnmatch(pattern, string, Protocol <= PROTOCOL_LANMAN2, is_case_sensitive) == 0;
+	return ms_fnmatch_protocol(pattern, string, Protocol, is_case_sensitive) == 0;
 }
 
 /*******************************************************************

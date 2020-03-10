@@ -31,6 +31,7 @@
  */
 
 #include "includes.h"
+#include "lib/util/server_id.h"
 #include "smbd/globals.h"
 #include "system/filesys.h"
 #include "popt_common.h"
@@ -116,6 +117,7 @@ static bool Ucrit_addPid( struct server_id pid )
 }
 
 static int print_share_mode(const struct share_mode_entry *e,
+			    const struct file_id *id,
 			    const char *sharepath,
 			    const char *fname,
 			    const char *sname,
@@ -364,7 +366,7 @@ static int traverse_sessionid(const char *key, struct sessionid *session,
 			      void *private_data)
 {
 	TALLOC_CTX *mem_ctx = (TALLOC_CTX *)private_data;
-	fstring uid_str, gid_str;
+	fstring uid_gid_str;
 	struct server_id_buf tmp;
 	char *machine_hostname = NULL;
 	int result = 0;
@@ -379,23 +381,40 @@ static int traverse_sessionid(const char *key, struct sessionid *session,
 
 	Ucrit_addPid(session->pid);
 
-	fstrcpy(uid_str, "-1");
-
-	if (session->uid != -1) {
-		if (numeric_only) {
-			fstr_sprintf(uid_str, "%u", (unsigned int)session->uid);
+	if (numeric_only) {
+		fstr_sprintf(uid_gid_str, "%-12u %-12u",
+			     (unsigned int)session->uid,
+			     (unsigned int)session->gid);
+	} else {
+		if (session->uid == -1 && session->gid == -1) {
+			/*
+			 * The session is not fully authenticated yet.
+			 */
+			fstrcpy(uid_gid_str, "(auth in progress)");
 		} else {
-			fstrcpy(uid_str, uidtoname(session->uid));
-		}
-	}
+			/*
+			 * In theory it should not happen that one of
+			 * session->uid and session->gid is valid (ie != -1)
+			 * while the other is not (ie = -1), so we a check for
+			 * that case that bails out would be reasonable.
+			 */
+			const char *uid_name = "-1";
+			const char *gid_name = "-1";
 
-	fstrcpy(gid_str, "-1");
-
-	if (session->gid != -1) {
-		if (numeric_only) {
-			fstr_sprintf(gid_str, "%u", (unsigned int)session->gid);
-		} else {
-			fstrcpy(gid_str, gidtoname(session->gid));
+			if (session->uid != -1) {
+				uid_name = uidtoname(session->uid);
+				if (uid_name == NULL) {
+					return -1;
+				}
+			}
+			if (session->gid != -1) {
+				gid_name = gidtoname(session->gid);
+				if (gid_name == NULL) {
+					return -1;
+				}
+			}
+			fstr_sprintf(uid_gid_str, "%-12s %-12s",
+				     uid_name, gid_name);
 		}
 	}
 
@@ -456,9 +475,9 @@ static int traverse_sessionid(const char *key, struct sessionid *session,
 	}
 
 
-	d_printf("%-7s %-12s %-12s %-41s %-17s %-20s %-21s\n",
+	d_printf("%-7s %-25s %-41s %-17s %-20s %-21s\n",
 		 server_id_str_buf(session->pid, &tmp),
-		 uid_str, gid_str,
+		 uid_gid_str,
 		 machine_hostname,
 		 session_dialect_str(session->connection_dialect),
 		 encryption,
@@ -509,6 +528,7 @@ int main(int argc, const char *argv[])
 	};
 	TALLOC_CTX *frame = talloc_stackframe();
 	int ret = 0;
+	struct tevent_context *ev;
 	struct messaging_context *msg_ctx = NULL;
 	char *db_path;
 	bool ok;
@@ -599,7 +619,14 @@ int main(int argc, const char *argv[])
 	 * This implicitly initializes the global ctdbd connection,
 	 * usable by the db_open() calls further down.
 	 */
-	msg_ctx = messaging_init(NULL, samba_tevent_context_init(NULL));
+	ev = samba_tevent_context_init(NULL);
+	if (ev == NULL) {
+		fprintf(stderr, "samba_tevent_context_init failed\n");
+		ret = -1;
+		goto done;
+	}
+
+	msg_ctx = messaging_init(NULL, ev);
 	if (msg_ctx == NULL) {
 		fprintf(stderr, "messaging_init failed\n");
 		ret = -1;
@@ -708,7 +735,6 @@ int main(int argc, const char *argv[])
 		struct notify_context *n;
 
 		n = notify_init(talloc_tos(), msg_ctx,
-				messaging_tevent_context(msg_ctx),
 				NULL, NULL);
 		if (n == NULL) {
 			goto done;

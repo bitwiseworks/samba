@@ -30,7 +30,7 @@
 #include <tevent.h>
 #include "../lib/util/setid.h"
 
-NTSTATUS ntvfs_unixuid_init(void);
+NTSTATUS ntvfs_unixuid_init(TALLOC_CTX *);
 
 struct unixuid_private {
 	struct security_unix_token *last_sec_ctx;
@@ -156,9 +156,7 @@ static NTSTATUS nt_token_to_unix_security(struct ntvfs_module_context *ntvfs,
 					  struct security_token *token,
 					  struct security_unix_token **sec)
 {
-	return security_token_to_unix_token(req,
-					    ntvfs->ctx->event_ctx,
-					    token, sec);
+	return security_token_to_unix_token(req, token, sec);
 }
 
 /*
@@ -665,7 +663,7 @@ static NTSTATUS unixuid_trans(struct ntvfs_module_context *ntvfs,
 /*
   initialise the unixuid backend, registering ourselves with the ntvfs subsystem
  */
-NTSTATUS ntvfs_unixuid_init(void)
+NTSTATUS ntvfs_unixuid_init(TALLOC_CTX *ctx)
 {
 	NTSTATUS ret;
 	struct ntvfs_ops ops;

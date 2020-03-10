@@ -35,6 +35,41 @@
 
 #include <ldb.h>
 
+#if defined(_SAMBA_BUILD_) && defined(USING_SYSTEM_LDB)
+
+/*
+ * Versions before 1.2.0 doesn't define these values
+ * so we assime 1.1.29 (which was used in Samba 4.6)
+ *
+ * See https://bugzilla.samba.org/show_bug.cgi?id=12859
+ */
+#ifndef EXPECTED_SYSTEM_LDB_VERSION_MAJOR
+#define EXPECTED_SYSTEM_LDB_VERSION_MAJOR 1
+#endif
+#ifndef EXPECTED_SYSTEM_LDB_VERSION_MINOR
+#define EXPECTED_SYSTEM_LDB_VERSION_MINOR 1
+#endif
+#ifndef EXPECTED_SYSTEM_LDB_VERSION_MINOR
+#define EXPECTED_SYSTEM_LDB_VERSION_MINOR 29
+#endif
+
+/*
+ * Only Samba versions which expect ldb >= 1.4.0
+ * reopen the ldb after each fork().
+ *
+ * See https://bugzilla.samba.org/show_bug.cgi?id=13519
+ */
+#if EXPECTED_SYSTEM_LDB_VERSION_MAJOR > 1
+#define __LDB_FORK_COMPATIBLE__ 1
+#elif EXPECTED_SYSTEM_LDB_VERSION_MINOR > 3
+#define __LDB_FORK_COMPATIBLE__ 1
+#endif
+#ifndef __LDB_FORK_COMPATIBLE__
+#error "Samba < 4.9 is not compatible with this version of ldb due to assumptions around fork() behaviour"
+#endif
+
+#endif /* defined(_SAMBA_BUILD_) && defined(USING_SYSTEM_LDB) */
+
 struct ldb_context;
 struct ldb_module;
 
@@ -51,6 +86,15 @@ struct ldb_module;
 
 /* force single value checking on this attribute */
 #define LDB_FLAG_INTERNAL_FORCE_SINGLE_VALUE_CHECK 0x80
+
+/*
+ * ensure that this value is unique on an index
+ * (despite the index not otherwise being configured as UNIQUE).
+ * For example, all words starting with 'a' must be unique, but duplicates of
+ * words starting with b are allowed.  This is specifically for Samba's
+ * objectSid index which is unique in the primary domain only.
+ */
+#define LDB_FLAG_INTERNAL_FORCE_UNIQUE_INDEX 0x100
 
 /* an extended match rule that always fails to match */
 #define SAMBA_LDAP_MATCH_ALWAYS_FALSE "1.3.6.1.4.1.7165.4.5.1"
@@ -77,6 +121,8 @@ struct ldb_module_ops {
 	int (*end_transaction)(struct ldb_module *);
 	int (*del_transaction)(struct ldb_module *);
 	int (*sequence_number)(struct ldb_module *, struct ldb_request *);
+	int (*read_lock)(struct ldb_module *);
+	int (*read_unlock)(struct ldb_module *);
 	void *private_data;
 };
 
@@ -122,9 +168,45 @@ void ldb_schema_attribute_remove(struct ldb_context *ldb, const char *name);
 /* we allow external code to override the name -> schema_attribute function */
 typedef const struct ldb_schema_attribute *(*ldb_attribute_handler_override_fn_t)(struct ldb_context *, void *, const char *);
 
+/**
+  Allow the caller to define a callback for the attribute handler
+
+  \param ldb The ldb context
+  \param override The callback to be used for attribute lookups
+  \param private_data Private data for the callback
+
+*/
 void ldb_schema_attribute_set_override_handler(struct ldb_context *ldb,
 					       ldb_attribute_handler_override_fn_t override,
 					       void *private_data);
+
+/**
+  Allow the caller to define that the callback for the attribute handler
+  also overrides the index list
+
+  \param ldb The ldb context
+  \param one_level_indexes Indicates that the index for SCOPE_ONELEVEL
+         should also be maintained
+
+*/
+void ldb_schema_set_override_indexlist(struct ldb_context *ldb,
+				       bool one_level_indexes);
+
+/**
+
+  \param ldb The ldb context
+  \param GUID_index_attribute The globally attribute (eg objectGUID)
+         on each entry
+  \param GUID_index_attribute The DN component matching the
+         globally attribute on each entry (eg GUID)
+
+ The caller must ensure the supplied strings do not go out of
+ scope (they are typically constant memory).
+
+*/
+void ldb_schema_set_override_GUID_index(struct ldb_context *ldb,
+					const char *GUID_index_attribute,
+					const char *GUID_index_dn_component);
 
 /* A useful function to build comparison functions with */
 int ldb_any_comparison(struct ldb_context *ldb, void *mem_ctx, 
@@ -183,6 +265,8 @@ int ldb_next_end_trans(struct ldb_module *module);
 int ldb_next_del_trans(struct ldb_module *module);
 int ldb_next_prepare_commit(struct ldb_module *module);
 int ldb_next_init(struct ldb_module *module);
+int ldb_next_read_lock(struct ldb_module *module);
+int ldb_next_read_unlock(struct ldb_module *module);
 
 void ldb_set_errstring(struct ldb_context *ldb, const char *err_string);
 void ldb_asprintf_errstring(struct ldb_context *ldb, const char *format, ...) PRINTF_ATTRIBUTE(2,3);
@@ -197,6 +281,17 @@ typedef int (*ldb_connect_fn)(struct ldb_context *ldb, const char *url,
 			      unsigned int flags, const char *options[],
 			      struct ldb_module **module);
 
+/**
+ Require that LDB use a private event context for each request
+
+ A private event context may need to be created to avoid nested event
+ loops during ldb_tdb with the locks held.  This indicates that a
+ backend is in use that requires this to hold locks safely.
+
+ \param handle The ldb handle to set the flag on
+ */
+void ldb_set_require_private_event_context(struct ldb_context *ldb);
+
 struct ldb_backend_ops {
 	const char *name;
 	ldb_connect_fn connect_fn;
@@ -207,6 +302,18 @@ const char *ldb_default_modules_dir(void);
 int ldb_register_backend(const char *url_prefix, ldb_connect_fn, bool);
 
 struct ldb_handle *ldb_handle_new(TALLOC_CTX *mem_ctx, struct ldb_context *ldb);
+
+/**
+ Obtains the private event context for the handle,
+
+ A private event context may have been created to avoid nested event
+ loops during ldb_tdb with the locks held.  Otherwise return the
+ global one.
+
+ \param handle The ldb handle to obtain the event context for
+ \return the tevent event context for this handle (private or global)
+ */
+struct tevent_context *ldb_handle_get_event_context(struct ldb_handle *handle);
 
 int ldb_module_send_entry(struct ldb_request *req,
 			  struct ldb_message *msg,
@@ -236,19 +343,32 @@ void ldb_set_default_dns(struct ldb_context *ldb);
 int ldb_reply_add_control(struct ldb_reply *ares, const char *oid, bool critical, void *data);
 
 /**
-  mark a request as untrusted. This tells the rootdse module to remove
-  unregistered controls
- */
+  mark a request as untrusted.
+
+  This tells the rootdse module to remove unregistered controls
+
+  \param req the request to mark as untrusted
+*/
 void ldb_req_mark_untrusted(struct ldb_request *req);
 
 /**
   mark a request as trusted.
- */
+
+  This tells the rootdse module to allow unregistered controls
+
+  \param req the request to mark as trusted
+*/
 void ldb_req_mark_trusted(struct ldb_request *req);
 
 /**
    return true is a request is untrusted
- */
+
+   This indicates the request came across a trust boundary
+   for example over LDAP
+
+  \param req the request check
+  \return is req trusted
+*/
 bool ldb_req_is_untrusted(struct ldb_request *req);
 
 /**
@@ -423,6 +543,10 @@ int ldb_unpack_data(struct ldb_context *ldb,
  * LDB_UNPACK_DATA_FLAG_NO_DATA_ALLOC is also specified.
  *
  * Likewise if LDB_UNPACK_DATA_FLAG_NO_DN is specified, the DN is omitted.
+ *
+ * If LDB_UNPACK_DATA_FLAG_NO_ATTRS is specified, then no attributes
+ * are unpacked or returned.
+ *
  */
 int ldb_unpack_data_only_attr_list_flags(struct ldb_context *ldb,
 					 const struct ldb_val *data,
@@ -435,5 +559,22 @@ int ldb_unpack_data_only_attr_list_flags(struct ldb_context *ldb,
 #define LDB_UNPACK_DATA_FLAG_NO_DATA_ALLOC   0x0001
 #define LDB_UNPACK_DATA_FLAG_NO_DN           0x0002
 #define LDB_UNPACK_DATA_FLAG_NO_VALUES_ALLOC 0x0004
+#define LDB_UNPACK_DATA_FLAG_NO_ATTRS        0x0008
+
+/**
+ Forces a specific ldb handle to use the global event context.
+
+ This allows a nested event loop to operate, so any open
+ transaction also needs to be aborted.
+
+ Any events on this event context will be lost.
+
+ This is used in Samba when sending an IRPC to another part of the
+ same process instead of making a local DB modification.
+
+ \param handle The ldb handle to force to use the global context
+
+ */
+void ldb_handle_use_global_event_context(struct ldb_handle *handle);
 
 #endif

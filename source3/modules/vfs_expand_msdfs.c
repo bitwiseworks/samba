@@ -181,7 +181,9 @@ static char *expand_msdfs_target(TALLOC_CTX *ctx,
 }
 
 static int expand_msdfs_readlink(struct vfs_handle_struct *handle,
-				 const char *path, char *buf, size_t bufsiz)
+				const struct smb_filename *smb_fname,
+				char *buf,
+				size_t bufsiz)
 {
 	TALLOC_CTX *ctx = talloc_tos();
 	int result;
@@ -197,7 +199,7 @@ static int expand_msdfs_readlink(struct vfs_handle_struct *handle,
 		return -1;
 	}
 
-	result = SMB_VFS_NEXT_READLINK(handle, path, target,
+	result = SMB_VFS_NEXT_READLINK(handle, smb_fname, target,
 				       PATH_MAX);
 
 	if (result <= 0)
@@ -226,8 +228,8 @@ static struct vfs_fn_pointers vfs_expand_msdfs_fns = {
 	.readlink_fn = expand_msdfs_readlink
 };
 
-NTSTATUS vfs_expand_msdfs_init(void);
-NTSTATUS vfs_expand_msdfs_init(void)
+static_decl_vfs;
+NTSTATUS vfs_expand_msdfs_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "expand_msdfs",
 				&vfs_expand_msdfs_fns);

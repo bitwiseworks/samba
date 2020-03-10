@@ -99,10 +99,13 @@
 
     <para>
       By default, the recovery lock is implemented using a file
-      (specified by <parameter>CTDB_RECOVERY_LOCK</parameter>)
-      residing in shared storage (usually) on a cluster filesystem.
-      To support a recovery lock the cluster filesystem must support
-      lock coherence.  See
+      (specified by <parameter>recovery lock</parameter> in the
+      <literal>[cluster]</literal> section of
+      <citerefentry><refentrytitle>ctdb.conf</refentrytitle>
+      <manvolnum>5</manvolnum></citerefentry>) residing in shared
+      storage (usually) on a cluster filesystem.  To support a
+      recovery lock the cluster filesystem must support lock
+      coherence.  See
       <citerefentry><refentrytitle>ping_pong</refentrytitle>
       <manvolnum>1</manvolnum></citerefentry> for more details.
     </para>
@@ -110,12 +113,11 @@
     <para>
       The recovery lock can also be implemented using an arbitrary
       cluster mutex call-out by using an exclamation point ('!') as
-      the first character of
-      <parameter>CTDB_RECOVERY_LOCK</parameter>.  For example, a value
-      of <command>!/usr/local/bin/myhelper recovery</command> would
-      run the given helper with the specified arguments.  See the
-      source code relating to cluster mutexes for clues about writing
-      call-outs.
+      the first character of <parameter>recovery lock</parameter>.
+      For example, a value of <command>!/usr/local/bin/myhelper
+      recovery</command> would run the given helper with the specified
+      arguments.  See the source code relating to cluster mutexes for
+      clues about writing call-outs.
     </para>
 
     <para>
@@ -174,16 +176,21 @@
         the cluster and is the address that CTDB daemons will use to
         communicate with the CTDB daemons on other nodes.
       </para>
+
       <para>
-        Private addresses are listed in the file specified by the
-        <varname>CTDB_NODES</varname> configuration variable (see
-        <citerefentry><refentrytitle>ctdbd.conf</refentrytitle>
-        <manvolnum>5</manvolnum></citerefentry>, default
-        <filename>/usr/local/etc/ctdb/nodes</filename>).  This file contains the
-        list of private addresses for all nodes in the cluster, one
-        per line. This file must be the same on all nodes in the
-        cluster.
+	Private addresses are listed in the file
+	<filename>/usr/local/etc/ctdb/nodes</filename>).  This file
+	contains the list of private addresses for all nodes in the
+	cluster, one per line. This file must be the same on all nodes
+	in the cluster.
       </para>
+
+      <para>
+	Some users like to put this configuration file in their
+	cluster filesystem.  A symbolic link should be used in this
+	case.
+      </para>
+
       <para>
 	Private addresses should not be used by clients to connect to
 	services provided by the cluster.
@@ -230,17 +237,21 @@
         clients, as long as there are nodes available capable of
         hosting this address.
       </para>
+
       <para>
-	The public address configuration is stored in a file on each
-	node specified by the <varname>CTDB_PUBLIC_ADDRESSES</varname>
-	configuration variable (see
-	<citerefentry><refentrytitle>ctdbd.conf</refentrytitle>
-	<manvolnum>5</manvolnum></citerefentry>, recommended
-	<filename>/usr/local/etc/ctdb/public_addresses</filename>).  This file
-	contains a list of the public addresses that the node is
-	capable of hosting, one per line.  Each entry also contains
-	the netmask and the interface to which the address should be
-	assigned.
+	The public address configuration is stored in
+	<filename>/usr/local/etc/ctdb/public_addresses</filename> on
+	each node.  This file contains a list of the public addresses
+	that the node is capable of hosting, one per line.  Each entry
+	also contains the netmask and the interface to which the
+	address should be assigned.  If this file is missing then no
+	public addresses are configured.
+      </para>
+
+      <para>
+	Some users who have the same public addresses on all nodes
+	like to put this configuration file in their cluster
+	filesystem.  A symbolic link should be used in this case.
       </para>
 
       <para>
@@ -501,7 +512,7 @@ Node 3:/usr/local/etc/ctdb/public_addresses
       the internal network to one of the nodes that LVS is using.
       When responding to the client, that node will send the data back
       directly to the client, bypassing the LVS master node.  The
-      command <command>ctdb lvsmaster</command> will show which node
+      command <command>ctdb lvs master</command> will show which node
       is the current LVS master.
     </para>
 
@@ -539,11 +550,11 @@ Node 3:/usr/local/etc/ctdb/public_addresses
       multiplex. This means that you should not use LVS if your I/O
       pattern is write-intensive since you will be limited in the
       available network bandwidth that node can handle.  LVS does work
-      wery well for read-intensive workloads where only smallish READ
+      very well for read-intensive workloads where only smallish READ
       requests are going through the LVSMASTER bottleneck and the
       majority of the traffic volume (the data in the read replies)
       goes straight from the processing node back to the clients. For
-      read-intensive i/o patterns you can acheive very high throughput
+      read-intensive i/o patterns you can achieve very high throughput
       rates in this mode.
     </para>
 
@@ -719,7 +730,7 @@ CTDB_NATGW_DEFAULT_GATEWAY=10.0.0.1
 
       <para>
 	See the <citetitle>NAT GATEWAY</citetitle> section in
-	<citerefentry><refentrytitle>ctdbd.conf</refentrytitle>
+	<citerefentry><refentrytitle>ctdb-script.options</refentrytitle>
 	<manvolnum>5</manvolnum></citerefentry> for more details of
 	NATGW configuration.
       </para>
@@ -771,7 +782,7 @@ CTDB_NATGW_DEFAULT_GATEWAY=10.0.0.1
 	This is implemented in the <filename>11.natgw</filename>
 	eventscript.  Please see the eventscript file and the
 	<citetitle>NAT GATEWAY</citetitle> section in
-	<citerefentry><refentrytitle>ctdbd.conf</refentrytitle>
+	<citerefentry><refentrytitle>ctdb-script.options</refentrytitle>
 	<manvolnum>5</manvolnum></citerefentry> for more details.
       </para>
 
@@ -803,7 +814,7 @@ CTDB_NATGW_DEFAULT_GATEWAY=10.0.0.1
 	<varname>CTDB_PER_IP_ROUTING_TABLE_ID_LOW</varname>,
 	<varname>CTDB_PER_IP_ROUTING_TABLE_ID_HIGH</varname>.  See the
 	<citetitle>POLICY ROUTING</citetitle> section in
-	<citerefentry><refentrytitle>ctdbd.conf</refentrytitle>
+	<citerefentry><refentrytitle>ctdb-script.options</refentrytitle>
 	<manvolnum>5</manvolnum></citerefentry> for more details.
       </para>
     </refsect2>
@@ -949,24 +960,22 @@ CTDB_NATGW_DEFAULT_GATEWAY=10.0.0.1
   </refsect1>
 
   <refsect1>
-    <title>NOTIFICATION SCRIPT</title>
+    <title>NOTIFICATIONS</title>
 
     <para>
       When certain state changes occur in CTDB, it can be configured
-      to perform arbitrary actions via a notification script.  For
-      example, sending SNMP traps or emails when a node becomes
-      unhealthy or similar.
+      to perform arbitrary actions via notifications.  For example,
+      sending SNMP traps or emails when a node becomes unhealthy or
+      similar.
     </para>
+
     <para>
-      This is activated by setting the
-      <varname>CTDB_NOTIFY_SCRIPT</varname> configuration variable.
-      The specified script must be executable.  
+      The notification mechanism runs all executable files ending in
+      ".script" in
+      <filename>/usr/local/etc/ctdb/events/notification/</filename>,
+      ignoring any failures and continuing to run all files.
     </para>
-    <para>
-      Use of the provided <filename>/usr/local/etc/ctdb/notify.sh</filename>
-      script is recommended.  It executes files in
-      <filename>/usr/local/etc/ctdb/notify.d/</filename>.
-    </para>
+
     <para>
       CTDB currently generates notifications after CTDB changes to
       these states:
@@ -983,14 +992,14 @@ CTDB_NATGW_DEFAULT_GATEWAY=10.0.0.1
   </refsect1>
 
   <refsect1>
-    <title>DEBUG LEVELS</title>
+    <title>LOG LEVELS</title>
 
     <para>
-      Valid values for DEBUGLEVEL are:
+      Valid log levels, in increasing order of verbosity, are:
     </para>
 
     <simplelist>
-      <member>ERR</member>
+      <member>ERROR</member>
       <member>WARNING</member>
       <member>NOTICE</member>
       <member>INFO</member>
@@ -1027,11 +1036,13 @@ correct CIFS semantics to clients.
     </para>
 
     <para>
-	To activate a node as being a remote cluster node you need to set
-	the following two parameters in /etc/sysconfig/ctdb  for the remote node:
+	To activate a node as being a remote cluster node you need to
+	set the following two parameters in
+	/usr/local/etc/ctdb/ctdb.conf for the remote node:
         <screen format="linespecific">
-CTDB_CAPABILITY_LMASTER=no
-CTDB_CAPABILITY_RECMASTER=no
+[legacy]
+  lmaster capability = false
+  recmaster capability = false
 	</screen>
     </para>
 
@@ -1068,7 +1079,13 @@ CTDB_CAPABILITY_RECMASTER=no
       <citerefentry><refentrytitle>ping_pong</refentrytitle>
       <manvolnum>1</manvolnum></citerefentry>,
 
-      <citerefentry><refentrytitle>ctdbd.conf</refentrytitle>
+      <citerefentry><refentrytitle>ctdb.conf</refentrytitle>
+      <manvolnum>5</manvolnum></citerefentry>,
+
+      <citerefentry><refentrytitle>ctdb-script.options</refentrytitle>
+      <manvolnum>5</manvolnum></citerefentry>,
+
+      <citerefentry><refentrytitle>ctdb.sysconfig</refentrytitle>
       <manvolnum>5</manvolnum></citerefentry>,
 
       <citerefentry><refentrytitle>ctdb-statistics</refentrytitle>

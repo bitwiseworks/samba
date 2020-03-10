@@ -41,7 +41,7 @@ static int num_backends;
   The 'name' can be later used by other backends to find the operations
   structure for this backend.  
 */
-NTSTATUS pvfs_acl_register(const struct pvfs_acl_ops *ops)
+NTSTATUS pvfs_acl_register(TALLOC_CTX *ctx, const struct pvfs_acl_ops *ops)
 {
 	struct pvfs_acl_ops *new_ops;
 
@@ -50,7 +50,8 @@ NTSTATUS pvfs_acl_register(const struct pvfs_acl_ops *ops)
 		return NT_STATUS_OBJECT_NAME_COLLISION;
 	}
 
-	backends = talloc_realloc(talloc_autofree_context(), backends, struct pvfs_acl_backend, num_backends+1);
+	backends = talloc_realloc(ctx, backends,
+			struct pvfs_acl_backend, num_backends+1);
 	NT_STATUS_HAVE_NO_MEMORY(backends);
 
 	new_ops = (struct pvfs_acl_ops *)talloc_memdup(backends, ops, sizeof(*ops));
@@ -85,7 +86,7 @@ const struct pvfs_acl_ops *pvfs_acl_backend_byname(const char *name)
 NTSTATUS pvfs_acl_init(void)
 {
 	static bool initialized = false;
-#define _MODULE_PROTO(init) extern NTSTATUS init(void);
+#define _MODULE_PROTO(init) extern NTSTATUS init(TALLOC_CTX *);
 	STATIC_pvfs_acl_MODULES_PROTO;
 	init_module_fn static_init[] = { STATIC_pvfs_acl_MODULES };
 	init_module_fn *shared_init;
@@ -95,8 +96,8 @@ NTSTATUS pvfs_acl_init(void)
 
 	shared_init = load_samba_modules(NULL, "pvfs_acl");
 
-	run_init_functions(static_init);
-	run_init_functions(shared_init);
+	run_init_functions(NULL, static_init);
+	run_init_functions(NULL, shared_init);
 
 	talloc_free(shared_init);
 

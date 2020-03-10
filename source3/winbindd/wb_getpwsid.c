@@ -47,6 +47,12 @@ struct tevent_req *wb_getpwsid_send(TALLOC_CTX *mem_ctx,
 	state->ev = ev;
 	state->pw = pw;
 
+	if (dom_sid_in_domain(&global_sid_Unix_Users, user_sid)) {
+		/* unmapped Unix users must be resolved locally */
+		tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER);
+		return tevent_req_post(req, ev);
+	}
+
 	subreq = wb_queryuser_send(state, ev, &state->sid);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
@@ -63,7 +69,9 @@ static void wb_getpwsid_queryuser_done(struct tevent_req *subreq)
 		req, struct wb_getpwsid_state);
 	struct winbindd_pw *pw = state->pw;
 	struct wbint_userinfo *info;
-	fstring acct_name, output_username;
+	fstring acct_name;
+	const char *output_username = NULL;
+	char *mapped_name = NULL;
 	char *tmp;
 	NTSTATUS status;
 
@@ -83,8 +91,29 @@ static void wb_getpwsid_queryuser_done(struct tevent_req *subreq)
 		return;
 	}
 
-	fill_domain_username(output_username, info->domain_name,
-			     acct_name, true);
+	/*
+	 * TODO:
+	 * This function should be called in 'idmap winbind child'. It shouldn't
+	 * be a blocking call, but for this we need to add a new function for
+	 * winbind.idl. This is a fix which can be backported for now.
+	 */
+	status = normalize_name_map(state,
+				    info->domain_name,
+				    acct_name,
+				    &mapped_name);
+	if (NT_STATUS_IS_OK(status) ||
+	    NT_STATUS_EQUAL(status, NT_STATUS_FILE_RENAMED)) {
+		fstrcpy(acct_name, mapped_name);
+	}
+	output_username = fill_domain_username_talloc(state,
+						      info->domain_name,
+						      acct_name,
+						      true);
+	if (output_username == NULL) {
+		tevent_req_nterror(req, NT_STATUS_NO_MEMORY);
+		return;
+	}
+
 	strlcpy(pw->pw_name, output_username, sizeof(pw->pw_name));
 
 	strlcpy(pw->pw_gecos, info->full_name ? info->full_name : "",
@@ -101,13 +130,13 @@ static void wb_getpwsid_queryuser_done(struct tevent_req *subreq)
 	TALLOC_FREE(tmp);
 
 	tmp = talloc_sub_specified(
-		state, info->shell, info->acct_name,
+		state, info->shell, acct_name,
 		info->primary_group_name, info->domain_name,
 		pw->pw_uid, pw->pw_gid);
 	if (tevent_req_nomem(tmp, req)) {
 		return;
 	}
-	strlcpy(pw->pw_shell, tmp, sizeof(pw->pw_dir));
+	strlcpy(pw->pw_shell, tmp, sizeof(pw->pw_shell));
 	TALLOC_FREE(tmp);
 
 	strlcpy(pw->pw_passwd, "*", sizeof(pw->pw_passwd));

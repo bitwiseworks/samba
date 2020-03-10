@@ -26,15 +26,19 @@
 
 static NTSTATUS auth_generic_server_authtype_start_as_root(TALLOC_CTX *mem_ctx,
 							   uint8_t auth_type, uint8_t auth_level,
-							   DATA_BLOB *token_in,
-							   DATA_BLOB *token_out,
 							   const struct tsocket_address *remote_address,
+							   const struct tsocket_address *local_address,
+							   const char *service_description,
 							   struct gensec_security **ctx)
 {
 	struct gensec_security *gensec_security = NULL;
 	NTSTATUS status;
 
-	status = auth_generic_prepare(talloc_tos(), remote_address, &gensec_security);
+	status = auth_generic_prepare(talloc_tos(),
+				      remote_address,
+				      local_address,
+				      service_description,
+				      &gensec_security);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0, (__location__ ": auth_generic_prepare failed: %s\n",
 			  nt_errstr(status)));
@@ -49,14 +53,6 @@ static NTSTATUS auth_generic_server_authtype_start_as_root(TALLOC_CTX *mem_ctx,
 		return status;
 	}
 
-	status = gensec_update(gensec_security, mem_ctx, *token_in, token_out);
-	if (!NT_STATUS_IS_OK(status) && !NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
-		DEBUG(2, (__location__ ": gensec_update failed: %s\n",
-			  nt_errstr(status)));
-		TALLOC_FREE(gensec_security);
-		return status;
-	}
-
 	/* steal gensec context to the caller */
 	*ctx = talloc_move(mem_ctx, &gensec_security);
 	return status;
@@ -64,9 +60,9 @@ static NTSTATUS auth_generic_server_authtype_start_as_root(TALLOC_CTX *mem_ctx,
 
 NTSTATUS auth_generic_server_authtype_start(TALLOC_CTX *mem_ctx,
 					    uint8_t auth_type, uint8_t auth_level,
-					    DATA_BLOB *token_in,
-					    DATA_BLOB *token_out,
 					    const struct tsocket_address *remote_address,
+					    const struct tsocket_address *local_address,
+					    const char *service_description,
 					    struct gensec_security **ctx)
 {
 	NTSTATUS status;
@@ -75,9 +71,9 @@ NTSTATUS auth_generic_server_authtype_start(TALLOC_CTX *mem_ctx,
 	/* this has to be done as root in order to create the messaging socket */
 	status = auth_generic_server_authtype_start_as_root(mem_ctx,
 							    auth_type, auth_level,
-							    token_in,
-							    token_out,
 							    remote_address,
+							    local_address,
+							    service_description,
 							    ctx);
 	unbecome_root();
 	return status;

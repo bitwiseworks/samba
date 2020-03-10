@@ -533,7 +533,6 @@ static NTSTATUS idmap_tdb2_db_init(struct idmap_domain *dom)
 	NTSTATUS ret;
 	struct idmap_tdb_common_context *commonctx;
 	struct idmap_tdb2_context *ctx;
-	char *config_option = NULL;
 	const char * idmap_script = NULL;
 
 	commonctx = talloc_zero(dom, struct idmap_tdb_common_context);
@@ -556,14 +555,7 @@ static NTSTATUS idmap_tdb2_db_init(struct idmap_domain *dom)
 		goto failed;
 	}
 
-	config_option = talloc_asprintf(ctx, "idmap config %s", dom->name);
-	if (config_option == NULL) {
-		DEBUG(0, ("Out of memory!\n"));
-		ret = NT_STATUS_NO_MEMORY;
-		goto failed;
-	}
-	ctx->script = lp_parm_const_string(-1, config_option, "script", NULL);
-	talloc_free(config_option);
+	ctx->script = idmap_config_const_string(dom->name, "script", NULL);
 
 	idmap_script = lp_parm_const_string(-1, "idmap", "script", NULL);
 	if (idmap_script != NULL) {
@@ -614,7 +606,7 @@ static struct idmap_methods db_methods = {
 };
 
 static_decl_idmap;
-NTSTATUS idmap_tdb2_init(void)
+NTSTATUS idmap_tdb2_init(TALLOC_CTX *ctx)
 {
 	return smb_register_idmap(SMB_IDMAP_INTERFACE_VERSION, "tdb2", &db_methods);
 }

@@ -17,6 +17,7 @@
 */
 
 #include <Python.h>
+#include "python/py3compat.h"
 #include "includes.h"
 #include "param/pyparam.h"
 #include "auth/gensec/gensec.h"
@@ -43,7 +44,7 @@ static PyObject *py_get_name_by_authtype(PyObject *self, PyObject *args)
 	if (name == NULL)
 		Py_RETURN_NONE;
 
-	return PyString_FromString(name);
+	return PyStr_FromString(name);
 }
 
 static struct gensec_settings *settings_from_object(TALLOC_CTX *mem_ctx, PyObject *object)
@@ -71,7 +72,7 @@ static struct gensec_settings *settings_from_object(TALLOC_CTX *mem_ctx, PyObjec
 		return NULL;
 	}
 
-	s->target_hostname = PyString_AsString(py_hostname);
+	s->target_hostname = PyStr_AsString(py_hostname);
 	s->lp_ctx = lpcfg_from_py_object(s, py_lp_ctx);
 	return s;
 }
@@ -240,6 +241,25 @@ static PyObject *py_gensec_set_target_service(PyObject *self, PyObject *args)
 	Py_RETURN_NONE;
 }
 
+static PyObject *py_gensec_set_target_service_description(PyObject *self, PyObject *args)
+{
+	struct gensec_security *security = pytalloc_get_type(self, struct gensec_security);
+	char *target_service_description;
+	NTSTATUS status;
+
+	if (!PyArg_ParseTuple(args, "s", &target_service_description))
+		return NULL;
+
+	status = gensec_set_target_service_description(security,
+						       target_service_description);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetNTSTATUS(status);
+		return NULL;
+	}
+
+	Py_RETURN_NONE;
+}
+
 static PyObject *py_gensec_set_credentials(PyObject *self, PyObject *args)
 {
 	PyObject *py_creds = Py_None;
@@ -255,6 +275,7 @@ static PyObject *py_gensec_set_credentials(PyObject *self, PyObject *args)
 		PyErr_Format(PyExc_TypeError,
 			     "Expected samba.credentaials for credentials argument got  %s",
 			     talloc_get_name(pytalloc_get_ptr(py_creds)));
+		return NULL;
 	}
 
 	status = gensec_set_credentials(security, creds);
@@ -312,7 +333,7 @@ static PyObject *py_gensec_session_key(PyObject *self)
 		return NULL;
 	}
 
-	session_key_obj = PyString_FromStringAndSize((const char *)session_key.data,
+	session_key_obj = PyBytes_FromStringAndSize((const char *)session_key.data,
 						     session_key.length);
 	talloc_free(mem_ctx);
 	return session_key_obj;
@@ -432,14 +453,13 @@ static PyObject *py_gensec_update(PyObject *self, PyObject *args)
 		return NULL;
 
 	mem_ctx = talloc_new(NULL);
-
-	if (!PyString_Check(py_in)) {
-		PyErr_Format(PyExc_TypeError, "expected a string");
+	if (!PyBytes_Check(py_in)) {
+		PyErr_Format(PyExc_TypeError, "bytes expected");
 		return NULL;
 	}
 
-	in.data = (uint8_t *)PyString_AsString(py_in);
-	in.length = PyString_Size(py_in);
+	in.data = (uint8_t *)PyBytes_AsString(py_in);
+	in.length = PyBytes_Size(py_in);
 
 	status = gensec_update(security, mem_ctx, in, &out);
 
@@ -449,7 +469,7 @@ static PyObject *py_gensec_update(PyObject *self, PyObject *args)
 		talloc_free(mem_ctx);
 		return NULL;
 	}
-	ret = PyString_FromStringAndSize((const char *)out.data, out.length);
+	ret = PyBytes_FromStringAndSize((const char *)out.data, out.length);
 	talloc_free(mem_ctx);
 
 	if (NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
@@ -475,12 +495,12 @@ static PyObject *py_gensec_wrap(PyObject *self, PyObject *args)
 
 	mem_ctx = talloc_new(NULL);
 
-	if (!PyString_Check(py_in)) {
-		PyErr_Format(PyExc_TypeError, "expected a string");
+	if (!PyBytes_Check(py_in)) {
+		PyErr_Format(PyExc_TypeError, "bytes expected");
 		return NULL;
 	}
-	in.data = (uint8_t *)PyString_AsString(py_in);
-	in.length = PyString_Size(py_in);
+	in.data = (uint8_t *)PyBytes_AsString(py_in);
+	in.length = PyBytes_Size(py_in);
 
 	status = gensec_wrap(security, mem_ctx, &in, &out);
 
@@ -490,10 +510,11 @@ static PyObject *py_gensec_wrap(PyObject *self, PyObject *args)
 		return NULL;
 	}
 
-	ret = PyString_FromStringAndSize((const char *)out.data, out.length);
+	ret = PyBytes_FromStringAndSize((const char *)out.data, out.length);
 	talloc_free(mem_ctx);
 	return ret;
 }
+
 
 static PyObject *py_gensec_unwrap(PyObject *self, PyObject *args)
 {
@@ -509,13 +530,13 @@ static PyObject *py_gensec_unwrap(PyObject *self, PyObject *args)
 
 	mem_ctx = talloc_new(NULL);
 
-	if (!PyString_Check(py_in)) {
-		PyErr_Format(PyExc_TypeError, "expected a string");
+	if (!PyBytes_Check(py_in)) {
+		PyErr_Format(PyExc_TypeError, "bytes expected");
 		return NULL;
 	}
 
-	in.data = (uint8_t *)PyString_AsString(py_in);
-	in.length = PyString_Size(py_in);
+	in.data = (uint8_t *)PyBytes_AsString(py_in);
+	in.length = PyBytes_Size(py_in);
 
 	status = gensec_unwrap(security, mem_ctx, &in, &out);
 
@@ -525,7 +546,7 @@ static PyObject *py_gensec_unwrap(PyObject *self, PyObject *args)
 		return NULL;
 	}
 
-	ret = PyString_FromStringAndSize((const char *)out.data, out.length);
+	ret = PyBytes_FromStringAndSize((const char *)out.data, out.length);
 	talloc_free(mem_ctx);
 	return ret;
 }
@@ -615,9 +636,11 @@ static PyMethodDef py_gensec_security_methods[] = {
 	{ "set_credentials", (PyCFunction)py_gensec_set_credentials, METH_VARARGS, 
 		"S.start_client(credentials)" },
 	{ "set_target_hostname", (PyCFunction)py_gensec_set_target_hostname, METH_VARARGS, 
-		"S.start_target_hostname(target_hostname)" },
+		"S.start_target_hostname(target_hostname) \n This sets the Kerberos target hostname to obtain a ticket for." },
 	{ "set_target_service", (PyCFunction)py_gensec_set_target_service, METH_VARARGS, 
-		"S.start_target_service(target_service)" },
+		"S.start_target_service(target_service) \n This sets the Kerberos target service to obtain a ticket for.  The default value is 'host'" },
+	{ "set_target_service_description", (PyCFunction)py_gensec_set_target_service_description, METH_VARARGS,
+		"S.start_target_service_description(target_service_description) \n This description is set server-side and used in authentication and authorization logs.  The default value is that provided to set_target_service() or None."},
 	{ "session_info", (PyCFunction)py_gensec_session_info, METH_NOARGS,
 		"S.session_info() -> info" },
 	{ "session_key", (PyCFunction)py_gensec_session_key, METH_NOARGS,
@@ -653,23 +676,29 @@ static PyMethodDef py_gensec_security_methods[] = {
 	{ NULL }
 };
 
+static struct PyModuleDef moduledef = {
+    PyModuleDef_HEAD_INIT,
+    .m_name = "gensec",
+    .m_doc = "Generic Security Interface.",
+    .m_size = -1,
+};
+
 static PyTypeObject Py_Security = {
 	.tp_name = "gensec.Security",
 	.tp_flags = Py_TPFLAGS_DEFAULT,
 	.tp_methods = py_gensec_security_methods,
 };
 
-void initgensec(void);
-void initgensec(void)
+MODULE_INIT_FUNC(gensec)
 {
 	PyObject *m;
 
 	if (pytalloc_BaseObject_PyType_Ready(&Py_Security) < 0)
-		return;
+		return NULL;
 
-	m = Py_InitModule3("gensec", NULL, "Generic Security Interface.");
+	m = PyModule_Create(&moduledef);
 	if (m == NULL)
-		return;
+		return NULL;
 
 	PyModule_AddObject(m, "FEATURE_SESSION_KEY",     PyInt_FromLong(GENSEC_FEATURE_SESSION_KEY));
 	PyModule_AddObject(m, "FEATURE_SIGN",            PyInt_FromLong(GENSEC_FEATURE_SIGN));
@@ -682,4 +711,6 @@ void initgensec(void)
 
 	Py_INCREF(&Py_Security);
 	PyModule_AddObject(m, "Security", (PyObject *)&Py_Security);
+
+	return m;
 }

@@ -18,6 +18,7 @@
 
 import optparse, samba
 from samba import getopt as options
+from samba import colour
 from ldb import LdbError
 import sys, traceback
 import textwrap
@@ -103,7 +104,7 @@ class Command(object):
             force_traceback = True
 
         if isinstance(inner_exception, LdbError):
-            (ldb_ecode, ldb_emsg) = inner_exception
+            (ldb_ecode, ldb_emsg) = inner_exception.args
             self.errf.write("ERROR(ldb): %s - %s\n" % (message, ldb_emsg))
         elif isinstance(inner_exception, AssertionError):
             self.errf.write("ERROR(assert): %s\n" % message)
@@ -130,7 +131,7 @@ class Command(object):
             prog=prog,epilog=epilog)
         parser.add_options(self.takes_options)
         optiongroups = {}
-        for name, optiongroup in self.takes_optiongroups.iteritems():
+        for name, optiongroup in self.takes_optiongroups.items():
             optiongroups[name] = optiongroup(parser)
             parser.add_option_group(optiongroups[name])
         return parser, optiongroups
@@ -174,12 +175,12 @@ class Command(object):
 
         try:
             return self.run(*args, **kwargs)
-        except Exception, e:
+        except Exception as e:
             self.show_command_error(e)
             return -1
 
     def run(self):
-        """Run the command. This should be overriden by all subclasses."""
+        """Run the command. This should be overridden by all subclasses."""
         raise NotImplementedError(self.run)
 
     def get_logger(self, name="netcmd"):
@@ -188,6 +189,29 @@ class Command(object):
         logger = logging.getLogger(name)
         logger.addHandler(logging.StreamHandler(self.errf))
         return logger
+
+    def apply_colour_choice(self, requested):
+        """Heuristics to work out whether the user wants colour output, from a
+        --color=yes|no|auto option. This alters the ANSI 16 bit colour
+        "constants" in the colour module to be either real colours or empty
+        strings.
+        """
+        requested = requested.lower()
+        if requested == 'no':
+            colour.switch_colour_off()
+
+        elif requested == 'yes':
+            colour.switch_colour_on()
+
+        elif requested == 'auto':
+            if (hasattr(self.outf, 'isatty') and self.outf.isatty()):
+                colour.switch_colour_on()
+            else:
+                colour.switch_colour_off()
+
+        else:
+            raise CommandError("Unknown --color option: %s "
+                               "please choose from yes, no, auto")
 
 
 class SuperCommand(Command):
@@ -201,6 +225,19 @@ class SuperCommand(Command):
         if subcommand in self.subcommands:
             return self.subcommands[subcommand]._run(
                 "%s %s" % (myname, subcommand), *args)
+
+        if subcommand == 'help':
+            # pass the request down
+            if len(args) > 0:
+                sub = self.subcommands.get(args[0])
+                if isinstance(sub, SuperCommand):
+                    return sub._run("%s %s" % (myname, args[0]), 'help',
+                                    *args[1:])
+                elif sub is not None:
+                    return sub._run("%s %s" % (myname, args[0]), '--help',
+                                    *args[1:])
+
+            subcommand = '--help'
 
         epilog = "\nAvailable subcommands:\n"
         subcmds = self.subcommands.keys()
@@ -230,3 +267,6 @@ class CommandError(Exception):
         self.message = message
         self.inner_exception = inner_exception
         self.exception_info = sys.exc_info()
+
+    def __repr__(self):
+        return "CommandError(%s)" % self.message

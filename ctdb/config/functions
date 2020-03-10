@@ -11,14 +11,13 @@ export CTDB_BASE
 # CTDB_VARDIR is used elsewhere
 # shellcheck disable=SC2034
 CTDB_VARDIR="/usr/local/var/lib/ctdb"
-ctdb_rundir="/usr/local/var/run/ctdb"
 
 CTDB="${CTDB:-/usr/local/bin/ctdb}"
 
 # Only (and always) override these variables in test code
 
 if [ -z "$CTDB_SCRIPT_VARDIR" ] ; then
-    CTDB_SCRIPT_VARDIR="/usr/local/var/lib/ctdb/state"
+    CTDB_SCRIPT_VARDIR="/usr/local/var/lib/ctdb/scripts"
 fi
 
 if [ -z "$CTDB_SYS_ETCDIR" ] ; then
@@ -32,90 +31,51 @@ fi
 #######################################
 # pull in a system config file, if any
 
-rewrite_ctdb_options ()
+load_system_config ()
 {
-    case "$CTDB_DBDIR" in
-	tmpfs|tmpfs:*)
-	    _opts_defaults="mode=700"
-	    # Get any extra options specified after colon
-	    if [ "$CTDB_DBDIR" = "tmpfs" ] ; then
-		_opts=""
-	    else
-		_opts="${CTDB_DBDIR#tmpfs:}"
-	    fi
-	    # It is OK to repeat mount options - last value wins.
-	    # CTDB_DBDIR_TMPFS_OPTIONS is used by ctdbd_wrapper
-	    # shellcheck disable=SC2034
-	    CTDB_DBDIR_TMPFS_OPTIONS="${_opts_defaults}${_opts:+,}${_opts}"
+	if [ -z "$1" ] ; then
+		return
+	fi
 
-	    CTDB_DBDIR="${ctdb_rundir}/CTDB_DBDIR"
-	    ;;
-	*)
-	    # shellcheck disable=SC2034
-	    CTDB_DBDIR_TMPFS_OPTIONS=""
-    esac
+	if [ -f "${CTDB_SYS_ETCDIR}/sysconfig/$1" ]; then
+		. "${CTDB_SYS_ETCDIR}/sysconfig/$1"
+	elif [ -f "${CTDB_SYS_ETCDIR}/default/$1" ]; then
+		. "${CTDB_SYS_ETCDIR}/default/$1"
+	fi
 }
 
-_loadconfig() {
-
-    if [ -z "$1" ] ; then
-	foo="${service_config:-${service_name}}"
-	if [ -n "$foo" ] ; then
-	    loadconfig "$foo"
-	    return
+# load_script_options [ component script ]
+#   script is an event script name relative to a component
+#   component is currently ignored
+load_script_options ()
+{
+	if [ $# -eq 2 ] ; then
+		_script="$2"
+	elif [ $# -eq 0  ] ; then
+		_script=""
+	else
+		die "usage: load_script_options [ component script ]"
 	fi
-    fi
 
-    if [ "$1" != "ctdb" ] ; then
-	loadconfig "ctdb"
-    fi
+	_options="${CTDB_BASE}/script.options"
 
-    if [ -z "$1" ] ; then
-	return
-    fi
-
-    if [ -f "${CTDB_SYS_ETCDIR}/sysconfig/$1" ]; then
-	. "${CTDB_SYS_ETCDIR}/sysconfig/$1"
-    elif [ -f "${CTDB_SYS_ETCDIR}/default/$1" ]; then
-	. "${CTDB_SYS_ETCDIR}/default/$1"
-    elif [ -f "${CTDB_BASE}/sysconfig/$1" ]; then
-	. "${CTDB_BASE}/sysconfig/$1"
-    fi
-
-    if [ "$1" = "ctdb" ] ; then
-	_config="${CTDBD_CONF:-${CTDB_BASE}/ctdbd.conf}"
-	if [ -r "$_config" ] ; then
-	    . "$_config"
+	if [ -r "$_options" ] ; then
+		. "$_options"
 	fi
-	rewrite_ctdb_options
-    fi
-}
 
-loadconfig () {
-    _loadconfig "$@"
+	if [ -n "$_script" ] ; then
+		_s="${CTDB_BASE}/events/legacy/${_script}"
+	else
+		_s="${0%.script}"
+	fi
+	_options="${_s}.options"
+
+	if [ -r "$_options" ] ; then
+		. "$_options"
+	fi
 }
 
 ##############################################################
-
-# CTDB_SCRIPT_DEBUGLEVEL can be overwritten by setting it in a
-# configuration file.
-debug ()
-{
-    if [ "${CTDB_SCRIPT_DEBUGLEVEL:-NOTICE}" = "DEBUG" ] ; then
-	# If there are arguments then echo them.  Otherwise expect to
-	# use stdin, which allows us to pass lots of debug using a
-	# here document.
-	if [ -n "$1" ] ; then
-	    echo "DEBUG: $*"
-	else
-	    sed -e 's@^@DEBUG: @'
-	fi
-    else
-	if [ -z "$1" ] ; then
-	    cat >/dev/null
-	fi
-    fi
-}
 
 die ()
 {
@@ -191,16 +151,18 @@ ctdb_check_args ()
 # determine on what type of system (init style) we are running
 detect_init_style()
 {
-    # only do detection if not already set:
-    [ -z "$CTDB_INIT_STYLE" ] || return
+	# only do detection if not already set:
+	if [ -n "$CTDB_INIT_STYLE" ] ; then
+		return
+	fi
 
-    if [ -x /sbin/startproc ]; then
-        CTDB_INIT_STYLE="suse"
-    elif [ -x /sbin/start-stop-daemon ]; then
-        CTDB_INIT_STYLE="debian"
-    else
-        CTDB_INIT_STYLE="redhat"
-    fi
+	if [ -x /sbin/startproc ]; then
+		CTDB_INIT_STYLE="suse"
+	elif [ -x /sbin/start-stop-daemon ]; then
+		CTDB_INIT_STYLE="debian"
+	else
+		CTDB_INIT_STYLE="redhat"
+	fi
 }
 
 ######################################################
@@ -270,6 +232,43 @@ ctdb_get_ip_address ()
     cat "$_ip_addr_file"
 }
 
+# Cached retrieval of database options for use by event scripts.
+#
+# If the variables are already set then they should not be overwritten
+# - this should only happen during event script testing.
+ctdb_get_db_options ()
+{
+	_db_opts_file="${CTDB_SCRIPT_VARDIR}/db_options.cache"
+
+	if [ ! -f "$_db_opts_file" ] ; then
+		{
+			ctdb_translate_option "database" \
+					      "volatile database directory" \
+					      "CTDB_DBDIR"
+			ctdb_translate_option "database" \
+					      "persistent database directory" \
+					      "CTDB_DBDIR_PERSISTENT"
+			ctdb_translate_option "database" \
+					      "state database directory" \
+					      "CTDB_DBDIR_STATE"
+		} >"$_db_opts_file"
+	fi
+
+	. "$_db_opts_file"
+}
+
+ctdb_translate_option ()
+{
+	_section="$1"
+	_opt="$2"
+	_variable="$3"
+
+	# ctdb-config already prints an error if something goes wrong
+	_t=$("${CTDB_HELPER_BINDIR}/ctdb-config" get "$_section" "$_opt") || \
+		exit $?
+	echo "${_variable}=\"${_t}\""
+}
+
 ######################################################
 # wrapper around /proc/ settings to allow them to be hooked
 # for testing
@@ -320,7 +319,9 @@ program_stack_traces ()
 # Ensure $service_name is set
 assert_service_name ()
 {
-    [ -n "$service_name" ] || die "INTERNAL ERROR: \$service_name not set"
+	# service_name is set by the event script
+	# shellcheck disable=SC2154
+	[ -n "$service_name" ] || die "INTERNAL ERROR: \$service_name not set"
 }
 
 ######################################################
@@ -358,94 +359,60 @@ ctdb_check_directories()
 # usage: ctdb_check_tcp_ports <ports...>
 ######################################################
 
-# This flag file is created when a service is initially started.  It
-# is deleted the first time TCP port checks for that service succeed.
-# Until then ctdb_check_tcp_ports() prints a more subtle "error"
-# message if a port check fails.
-_ctdb_check_tcp_common ()
-{
-    assert_service_name
-    _d="${CTDB_SCRIPT_VARDIR}/failcount"
-    _ctdb_service_started_file="${_d}/${service_name}.started"
-}
-
-ctdb_check_tcp_init ()
-{
-    _ctdb_check_tcp_common
-    mkdir -p "${_ctdb_service_started_file%/*}" # dirname
-    touch "$_ctdb_service_started_file"
-}
-
 # Check whether something is listening on all of the given TCP ports
 # using the "ctdb checktcpport" command.
 ctdb_check_tcp_ports()
 {
-    if [ -z "$1" ] ; then
-	echo "INTERNAL ERROR: ctdb_check_tcp_ports - no ports specified"
-	exit 1
-    fi
+	if [ -z "$1" ] ; then
+		echo "INTERNAL ERROR: ctdb_check_tcp_ports - no ports specified"
+		exit 1
+	fi
 
-    for _p ; do  # process each function argument (port)
-	_cmd="$CTDB checktcpport $_p"
-	_out=$($_cmd 2>&1)
-	_ret=$?
-	case "$_ret" in
-	    0)
-		_ctdb_check_tcp_common
-		if [ ! -f "$_ctdb_service_started_file" ] ; then
-		    echo "ERROR: $service_name tcp port $_p is not responding"
-		    debug "\"ctdb checktcpport $_p\" was able to bind to port"
-		else
-		    echo "INFO: $service_name tcp port $_p is not responding"
-		fi
+	for _p ; do  # process each function argument (port)
+		_cmd="$CTDB checktcpport $_p"
+		_out=$($_cmd 2>&1)
+		_ret=$?
+		case "$_ret" in
+		0)
+			echo "$service_name not listening on TCP port $_p"
+			return 1
+			;;
+		98)
+			# Couldn't bind, something already listening, next port
+			continue
+			;;
+		*)
+			echo "unexpected error (${_ret}) running \"${_cmd}\""
+			if [ -n "$_out" ] ; then
+				echo "$_out"
+			fi
+			return $_ret
+			;;
+		esac
+	done
 
-		return 1
-		;;
-	    98)
-		# Couldn't bind, something already listening, next port...
-		continue
-		;;
-	    *)
-		echo "ERROR: unexpected error running \"ctdb checktcpport\""
-		debug <<EOF
-$CTDB checktcpport (exited with $_ret) with output:
-$_out"
-EOF
-		return $_ret
-	esac
-    done
-
-    # All ports listening
-    _ctdb_check_tcp_common
-    rm -f "$_ctdb_service_started_file"
-    return 0
+	# All ports listening
+	return 0
 }
 
 ######################################################
 # check a unix socket
-# usage: ctdb_check_unix_socket SERVICE_NAME <socket_path>
+# usage: ctdb_check_unix_socket SOCKPATH
 ######################################################
-ctdb_check_unix_socket() {
-    socket_path="$1"
-    [ -z "$socket_path" ] && return
-
-    if ! netstat --unix -a -n | grep -q "^unix.*LISTEN.*${socket_path}$"; then
-        echo "ERROR: $service_name socket $socket_path not found"
-        return 1
-    fi
-}
-
-######################################################
-# check a command returns zero status
-# usage: ctdb_check_command <command>
-######################################################
-ctdb_check_command ()
+ctdb_check_unix_socket()
 {
-    _out=$("$@" 2>&1) || {
-	echo "ERROR: $* returned error"
-	echo "$_out" | debug
-	exit 1
-    }
+	_sockpath="$1"
+
+	if [ -z "$_sockpath" ] ; then
+		echo "ERROR: ctdb_check_unix_socket() requires socket path"
+		return 1
+	fi
+
+	_out=$(ss -l -x "src ${_sockpath}" | tail -n +2)
+	if [ -z "$_out" ] ; then
+		echo "ERROR: ${service_name} not listening on ${_sockpath}"
+		return 1
+	fi
 }
 
 ################################################
@@ -474,7 +441,6 @@ kill_tcp_connections ()
 		139|445) __oneway=true ;;
 	    esac
 
-	    echo "Killing TCP connection $_src $_dst"
 	    _connections="${_connections}${_nl}${_src} ${_dst}"
 	    if ! $__oneway ; then
 		_connections="${_connections}${_nl}${_dst} ${_src}"
@@ -493,15 +459,22 @@ kill_tcp_connections ()
 		return
 	}
 
-	_remaining=$(get_tcp_connections_for_ip "$_ip" | wc -l)
-
-	if [ "$_remaining" -eq 0 ] ; then
-		echo "Killed $_killcount TCP connections to released IP $_ip"
-		return
+	_connections=$(get_tcp_connections_for_ip "$_ip")
+	if [ -z "$_connections" ] ; then
+		_remaining=0
+	else
+		_remaining=$(echo "$_connections" | wc -l)
 	fi
 
-	_t="${_remaining}/${_killcount}"
-	echo "Failed to kill TCP connections for IP $_ip (${_t} remaining)"
+	_actually_killed=$((_killcount - _remaining))
+
+	_t="${_actually_killed}/${_killcount}"
+	echo "Killed ${_t} TCP connections to released IP $_ip"
+
+	if [ -n "$_connections" ] ; then
+		echo "Remaining connections:"
+		echo "$_connections" | sed -e 's|^|  |'
+	fi
     }
 }
 
@@ -640,7 +613,7 @@ drop_all_public_ips ()
 	# shellcheck disable=SC2034
 	while read _ip _x ; do
 		drop_ip "$_ip"
-	done <"${CTDB_PUBLIC_ADDRESSES:-/dev/null}"
+	done <"${CTDB_BASE}/public_addresses"
 }
 
 flush_route_cache ()
@@ -745,17 +718,28 @@ interface_monitor ()
 
 ########################################################
 # Simple counters
-_ctdb_counter_common () {
-    _service_name="${1:-${service_name:-${script_name}}}"
-    _counter_file="${CTDB_SCRIPT_VARDIR}/failcount/${_service_name}"
-    mkdir -p "${_counter_file%/*}" # dirname
+_ctdb_counter_common ()
+{
+	[ $# -le 1 ] || die "usage: _ctdb_counter_common [name]"
+
+	if [ $# -eq 1 ] ; then
+		_counter_name="${1}.failcount"
+	else
+		_counter_name="failcount"
+	fi
+
+	if [ -z "$script_state_dir" ] ; then
+		die "ctdb_counter_* functions need ctdb_setup_state_dir()"
+	fi
+
+	_counter_file="${script_state_dir}/${_counter_name}"
 }
 # Some code passes an argument
 # shellcheck disable=SC2120
 ctdb_counter_init () {
     _ctdb_counter_common "$1"
 
-    >"$_counter_file"
+    : >"$_counter_file"
 }
 ctdb_counter_incr () {
     _ctdb_counter_common "$1"
@@ -766,47 +750,27 @@ ctdb_counter_incr () {
 ctdb_counter_get () {
     _ctdb_counter_common "$1"
     # unary counting!
-    stat -c "%s" "$_counter_file" 2>/dev/null || echo 0
+    _val=$(wc -c < "$_counter_file" 2>/dev/null || echo 0)
+    # Strip leading spaces from ouput of wc (on freebsd)
+    # shellcheck disable=SC2086
+    echo $_val
 }
 
 ########################################################
 
-ctdb_setup_service_state_dir ()
+# ctdb_setup_state_dir <type> <name>
+#   Sets/creates script_state_dir)
+ctdb_setup_state_dir ()
 {
-	_s="${1:-${service_name}}"
+	[ $# -eq 2 ] || die "usage: ctdb_setup_state_dir <type> <name>"
 
-	_service_state_dir="${CTDB_SCRIPT_VARDIR}/service_state/${_s}"
-	mkdir -p "$_service_state_dir" ||
-		die "Error creating state dir \"${_service_state_dir}\""
+	_type="$1"
+	_name="$2"
 
-	echo "$_service_state_dir"
-}
+	script_state_dir="${CTDB_SCRIPT_VARDIR}/${_type}/${_name}"
 
-########################################################
-# Managed status history, for auto-start/stop
-
-_ctdb_managed_common ()
-{
-    _ctdb_managed_file="${CTDB_SCRIPT_VARDIR}/managed_history/${service_name}"
-}
-
-ctdb_service_managed ()
-{
-    _ctdb_managed_common
-    mkdir -p "${_ctdb_managed_file%/*}" # dirname
-    touch "$_ctdb_managed_file"
-}
-
-ctdb_service_unmanaged ()
-{
-    _ctdb_managed_common
-    rm -f "$_ctdb_managed_file"
-}
-
-is_ctdb_previously_managed_service ()
-{
-    _ctdb_managed_common
-    [ -f "$_ctdb_managed_file" ]
+	mkdir -p "$script_state_dir" || \
+		die "Error creating script state dir \"${script_state_dir}\""
 }
 
 ##################################################################
@@ -814,9 +778,11 @@ is_ctdb_previously_managed_service ()
 
 _ctdb_service_reconfigure_common ()
 {
-    _d="${CTDB_SCRIPT_VARDIR}/service_status/${service_name}"
-    mkdir -p "$_d"
-    _ctdb_service_reconfigure_flag="$_d/reconfigure"
+	if [ -z "$script_state_dir" ] ; then
+		die "ctdb_service_*_reconfigure() needs ctdb_setup_state_dir()"
+	fi
+
+	_ctdb_service_reconfigure_flag="${script_state_dir}/need_reconfigure"
 }
 
 ctdb_service_needs_reconfigure ()
@@ -828,7 +794,7 @@ ctdb_service_needs_reconfigure ()
 ctdb_service_set_reconfigure ()
 {
     _ctdb_service_reconfigure_common
-    >"$_ctdb_service_reconfigure_flag"
+    : >"$_ctdb_service_reconfigure_flag"
 }
 
 ctdb_service_unset_reconfigure ()
@@ -853,117 +819,8 @@ service_reconfigure ()
     :
 }
 
-##################################################################
-# Does CTDB manage this service? - and associated auto-start/stop
-
-ctdb_compat_managed_service ()
-{
-    if [ "$1" = "yes" -a "$2" = "$service_name" ] ; then
-	CTDB_MANAGED_SERVICES="$CTDB_MANAGED_SERVICES $2"
-    fi
-}
-
-is_ctdb_managed_service ()
-{
-    assert_service_name
-
-    # $t is used just for readability and to allow better accurate
-    # matching via leading/trailing spaces
-    t=" $CTDB_MANAGED_SERVICES "
-
-    # Return 0 if "<space>$service_name<space>" appears in $t
-    if [ "${t#* ${service_name} }" != "${t}" ] ; then
-	return 0
-    fi
-
-    # If above didn't match then update $CTDB_MANAGED_SERVICES for
-    # backward compatibility and try again.
-    ctdb_compat_managed_service "$CTDB_MANAGES_VSFTPD"   "vsftpd"
-    ctdb_compat_managed_service "$CTDB_MANAGES_SAMBA"    "samba"
-    ctdb_compat_managed_service "$CTDB_MANAGES_WINBIND"  "winbind"
-    ctdb_compat_managed_service "$CTDB_MANAGES_HTTPD"    "apache2"
-    ctdb_compat_managed_service "$CTDB_MANAGES_HTTPD"    "httpd"
-    ctdb_compat_managed_service "$CTDB_MANAGES_ISCSI"    "iscsi"
-    ctdb_compat_managed_service "$CTDB_MANAGES_CLAMD"    "clamd"
-    ctdb_compat_managed_service "$CTDB_MANAGES_NFS"      "nfs"
-
-    t=" $CTDB_MANAGED_SERVICES "
-
-    # Return 0 if "<space>$service_name<space>" appears in $t
-    [ "${t#* ${service_name} }" != "${t}" ]
-}
-
-ctdb_start_stop_service ()
-{
-    assert_service_name
-
-    # Allow service-start/service-stop pseudo-events to start/stop
-    # services when we're not auto-starting/stopping and we're not
-    # monitoring.
-    case "$event_name" in
-	service-start)
-	    if is_ctdb_managed_service ; then
-		die 'service-start event not permitted when service is managed'
-	    fi
-	    if [ "$CTDB_SERVICE_AUTOSTARTSTOP" = "yes" ] ; then
-		die 'service-start event not permitted with CTDB_SERVICE_AUTOSTARTSTOP=yes'
-	    fi
-	    ctdb_service_start
-	    exit $?
-	    ;;
-	service-stop)
-	    if is_ctdb_managed_service ; then
-		die 'service-stop event not permitted when service is managed'
-	    fi
-	    if [ "$CTDB_SERVICE_AUTOSTARTSTOP" = "yes" ] ; then
-		die 'service-stop event not permitted with CTDB_SERVICE_AUTOSTARTSTOP=yes'
-	    fi
-	    ctdb_service_stop
-	    exit $?
-	    ;;
-    esac
-
-    # Do nothing unless configured to...
-    [ "$CTDB_SERVICE_AUTOSTARTSTOP" = "yes" ] || return 0
-
-    [ "$event_name" = "monitor" ] || return 0
-
-    if is_ctdb_managed_service ; then
-	if ! is_ctdb_previously_managed_service ; then
-	    echo "Starting service \"$service_name\" - now managed"
-	    background_with_logging ctdb_service_start
-	    exit $?
-	fi
-    else
-	if is_ctdb_previously_managed_service ; then
-	    echo "Stopping service \"$service_name\" - no longer managed"
-	    background_with_logging ctdb_service_stop
-	    exit $?
-	fi
-    fi
-}
-
-ctdb_service_start ()
-{
-    # The service is marked managed if we've ever tried to start it.
-    ctdb_service_managed
-
-    service_start || return $?
-
-    # Intentionally have this use $service_name as default
-    # shellcheck disable=SC2119
-    ctdb_counter_init
-    ctdb_check_tcp_init
-}
-
-ctdb_service_stop ()
-{
-    ctdb_service_unmanaged
-    service_stop
-}
-
 # Default service_start() and service_stop() functions.
- 
+
 # These may be overridden in an eventscript.
 service_start ()
 {
@@ -1010,15 +867,15 @@ if ! type mktemp >/dev/null 2>&1 ; then
 	fi
 	_d="${TMPDIR:-/tmp}"
 	_hex10=$(dd if=/dev/urandom count=20 2>/dev/null | \
-	    md5sum | \
-	    sed -e 's@\(..........\).*@\1@')
+	    cksum | \
+	    awk '{print $1}')
 	_t="${_d}/tmp.${_hex10}"
 	(
 	    umask 077
 	    if $_dir ; then
 		mkdir "$_t"
 	    else
-		>"$_t"
+		: >"$_t"
 	    fi
 	)
 	echo "$_t"
@@ -1153,10 +1010,6 @@ update_tickles ()
 # load a site local config file
 ########################################################
 
-[ -n "$CTDB_RC_LOCAL" -a -x "$CTDB_RC_LOCAL" ] && {
-	. "$CTDB_RC_LOCAL"
-}
-
 [ -x "${CTDB_BASE}/rc.local" ] && {
 	. "${CTDB_BASE}/rc.local"
 }
@@ -1168,4 +1021,3 @@ update_tickles ()
 }
 
 script_name="${0##*/}"       # basename
-event_name="$1"

@@ -37,6 +37,9 @@
 #include "param/loadparm.h"
 #include "libds/common/roles.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_AUTH
+
 /**
  * Return the credentials of a logged on user, including session keys
  * etc.
@@ -62,6 +65,7 @@ NTSTATUS gensec_ntlmssp_session_info(struct gensec_security *gensec_security,
 	}
 
 	session_info_flags |= AUTH_SESSION_INFO_DEFAULT_GROUPS;
+	session_info_flags |= AUTH_SESSION_INFO_NTLM;
 
 	if (gensec_security->auth_context && gensec_security->auth_context->generate_session_info) {
 		nt_status = gensec_security->auth_context->generate_session_info(gensec_security->auth_context, mem_ctx, 
@@ -175,25 +179,6 @@ NTSTATUS gensec_ntlmssp_server_start(struct gensec_security *gensec_security)
 	ntlmssp_state->neg_flags |= NTLMSSP_NEGOTIATE_SIGN;
 	ntlmssp_state->neg_flags |= NTLMSSP_NEGOTIATE_SEAL;
 
-	if (gensec_security->want_features & GENSEC_FEATURE_SESSION_KEY) {
-		ntlmssp_state->neg_flags |= NTLMSSP_NEGOTIATE_SIGN;
-	}
-	if (gensec_security->want_features & GENSEC_FEATURE_SIGN) {
-		ntlmssp_state->neg_flags |= NTLMSSP_NEGOTIATE_SIGN;
-
-		if (gensec_security->want_features & GENSEC_FEATURE_LDAP_STYLE) {
-			/*
-			 * We need to handle NTLMSSP_NEGOTIATE_SIGN as
-			 * NTLMSSP_NEGOTIATE_SEAL if GENSEC_FEATURE_LDAP_STYLE
-			 * is requested.
-			 */
-			ntlmssp_state->force_wrap_seal = true;
-		}
-	}
-	if (gensec_security->want_features & GENSEC_FEATURE_SEAL) {
-		ntlmssp_state->neg_flags |= NTLMSSP_NEGOTIATE_SIGN;
-		ntlmssp_state->neg_flags |= NTLMSSP_NEGOTIATE_SEAL;
-	}
 
 	if (role == ROLE_STANDALONE) {
 		ntlmssp_state->server.is_standalone = true;

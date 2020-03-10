@@ -4,11 +4,13 @@
 
 define_test "CTDB_PARTIALLY_ONLINE_INTERFACES, 1 down"
 
-setup_ctdb
+setup
 
 iface=$(ctdb_get_1_interface)
 
-export CTDB_PARTIALLY_ONLINE_INTERFACES="yes"
+setup_script_options <<EOF
+CTDB_PARTIALLY_ONLINE_INTERFACES=yes
+EOF
 
 ethtool_interfaces_down "$iface"
 

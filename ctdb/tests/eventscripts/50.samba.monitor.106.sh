@@ -4,10 +4,11 @@
 
 define_test "non-existent share - not checked"
 
-setup_samba
-shares_missing "ERROR: samba directory \"%s\" not available" 2
+setup
 
-export CTDB_SAMBA_SKIP_SHARE_CHECK="yes"
+setup_script_options <<EOF
+CTDB_SAMBA_SKIP_SHARE_CHECK="yes"
+EOF
 
 ok_null
 

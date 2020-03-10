@@ -47,7 +47,7 @@ struct tevent_req *winbindd_ping_dc_send(TALLOC_CTX *mem_ctx,
 		/* preserve old behavior, when no domain name is given */
 		domain = find_our_domain();
 	} else {
-		domain = find_domain_from_name_noinit(request->domain_name);
+		domain = find_trust_from_name_noinit(request->domain_name);
 	}
 	if (domain == NULL) {
 		tevent_req_nterror(req, NT_STATUS_NO_SUCH_DOMAIN);
@@ -70,6 +70,8 @@ struct tevent_req *winbindd_ping_dc_send(TALLOC_CTX *mem_ctx,
 			}
 
 			state->dcname = talloc_asprintf(state, "%s.%s", h, d);
+			TALLOC_FREE(h);
+
 			if (tevent_req_nomem(state->dcname, req)) {
 				return tevent_req_post(req, ev);
 			}
@@ -115,6 +117,11 @@ NTSTATUS winbindd_ping_dc_recv(struct tevent_req *req,
 {
 	struct winbindd_ping_dc_state *state = tevent_req_data(
 		req, struct winbindd_ping_dc_state);
+	NTSTATUS status;
+
+	if (tevent_req_is_nterror(req, &status)) {
+		return status;
+	}
 
 	if (!NT_STATUS_IS_OK(state->result)) {
 		set_auth_errors(presp, state->result);
@@ -122,8 +129,12 @@ NTSTATUS winbindd_ping_dc_recv(struct tevent_req *req,
 
 	if (state->dcname) {
 		presp->extra_data.data = talloc_strdup(presp, state->dcname);
+		if (presp->extra_data.data == NULL) {
+			return NT_STATUS_NO_MEMORY;
+		}
 		presp->length += strlen((char *)presp->extra_data.data) + 1;
 	}
 
-	return tevent_req_simple_recv_ntstatus(req);
+	tevent_req_received(req);
+	return NT_STATUS_OK;
 }

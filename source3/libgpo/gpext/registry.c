@@ -37,6 +37,8 @@
 
 static TALLOC_CTX *ctx = NULL;
 
+NTSTATUS gpext_registry_init(TALLOC_CTX *mem_ctx);
+
 /****************************************************************
 ****************************************************************/
 
@@ -340,6 +342,7 @@ static NTSTATUS registry_process_group_policy(TALLOC_CTX *mem_ctx,
 
 err_cache_path_free:
 	talloc_free(gpo_cache_path);
+	talloc_free(entries);
 	return status;
 }
 
@@ -407,7 +410,7 @@ static struct gp_extension_methods registry_methods = {
 /****************************************************************
 ****************************************************************/
 
-NTSTATUS gpext_registry_init(void)
+NTSTATUS gpext_registry_init(TALLOC_CTX *mem_ctx)
 {
 	NTSTATUS status;
 

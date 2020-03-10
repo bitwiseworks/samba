@@ -172,15 +172,19 @@ struct dnsserver_serverinfo *dnsserver_init_serverinfo(TALLOC_CTX *mem_ctx,
 	serverinfo->dwRpcProtocol = 5;
 	serverinfo->dwNameCheckFlag = DNS_ALLOW_MULTIBYTE_NAMES;
 	serverinfo->cAddressAnswerLimit = 0;
-	serverinfo->dwRecursionRetry = 3 /* seconds (default) */;
-	serverinfo->dwRecursionTimeout = 8 /* seconds (default) */;
-	serverinfo->dwMaxCacheTtl = 0x00015180; /* 1 day (default) */;
-	serverinfo->dwDsPollingInterval = 0xB4; /* 3 minutes (default) */;
-	serverinfo->dwLocalNetPriorityNetMask = 0x000000FF;;
+	serverinfo->dwRecursionRetry = 3;       /* seconds (default) */
+	serverinfo->dwRecursionTimeout = 8;     /* seconds (default) */
+	serverinfo->dwMaxCacheTtl = 0x00015180; /* 1 day (default) */
+	serverinfo->dwDsPollingInterval = 0xB4; /* 3 minutes (default) */
+	serverinfo->dwLocalNetPriorityNetMask = 0x000000FF;
 
-	serverinfo->dwScavengingInterval = 0;
-	serverinfo->dwDefaultRefreshInterval = 0xA8; /* 7 days in hours */;
-	serverinfo->dwDefaultNoRefreshInterval = 0xA8; /* 7 days in hours */;;
+	serverinfo->dwScavengingInterval = lpcfg_parm_int(
+	    lp_ctx, NULL, "dnsserver", "ScavengingInterval", 24 * 7);
+	serverinfo->dwDefaultRefreshInterval = lpcfg_parm_int(
+	    lp_ctx, NULL, "dnsserver", "DefaultRefreshInterval", 24 * 3);
+	serverinfo->dwDefaultNoRefreshInterval = lpcfg_parm_int(
+	    lp_ctx, NULL, "dnsserver", "DefaultNoRefreshInterval", 24 * 3);
+
 	serverinfo->dwLastScavengeTime = 0;
 
 	serverinfo->fAutoReverseZones = 0;
@@ -213,6 +217,8 @@ struct dnsserver_zoneinfo *dnsserver_init_zoneinfo(struct dnsserver_zone *zone,
 	const char *revzone = "in-addr.arpa";
 	const char *revzone6 = "ip6.arpa";
 	int len1, len2;
+	union dnsPropertyData *prop = NULL;
+	int i=0;
 
 	zoneinfo = talloc_zero(zone, struct dnsserver_zoneinfo);
 	if (zoneinfo == NULL) {
@@ -278,6 +284,58 @@ struct dnsserver_zoneinfo *dnsserver_init_zoneinfo(struct dnsserver_zone *zone,
 	zoneinfo->fReadOnlyZone = 0;
 	zoneinfo->dwLastXfrAttempt = 0;
 	zoneinfo->dwLastXfrResult = 0;
+
+	for(i=0; i<zone->num_props; i++){
+		prop=&(zone->tmp_props[i].data);
+		switch (zone->tmp_props[i].id) {
+		case DSPROPERTY_ZONE_TYPE:
+			zoneinfo->dwZoneType =
+				prop->zone_type;
+			break;
+		case DSPROPERTY_ZONE_ALLOW_UPDATE:
+			zoneinfo->fAllowUpdate =
+				prop->allow_update_flag;
+			break;
+		case DSPROPERTY_ZONE_NOREFRESH_INTERVAL:
+			zoneinfo->dwNoRefreshInterval =
+				prop->norefresh_hours;
+			break;
+		case DSPROPERTY_ZONE_REFRESH_INTERVAL:
+			zoneinfo->dwRefreshInterval =
+				prop->refresh_hours;
+			break;
+		case DSPROPERTY_ZONE_AGING_STATE:
+			zoneinfo->fAging =
+				prop->aging_enabled;
+			break;
+		case DSPROPERTY_ZONE_SCAVENGING_SERVERS:
+			zoneinfo->aipScavengeServers->AddrCount =
+				prop->servers.addrCount;
+			zoneinfo->aipScavengeServers->AddrArray =
+				prop->servers.addr;
+			break;
+		case DSPROPERTY_ZONE_AGING_ENABLED_TIME:
+			zoneinfo->dwAvailForScavengeTime =
+				prop->next_scavenging_cycle_hours;
+			break;
+		case DSPROPERTY_ZONE_MASTER_SERVERS:
+			zoneinfo->aipLocalMasters->AddrCount =
+				prop->master_servers.addrCount;
+			zoneinfo->aipLocalMasters->AddrArray =
+				prop->master_servers.addr;
+			break;
+		case DSPROPERTY_ZONE_EMPTY:
+		case DSPROPERTY_ZONE_SECURE_TIME:
+		case DSPROPERTY_ZONE_DELETED_FROM_HOSTNAME:
+		case DSPROPERTY_ZONE_AUTO_NS_SERVERS:
+		case DSPROPERTY_ZONE_DCPROMO_CONVERT:
+		case DSPROPERTY_ZONE_SCAVENGING_SERVERS_DA:
+		case DSPROPERTY_ZONE_MASTER_SERVERS_DA:
+		case DSPROPERTY_ZONE_NS_SERVERS_DA:
+		case DSPROPERTY_ZONE_NODE_DBFLAGS:
+			break;
+		}
+	}
 
 	return zoneinfo;
 }

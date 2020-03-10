@@ -133,7 +133,7 @@ static WERROR add_response_rr(const char *name,
 
 	ans[ai].name = talloc_strdup(ans, name);
 	W_ERROR_HAVE_NO_MEMORY(ans[ai].name);
-	ans[ai].rr_type = rec->wType;
+	ans[ai].rr_type = (enum dns_qtype)rec->wType;
 	ans[ai].rr_class = DNS_QCLASS_IN;
 	ans[ai].ttl = rec->dwTtlSeconds;
 	ans[ai].length = UINT16_MAX;
@@ -270,63 +270,26 @@ static WERROR add_dns_res_rec(struct dns_res_rec **pdst,
 }
 
 struct ask_forwarder_state {
-	struct tevent_context *ev;
-	uint16_t id;
-	struct dns_name_packet in_packet;
+	struct dns_name_packet *reply;
 };
 
 static void ask_forwarder_done(struct tevent_req *subreq);
 
 static struct tevent_req *ask_forwarder_send(
 	TALLOC_CTX *mem_ctx, struct tevent_context *ev,
-	struct dns_server *dns,
 	const char *forwarder, struct dns_name_question *question)
 {
 	struct tevent_req *req, *subreq;
 	struct ask_forwarder_state *state;
-	struct dns_res_rec *options;
-	struct dns_name_packet out_packet = { 0, };
-	DATA_BLOB out_blob;
-	enum ndr_err_code ndr_err;
-	WERROR werr;
 
 	req = tevent_req_create(mem_ctx, &state, struct ask_forwarder_state);
 	if (req == NULL) {
 		return NULL;
 	}
-	state->ev = ev;
-	generate_random_buffer((uint8_t *)&state->id, sizeof(state->id));
 
-	if (!is_ipaddress(forwarder)) {
-		DEBUG(0, ("Invalid 'dns forwarder' setting '%s', needs to be "
-			  "an IP address\n", forwarder));
-		tevent_req_werror(req, DNS_ERR(NAME_ERROR));
-		return tevent_req_post(req, ev);
-	}
-
-	out_packet.id = state->id;
-	out_packet.operation |= DNS_OPCODE_QUERY | DNS_FLAG_RECURSION_DESIRED;
-	out_packet.qdcount = 1;
-	out_packet.questions = question;
-
-	werr = dns_generate_options(dns, state, &options);
-	if (!W_ERROR_IS_OK(werr)) {
-		tevent_req_werror(req, werr);
-		return tevent_req_post(req, ev);
-	}
-
-	out_packet.arcount = 1;
-	out_packet.additional = options;
-
-	ndr_err = ndr_push_struct_blob(
-		&out_blob, state, &out_packet,
-		(ndr_push_flags_fn_t)ndr_push_dns_name_packet);
-	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-		tevent_req_werror(req, DNS_ERR(SERVER_FAILURE));
-		return tevent_req_post(req, ev);
-	}
-	subreq = dns_udp_request_send(state, ev, forwarder, out_blob.data,
-				      out_blob.length);
+	subreq = dns_cli_request_send(state, ev, forwarder,
+				      question->name, question->question_class,
+				      question->question_type);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
@@ -340,12 +303,9 @@ static void ask_forwarder_done(struct tevent_req *subreq)
 		subreq, struct tevent_req);
 	struct ask_forwarder_state *state = tevent_req_data(
 		req, struct ask_forwarder_state);
-	DATA_BLOB in_blob;
-	enum ndr_err_code ndr_err;
 	int ret;
 
-	ret = dns_udp_request_recv(subreq, state,
-				   &in_blob.data, &in_blob.length);
+	ret = dns_cli_request_recv(subreq, state, &state->reply);
 	TALLOC_FREE(subreq);
 
 	if (ret != 0) {
@@ -353,17 +313,6 @@ static void ask_forwarder_done(struct tevent_req *subreq)
 		return;
 	}
 
-	ndr_err = ndr_pull_struct_blob(
-		&in_blob, state, &state->in_packet,
-		(ndr_pull_flags_fn_t)ndr_pull_dns_name_packet);
-	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-		tevent_req_werror(req, DNS_ERR(SERVER_FAILURE));
-		return;
-	}
-	if (state->in_packet.id != state->id) {
-		tevent_req_werror(req, DNS_ERR(NAME_ERROR));
-		return;
-	}
 	tevent_req_done(req);
 }
 
@@ -375,7 +324,7 @@ static WERROR ask_forwarder_recv(
 {
 	struct ask_forwarder_state *state = tevent_req_data(
 		req, struct ask_forwarder_state);
-	struct dns_name_packet *in_packet = &state->in_packet;
+	struct dns_name_packet *in_packet = state->reply;
 	WERROR err;
 
 	if (tevent_req_is_werror(req, &err)) {
@@ -518,7 +467,7 @@ static struct tevent_req *handle_dnsrpcrec_send(
 		return req;
 	}
 
-	subreq = ask_forwarder_send(state, ev, dns, forwarder, new_q);
+	subreq = ask_forwarder_send(state, ev, forwarder, new_q);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
@@ -625,9 +574,8 @@ static struct tevent_req *handle_authoritative_send(
 	if (tevent_req_werror(req, werr)) {
 		return tevent_req_post(req, ev);
 	}
-
-	werr = dns_lookup_records(dns, state, dn, &state->recs,
-				  &state->rec_count);
+	werr = dns_lookup_records_wildcard(dns, state, dn, &state->recs,
+				           &state->rec_count);
 	TALLOC_FREE(dn);
 	if (tevent_req_werror(req, werr)) {
 		return tevent_req_post(req, ev);
@@ -702,6 +650,8 @@ static WERROR handle_authoritative_recv(struct tevent_req *req)
 static NTSTATUS create_tkey(struct dns_server *dns,
 			    const char* name,
 			    const char* algorithm,
+			    const struct tsocket_address *remote_address,
+			    const struct tsocket_address *local_address,
 			    struct dns_server_tkey **tkey)
 {
 	NTSTATUS status;
@@ -723,13 +673,19 @@ static NTSTATUS create_tkey(struct dns_server *dns,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	status = samba_server_gensec_start(k,
-					   dns->task->event_ctx,
-					   dns->task->msg_ctx,
-					   dns->task->lp_ctx,
-					   dns->server_credentials,
-					   "dns",
-					   &k->gensec);
+	/*
+	 * We only allow SPNEGO/KRB5 currently
+	 * and rely on the backend to be RPC/IPC free.
+	 *
+	 * It allows gensec_update() not to block.
+	 */
+	status = samba_server_gensec_krb5_start(k,
+						dns->task->event_ctx,
+						dns->task->msg_ctx,
+						dns->task->lp_ctx,
+						dns->server_credentials,
+						"dns",
+						&k->gensec);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(1, ("Failed to start GENSEC server code: %s\n", nt_errstr(status)));
 		*tkey = NULL;
@@ -737,6 +693,24 @@ static NTSTATUS create_tkey(struct dns_server *dns,
 	}
 
 	gensec_want_feature(k->gensec, GENSEC_FEATURE_SIGN);
+
+	status = gensec_set_remote_address(k->gensec,
+					   remote_address);
+	if (!NT_STATUS_IS_OK(status)) {
+		DEBUG(1, ("Failed to set remote address into GENSEC: %s\n",
+			  nt_errstr(status)));
+		*tkey = NULL;
+		return status;
+	}
+
+	status = gensec_set_local_address(k->gensec,
+					  local_address);
+	if (!NT_STATUS_IS_OK(status)) {
+		DEBUG(1, ("Failed to set local address into GENSEC: %s\n",
+			  nt_errstr(status)));
+		*tkey = NULL;
+		return status;
+	}
 
 	status = gensec_start_mech_by_oid(k->gensec, GENSEC_OID_SPNEGO);
 
@@ -747,9 +721,7 @@ static NTSTATUS create_tkey(struct dns_server *dns,
 		return status;
 	}
 
-	if (store->tkeys[store->next_idx] != NULL) {
-		TALLOC_FREE(store->tkeys[store->next_idx]);
-	}
+	TALLOC_FREE(store->tkeys[store->next_idx]);
 
 	store->tkeys[store->next_idx] = k;
 	(store->next_idx)++;
@@ -768,8 +740,21 @@ static NTSTATUS accept_gss_ticket(TALLOC_CTX *mem_ctx,
 {
 	NTSTATUS status;
 
-	status = gensec_update_ev(tkey->gensec, mem_ctx, dns->task->event_ctx,
-				  *key, reply);
+	/*
+	 * We use samba_server_gensec_krb5_start(),
+	 * which only allows SPNEGO/KRB5 currently
+	 * and makes sure the backend to be RPC/IPC free.
+	 *
+	 * See gensec_gssapi_update_internal() as
+	 * GENSEC_SERVER.
+	 *
+	 * It allows gensec_update() not to block.
+	 *
+	 * If that changes in future we need to use
+	 * gensec_update_send/recv here!
+	 */
+	status = gensec_update(tkey->gensec, mem_ctx,
+			       *key, reply);
 
 	if (NT_STATUS_EQUAL(NT_STATUS_MORE_PROCESSING_REQUIRED, status)) {
 		*dns_auth_error = DNS_RCODE_OK;
@@ -861,6 +846,8 @@ static WERROR handle_tkey(struct dns_server *dns,
 		if (tkey == NULL) {
 			status  = create_tkey(dns, in->questions[0].name,
 					      in_tkey->rdata.tkey_record.algorithm,
+					      state->remote_address,
+					      state->local_address,
 					      &tkey);
 			if (!NT_STATUS_IS_OK(status)) {
 				ret_tkey->rdata.tkey_record.error = DNS_RCODE_BADKEY;
@@ -877,11 +864,14 @@ static WERROR handle_tkey(struct dns_server *dns,
 			DEBUG(1, ("More processing required\n"));
 			ret_tkey->rdata.tkey_record.error = DNS_RCODE_BADKEY;
 		} else if (NT_STATUS_IS_OK(status)) {
-			DEBUG(1, ("Tkey handshake completed\n"));
+			DBG_DEBUG("Tkey handshake completed\n");
 			ret_tkey->rdata.tkey_record.key_size = reply.length;
 			ret_tkey->rdata.tkey_record.key_data = talloc_memdup(ret_tkey,
 								reply.data,
 								reply.length);
+			if (ret_tkey->rdata.tkey_record.key_data == NULL) {
+				return WERR_NOT_ENOUGH_MEMORY;
+			}
 			state->sign = true;
 			state->key_name = talloc_strdup(state->mem_ctx, tkey->name);
 			if (state->key_name == NULL) {
@@ -1015,10 +1005,10 @@ struct tevent_req *dns_server_process_query_send(
 
 	if ((req_state->flags & DNS_FLAG_RECURSION_DESIRED) &&
 	    (req_state->flags & DNS_FLAG_RECURSION_AVAIL)) {
-		DEBUG(2, ("Not authoritative for '%s', forwarding\n",
+		DEBUG(5, ("Not authoritative for '%s', forwarding\n",
 			  in->questions[0].name));
 
-		subreq = ask_forwarder_send(state, ev, dns,
+		subreq = ask_forwarder_send(state, ev,
 					    (forwarders == NULL ? NULL : forwarders[0]),
 					    &in->questions[0]);
 		if (tevent_req_nomem(subreq, req)) {
@@ -1061,7 +1051,7 @@ static void dns_server_process_query_got_response(struct tevent_req *subreq)
 
 		DEBUG(5, ("DNS query returned %s, trying another forwarder.\n",
 			  win_errstr(werr)));
-		subreq = ask_forwarder_send(state, state->ev, state->dns,
+		subreq = ask_forwarder_send(state, state->ev,
 					    state->forwarders->forwarder,
 					    state->question);
 

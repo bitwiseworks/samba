@@ -1,5 +1,5 @@
 /*
-   Unix SMB/CIFS mplementation.
+   Unix SMB/CIFS Implementation.
 
    DNS update service
 
@@ -41,7 +41,7 @@
 #include "librpc/gen_ndr/ndr_irpc.h"
 #include "libds/common/roles.h"
 
-NTSTATUS server_service_dnsupdate_init(void);
+NTSTATUS server_service_dnsupdate_init(TALLOC_CTX *);
 
 struct dnsupdate_service {
 	struct task_server *task;
@@ -170,16 +170,56 @@ static void dnsupdate_rebuild(struct dnsupdate_service *service)
 
 	path = lpcfg_parm_string(service->task->lp_ctx, NULL, "dnsupdate", "path");
 	if (path == NULL) {
-		path = lpcfg_private_path(tmp_ctx, service->task->lp_ctx, "named.conf.update");
+		path = lpcfg_private_path(tmp_ctx,
+					  service->task->lp_ctx,
+					  "named.conf.update");
+		if (path == NULL) {
+			DBG_ERR("Out of memory!");
+			talloc_free(tmp_ctx);
+			return;
+		}
+
+		/*
+		 * If the file doesn't exist, we provisioned in a the new
+		 * bind-dns directory
+		 */
+		if (!file_exist(path)) {
+			path = talloc_asprintf(tmp_ctx,
+					       "%s/named.conf.update",
+					       lpcfg_binddns_dir(service->task->lp_ctx));
+			if (path == NULL) {
+				DBG_ERR("Out of memory!");
+				talloc_free(tmp_ctx);
+				return;
+			}
+		}
 	}
 
 	path_static = lpcfg_parm_string(service->task->lp_ctx, NULL, "dnsupdate", "extra_static_grant_rules");
 	if (path_static == NULL) {
-		path_static = lpcfg_private_path(tmp_ctx, service->task->lp_ctx, "named.conf.update.static");
+		path_static = lpcfg_private_path(tmp_ctx,
+						 service->task->lp_ctx,
+						 "named.conf.update.static");
+		if (path_static == NULL) {
+			DBG_ERR("Out of memory!");
+			talloc_free(tmp_ctx);
+			return;
+		}
+
+		if (!file_exist(path_static)) {
+			path_static = talloc_asprintf(tmp_ctx,
+						      "%s/named.conf.update.static",
+						      lpcfg_binddns_dir(service->task->lp_ctx));
+			if (path_static == NULL) {
+				DBG_ERR("Out of memory!");
+				talloc_free(tmp_ctx);
+				return;
+			}
+		}
 	}
 
 	tmp_path = talloc_asprintf(tmp_ctx, "%s.tmp", path);
-	if (path == NULL || tmp_path == NULL || path_static == NULL ) {
+	if (tmp_path == NULL) {
 		DEBUG(0,(__location__ ": Unable to get paths\n"));
 		talloc_free(tmp_ctx);
 		return;
@@ -515,7 +555,7 @@ static NTSTATUS dnsupdate_dnsupdate_RODC(struct irpc_message *msg,
 
 
 	/* find dnsdomain and dnsforest */
-	dnsdomain = lpcfg_realm(s->task->lp_ctx);
+	dnsdomain = lpcfg_dnsdomain(s->task->lp_ctx);
 	dnsforest = dnsdomain;
 
 	/* find the hostname */
@@ -531,36 +571,35 @@ static NTSTATUS dnsupdate_dnsupdate_RODC(struct irpc_message *msg,
 		return NT_STATUS_OK;
 	}
 
-
 	for (i=0; i<st->r->in.dns_names->count; i++) {
 		struct NL_DNS_NAME_INFO *n = &r->in.dns_names->names[i];
 		switch (n->type) {
 		case NlDnsLdapAtSite:
-			dprintf(st->fd, "SRV _ldap._tcp.%s._sites.%s. %s %u\n",
+			dprintf(st->fd, "SRV _ldap._tcp.%s._sites.%s %s %u\n",
 				site, dnsdomain, hostname, n->port);
 			break;
 		case NlDnsGcAtSite:
-			dprintf(st->fd, "SRV _ldap._tcp.%s._sites.gc._msdcs.%s. %s %u\n",
+			dprintf(st->fd, "SRV _ldap._tcp.%s._sites.gc._msdcs.%s %s %u\n",
 				site, dnsdomain, hostname, n->port);
 			break;
 		case NlDnsDsaCname:
-			dprintf(st->fd, "CNAME %s._msdcs.%s. %s\n",
+			dprintf(st->fd, "CNAME %s._msdcs.%s %s\n",
 				ntdsguid, dnsforest, hostname);
 			break;
 		case NlDnsKdcAtSite:
-			dprintf(st->fd, "SRV _kerberos._tcp.%s._sites.dc._msdcs.%s. %s %u\n",
+			dprintf(st->fd, "SRV _kerberos._tcp.%s._sites.dc._msdcs.%s %s %u\n",
 				site, dnsdomain, hostname, n->port);
 			break;
 		case NlDnsDcAtSite:
-			dprintf(st->fd, "SRV _ldap._tcp.%s._sites.dc._msdcs.%s. %s %u\n",
+			dprintf(st->fd, "SRV _ldap._tcp.%s._sites.dc._msdcs.%s %s %u\n",
 				site, dnsdomain, hostname, n->port);
 			break;
 		case NlDnsRfc1510KdcAtSite:
-			dprintf(st->fd, "SRV _kerberos._tcp.%s._sites.%s. %s %u\n",
+			dprintf(st->fd, "SRV _kerberos._tcp.%s._sites.%s %s %u\n",
 				site, dnsdomain, hostname, n->port);
 			break;
 		case NlDnsGenericGcAtSite:
-			dprintf(st->fd, "SRV _gc._tcp.%s._sites.%s. %s %u\n",
+			dprintf(st->fd, "SRV _gc._tcp.%s._sites.%s %s %u\n",
 				site, dnsforest, hostname, n->port);
 			break;
 		}
@@ -621,8 +660,12 @@ static void dnsupdate_task_init(struct task_server *task)
 		return;
 	}
 
-	service->samdb = samdb_connect(service, service->task->event_ctx, task->lp_ctx,
-				       service->system_session_info, 0);
+	service->samdb = samdb_connect(service,
+				       service->task->event_ctx,
+				       task->lp_ctx,
+				       service->system_session_info,
+				       NULL,
+				       0);
 	if (!service->samdb) {
 		task_server_terminate(task, "dnsupdate: Failed to connect to local samdb\n",
 				      true);
@@ -666,7 +709,12 @@ static void dnsupdate_task_init(struct task_server *task)
 /*
   register ourselves as a available server
 */
-NTSTATUS server_service_dnsupdate_init(void)
+NTSTATUS server_service_dnsupdate_init(TALLOC_CTX *ctx)
 {
-	return register_server_service("dnsupdate", dnsupdate_task_init);
+	struct service_details details = {
+		.inhibit_fork_on_accept = true,
+		.inhibit_pre_fork = true,
+	};
+	return register_server_service(ctx, "dnsupdate", dnsupdate_task_init,
+				       &details);
 }

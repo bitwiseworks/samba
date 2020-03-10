@@ -280,7 +280,17 @@ int ldb_register_module(const struct ldb_module_ops *ops)
 	if (ldb_find_module_ops(ops->name) != NULL)
 		return LDB_ERR_ENTRY_ALREADY_EXISTS;
 
-	entry = talloc(talloc_autofree_context(), struct ops_list_entry);
+	/*
+	 * ldb modules are not (yet) unloaded and
+	 * are only loaded once (the above check
+	 * makes sure of this). Allocate off the NULL
+	 * context. We never want this to be freed
+	 * until process shutdown. If eventually we
+	 * want to unload ldb modules we can add a
+	 * deregister function that walks and
+	 * frees the list.
+	 */
+	entry = talloc(NULL, struct ops_list_entry);
 	if (entry == NULL) {
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
@@ -641,6 +651,52 @@ int ldb_next_end_trans(struct ldb_module *module)
 	return ret;
 }
 
+int ldb_next_read_lock(struct ldb_module *module)
+{
+	int ret;
+	FIND_OP(module, read_lock);
+	ret = module->ops->read_lock(module);
+	if (ret == LDB_SUCCESS) {
+		return ret;
+	}
+	if (!ldb_errstring(module->ldb)) {
+		/* Set a default error string, to place the blame somewhere */
+		ldb_asprintf_errstring(module->ldb,
+				       "read_lock error in module %s: %s (%d)",
+				       module->ops->name, ldb_strerror(ret),
+				       ret);
+	}
+	if ((module && module->ldb->flags & LDB_FLG_ENABLE_TRACING)) {
+		ldb_debug(module->ldb, LDB_DEBUG_TRACE,
+			  "ldb_next_read_lock error: %s",
+			  ldb_errstring(module->ldb));
+	}
+	return ret;
+}
+
+int ldb_next_read_unlock(struct ldb_module *module)
+{
+	int ret;
+	FIND_OP(module, read_unlock);
+	ret = module->ops->read_unlock(module);
+	if (ret == LDB_SUCCESS) {
+		return ret;
+	}
+	if (!ldb_errstring(module->ldb)) {
+		/* Set a default error string, to place the blame somewhere */
+		ldb_asprintf_errstring(module->ldb,
+				       "read_unlock error in module %s: %s (%d)",
+				       module->ops->name, ldb_strerror(ret),
+				       ret);
+	}
+	if ((module && module->ldb->flags & LDB_FLG_ENABLE_TRACING)) {
+		ldb_debug(module->ldb, LDB_DEBUG_TRACE,
+			  "ldb_next_read_unlock error: %s",
+			  ldb_errstring(module->ldb));
+	}
+	return ret;
+}
+
 int ldb_next_prepare_commit(struct ldb_module *module)
 {
 	int ret;
@@ -682,26 +738,6 @@ int ldb_next_del_trans(struct ldb_module *module)
 			  ldb_errstring(module->ldb));				
 	}
 	return ret;
-}
-
-struct ldb_handle *ldb_handle_new(TALLOC_CTX *mem_ctx, struct ldb_context *ldb)
-{
-	struct ldb_handle *h;
-
-	h = talloc_zero(mem_ctx, struct ldb_handle);
-	if (h == NULL) {
-		ldb_set_errstring(ldb, "Out of Memory");
-		return NULL;
-	}
-
-	h->status = LDB_SUCCESS;
-	h->state = LDB_ASYNC_INIT;
-	h->ldb = ldb;
-	h->flags = 0;
-	h->location = NULL;
-	h->parent = NULL;
-
-	return h;
 }
 
 /* calls the request callback to send an entry
@@ -1067,7 +1103,7 @@ static int ldb_modules_load_dir(const char *modules_dir, const char *version)
 */
 void ldb_set_modules_dir(struct ldb_context *ldb, const char *path)
 {
-	int ret = ldb_modules_load_path(path, LDB_VERSION);
+	int ret = ldb_modules_load_dir(path, LDB_VERSION);
 	if (ret != LDB_SUCCESS) {
 		ldb_asprintf_errstring(ldb, "Failed to load modules from: %s\n", path);
 	}

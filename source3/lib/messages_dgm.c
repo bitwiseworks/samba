@@ -216,6 +216,7 @@ static int messaging_dgm_out_create(TALLOC_CTX *mem_ctx,
 	struct sockaddr_un addr = { .sun_family = AF_UNIX };
 	int ret = ENOMEM;
 	int out_pathlen;
+	char addr_buf[sizeof(addr.sun_path) + (3 * sizeof(unsigned) + 2)];
 
 	out = talloc(mem_ctx, struct messaging_dgm_out);
 	if (out == NULL) {
@@ -228,7 +229,7 @@ static int messaging_dgm_out_create(TALLOC_CTX *mem_ctx,
 		.cookie = 1
 	};
 
-	out_pathlen = snprintf(addr.sun_path, sizeof(addr.sun_path),
+	out_pathlen = snprintf(addr_buf, sizeof(addr_buf),
 			       "%s/%u", ctx->socket_dir.buf, (unsigned)pid);
 	if (out_pathlen < 0) {
 		goto errno_fail;
@@ -237,6 +238,8 @@ static int messaging_dgm_out_create(TALLOC_CTX *mem_ctx,
 		ret = ENAMETOOLONG;
 		goto fail;
 	}
+
+	memcpy(addr.sun_path, addr_buf, out_pathlen + 1);
 
 	out->queue = tevent_queue_create(out, addr.sun_path);
 	if (out->queue == NULL) {
@@ -365,7 +368,7 @@ static ssize_t messaging_dgm_sendmsg(int sock,
 		msghdr_prep_fds(&msg, buf, fdlen, fds, num_fds);
 
 		do {
-			ret = sendmsg(sock, &msg, MSG_NOSIGNAL);
+			ret = sendmsg(sock, &msg, 0);
 		} while ((ret == -1) && (errno == EINTR));
 	}
 
@@ -543,9 +546,35 @@ static void messaging_dgm_out_threaded_job(void *private_data)
 	struct iovec iov = { .iov_base = state->buf,
 			     .iov_len = talloc_get_size(state->buf) };
 	size_t num_fds = talloc_array_length(state->fds);
+	int msec = 1;
 
-	state->sent = messaging_dgm_sendmsg(state->sock, &iov, 1,
+	while (true) {
+		int ret;
+
+		state->sent = messaging_dgm_sendmsg(state->sock, &iov, 1,
 					    state->fds, num_fds, &state->err);
+
+		if (state->sent != -1) {
+			return;
+		}
+		if (errno != ENOBUFS) {
+			return;
+		}
+
+		/*
+		 * ENOBUFS is the FreeBSD way of saying "Try
+		 * again". We have to do polling.
+		 */
+		do {
+			ret = poll(NULL, 0, msec);
+		} while ((ret == -1) && (errno == EINTR));
+
+		/*
+		 * Exponential backoff up to once a second
+		 */
+		msec *= 2;
+		msec = MIN(msec, 1000);
+	}
 }
 
 /*
@@ -619,6 +648,15 @@ static int messaging_dgm_out_send_fragment(
 					      num_fds, &err);
 		if (nsent >= 0) {
 			return 0;
+		}
+
+		if (err == ENOBUFS) {
+			/*
+			 * FreeBSD's way of telling us the dst socket
+			 * is full. EWOULDBLOCK makes us spawn a
+			 * polling helper thread.
+			 */
+			err = EWOULDBLOCK;
 		}
 
 		if (err != EWOULDBLOCK) {
@@ -959,6 +997,12 @@ int messaging_dgm_init(struct tevent_context *ev,
 		return EEXIST;
 	}
 
+	if (tevent_context_is_wrapper(ev)) {
+		/* This is really a programmer error! */
+		DBG_ERR("Should not be used with a wrapper tevent context\n");
+		return EINVAL;
+	}
+
 	ctx = talloc_zero(NULL, struct messaging_dgm_context);
 	if (ctx == NULL) {
 		goto fail_nomem;
@@ -1104,6 +1148,88 @@ static int messaging_dgm_context_destructor(struct messaging_dgm_context *c)
 	return 0;
 }
 
+static void messaging_dgm_validate(struct messaging_dgm_context *ctx)
+{
+#ifdef DEVELOPER
+	pid_t pid = getpid();
+	struct sockaddr_storage addr;
+	socklen_t addrlen = sizeof(addr);
+	struct sockaddr_un *un_addr;
+	struct sun_path_buf pathbuf;
+	struct stat st1, st2;
+	int ret;
+
+	/*
+	 * Protect against using the wrong messaging context after a
+	 * fork without reinit_after_fork.
+	 */
+
+	ret = getsockname(ctx->sock, (struct sockaddr *)&addr, &addrlen);
+	if (ret == -1) {
+		DBG_ERR("getsockname failed: %s\n", strerror(errno));
+		goto fail;
+	}
+	if (addr.ss_family != AF_UNIX) {
+		DBG_ERR("getsockname returned family %d\n",
+			(int)addr.ss_family);
+		goto fail;
+	}
+	un_addr = (struct sockaddr_un *)&addr;
+
+	ret = snprintf(pathbuf.buf, sizeof(pathbuf.buf),
+		       "%s/%u", ctx->socket_dir.buf, (unsigned)pid);
+	if (ret < 0) {
+		DBG_ERR("snprintf failed: %s\n", strerror(errno));
+		goto fail;
+	}
+	if ((size_t)ret >= sizeof(pathbuf.buf)) {
+		DBG_ERR("snprintf returned %d chars\n", (int)ret);
+		goto fail;
+	}
+
+	if (strcmp(pathbuf.buf, un_addr->sun_path) != 0) {
+		DBG_ERR("sockname wrong: Expected %s, got %s\n",
+			pathbuf.buf, un_addr->sun_path);
+		goto fail;
+	}
+
+	ret = snprintf(pathbuf.buf, sizeof(pathbuf.buf),
+		       "%s/%u", ctx->lockfile_dir.buf, (unsigned)pid);
+	if (ret < 0) {
+		DBG_ERR("snprintf failed: %s\n", strerror(errno));
+		goto fail;
+	}
+	if ((size_t)ret >= sizeof(pathbuf.buf)) {
+		DBG_ERR("snprintf returned %d chars\n", (int)ret);
+		goto fail;
+	}
+
+	ret = stat(pathbuf.buf, &st1);
+	if (ret == -1) {
+		DBG_ERR("stat failed: %s\n", strerror(errno));
+		goto fail;
+	}
+	ret = fstat(ctx->lockfile_fd, &st2);
+	if (ret == -1) {
+		DBG_ERR("fstat failed: %s\n", strerror(errno));
+		goto fail;
+	}
+
+	if ((st1.st_dev != st2.st_dev) || (st1.st_ino != st2.st_ino)) {
+		DBG_ERR("lockfile differs, expected (%d/%d), got (%d/%d)\n",
+			(int)st2.st_dev, (int)st2.st_ino,
+			(int)st1.st_dev, (int)st1.st_ino);
+		goto fail;
+	}
+
+	return;
+fail:
+	abort();
+#else
+	return;
+#endif
+}
+
 static void messaging_dgm_recv(struct messaging_dgm_context *ctx,
 			       struct tevent_context *ev,
 			       uint8_t *msg, size_t msg_len,
@@ -1127,6 +1253,8 @@ static void messaging_dgm_read_handler(struct tevent_context *ev,
 	size_t msgbufsize = msghdr_prep_recv_fds(NULL, NULL, 0, INT8_MAX);
 	uint8_t msgbuf[msgbufsize];
 	uint8_t buf[MESSAGING_DGM_FRAGMENT_LENGTH];
+
+	messaging_dgm_validate(ctx);
 
 	if ((flags & TEVENT_FD_READ) == 0) {
 		return;
@@ -1302,6 +1430,8 @@ int messaging_dgm_send(pid_t pid,
 		return ENOTCONN;
 	}
 
+	messaging_dgm_validate(ctx);
+
 	ret = messaging_dgm_out_get(ctx, pid, &out);
 	if (ret != 0) {
 		return ret;
@@ -1350,6 +1480,8 @@ int messaging_dgm_get_unique(pid_t pid, uint64_t *unique)
 	if (ctx == NULL) {
 		return EBADF;
 	}
+
+	messaging_dgm_validate(ctx);
 
 	if (pid == getpid()) {
 		/*
@@ -1440,17 +1572,45 @@ int messaging_dgm_cleanup(pid_t pid)
 	return 0;
 }
 
+static int messaging_dgm_wipe_fn(pid_t pid, void *private_data)
+{
+	pid_t *our_pid = (pid_t *)private_data;
+	int ret;
+
+	if (pid == *our_pid) {
+		/*
+		 * fcntl(F_GETLK) will succeed for ourselves, we hold
+		 * that lock ourselves.
+		 */
+		return 0;
+	}
+
+	ret = messaging_dgm_cleanup(pid);
+	DEBUG(10, ("messaging_dgm_cleanup(%lu) returned %s\n",
+		   (unsigned long)pid, ret ? strerror(ret) : "ok"));
+
+	return 0;
+}
+
 int messaging_dgm_wipe(void)
+{
+	pid_t pid = getpid();
+	messaging_dgm_forall(messaging_dgm_wipe_fn, &pid);
+	return 0;
+}
+
+int messaging_dgm_forall(int (*fn)(pid_t pid, void *private_data),
+			 void *private_data)
 {
 	struct messaging_dgm_context *ctx = global_dgm_context;
 	DIR *msgdir;
 	struct dirent *dp;
-	pid_t our_pid = getpid();
-	int ret;
 
 	if (ctx == NULL) {
 		return ENOTCONN;
 	}
+
+	messaging_dgm_validate(ctx);
 
 	/*
 	 * We scan the socket directory and not the lock directory. Otherwise
@@ -1465,6 +1625,7 @@ int messaging_dgm_wipe(void)
 
 	while ((dp = readdir(msgdir)) != NULL) {
 		unsigned long pid;
+		int ret;
 
 		pid = strtoul(dp->d_name, NULL, 10);
 		if (pid == 0) {
@@ -1473,17 +1634,11 @@ int messaging_dgm_wipe(void)
 			 */
 			continue;
 		}
-		if ((pid_t)pid == our_pid) {
-			/*
-			 * fcntl(F_GETLK) will succeed for ourselves, we hold
-			 * that lock ourselves.
-			 */
-			continue;
-		}
 
-		ret = messaging_dgm_cleanup(pid);
-		DEBUG(10, ("messaging_dgm_cleanup(%lu) returned %s\n",
-			   pid, ret ? strerror(ret) : "ok"));
+		ret = fn(pid, private_data);
+		if (ret != 0) {
+			break;
+		}
 	}
 	closedir(msgdir);
 
@@ -1534,13 +1689,51 @@ struct messaging_dgm_fde *messaging_dgm_register_tevent_context(
 	}
 
 	for (fde_ev = ctx->fde_evs; fde_ev != NULL; fde_ev = fde_ev->next) {
-		if ((fde_ev->ev == ev) &&
-		    (tevent_fd_get_flags(fde_ev->fde) != 0)) {
+		if (tevent_fd_get_flags(fde_ev->fde) == 0) {
+			/*
+			 * If the event context got deleted,
+			 * tevent_fd_get_flags() will return 0
+			 * for the stale fde.
+			 *
+			 * In that case we should not
+			 * use fde_ev->ev anymore.
+			 */
+			continue;
+		}
+
+		/*
+		 * We can only have one tevent_fd
+		 * per low level tevent_context.
+		 *
+		 * This means any wrapper tevent_context
+		 * needs to share the structure with
+		 * the main tevent_context and/or
+		 * any sibling wrapper tevent_context.
+		 *
+		 * This means we need to use tevent_context_same_loop()
+		 * instead of just (fde_ev->ev == ev).
+		 *
+		 * Note: the tevent_context_is_wrapper() check below
+		 * makes sure that fde_ev->ev is always a raw
+		 * tevent context.
+		 */
+		if (tevent_context_same_loop(fde_ev->ev, ev)) {
 			break;
 		}
 	}
 
 	if (fde_ev == NULL) {
+		if (tevent_context_is_wrapper(ev)) {
+			/*
+			 * This is really a programmer error!
+			 *
+			 * The main/raw tevent context should
+			 * have been registered first!
+			 */
+			DBG_ERR("Should not be used with a wrapper tevent context\n");
+			return NULL;
+		}
+
 		fde_ev = talloc(fde, struct messaging_dgm_fde_ev);
 		if (fde_ev == NULL) {
 			return NULL;

@@ -29,6 +29,10 @@
 #include "auth/gensec/gensec.h"
 #include "auth/gensec/gensec_internal.h"
 #include "librpc/gen_ndr/dcerpc.h"
+#include "auth/common_auth.h"
+
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_AUTH
 
 _PRIVATE_ NTSTATUS gensec_may_reset_crypto(struct gensec_security *gensec_security,
 					   bool full_reset)
@@ -192,13 +196,65 @@ _PUBLIC_ NTSTATUS gensec_session_key(struct gensec_security *gensec_security,
 	return gensec_security->ops->session_key(gensec_security, mem_ctx, session_key);
 }
 
+const char *gensec_final_auth_type(struct gensec_security *gensec_security)
+{
+	if (!gensec_security->ops->final_auth_type) {
+		return gensec_security->ops->name;
+	}
+
+	return gensec_security->ops->final_auth_type(gensec_security);
+}
+
+/*
+ * Log details of a successful GENSEC authorization to a service.
+ *
+ * Only successful authorizations are logged, as only these call gensec_session_info()
+ *
+ * The service may later refuse authorization due to an ACL.
+ *
+ */
+static void log_successful_gensec_authz_event(struct gensec_security *gensec_security,
+					      struct auth_session_info *session_info)
+{
+	const struct tsocket_address *remote
+		= gensec_get_remote_address(gensec_security);
+	const struct tsocket_address *local
+		= gensec_get_local_address(gensec_security);
+	const char *service_description
+		= gensec_get_target_service_description(gensec_security);
+	const char *final_auth_type
+		= gensec_final_auth_type(gensec_security);
+	const char *transport_protection = NULL;
+	if (gensec_security->want_features & GENSEC_FEATURE_SMB_TRANSPORT) {
+		transport_protection = AUTHZ_TRANSPORT_PROTECTION_SMB;
+	} else if (gensec_security->want_features & GENSEC_FEATURE_LDAPS_TRANSPORT) {
+		transport_protection = AUTHZ_TRANSPORT_PROTECTION_TLS;
+	} else if (gensec_have_feature(gensec_security, GENSEC_FEATURE_SEAL)) {
+		transport_protection = AUTHZ_TRANSPORT_PROTECTION_SEAL;
+	} else if (gensec_have_feature(gensec_security, GENSEC_FEATURE_SIGN)) {
+		transport_protection = AUTHZ_TRANSPORT_PROTECTION_SIGN;
+	} else {
+		transport_protection = AUTHZ_TRANSPORT_PROTECTION_NONE;
+	}
+	log_successful_authz_event(gensec_security->auth_context->msg_ctx,
+				   gensec_security->auth_context->lp_ctx,
+				   remote, local,
+				   service_description,
+				   final_auth_type,
+				   transport_protection,
+				   session_info);
+}
+
+
 /**
  * Return the credentials of a logged on user, including session keys
  * etc.
  *
  * Only valid after a successful authentication
  *
- * May only be called once per authentication.
+ * May only be called once per authentication.  This will also make an
+ * authorization log entry, as it is already called by all the
+ * callers.
  *
  */
 
@@ -206,10 +262,18 @@ _PUBLIC_ NTSTATUS gensec_session_info(struct gensec_security *gensec_security,
 				      TALLOC_CTX *mem_ctx,
 				      struct auth_session_info **session_info)
 {
+	NTSTATUS status;
 	if (!gensec_security->ops->session_info) {
 		return NT_STATUS_NOT_IMPLEMENTED;
 	}
-	return gensec_security->ops->session_info(gensec_security, mem_ctx, session_info);
+	status = gensec_security->ops->session_info(gensec_security, mem_ctx, session_info);
+
+	if (NT_STATUS_IS_OK(status) && !gensec_security->subcontext
+	    && (gensec_security->want_features & GENSEC_FEATURE_NO_AUTHZ_LOG) == 0) {
+		log_successful_gensec_authz_event(gensec_security, *session_info);
+	}
+
+	return status;
 }
 
 _PUBLIC_ void gensec_set_max_update_size(struct gensec_security *gensec_security,
@@ -258,89 +322,6 @@ static NTSTATUS gensec_verify_features(struct gensec_security *gensec_security)
 	return NT_STATUS_OK;
 }
 
-_PUBLIC_ NTSTATUS gensec_update_ev(struct gensec_security *gensec_security,
-				   TALLOC_CTX *out_mem_ctx,
-				   struct tevent_context *ev,
-				   const DATA_BLOB in, DATA_BLOB *out)
-{
-	NTSTATUS status;
-	const struct gensec_security_ops *ops = gensec_security->ops;
-	TALLOC_CTX *frame = NULL;
-	struct tevent_req *subreq = NULL;
-	bool ok;
-
-	if (ops->update_send == NULL) {
-
-		if (ev == NULL) {
-			frame = talloc_stackframe();
-
-			ev = samba_tevent_context_init(frame);
-			if (ev == NULL) {
-				status = NT_STATUS_NO_MEMORY;
-				goto fail;
-			}
-
-			/*
-			 * TODO: remove this hack once the backends
-			 * are fixed.
-			 */
-			tevent_loop_allow_nesting(ev);
-		}
-
-		status = ops->update(gensec_security, out_mem_ctx,
-				     ev, in, out);
-		TALLOC_FREE(frame);
-		if (!NT_STATUS_IS_OK(status)) {
-			return status;
-		}
-
-		/*
-		 * Because callers using the
-		 * gensec_start_mech_by_auth_type() never call
-		 * gensec_want_feature(), it isn't sensible for them
-		 * to have to call gensec_have_feature() manually, and
-		 * these are not points of negotiation, but are
-		 * asserted by the client
-		 */
-		status = gensec_verify_features(gensec_security);
-		if (!NT_STATUS_IS_OK(status)) {
-			return status;
-		}
-
-		return NT_STATUS_OK;
-	}
-
-	frame = talloc_stackframe();
-
-	if (ev == NULL) {
-		ev = samba_tevent_context_init(frame);
-		if (ev == NULL) {
-			status = NT_STATUS_NO_MEMORY;
-			goto fail;
-		}
-
-		/*
-		 * TODO: remove this hack once the backends
-		 * are fixed.
-		 */
-		tevent_loop_allow_nesting(ev);
-	}
-
-	subreq = ops->update_send(frame, ev, gensec_security, in);
-	if (subreq == NULL) {
-		status = NT_STATUS_NO_MEMORY;
-		goto fail;
-	}
-	ok = tevent_req_poll_ntstatus(subreq, ev, &status);
-	if (!ok) {
-		goto fail;
-	}
-	status = ops->update_recv(subreq, out_mem_ctx, out);
- fail:
-	TALLOC_FREE(frame);
-	return status;
-}
-
 /**
  * Next state function for the GENSEC state machine
  *
@@ -351,32 +332,62 @@ _PUBLIC_ NTSTATUS gensec_update_ev(struct gensec_security *gensec_security,
  * @return Error, MORE_PROCESSING_REQUIRED if a reply is sent,
  *                or NT_STATUS_OK if the user is authenticated.
  */
-
 _PUBLIC_ NTSTATUS gensec_update(struct gensec_security *gensec_security,
 				TALLOC_CTX *out_mem_ctx,
 				const DATA_BLOB in, DATA_BLOB *out)
 {
-	return gensec_update_ev(gensec_security, out_mem_ctx, NULL, in, out);
+	NTSTATUS status;
+	TALLOC_CTX *frame = NULL;
+	struct tevent_context *ev = NULL;
+	struct tevent_req *subreq = NULL;
+	bool ok;
+
+	if (gensec_security->subcontext) {
+		/*
+		 * gensec modules are not allowed to call the sync version.
+		 */
+		return NT_STATUS_INTERNAL_ERROR;
+	}
+
+	frame = talloc_stackframe();
+
+	ev = samba_tevent_context_init(frame);
+	if (ev == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto fail;
+	}
+
+	/*
+	 * TODO: remove this hack once the backends
+	 * are fixed.
+	 */
+	tevent_loop_allow_nesting(ev);
+
+	subreq = gensec_update_send(frame, ev, gensec_security, in);
+	if (subreq == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto fail;
+	}
+	ok = tevent_req_poll_ntstatus(subreq, ev, &status);
+	if (!ok) {
+		goto fail;
+	}
+	status = gensec_update_recv(subreq, out_mem_ctx, out);
+ fail:
+	TALLOC_FREE(frame);
+	return status;
 }
 
 struct gensec_update_state {
 	const struct gensec_security_ops *ops;
-	struct tevent_req *subreq;
 	struct gensec_security *gensec_security;
+	NTSTATUS status;
 	DATA_BLOB out;
-
-	/*
-	 * only for sync backends, we should remove this
-	 * once all backends are async.
-	 */
-	struct tevent_immediate *im;
-	DATA_BLOB in;
 };
 
-static void gensec_update_async_trigger(struct tevent_context *ctx,
-					struct tevent_immediate *im,
-					void *private_data);
-static void gensec_update_subreq_done(struct tevent_req *subreq);
+static void gensec_update_cleanup(struct tevent_req *req,
+				  enum tevent_req_state req_state);
+static void gensec_update_done(struct tevent_req *subreq);
 
 /**
  * Next state function for the GENSEC state machine async version
@@ -394,64 +405,62 @@ _PUBLIC_ struct tevent_req *gensec_update_send(TALLOC_CTX *mem_ctx,
 					       struct gensec_security *gensec_security,
 					       const DATA_BLOB in)
 {
-	struct tevent_req *req;
+	struct tevent_req *req = NULL;
 	struct gensec_update_state *state = NULL;
+	struct tevent_req *subreq = NULL;
 
 	req = tevent_req_create(mem_ctx, &state,
 				struct gensec_update_state);
 	if (req == NULL) {
 		return NULL;
 	}
-
 	state->ops = gensec_security->ops;
 	state->gensec_security = gensec_security;
 
-	if (state->ops->update_send == NULL) {
-		state->in = in;
-		state->im = tevent_create_immediate(state);
-		if (tevent_req_nomem(state->im, req)) {
-			return tevent_req_post(req, ev);
-		}
-
-		tevent_schedule_immediate(state->im, ev,
-					  gensec_update_async_trigger,
-					  req);
-
-		return req;
-	}
-
-	state->subreq = state->ops->update_send(state, ev, gensec_security, in);
-	if (tevent_req_nomem(state->subreq, req)) {
+	if (gensec_security->update_busy_ptr != NULL) {
+		tevent_req_nterror(req, NT_STATUS_INTERNAL_ERROR);
 		return tevent_req_post(req, ev);
 	}
 
-	tevent_req_set_callback(state->subreq,
-				gensec_update_subreq_done,
-				req);
+	if (gensec_security->child_security != NULL) {
+		tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER);
+		return tevent_req_post(req, ev);
+	}
+
+	gensec_security->update_busy_ptr = &state->gensec_security;
+	tevent_req_set_cleanup_fn(req, gensec_update_cleanup);
+
+	subreq = state->ops->update_send(state, ev, gensec_security, in);
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, gensec_update_done, req);
+
+	DBG_DEBUG("%s[%p]: subreq: %p\n", state->ops->name,
+		  state->gensec_security, subreq);
 
 	return req;
 }
 
-static void gensec_update_async_trigger(struct tevent_context *ctx,
-					struct tevent_immediate *im,
-					void *private_data)
+static void gensec_update_cleanup(struct tevent_req *req,
+				  enum tevent_req_state req_state)
 {
-	struct tevent_req *req =
-		talloc_get_type_abort(private_data, struct tevent_req);
 	struct gensec_update_state *state =
-		tevent_req_data(req, struct gensec_update_state);
-	NTSTATUS status;
+		tevent_req_data(req,
+		struct gensec_update_state);
 
-	status = state->ops->update(state->gensec_security, state, ctx,
-				    state->in, &state->out);
-	if (tevent_req_nterror(req, status)) {
+	if (state->gensec_security == NULL) {
 		return;
 	}
 
-	tevent_req_done(req);
+	if (state->gensec_security->update_busy_ptr == &state->gensec_security) {
+		state->gensec_security->update_busy_ptr = NULL;
+	}
+
+	state->gensec_security = NULL;
 }
 
-static void gensec_update_subreq_done(struct tevent_req *subreq)
+static void gensec_update_done(struct tevent_req *subreq)
 {
 	struct tevent_req *req =
 		tevent_req_callback_data(subreq,
@@ -460,12 +469,35 @@ static void gensec_update_subreq_done(struct tevent_req *subreq)
 		tevent_req_data(req,
 		struct gensec_update_state);
 	NTSTATUS status;
+	const char *debug_subreq = NULL;
 
-	state->subreq = NULL;
+	if (CHECK_DEBUGLVL(DBGLVL_DEBUG)) {
+		/*
+		 * We need to call tevent_req_print()
+		 * before calling the _recv function,
+		 * before tevent_req_received() was called.
+		 * in order to print the pointer value of
+		 * the subreq state.
+		 */
+		debug_subreq = tevent_req_print(state, subreq);
+	}
 
 	status = state->ops->update_recv(subreq, state, &state->out);
 	TALLOC_FREE(subreq);
-	if (tevent_req_nterror(req, status)) {
+	state->status = status;
+	if (GENSEC_UPDATE_IS_NTERROR(status)) {
+		DBG_INFO("%s[%p]: %s%s%s\n", state->ops->name,
+			 state->gensec_security, nt_errstr(status),
+			 debug_subreq ? " " : "",
+			 debug_subreq ? debug_subreq : "");
+		tevent_req_nterror(req, status);
+		return;
+	}
+	DBG_DEBUG("%s[%p]: %s %s\n", state->ops->name,
+		  state->gensec_security, nt_errstr(status),
+		  debug_subreq);
+	if (NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
+		tevent_req_done(req);
 		return;
 	}
 
@@ -502,18 +534,16 @@ _PUBLIC_ NTSTATUS gensec_update_recv(struct tevent_req *req,
 		tevent_req_data(req, struct gensec_update_state);
 	NTSTATUS status;
 
+	*out = data_blob_null;
+
 	if (tevent_req_is_nterror(req, &status)) {
-		if (!NT_STATUS_EQUAL(status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
-			tevent_req_received(req);
-			return status;
-		}
-	} else {
-		status = NT_STATUS_OK;
+		tevent_req_received(req);
+		return status;
 	}
 
 	*out = state->out;
 	talloc_steal(out_mem_ctx, out->data);
-
+	status = state->status;
 	tevent_req_received(req);
 	return status;
 }
@@ -574,6 +604,7 @@ _PUBLIC_ struct cli_credentials *gensec_get_credentials(struct gensec_security *
 /**
  * Set the target service (such as 'http' or 'host') on a GENSEC context - ensures it is talloc()ed
  *
+ * This is used for Kerberos service principal name resolution.
  */
 
 _PUBLIC_ NTSTATUS gensec_set_target_service(struct gensec_security *gensec_security, const char *service)
@@ -595,6 +626,34 @@ _PUBLIC_ const char *gensec_get_target_service(struct gensec_security *gensec_se
 }
 
 /**
+ * Set the target service (such as 'samr') on an GENSEC context - ensures it is talloc()ed.
+ *
+ * This is not the Kerberos service principal, instead this is a
+ * constant value that can be logged as part of authentication and
+ * authorization logging
+ */
+_PUBLIC_ NTSTATUS gensec_set_target_service_description(struct gensec_security *gensec_security,
+							const char *service)
+{
+	gensec_security->target.service_description = talloc_strdup(gensec_security, service);
+	if (!gensec_security->target.service_description) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	return NT_STATUS_OK;
+}
+
+_PUBLIC_ const char *gensec_get_target_service_description(struct gensec_security *gensec_security)
+{
+	if (gensec_security->target.service_description) {
+		return gensec_security->target.service_description;
+	} else if (gensec_security->target.service) {
+		return gensec_security->target.service;
+	}
+
+	return NULL;
+}
+
+/**
  * Set the target hostname (suitable for kerberos resolutation) on a GENSEC context - ensures it is talloc()ed
  *
  */
@@ -610,7 +669,7 @@ _PUBLIC_ NTSTATUS gensec_set_target_hostname(struct gensec_security *gensec_secu
 
 _PUBLIC_ const char *gensec_get_target_hostname(struct gensec_security *gensec_security)
 {
-	/* We allow the target hostname to be overriden for testing purposes */
+	/* We allow the target hostname to be overridden for testing purposes */
 	if (gensec_security->settings->target_hostname) {
 		return gensec_security->settings->target_hostname;
 	}

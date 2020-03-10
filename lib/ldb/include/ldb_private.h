@@ -62,6 +62,9 @@ struct ldb_handle {
 	uint32_t custom_flags;
 	unsigned nesting;
 
+	/* Private event context (if not NULL) */
+	struct tevent_context *event_context;
+
 	/* used for debugging */
 	struct ldb_request *parent;
 	const char *location;
@@ -88,6 +91,16 @@ struct ldb_schema {
 
 	unsigned num_dn_extended_syntax;
 	struct ldb_dn_extended_syntax *dn_extended_syntax;
+
+	/*
+	 * If set, the attribute_handler_override has the details of
+	 * what attributes have an index
+	 */
+	bool index_handler_override;
+	bool one_level_indexes;
+
+	const char *GUID_index_attribute;
+	const char *GUID_index_dn_component;
 };
 
 /*
@@ -129,6 +142,13 @@ struct ldb_context {
 	unsigned int create_perms;
 
 	struct tevent_context *ev_ctx;
+
+	/*
+	 * If the backend holds locks, we must not use a global event
+	 * context, so this flag will be set and ldb_handle_new() will
+	 * build a new event context
+	 */
+	bool require_private_event_context;
 
 	bool prepare_commit_done;
 
@@ -219,5 +239,75 @@ char *ldb_ldif_write_redacted_trace_string(struct ldb_context *ldb, TALLOC_CTX *
  * adding base and child components to an existing DN.
  */
 struct ldb_context *ldb_dn_get_ldb_context(struct ldb_dn *dn);
+
+#define LDB_MSG_FIND_COMMON_REMOVE_DUPLICATES 1
+
+/**
+  Determine whether any values in an element are also in another element,
+  and optionally fix that.
+
+  \param ldb      an ldb context
+  \param mem_ctx  a talloc context
+  \param el       an element
+  \param other_el another element
+  \param options  flags controlling the function behaviour
+
+  Without the LDB_MSG_FIND_COMMON_REMOVE_DUPLICATES flag, return
+  LDB_ERR_ATTRIBUTE_OR_VALUE_EXISTS if the elements share values, and
+  LDB_SUCCESS if they don't. That is, determine whether there is an
+  intersection without changing anything.
+
+  With the LDB_MSG_FIND_COMMON_REMOVE_DUPLICATES flag, any values in common
+  are removed from the first element and LDB_SUCCESS is returned.
+
+  LDB_ERR_OPERATIONS_ERROR indicates an allocation failure or an unknown option.
+  LDB_ERR_INAPPROPRIATE_MATCHING means the elements differ in name.
+*/
+
+int ldb_msg_find_common_values(struct ldb_context *ldb,
+			       TALLOC_CTX *mem_ctx,
+			       struct ldb_message_element *el,
+			       struct ldb_message_element *other_el,
+			       uint32_t options);
+
+/**
+   Detect whether an element contains duplicate values
+
+   \param ldb a currently unused ldb_context struct
+   \param mem_ctx a talloc context
+   \param el the element to search
+   \param duplicate will point to a duplicate value if there are duplicates,
+   or NULL otherwise.
+   \param options is a flags field. All values are reserved.
+
+   \return an ldb error code. LDB_ERR_OPERATIONS_ERROR indicates an allocation
+   failure or an unknown option flag. Otherwise LDB_SUCCESS.
+
+   \note This search is case sensitive
+*/
+int ldb_msg_find_duplicate_val(struct ldb_context *ldb,
+			       TALLOC_CTX *mem_ctx,
+			       const struct ldb_message_element *el,
+			       struct ldb_val **duplicate,
+			       uint32_t options);
+/**
+  Check if a particular message will match the given filter
+
+  \param ldb an ldb context
+  \param msg the message to be checked
+  \param tree the filter tree to check against
+  \param scope the scope to match against
+         (to avoid matching special DNs except on a base search)
+  \param matched a pointer to a boolean set true if it matches,
+         false otherwise
+
+  returns LDB_SUCCESS or an error
+
+  \note this is a recursive function, and does short-circuit evaluation
+ */
+int ldb_match_message(struct ldb_context *ldb,
+		      const struct ldb_message *msg,
+		      const struct ldb_parse_tree *tree,
+		      enum ldb_scope scope, bool *matched);
 
 #endif

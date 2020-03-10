@@ -190,7 +190,7 @@ static bool run_attrtest(struct torture_context *tctx,
 
 	torture_comment(tctx, "New file time is %s", ctime(&t));
 
-	if (abs(t - time(NULL)) > 60*60*24*10) {
+	if (labs(t - time(NULL)) > 60*60*24*10) {
 		torture_result(tctx, TORTURE_FAIL, "ERROR: SMBgetatr bug. time is %s",
 		       ctime(&t));
 		t = time(NULL);
@@ -289,13 +289,13 @@ static bool run_trans2test(struct torture_context *tctx,
 			torture_comment(tctx, "modify time=%s", ctime(&m_time));
 			torture_comment(tctx, "This system appears to have sticky create times\n");
 		}
-		if ((abs(a_time - t) > 60) && (a_time % (60*60) == 0)) {
+		if ((labs(a_time - t) > 60) && (a_time % (60*60) == 0)) {
 			torture_comment(tctx, "access time=%s", ctime(&a_time));
 			torture_result(tctx, TORTURE_FAIL, "This system appears to set a midnight access time\n");
 			correct = false;
 		}
 
-		if (abs(m_time - t) > 60*60*24*7) {
+		if (labs(m_time - t) > 60*60*24*7) {
 			torture_result(tctx, TORTURE_FAIL, "ERROR: totally incorrect times - maybe word reversed? mtime=%s", ctime(&m_time));
 			correct = false;
 		}
@@ -1935,9 +1935,9 @@ static bool run_birthtimetest(struct torture_context *tctx,
 }
 
 
-NTSTATUS torture_base_init(void)
+NTSTATUS torture_base_init(TALLOC_CTX *ctx)
 {
-	struct torture_suite *suite = torture_suite_create(talloc_autofree_context(), "base");
+	struct torture_suite *suite = torture_suite_create(ctx, "base");
 
 	torture_suite_add_2smb_test(suite, "fdpass", run_fdpasstest);
 	torture_suite_add_suite(suite, torture_base_locktest(suite));
@@ -1963,7 +1963,7 @@ NTSTATUS torture_base_init(void)
 	torture_suite_add_1smb_test(suite, "xcopy", run_xcopy);
 	torture_suite_add_1smb_test(suite, "iometer", run_iometer);
 	torture_suite_add_1smb_test(suite, "rename", torture_test_rename);
-	torture_suite_add_suite(suite, torture_test_delete());
+	torture_suite_add_suite(suite, torture_test_delete(suite));
 	torture_suite_add_1smb_test(suite, "properties", torture_test_properties);
 	torture_suite_add_1smb_test(suite, "mangle", torture_mangle);
 	torture_suite_add_1smb_test(suite, "openattr", torture_openattrtest);
@@ -1972,7 +1972,7 @@ NTSTATUS torture_base_init(void)
 	torture_suite_add_1smb_test(suite, "chkpath",  torture_chkpath_test);
 	torture_suite_add_1smb_test(suite, "secleak",  torture_sec_leak);
 	torture_suite_add_simple_test(suite, "disconnect",  torture_disconnect);
-	torture_suite_add_suite(suite, torture_delay_write());
+	torture_suite_add_suite(suite, torture_delay_write(suite));
 	torture_suite_add_simple_test(suite, "samba3error", torture_samba3_errorpaths);
 	torture_suite_add_1smb_test(suite, "casetable", torture_casetable);
 	torture_suite_add_1smb_test(suite, "utable", torture_utable);
@@ -1996,7 +1996,7 @@ NTSTATUS torture_base_init(void)
 	suite->description = talloc_strdup(suite, 
 					"Basic SMB tests (imported from the original smbtorture)");
 
-	torture_register_suite(suite);
+	torture_register_suite(ctx, suite);
 
 	return NT_STATUS_OK;
 }

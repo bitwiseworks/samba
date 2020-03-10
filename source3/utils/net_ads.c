@@ -22,6 +22,7 @@
 
 #include "includes.h"
 #include "utils/net.h"
+#include "libsmb/namequery.h"
 #include "rpc_client/cli_pipe.h"
 #include "librpc/gen_ndr/ndr_krb5pac.h"
 #include "../librpc/gen_ndr/ndr_spoolss.h"
@@ -2605,7 +2606,10 @@ static int net_ads_keytab_flush(struct net_context *c, int argc, const char **ar
 	return ret;
 }
 
-static int net_ads_keytab_add(struct net_context *c, int argc, const char **argv)
+static int net_ads_keytab_add(struct net_context *c,
+			      int argc,
+			      const char **argv,
+			      bool update_ads)
 {
 	int i;
 	int ret = 0;
@@ -2626,10 +2630,24 @@ static int net_ads_keytab_add(struct net_context *c, int argc, const char **argv
 		return -1;
 	}
 	for (i = 0; i < argc; i++) {
-		ret |= ads_keytab_add_entry(ads, argv[i]);
+		ret |= ads_keytab_add_entry(ads, argv[i], update_ads);
 	}
 	ads_destroy(&ads);
 	return ret;
+}
+
+static int net_ads_keytab_add_default(struct net_context *c,
+				      int argc,
+				      const char **argv)
+{
+	return net_ads_keytab_add(c, argc, argv, false);
+}
+
+static int net_ads_keytab_add_update_ads(struct net_context *c,
+					 int argc,
+					 const char **argv)
+{
+	return net_ads_keytab_add(c, argc, argv, true);
 }
 
 static int net_ads_keytab_create(struct net_context *c, int argc, const char **argv)
@@ -2680,11 +2698,19 @@ int net_ads_keytab(struct net_context *c, int argc, const char **argv)
 	struct functable func[] = {
 		{
 			"add",
-			net_ads_keytab_add,
+			net_ads_keytab_add_default,
 			NET_TRANSPORT_ADS,
 			N_("Add a service principal"),
 			N_("net ads keytab add\n"
-			   "    Add a service principal")
+			   "    Add a service principal, updates keytab file only.")
+		},
+		{
+			"add_update_ads",
+			net_ads_keytab_add_update_ads,
+			NET_TRANSPORT_ADS,
+			N_("Add a service principal"),
+			N_("net ads keytab add_update_ads\n"
+			   "    Add a service principal, depending on the param passed may update ADS computer object in addition to the keytab file.")
 		},
 		{
 			"create",
@@ -2692,7 +2718,7 @@ int net_ads_keytab(struct net_context *c, int argc, const char **argv)
 			NET_TRANSPORT_ADS,
 			N_("Create a fresh keytab"),
 			N_("net ads keytab create\n"
-			   "    Create a fresh keytab")
+			   "    Create a fresh keytab or update exising one.")
 		},
 		{
 			"flush",
@@ -3003,6 +3029,132 @@ int net_ads_kerberos(struct net_context *c, int argc, const char **argv)
 	};
 
 	return net_run_function(c, argc, argv, "net ads kerberos", func);
+}
+
+static int net_ads_setspn_list(struct net_context *c, int argc, const char **argv)
+{
+	int ret = 0;
+	bool ok = false;
+	ADS_STRUCT *ads = NULL;
+	if (c->display_usage) {
+		d_printf("%s\n%s",
+			 _("Usage:"),
+			 _("net ads setspn list <machinename>\n"));
+		ret = 0;
+		goto done;
+	}
+	if (!ADS_ERR_OK(ads_startup(c, true, &ads))) {
+		ret = -1;
+		goto done;
+	}
+	if (argc) {
+		ok = ads_setspn_list(ads, argv[0]);
+	} else {
+		ok = ads_setspn_list(ads, lp_netbios_name());
+	}
+	if (!ok) {
+            ret = -1;
+	}
+done:
+	if (ads) {
+		ads_destroy(&ads);
+	}
+	return ret;
+}
+
+static int net_ads_setspn_add(struct net_context *c, int argc, const char **argv)
+{
+	int ret = 0;
+	bool ok = false;
+	ADS_STRUCT *ads = NULL;
+	if (c->display_usage || argc < 1) {
+		d_printf("%s\n%s",
+			 _("Usage:"),
+			 _("net ads setspn add <machinename> SPN\n"));
+		ret = 0;
+		goto done;
+	}
+	if (!ADS_ERR_OK(ads_startup(c, true, &ads))) {
+		ret = -1;
+		goto done;
+	}
+	if (argc > 1) {
+		ok = ads_setspn_add(ads, argv[0], argv[1]);
+	} else {
+		ok = ads_setspn_add(ads, lp_netbios_name(), argv[0]);
+	}
+	if (!ok) {
+            ret = -1;
+	}
+done:
+	if (ads) {
+		ads_destroy(&ads);
+	}
+	return ret;
+}
+
+static int net_ads_setspn_delete(struct net_context *c, int argc, const char **argv)
+{
+	int ret = 0;
+	bool ok = false;
+	ADS_STRUCT *ads = NULL;
+	if (c->display_usage || argc < 1) {
+		d_printf("%s\n%s",
+			 _("Usage:"),
+			 _("net ads setspn delete <machinename> SPN\n"));
+		ret = 0;
+		goto done;
+	}
+	if (!ADS_ERR_OK(ads_startup(c, true, &ads))) {
+		ret = -1;
+		goto done;
+	}
+	if (argc > 1) {
+		ok = ads_setspn_delete(ads, argv[0], argv[1]);
+	} else {
+		ok = ads_setspn_delete(ads, lp_netbios_name(), argv[0]);
+	}
+	if (!ok) {
+		ret = -1;
+	}
+done:
+	if (ads) {
+		ads_destroy(&ads);
+	}
+	return ret;
+}
+
+int net_ads_setspn(struct net_context *c, int argc, const char **argv)
+{
+	struct functable func[] = {
+		{
+			"list",
+			net_ads_setspn_list,
+			NET_TRANSPORT_ADS,
+			N_("List Service Principal Names (SPN)"),
+			N_("net ads setspn list machine\n"
+			   "    List Service Principal Names (SPN)")
+		},
+		{
+			"add",
+			net_ads_setspn_add,
+			NET_TRANSPORT_ADS,
+			N_("Add Service Principal Names (SPN)"),
+			N_("net ads setspn add machine spn\n"
+			   "    Add Service Principal Names (SPN)")
+		},
+		{
+			"delete",
+			net_ads_setspn_delete,
+			NET_TRANSPORT_ADS,
+			N_("Delete Service Principal Names (SPN)"),
+			N_("net ads setspn delete machine spn\n"
+			   "    Delete Service Principal Names (SPN)")
+		},
+		{NULL, NULL, 0, NULL, NULL}
+	};
+
+	return net_run_function(c, argc, argv, "net ads setspn", func);
 }
 
 static int net_ads_enctype_lookup_account(struct net_context *c,
@@ -3431,7 +3583,7 @@ int net_ads(struct net_context *c, int argc, const char **argv)
 			"lookup",
 			net_ads_lookup,
 			NET_TRANSPORT_ADS,
-			N_("Perfom CLDAP query on DC"),
+			N_("Perform CLDAP query on DC"),
 			N_("net ads lookup\n"
 			   "    Find the ADS DC using CLDAP lookups")
 		},
@@ -3442,6 +3594,14 @@ int net_ads(struct net_context *c, int argc, const char **argv)
 			N_("Manage local keytab file"),
 			N_("net ads keytab\n"
 			   "    Manage local keytab file")
+		},
+		{
+			"setspn",
+			net_ads_setspn,
+			NET_TRANSPORT_ADS,
+			N_("Manage Service Principal Names (SPN)s"),
+			N_("net ads spnset\n"
+			   "    Manage Service Principal Names (SPN)s")
 		},
 		{
 			"gpo",
@@ -3487,6 +3647,11 @@ int net_ads_keytab(struct net_context *c, int argc, const char **argv)
 }
 
 int net_ads_kerberos(struct net_context *c, int argc, const char **argv)
+{
+	return net_ads_noads();
+}
+
+int net_ads_setspn(struct net_context *c, int argc, const char **argv)
 {
 	return net_ads_noads();
 }

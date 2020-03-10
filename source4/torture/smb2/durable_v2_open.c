@@ -1518,9 +1518,15 @@ bool test_durable_v2_open_reopen2_lease_v2(struct torture_context *tctx,
 
 	options = tree->session->transport->options;
 
+	smb2_deltree(tree, __func__);
+	status = torture_smb2_testdir(tree, __func__, &_h);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"torture_smb2_testdir failed\n");
+	smb2_util_close(tree, _h);
+
 	/* Choose a random name in case the state is left a little funky. */
-	snprintf(fname, 256, "durable_v2_open_reopen2_%s.dat",
-		 generate_random_str(tctx, 8));
+	snprintf(fname, 256, "%s\\durable_v2_open_reopen2_%s.dat",
+		 __func__, generate_random_str(tctx, 8));
 
 	smb2_util_unlink(tree, fname);
 
@@ -1726,6 +1732,7 @@ done:
 	}
 
 	smb2_util_unlink(tree, fname);
+	smb2_deltree(tree, __func__);
 
 	talloc_free(tree);
 
@@ -2004,10 +2011,10 @@ bool test_persistent_open_lease(struct torture_context *tctx,
 	return ret;
 }
 
-struct torture_suite *torture_smb2_durable_v2_open_init(void)
+struct torture_suite *torture_smb2_durable_v2_open_init(TALLOC_CTX *ctx)
 {
 	struct torture_suite *suite =
-	    torture_suite_create(talloc_autofree_context(), "durable-v2-open");
+	    torture_suite_create(ctx, "durable-v2-open");
 
 	torture_suite_add_1smb2_test(suite, "create-blob", test_durable_v2_open_create_blob);
 	torture_suite_add_1smb2_test(suite, "open-oplock", test_durable_v2_open_oplock);
@@ -2025,6 +2032,101 @@ struct torture_suite *torture_smb2_durable_v2_open_init(void)
 	torture_suite_add_1smb2_test(suite, "persistent-open-lease", test_persistent_open_lease);
 
 	suite->description = talloc_strdup(suite, "SMB2-DURABLE-V2-OPEN tests");
+
+	return suite;
+}
+
+/**
+ * basic test for doing a durable open
+ * tcp disconnect, reconnect, do a durable reopen (succeeds)
+ */
+static bool test_durable_v2_reconnect_delay(struct torture_context *tctx,
+					    struct smb2_tree *tree)
+{
+	NTSTATUS status;
+	TALLOC_CTX *mem_ctx = talloc_new(tctx);
+	char fname[256];
+	struct smb2_handle _h;
+	struct smb2_handle *h = NULL;
+	struct smb2_create io;
+	struct GUID create_guid = GUID_random();
+	struct smbcli_options options;
+	uint64_t previous_session_id;
+	uint8_t b = 0;
+	bool ret = true;
+
+	options = tree->session->transport->options;
+	previous_session_id = smb2cli_session_current_id(tree->session->smbXcli);
+
+	/* Choose a random name in case the state is left a little funky. */
+	snprintf(fname, 256, "durable_v2_reconnect_delay_%s.dat",
+		 generate_random_str(tctx, 8));
+
+	smb2_util_unlink(tree, fname);
+
+	smb2_oplock_create_share(&io, fname,
+				 smb2_util_share_access(""),
+				 smb2_util_oplock_level("b"));
+	io.in.durable_open = false;
+	io.in.durable_open_v2 = true;
+	io.in.persistent_open = false;
+	io.in.create_guid = create_guid;
+	io.in.timeout = 0;
+
+	status = smb2_create(tree, mem_ctx, &io);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	_h = io.out.file.handle;
+	h = &_h;
+	CHECK_VAL(io.out.oplock_level, smb2_util_oplock_level("b"));
+	CHECK_VAL(io.out.durable_open_v2, true);
+
+	status = smb2_util_write(tree, *h, &b, 0, 1);
+	CHECK_STATUS(status, NT_STATUS_OK);
+
+	/* disconnect, leaving the durable open */
+	TALLOC_FREE(tree);
+
+	if (!torture_smb2_connection_ext(tctx, previous_session_id,
+					 &options, &tree)) {
+		torture_warning(tctx, "couldn't reconnect, bailing\n");
+		ret = false;
+		goto done;
+	}
+
+	ZERO_STRUCT(io);
+	io.in.fname = fname;
+	io.in.durable_open_v2 = false;
+	io.in.durable_handle_v2 = h;
+	io.in.create_guid = create_guid;
+	h = NULL;
+
+	status = smb2_create(tree, mem_ctx, &io);
+	CHECK_STATUS(status, NT_STATUS_OK);
+	CHECK_VAL(io.out.oplock_level, smb2_util_oplock_level("b"));
+	_h = io.out.file.handle;
+	h = &_h;
+
+done:
+	if (h != NULL) {
+		smb2_util_close(tree, *h);
+	}
+
+	smb2_util_unlink(tree, fname);
+
+	talloc_free(tree);
+
+	talloc_free(mem_ctx);
+
+	return ret;
+}
+
+struct torture_suite *torture_smb2_durable_v2_delay_init(TALLOC_CTX *ctx)
+{
+	struct torture_suite *suite =
+	    torture_suite_create(ctx, "durable-v2-delay");
+
+	torture_suite_add_1smb2_test(suite, "durable_v2_reconnect_delay", test_durable_v2_reconnect_delay);
 
 	return suite;
 }

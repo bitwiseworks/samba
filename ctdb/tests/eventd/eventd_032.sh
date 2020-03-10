@@ -4,121 +4,40 @@
 
 define_test "failures with multiple scripts"
 
-cat > "$eventd_scriptdir/01.test" <<EOF
-#!/bin/sh
-
-case "\$1" in
-startup)
-	exit 1
-	;;
-monitor|ipreallocated)
-	exit 0
-	;;
-esac
-
-EOF
-chmod +x "$eventd_scriptdir/01.test"
-
-cat > "$eventd_scriptdir/02.test" <<EOF
-#!/bin/sh
-
-case "\$1" in
-monitor)
-	exit 2
-	;;
-startup|ipreallocated)
-	exit 0
-	;;
-esac
-
-EOF
-chmod +x "$eventd_scriptdir/02.test"
-
-cat > "$eventd_scriptdir/03.test" <<EOF
-#!/bin/sh
-
-case "\$1" in
-ipreallocated)
-	exit 3
-	;;
-startup|monitor)
-	exit 0
-	;;
-esac
-
-EOF
-chmod +x "$eventd_scriptdir/03.test"
-
 setup_eventd
 
-required_result 1 <<EOF
-Failed to run event startup, result=1
+required_error ENOEXEC <<EOF
+Event event1 in multi failed
 EOF
-simple_test run startup 30
+simple_test run 10 multi event1
 
 required_result 1 <<EOF
-01.test              ERROR      DURATION DATETIME
-  OUTPUT: 
-EOF
-simple_test status startup
-
-required_result 0 <<EOF
-Event startup has never passed
-EOF
-simple_test status startup lastpass
-
-required_result 1 <<EOF
-01.test              ERROR      DURATION DATETIME
-  OUTPUT: 
-EOF
-simple_test status startup lastfail
-
-required_result 2 <<EOF
-Failed to run event monitor, result=2
-EOF
-simple_test run monitor 30
-
-required_result 2 <<EOF
 01.test              OK         DURATION DATETIME
 02.test              ERROR      DURATION DATETIME
   OUTPUT: 
 EOF
-simple_test status monitor
+simple_test status multi event1
 
-required_result 0 <<EOF
-Event monitor has never passed
+required_error ENOEXEC <<EOF
+Event event2 in multi failed
 EOF
-simple_test status monitor lastpass
+simple_test run 10 multi event2
 
 required_result 2 <<EOF
-01.test              OK         DURATION DATETIME
-02.test              ERROR      DURATION DATETIME
-  OUTPUT: 
-EOF
-simple_test status monitor lastfail
-
-required_result 3 <<EOF
-Failed to run event ipreallocated, result=3
-EOF
-simple_test run ipreallocated 30
-
-required_result 3 <<EOF
 01.test              OK         DURATION DATETIME
 02.test              OK         DURATION DATETIME
 03.test              ERROR      DURATION DATETIME
   OUTPUT: 
 EOF
-simple_test status ipreallocated
+simple_test status multi event2
 
-required_result 0 <<EOF
-Event ipreallocated has never passed
+required_error ENOEXEC <<EOF
+Event event3 in multi failed
 EOF
-simple_test status ipreallocated lastpass
+simple_test run 10 multi event3
 
 required_result 3 <<EOF
-01.test              OK         DURATION DATETIME
-02.test              OK         DURATION DATETIME
-03.test              ERROR      DURATION DATETIME
+01.test              ERROR      DURATION DATETIME
   OUTPUT: 
 EOF
-simple_test status ipreallocated lastfail
+simple_test status multi event3

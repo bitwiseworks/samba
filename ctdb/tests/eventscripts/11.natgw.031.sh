@@ -4,9 +4,11 @@
 
 define_test "master node, static routes, custom gateway, config change"
 
-setup_ctdb
+setup
 
-export CTDB_NATGW_STATIC_ROUTES="10.1.1.0/24 10.1.2.0/24@10.1.1.253"
+setup_script_options <<EOF
+CTDB_NATGW_STATIC_ROUTES="10.1.1.0/24 10.1.2.0/24@10.1.1.253"
+EOF
 
 echo "##################################################"
 echo "Static routes..."
@@ -30,7 +32,9 @@ simple_test_command ip addr show "$CTDB_NATGW_PUBLIC_IFACE"
 echo "##################################################"
 echo "Default routes..."
 
-unset CTDB_NATGW_STATIC_ROUTES
+setup_script_options <<EOF
+CTDB_NATGW_STATIC_ROUTES=""
+EOF
 
 ok "NAT gateway configuration has changed"
 simple_test_event "ipreallocated"
@@ -44,7 +48,9 @@ simple_test_command ip addr show "$CTDB_NATGW_PUBLIC_IFACE"
 echo "##################################################"
 echo "Static routes again..."
 
-export CTDB_NATGW_STATIC_ROUTES="10.1.3.0/24 10.1.4.4/32 10.1.2.0/24@10.1.1.252"
+setup_script_options <<EOF
+CTDB_NATGW_STATIC_ROUTES="10.1.3.0/24 10.1.4.4/32 10.1.2.0/24@10.1.1.252"
+EOF
 
 ok "NAT gateway configuration has changed"
 simple_test_event "ipreallocated"

@@ -50,18 +50,6 @@ struct tevent_req *wb_queryuser_send(TALLOC_CTX *mem_ctx,
 	}
 	state->ev = ev;
 
-	if (lp_winbind_trusted_domains_only()) {
-		struct winbindd_domain *our_domain = find_our_domain();
-
-		if (dom_sid_compare_domain(user_sid, &our_domain->sid) == 0) {
-			char buf[DOM_SID_STR_BUFLEN];
-			dom_sid_string_buf(user_sid, buf, sizeof(buf));
-			DBG_NOTICE("My domain -- rejecting %s\n", buf);
-			tevent_req_nterror(req, NT_STATUS_NO_SUCH_USER);
-			return tevent_req_post(req, ev);
-		}
-	}
-
 	state->info = talloc_zero(state, struct wbint_userinfo);
 	if (tevent_req_nomem(state->info, req)) {
 		return tevent_req_post(req, ev);
@@ -202,6 +190,8 @@ static void wb_queryuser_done(struct tevent_req *subreq)
 		req, struct wb_queryuser_state);
 	struct wbint_userinfo *info = state->info;
 	NTSTATUS status, result;
+	bool need_group_name = false;
+	const char *tmpl = NULL;
 
 	status = dcerpc_wbint_GetNssInfo_recv(subreq, info, &result);
 	TALLOC_FREE(subreq);
@@ -236,7 +226,16 @@ static void wb_queryuser_done(struct tevent_req *subreq)
 		return;
 	}
 
-	if (state->info->primary_group_name == NULL) {
+	tmpl = lp_template_homedir();
+	if(strstr_m(tmpl, "%g") || strstr_m(tmpl, "%G")) {
+		need_group_name = true;
+	}
+	tmpl = lp_template_shell();
+	if(strstr_m(tmpl, "%g") || strstr_m(tmpl, "%G")) {
+		need_group_name = true;
+	}
+
+	if (need_group_name && state->info->primary_group_name == NULL) {
 		subreq = wb_lookupsid_send(state, state->ev, &info->group_sid);
 		if (tevent_req_nomem(subreq, req)) {
 			return;
@@ -291,6 +290,8 @@ static void wb_queryuser_got_gid(struct tevent_req *subreq)
 		req, struct wb_queryuser_state);
 	struct unixid xid;
 	NTSTATUS status;
+	bool need_group_name = false;
+	const char *tmpl = NULL;
 
 	status = wb_sids2xids_recv(subreq, &xid, 1);
 	TALLOC_FREE(subreq);
@@ -305,7 +306,16 @@ static void wb_queryuser_got_gid(struct tevent_req *subreq)
 
 	state->info->primary_gid = xid.id;
 
-	if (state->info->primary_group_name == NULL) {
+	tmpl = lp_template_homedir();
+	if(strstr_m(tmpl, "%g") || strstr_m(tmpl, "%G")) {
+		need_group_name = true;
+	}
+	tmpl = lp_template_shell();
+	if(strstr_m(tmpl, "%g") || strstr_m(tmpl, "%G")) {
+		need_group_name = true;
+	}
+
+	if (need_group_name && state->info->primary_group_name == NULL) {
 		subreq = wb_lookupsid_send(state, state->ev,
 					   &state->info->group_sid);
 		if (tevent_req_nomem(subreq, req)) {

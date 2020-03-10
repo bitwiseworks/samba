@@ -36,166 +36,249 @@
 /*
   reply to a GETDC request
  */
-static void nbtd_netlogon_getdc(struct dgram_mailslot_handler *dgmslot, 
-				struct nbtd_interface *iface,
-				struct nbt_dgram_packet *packet, 
-				const struct socket_address *src,
-				struct nbt_netlogon_packet *netlogon)
+static NTSTATUS nbtd_netlogon_getdc(struct nbtd_server *nbtsrv,
+				    struct nbt_name *dst_name,
+				    struct nbt_netlogon_packet *netlogon,
+				    TALLOC_CTX *mem_ctx,
+				    struct nbt_netlogon_response **presponse,
+				    char **preply_mailslot)
 {
-	struct nbt_name *name = &packet->data.msg.dest_name;
-	struct nbtd_interface *reply_iface = nbtd_find_reply_iface(iface, src->addr, false);
 	struct nbt_netlogon_response_from_pdc *pdc;
 	struct ldb_context *samctx;
-	struct nbt_netlogon_response netlogon_response;
+	struct nbt_netlogon_response *response = NULL;
+	char *reply_mailslot = NULL;
 
 	/* only answer getdc requests on the PDC or LOGON names */
-	if (name->type != NBT_NAME_PDC && name->type != NBT_NAME_LOGON) {
-		return;
+	if ((dst_name->type != NBT_NAME_PDC) &&
+	    (dst_name->type != NBT_NAME_LOGON)) {
+		return NT_STATUS_NOT_SUPPORTED;
 	}
 
-	samctx = iface->nbtsrv->sam_ctx;
+	samctx = nbtsrv->sam_ctx;
 
-	if (lpcfg_server_role(iface->nbtsrv->task->lp_ctx) != ROLE_ACTIVE_DIRECTORY_DC
+	if (lpcfg_server_role(nbtsrv->task->lp_ctx) != ROLE_ACTIVE_DIRECTORY_DC
 	    || !samdb_is_pdc(samctx)) {
 		DEBUG(2, ("Not a PDC, so not processing LOGON_PRIMARY_QUERY\n"));
-		return;		
+		return NT_STATUS_NOT_SUPPORTED;
 	}
 
-	if (strcasecmp_m(name->name, lpcfg_workgroup(iface->nbtsrv->task->lp_ctx)) != 0) {
-		DEBUG(5,("GetDC requested for a domian %s that we don't host\n", name->name));
-		return;
+	if (strcasecmp_m(dst_name->name,
+			 lpcfg_workgroup(nbtsrv->task->lp_ctx)) != 0) {
+		DBG_INFO("GetDC requested for a domain %s that we don't "
+			 "host\n", dst_name->name);
+		return NT_STATUS_NOT_SUPPORTED;
+	}
+
+	reply_mailslot = talloc_strdup(
+		mem_ctx, netlogon->req.pdc.mailslot_name);
+	if (reply_mailslot == NULL) {
+		goto nomem;
 	}
 
 	/* setup a GETDC reply */
-	ZERO_STRUCT(netlogon_response);
-	netlogon_response.response_type = NETLOGON_GET_PDC;
-	pdc = &netlogon_response.data.get_pdc;
+	response = talloc_zero(mem_ctx, struct nbt_netlogon_response);
+	if (response == NULL) {
+		goto nomem;
+	}
+	response->response_type = NETLOGON_GET_PDC;
+	pdc = &response->data.get_pdc;
 
 	pdc->command = NETLOGON_RESPONSE_FROM_PDC;
-	pdc->pdc_name         = lpcfg_netbios_name(iface->nbtsrv->task->lp_ctx);
+
+	pdc->pdc_name = talloc_strdup(
+		response, lpcfg_netbios_name(nbtsrv->task->lp_ctx));
+	if (pdc->pdc_name == NULL) {
+		goto nomem;
+	}
+
 	pdc->unicode_pdc_name = pdc->pdc_name;
-	pdc->domain_name      = lpcfg_workgroup(iface->nbtsrv->task->lp_ctx);
+
+	pdc->domain_name = talloc_strdup(
+		response, lpcfg_workgroup(nbtsrv->task->lp_ctx));
+	if (pdc->domain_name == NULL) {
+		goto nomem;
+	}
+
 	pdc->nt_version       = 1;
 	pdc->lmnt_token       = 0xFFFF;
 	pdc->lm20_token       = 0xFFFF;
 
-	dgram_mailslot_netlogon_reply(reply_iface->dgmsock, 
-				      packet, 
-				      lpcfg_netbios_name(iface->nbtsrv->task->lp_ctx),
-				      netlogon->req.pdc.mailslot_name,
-				      &netlogon_response);
-}
+	*presponse = response;
+	*preply_mailslot = reply_mailslot;
+	return NT_STATUS_OK;
 
+nomem:
+	TALLOC_FREE(response);
+	TALLOC_FREE(reply_mailslot);
+	return NT_STATUS_NO_MEMORY;
+}
 
 /*
   reply to a ADS style GETDC request
  */
-static void nbtd_netlogon_samlogon(struct dgram_mailslot_handler *dgmslot,
-				   struct nbtd_interface *iface,
-				   struct nbt_dgram_packet *packet, 
-				   const struct socket_address *src,
-				   struct nbt_netlogon_packet *netlogon)
+static NTSTATUS nbtd_netlogon_samlogon(
+	struct nbtd_server *nbtsrv,
+	struct nbt_name *dst_name,
+	const struct socket_address *src,
+	struct nbt_netlogon_packet *netlogon,
+	TALLOC_CTX *mem_ctx,
+	struct nbt_netlogon_response **presponse,
+	char **preply_mailslot)
 {
-	struct nbt_name *name = &packet->data.msg.dest_name;
-	struct nbtd_interface *reply_iface = nbtd_find_reply_iface(iface, src->addr, false);
 	struct ldb_context *samctx;
-	const char *my_ip = reply_iface->ip_address; 
-	struct dom_sid *sid;
-	struct nbt_netlogon_response netlogon_response;
+	struct dom_sid *sid = NULL;
+	struct nbt_netlogon_response *response = NULL;
+	char *reply_mailslot = NULL;
 	NTSTATUS status;
 
-	if (!my_ip) {
-		DEBUG(0, ("Could not obtain own IP address for datagram socket\n"));
-		return;
-	}
-
 	/* only answer getdc requests on the PDC or LOGON names */
-	if (name->type != NBT_NAME_PDC && name->type != NBT_NAME_LOGON) {
-		return;
+	if ((dst_name->type != NBT_NAME_PDC) &&
+	    (dst_name->type != NBT_NAME_LOGON)) {
+		return NT_STATUS_NOT_SUPPORTED;
 	}
 
-	samctx = iface->nbtsrv->sam_ctx;
+	samctx = nbtsrv->sam_ctx;
 
-	if (netlogon->req.logon.sid_size) {
+	if (netlogon->req.logon.sid_size != 0) {
 		sid = &netlogon->req.logon.sid;
-	} else {
-		sid = NULL;
 	}
 
-	status = fill_netlogon_samlogon_response(samctx, packet, NULL, name->name, sid, NULL, 
-						 netlogon->req.logon.user_name, netlogon->req.logon.acct_control, src->addr, 
-						 netlogon->req.logon.nt_version, iface->nbtsrv->task->lp_ctx, &netlogon_response.data.samlogon, false);
+	reply_mailslot = talloc_strdup(
+		mem_ctx, netlogon->req.logon.mailslot_name);
+	if (reply_mailslot == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	response = talloc_zero(mem_ctx, struct nbt_netlogon_response);
+	if (response == NULL) {
+		TALLOC_FREE(reply_mailslot);
+		return NT_STATUS_NO_MEMORY;
+	}
+	response->response_type = NETLOGON_SAMLOGON;
+
+	status = fill_netlogon_samlogon_response(
+		samctx, response, NULL, dst_name->name, sid, NULL,
+		netlogon->req.logon.user_name,
+		netlogon->req.logon.acct_control, src->addr,
+		netlogon->req.logon.nt_version, nbtsrv->task->lp_ctx,
+		&response->data.samlogon, false);
 	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(2,("NBT netlogon query failed domain=%s sid=%s version=%d - %s\n",
-			 name->name, dom_sid_string(packet, sid), netlogon->req.logon.nt_version, nt_errstr(status)));
-		return;
+		char buf[DOM_SID_STR_BUFLEN];
+		dom_sid_string_buf(sid, buf, sizeof(buf));
+
+		DBG_NOTICE("NBT netlogon query failed domain=%s sid=%s "
+			   "version=%d - %s\n", dst_name->name, buf,
+			   netlogon->req.logon.nt_version, nt_errstr(status));
+		TALLOC_FREE(reply_mailslot);
+		TALLOC_FREE(response);
+		return status;
 	}
 
-	netlogon_response.response_type = NETLOGON_SAMLOGON;
-
-	packet->data.msg.dest_name.type = 0;
-
-	dgram_mailslot_netlogon_reply(reply_iface->dgmsock, 
-				      packet, 
-				      lpcfg_netbios_name(iface->nbtsrv->task->lp_ctx),
-				      netlogon->req.logon.mailslot_name,
-				      &netlogon_response);
+	*presponse = response;
+	*preply_mailslot = reply_mailslot;
+	return NT_STATUS_OK;
 }
 
-
-/*
-  handle incoming netlogon mailslot requests
-*/
-void nbtd_mailslot_netlogon_handler(struct dgram_mailslot_handler *dgmslot, 
-				    struct nbt_dgram_packet *packet, 
-				    struct socket_address *src)
+static NTSTATUS nbtd_mailslot_netlogon_reply(
+	struct nbtd_interface *iface,
+	struct nbt_dgram_packet *packet,
+	struct socket_address *src,
+	TALLOC_CTX *mem_ctx,
+	struct nbt_netlogon_response **presponse,
+	char **preply_mailslot)
 {
-	NTSTATUS status = NT_STATUS_NO_MEMORY;
-	struct nbtd_interface *iface = 
-		talloc_get_type(dgmslot->private_data, struct nbtd_interface);
-	struct nbt_netlogon_packet *netlogon = 
-		talloc(dgmslot, struct nbt_netlogon_packet);
+	struct nbt_netlogon_packet *netlogon;
+	struct nbt_name *dst_name = &packet->data.msg.dest_name;
+	struct nbt_netlogon_response *response = NULL;
 	struct nbtd_iface_name *iname;
-	struct nbt_name *name = &packet->data.msg.dest_name;
-
-	if (netlogon == NULL) goto failed;
+	char *reply_mailslot = NULL;
+	NTSTATUS status;
 
 	/*
 	  see if the we are listening on the destination netbios name
 	*/
-	iname = nbtd_find_iname(iface, name, 0);
+	iname = nbtd_find_iname(iface, dst_name, 0);
 	if (iname == NULL) {
-		status = NT_STATUS_BAD_NETWORK_NAME;
+		return NT_STATUS_BAD_NETWORK_NAME;
+	}
+
+	netlogon = talloc(mem_ctx, struct nbt_netlogon_packet);
+	if (netlogon == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	status = dgram_mailslot_netlogon_parse_request(netlogon, packet,
+						       netlogon);
+	if (!NT_STATUS_IS_OK(status)) {
 		goto failed;
 	}
 
-	DEBUG(5,("netlogon request to %s from %s:%d\n",
-		 nbt_name_string(netlogon, name), src->addr, src->port));
-	status = dgram_mailslot_netlogon_parse_request(dgmslot, netlogon, packet, netlogon);
-	if (!NT_STATUS_IS_OK(status)) goto failed;
-
 	switch (netlogon->command) {
 	case LOGON_PRIMARY_QUERY:
-		nbtd_netlogon_getdc(dgmslot, iface, packet, 
-				    src, netlogon);
+		status = nbtd_netlogon_getdc(
+			iface->nbtsrv, &packet->data.msg.dest_name,
+			netlogon, mem_ctx, &response, &reply_mailslot);
 		break;
 	case LOGON_SAM_LOGON_REQUEST:
-		nbtd_netlogon_samlogon(dgmslot, iface, packet, 
-				       src, netlogon);
+		status = nbtd_netlogon_samlogon(
+			iface->nbtsrv, &packet->data.msg.dest_name, src,
+			netlogon, mem_ctx, &response, &reply_mailslot);
 		break;
 	default:
-		DEBUG(2,("unknown netlogon op %d from %s:%d\n", 
+		DEBUG(2,("unknown netlogon op %d from %s:%d\n",
 			 netlogon->command, src->addr, src->port));
 		NDR_PRINT_DEBUG(nbt_netlogon_packet, netlogon);
+		status = NT_STATUS_NOT_SUPPORTED;
 		break;
 	}
 
-	talloc_free(netlogon);
-	return;
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("Calculating reply failed: %s\n",
+			  nt_errstr(status));
+		goto failed;
+	}
+
+	*presponse = response;
+	*preply_mailslot = reply_mailslot;
+	return NT_STATUS_OK;
 
 failed:
-	DEBUG(2,("nbtd netlogon handler failed from %s:%d to %s - %s\n",
-		 src->addr, src->port, nbt_name_string(netlogon, name),
-		 nt_errstr(status)));
-	talloc_free(netlogon);
+	TALLOC_FREE(reply_mailslot);
+	TALLOC_FREE(netlogon);
+	return status;
+}
+
+/*
+  handle incoming netlogon mailslot requests
+*/
+void nbtd_mailslot_netlogon_handler(struct dgram_mailslot_handler *dgmslot,
+				    struct nbt_dgram_packet *packet,
+				    struct socket_address *src)
+{
+	NTSTATUS status = NT_STATUS_NO_MEMORY;
+	struct nbtd_interface *iface =
+		talloc_get_type(dgmslot->private_data, struct nbtd_interface);
+	struct nbtd_interface *reply_iface = nbtd_find_reply_iface(
+		iface, src->addr, false);
+	struct nbt_netlogon_response *response = NULL;
+	char *reply_mailslot = NULL;
+
+	if (reply_iface->ip_address == NULL) {
+		DBG_WARNING("Could not obtain own IP address for datagram "
+			    "socket\n");
+		return;
+	}
+
+	status = nbtd_mailslot_netlogon_reply(
+		iface, packet, src, dgmslot, &response, &reply_mailslot);
+
+	if (NT_STATUS_IS_OK(status)) {
+		dgram_mailslot_netlogon_reply(
+			reply_iface->dgmsock, packet,
+			lpcfg_netbios_name(iface->nbtsrv->task->lp_ctx),
+			reply_mailslot, response);
+	}
+
+	TALLOC_FREE(response);
+	TALLOC_FREE(reply_mailslot);
 }

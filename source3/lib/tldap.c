@@ -1262,7 +1262,8 @@ static bool tldap_find_first_star(const char *val, const char **star)
 
 static bool tldap_unescape_inplace(char *value, size_t *val_len)
 {
-	int c, i, p;
+	int c;
+	size_t i, p;
 
 	for (i = 0,p = 0; i < *val_len; i++) {
 
@@ -1280,6 +1281,7 @@ static bool tldap_unescape_inplace(char *value, size_t *val_len)
 			}
 			i++;
 
+			/* LDAPv3 escaped */
 			c = tldap_hex2char(&value[i]);
 			if (c >= 0 && c < 256) {
 				value[p] = c;
@@ -1288,6 +1290,7 @@ static bool tldap_unescape_inplace(char *value, size_t *val_len)
 				break;
 			}
 
+			/* LDAPv2 escaped */
 			switch (value[i]) {
 			case '(':
 			case ')':
@@ -1295,6 +1298,8 @@ static bool tldap_unescape_inplace(char *value, size_t *val_len)
 			case '\\':
 				value[p] = value[i];
 				p++;
+
+				break;
 			default:
 				/* invalid */
 				return false;
@@ -1995,7 +2000,7 @@ TLDAPRC tldap_search(struct tldap_context *ld,
 		rc = TLDAP_OPERATIONS_ERROR;
 		goto fail;
 	}
-	rc = tldap_search_all_recv(req, mem_ctx, &msgs, &result);
+	rc = tldap_search_all_recv(req, frame, &msgs, &result);
 	TALLOC_FREE(req);
 	if (!TLDAP_RC_IS_SUCCESS(rc)) {
 		goto fail;
@@ -2004,7 +2009,9 @@ TLDAPRC tldap_search(struct tldap_context *ld,
 	TALLOC_FREE(ld->last_msg);
 	ld->last_msg = talloc_move(ld, &result);
 
-	*pmsgs = msgs;
+	if (pmsgs != NULL) {
+		*pmsgs = talloc_move(mem_ctx, &msgs);
+	}
 fail:
 	TALLOC_FREE(frame);
 	return rc;

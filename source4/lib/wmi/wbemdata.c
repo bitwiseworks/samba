@@ -19,6 +19,7 @@
 */
 
 #include "includes.h"
+#include <talloc.h>
 #include "librpc/gen_ndr/dcom.h"
 #include "librpc/gen_ndr/com_dcom.h"
 #include "librpc/ndr/libndr.h"
@@ -30,7 +31,6 @@
 #include "librpc/gen_ndr/ndr_dcom.h"
 #include "librpc/rpc/dcerpc.h"
 #include "librpc/gen_ndr/ndr_misc.h"
-#include "lib/talloc/talloc.h"
 #include "libcli/composite/composite.h"
 #include "lib/wmi/wmi.h"
 #include "librpc/gen_ndr/ndr_wmi.h"
@@ -432,11 +432,11 @@ struct composite_context *dcom_proxy_IEnumWbemClassObject_Release_send(struct IU
 	return c;
 }
 
-NTSTATUS dcom_proxy_IWbemClassObject_init(void)
+NTSTATUS dcom_proxy_IWbemClassObject_init(TALLOC_CTX *ctx)
 {
 	struct GUID clsid;
 	GUID_from_string("4590f812-1d3a-11d0-891f-00aa004b2e24", &clsid);
-	dcom_register_marshal(&clsid, marshal, unmarshal);
+	dcom_register_marshal(ctx, &clsid, marshal, unmarshal);
 
 #if 0
 	struct IEnumWbemClassObject_vtable *proxy_vtable;

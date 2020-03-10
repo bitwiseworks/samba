@@ -208,6 +208,7 @@ smbc_new_context(void)
         smbc_setFunctionOpendir(context, SMBC_opendir_ctx);
         smbc_setFunctionClosedir(context, SMBC_closedir_ctx);
         smbc_setFunctionReaddir(context, SMBC_readdir_ctx);
+        smbc_setFunctionReaddirPlus(context, SMBC_readdirplus_ctx);
         smbc_setFunctionGetdents(context, SMBC_getdents_ctx);
         smbc_setFunctionMkdir(context, SMBC_mkdir_ctx);
         smbc_setFunctionRmdir(context, SMBC_rmdir_ctx);
@@ -658,24 +659,16 @@ smbc_init_context(SMBCCTX *context)
         DEBUG(1, ("Using netbios name %s.\n", smbc_getNetbiosName(context)));
 
         if (!smbc_getWorkgroup(context)) {
-                char *workgroup;
+                const char *workgroup;
 
                 if (lp_workgroup()) {
-                        workgroup = SMB_STRDUP(lp_workgroup());
-                }
-                else {
+                        workgroup = lp_workgroup();
+                } else {
                         /* TODO: Think about a decent default workgroup */
-                        workgroup = SMB_STRDUP("samba");
-                }
-
-                if (!workgroup) {
-                        TALLOC_FREE(frame);
-                        errno = ENOMEM;
-                        return NULL;
+                        workgroup = "samba";
                 }
 
                 smbc_setWorkgroup(context, workgroup);
-		SAFE_FREE(workgroup);
 
 		if (!smbc_getWorkgroup(context)) {
                         TALLOC_FREE(frame);

@@ -42,15 +42,24 @@ struct db_context *open_schannel_session_store(TALLOC_CTX *mem_ctx,
 {
 	struct db_context *db_sc = NULL;
 	char *fname = lpcfg_private_db_path(mem_ctx, lp_ctx, "schannel_store");
+	int hash_size, tdb_flags;
 
 	if (!fname) {
 		return NULL;
 	}
 
-	db_sc = dbwrap_local_open(mem_ctx, lp_ctx, fname, 0,
-				  TDB_CLEAR_IF_FIRST|TDB_NOSYNC, O_RDWR|O_CREAT,
-				  0600, DBWRAP_LOCK_ORDER_NONE,
-				  DBWRAP_FLAG_NONE);
+	hash_size = lpcfg_tdb_hash_size(lp_ctx, fname);
+	tdb_flags = lpcfg_tdb_flags(lp_ctx, TDB_CLEAR_IF_FIRST|TDB_NOSYNC);
+
+	db_sc = dbwrap_local_open(
+		mem_ctx,
+		fname,
+		hash_size,
+		tdb_flags,
+		O_RDWR|O_CREAT,
+		0600,
+		DBWRAP_LOCK_ORDER_NONE,
+		DBWRAP_FLAG_NONE);
 
 	if (!db_sc) {
 		DEBUG(0,("open_schannel_session_store: Failed to open %s - %s\n",
@@ -263,11 +272,13 @@ NTSTATUS schannel_save_creds_state(TALLOC_CTX *mem_ctx,
 
 	db_sc = open_schannel_session_store(tmpctx, lp_ctx);
 	if (!db_sc) {
-		return NT_STATUS_ACCESS_DENIED;
+		status = NT_STATUS_ACCESS_DENIED;
+		goto fail;
 	}
 
 	status = schannel_store_session_key_tdb(db_sc, tmpctx, creds);
 
+fail:
 	talloc_free(tmpctx);
 	return status;
 }
@@ -439,7 +450,7 @@ NTSTATUS schannel_fetch_challenge_tdb(struct db_context *db_sc,
 }
 
 /******************************************************************************
- Wrapper around schannel_fetch_session_key_tdb()
+ Wrapper around schannel_fetch_challenge_tdb()
  Note we must be root here.
 
 *******************************************************************************/

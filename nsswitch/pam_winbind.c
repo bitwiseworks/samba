@@ -174,6 +174,10 @@ static inline void textdomain_init(void)
 
 
 /* some syslogging */
+static void _pam_log_int(const pam_handle_t *pamh,
+			 int err,
+			 const char *format,
+			 va_list args) PRINTF_ATTRIBUTE(3, 0);
 
 #ifdef HAVE_PAM_VSYSLOG
 static void _pam_log_int(const pam_handle_t *pamh,
@@ -189,21 +193,26 @@ static void _pam_log_int(const pam_handle_t *pamh,
 			 const char *format,
 			 va_list args)
 {
-	char *format2 = NULL;
+	char *base = NULL;
+	va_list args2;
 	const char *service;
 	int ret;
 
+	va_copy(args2, args);
+
 	pam_get_item(pamh, PAM_SERVICE, (const void **) &service);
 
-	ret = asprintf(&format2, "%s(%s): %s", MODULE_NAME, service, format);
+	ret = vasprintf(&base, format, args);
 	if (ret == -1) {
 		/* what else todo ? */
-		vsyslog(err, format, args);
+		vsyslog(err, format, args2);
+		va_end(args2);
 		return;
 	}
 
-	vsyslog(err, format2, args);
-	SAFE_FREE(format2);
+	syslog(err, "%s(%s): %s", MODULE_NAME, service, base);
+	SAFE_FREE(base);
+	va_end(args2);
 }
 #endif /* HAVE_PAM_VSYSLOG */
 
@@ -610,7 +619,7 @@ static const struct ntstatus_errors {
 	{"NT_STATUS_OK",
 		N_("Success")},
 	{"NT_STATUS_BACKUP_CONTROLLER",
-		N_("No primary Domain Controler available")},
+		N_("No primary Domain Controller available")},
 	{"NT_STATUS_DOMAIN_CONTROLLER_NOT_FOUND",
 		N_("No domain controllers found")},
 	{"NT_STATUS_NO_LOGON_SERVERS",
@@ -671,7 +680,7 @@ static int converse(const pam_handle_t *pamh,
 		    struct pam_response **response)
 {
 	int retval;
-	struct pam_conv *conv;
+	const struct pam_conv *conv;
 
 	retval = pam_get_item(pamh, PAM_CONV, (const void **) &conv);
 	if (retval == PAM_SUCCESS) {
@@ -710,6 +719,11 @@ static int _make_remark(struct pwb_context *ctx,
 	}
 	return retval;
 }
+
+static int _make_remark_v(struct pwb_context *ctx,
+			  int type,
+			  const char *format,
+			  va_list args) PRINTF_ATTRIBUTE(3, 0);
 
 static int _make_remark_v(struct pwb_context *ctx,
 			  int type,
@@ -1206,7 +1220,7 @@ static bool winbind_name_list_to_sid_string_list(struct pwb_context *ctx,
 		/*
 		 * The lookup of the last name failed..
 		 * It results in require_member_of_sid ends with ','
-		 * It is malformated parameter here, overwrite the last ','.
+		 * It is malformatted parameter here, overwrite the last ','.
 		 */
 		len = strlen(sid_list_buffer);
 		if ((len != 0) && (sid_list_buffer[len - 1] == ',')) {
@@ -2872,7 +2886,8 @@ int pam_sm_acct_mgmt(pam_handle_t *pamh, int flags,
 			ret = atoi(tmp);
 			switch (ret) {
 			case PAM_AUTHTOK_EXPIRED:
-				/* fall through, since new token is required in this case */
+				/* Since new token is required in this case */
+				FALL_THROUGH;
 			case PAM_NEW_AUTHTOK_REQD:
 				_pam_log(ctx, LOG_WARNING,
 					 "pam_sm_acct_mgmt success but %s is set",
@@ -2993,7 +3008,7 @@ static bool _pam_require_krb5_auth_after_chauthtok(struct pwb_context *ctx,
 	 * --- BoYang
 	 * */
 
-	char *new_authtok_reqd_during_auth = NULL;
+	const char *new_authtok_reqd_during_auth = NULL;
 	struct passwd *pwd = NULL;
 
 	pam_get_data(ctx->pamh, PAM_WINBIND_NEW_AUTHTOK_REQD_DURING_AUTH,

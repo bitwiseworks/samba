@@ -41,72 +41,67 @@ NTSTATUS rpc_query_user_list(TALLOC_CTX *mem_ctx,
 			     const struct dom_sid *domain_sid,
 			     uint32_t **prids)
 {
+	struct dcerpc_binding_handle *b = samr_pipe->binding_handle;
 	uint32_t *rids = NULL;
 	uint32_t num_rids = 0;
-	uint32_t loop_count = 0;
-	uint32_t start_idx = 0;
 	uint32_t i = 0;
-	NTSTATUS status, result;
-	struct dcerpc_binding_handle *b = samr_pipe->binding_handle;
+	uint32_t resume_handle = 0;
+	NTSTATUS result = NT_STATUS_UNSUCCESSFUL;
+	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
+	TALLOC_CTX *tmp_ctx;
 
 	*prids = NULL;
 
+	tmp_ctx = talloc_stackframe();
+	if (tmp_ctx == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
 	do {
-		uint32_t j;
-		uint32_t num_dom_users;
-		uint32_t max_entries, max_size;
-		uint32_t total_size, returned_size;
-		union samr_DispInfo disp_info;
+		struct samr_SamArray *sam_array = NULL;
+		uint32_t count = 0;
+		uint32_t *tmp;
 
-		dcerpc_get_query_dispinfo_params(loop_count,
-						 &max_entries,
-						 &max_size);
-
-		status = dcerpc_samr_QueryDisplayInfo(b,
-						      mem_ctx,
-						      samr_policy,
-						      1, /* level */
-						      start_idx,
-						      max_entries,
-						      max_size,
-						      &total_size,
-						      &returned_size,
-						      &disp_info,
-						      &result);
+		status = dcerpc_samr_EnumDomainUsers(
+			b, tmp_ctx, samr_policy, &resume_handle,
+			ACB_NORMAL, &sam_array, 0xffff, &count, &result);
 		if (!NT_STATUS_IS_OK(status)) {
-			return status;
+			goto done;
 		}
 		if (!NT_STATUS_IS_OK(result)) {
 			if (!NT_STATUS_EQUAL(result, STATUS_MORE_ENTRIES)) {
-				TALLOC_FREE(rids);
-				return result;
+				DBG_WARNING("EnumDomainUsers failed: %s\n",
+					    nt_errstr(result));
+				status = result;
+				goto done;
 			}
 		}
 
-		/* increment required start query values */
-		start_idx += disp_info.info1.count;
-		loop_count++;
-		num_dom_users = disp_info.info1.count;
-
-		num_rids += num_dom_users;
-		/* If there are no user to enumerate we're done */
-		if (num_rids == 0) {
-			return NT_STATUS_OK;
+		if (num_rids + count < num_rids) {
+			status = NT_STATUS_INTEGER_OVERFLOW;
+			goto done;
 		}
 
-		rids = talloc_realloc(mem_ctx, rids, uint32_t, num_rids);
-		if (rids == NULL) {
-			return NT_STATUS_NO_MEMORY;
+		tmp = talloc_realloc(tmp_ctx, rids, uint32_t, num_rids+count);
+		if (tmp == NULL) {
+			status = NT_STATUS_NO_MEMORY;
+			goto done;
+		}
+		rids = tmp;
+
+		for (i=0; i<count; i++) {
+			rids[num_rids++] = sam_array->entries[i].idx;
 		}
 
-		for (j = 0; j < num_dom_users; j++) {
-			rids[i++] = disp_info.info1.entries[j].rid;
-		}
+		TALLOC_FREE(sam_array);
 	} while (NT_STATUS_EQUAL(result, STATUS_MORE_ENTRIES));
 
-	*prids = rids;
+	*prids = talloc_steal(mem_ctx, rids);
+	status = NT_STATUS_OK;
 
-	return NT_STATUS_OK;
+done:
+	TALLOC_FREE(tmp_ctx);
+	return status;
 }
 
 /* List all domain groups */
@@ -337,7 +332,7 @@ NTSTATUS rpc_sid_to_name(TALLOC_CTX *mem_ctx,
 	*ptype = (enum lsa_SidType) types[0];
 
 	map_status = normalize_name_map(mem_ctx,
-					domain,
+					domain->name,
 					names[0],
 					&mapped_name);
 	if (NT_STATUS_IS_OK(map_status) ||
@@ -415,7 +410,7 @@ NTSTATUS rpc_rids_to_names(TALLOC_CTX *mem_ctx,
 
 		if (types[i] != SID_NAME_UNKNOWN) {
 			map_status = normalize_name_map(mem_ctx,
-							domain,
+							domain->name,
 							names[i],
 							&mapped_name);
 			if (NT_STATUS_IS_OK(map_status) ||

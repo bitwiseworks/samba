@@ -418,9 +418,10 @@ enum pdb_policy_type {
  * Changed to 23, new idmap control functions
  * Changed to 24, removed uid_to_sid and gid_to_sid, replaced with id_to_sid
  * Leave at 24, add optional get_trusteddom_creds()
+ * Change to 25, loadable modules now have a TALLOC_CTX * parameter in init.
  */
 
-#define PASSDB_INTERFACE_VERSION 24
+#define PASSDB_INTERFACE_VERSION 25
 
 struct pdb_methods 
 {
@@ -894,11 +895,6 @@ NTSTATUS pdb_lookup_rids(const struct dom_sid *domain_sid,
 			 uint32_t *rids,
 			 const char **names,
 			 enum lsa_SidType *attrs);
-NTSTATUS pdb_lookup_names(const struct dom_sid *domain_sid,
-			  int num_names,
-			  const char **names,
-			  uint32_t *rids,
-			  enum lsa_SidType *attrs);
 bool pdb_get_account_policy(enum pdb_policy_type type, uint32_t *value);
 bool pdb_set_account_policy(enum pdb_policy_type type, uint32_t value);
 bool pdb_get_seq_num(time_t *seq_num);
@@ -975,6 +971,7 @@ bool pdb_is_responsible_for_everything_else(void);
 NTSTATUS pdb_create_builtin(uint32_t rid);
 NTSTATUS create_builtin_users(const struct dom_sid *sid);
 NTSTATUS create_builtin_administrators(const struct dom_sid *sid);
+NTSTATUS create_builtin_guests(const struct dom_sid *dom_sid);
 
 #include "passdb/machine_sid.h"
 #include "passdb/lookup_sid.h"

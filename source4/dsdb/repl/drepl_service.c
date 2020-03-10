@@ -35,6 +35,9 @@
 #include "param/param.h"
 #include "libds/common/roles.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS            DBGC_DRS_REPL
+
 /**
  * Call-back data for _drepl_replica_sync_done_cb()
  */
@@ -65,7 +68,12 @@ static WERROR dreplsrv_connect_samdb(struct dreplsrv_service *service, struct lo
 	const struct GUID *ntds_guid;
 	struct drsuapi_DsBindInfo28 *bind_info28;
 
-	service->samdb = samdb_connect(service, service->task->event_ctx, lp_ctx, service->system_session_info, 0);
+	service->samdb = samdb_connect(service,
+				       service->task->event_ctx,
+				       lp_ctx,
+				       service->system_session_info,
+				       NULL,
+				       0);
 	if (!service->samdb) {
 		return WERR_DS_UNAVAILABLE;
 	}
@@ -266,7 +274,7 @@ static NTSTATUS drepl_replica_sync(struct irpc_message *msg,
 	} else {
 		cb_data = talloc_zero(msg, struct drepl_replica_sync_cb_data);
 		if (!cb_data) {
-			REPLICA_SYNC_FAIL("Not enought memory",
+			REPLICA_SYNC_FAIL("Not enough memory",
 					  WERR_DS_DRA_INTERNAL_ERROR);
 		}
 
@@ -339,7 +347,7 @@ static NTSTATUS drepl_replica_sync(struct irpc_message *msg,
 	 * schedule replication event to force
 	 * replication as soon as possible
 	 */
-	dreplsrv_pendingops_schedule(service, 0);
+	dreplsrv_pendingops_schedule_pull_now(service);
 
 done:
 	return NT_STATUS_OK;
@@ -486,6 +494,15 @@ static void dreplsrv_task_init(struct task_server *task)
 		return;
 	}
 
+	service->pending.im = tevent_create_immediate(service);
+	if (service->pending.im == NULL) {
+		task_server_terminate(task,
+				      "dreplsrv: Failed to create immediate "
+				      "task for future DsReplicaSync\n",
+				      true);
+		return;
+	}
+
 	/* if we are a RODC then we do not send DSReplicaSync*/
 	if (!service->am_rodc) {
 		service->notify.interval = lpcfg_parm_int(task->lp_ctx, NULL, "dreplsrv",
@@ -514,7 +531,12 @@ static void dreplsrv_task_init(struct task_server *task)
 /*
   register ourselves as a available server
 */
-NTSTATUS server_service_drepl_init(void)
+NTSTATUS server_service_drepl_init(TALLOC_CTX *ctx)
 {
-	return register_server_service("drepl", dreplsrv_task_init);
+	struct service_details details = {
+		.inhibit_fork_on_accept = true,
+		.inhibit_pre_fork = true,
+	};
+	return register_server_service(ctx, "drepl",  dreplsrv_task_init,
+				       &details);
 }

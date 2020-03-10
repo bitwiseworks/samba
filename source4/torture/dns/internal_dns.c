@@ -171,20 +171,19 @@ static struct torture_suite *internal_dns_suite(TALLOC_CTX *ctx)
 
 
 /* Silence silly compiler warning */
-NTSTATUS torture_internal_dns_init(void);
+NTSTATUS torture_internal_dns_init(TALLOC_CTX *);
 
 /**
  * DNS torture module initialization
  */
-NTSTATUS torture_internal_dns_init(void)
+NTSTATUS torture_internal_dns_init(TALLOC_CTX *ctx)
 {
 	struct torture_suite *suite;
-	TALLOC_CTX *mem_ctx = talloc_autofree_context();
 
 	/* register internal DNS torture test cases */
-	suite = internal_dns_suite(mem_ctx);
+	suite = internal_dns_suite(ctx);
 	if (!suite) return NT_STATUS_NO_MEMORY;
-	torture_register_suite(suite);
+	torture_register_suite(ctx, suite);
 
 	return NT_STATUS_OK;
 }

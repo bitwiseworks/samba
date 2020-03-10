@@ -45,6 +45,9 @@ interface messaging
 		MSG_PREFORK_CHILD_EVENT		= 0x0031,
 		MSG_PREFORK_PARENT_EVENT	= 0x0032,
 
+		MSG_REQ_RINGBUF_LOG		= 0x0033,
+		MSG_RINGBUF_LOG			= 0x0034,
+
 		/* nmbd messages */
 		MSG_FORCE_ELECTION		= 0x0101,
 		MSG_WINS_NEW_ENTRY		= 0x0102,
@@ -120,10 +123,11 @@ interface messaging
 		MSG_WINBIND_IP_DROPPED		= 0x040A,
 		MSG_WINBIND_DOMAIN_ONLINE	= 0x040B,
 		MSG_WINBIND_DOMAIN_OFFLINE	= 0x040C,
-		MSG_WINBIND_NEW_TRUSTED_DOMAIN	= 0x040D,
+		MSG_WINBIND_RELOAD_TRUSTED_DOMAINS = 0x040D,
+		MSG_WINBIND_DISCONNECT_DC       = 0x040E,
 
 		/* event messages */
-		MSG_DUMP_EVENT_LIST		= 0x0500,
+		/* MSG_DUMP_EVENT_LIST		= 0x0500, Obsoleted */
 
 		/* smbXsrv messages */
 		MSG_SMBXSRV_SESSION_CLOSE	= 0x0600,
@@ -135,6 +139,15 @@ interface messaging
 		MSG_IRPC                        = 0x0702,
 		MSG_NTVFS_OPLOCK_BREAK          = 0x0703,
 		MSG_DREPL_ALLOCATE_RID          = 0x0704,
+
+		/*
+		 * Audit, Authentication and Authorisation event
+		 * messages
+		 */
+		MSG_AUTH_LOG                    = 0x0800,
+		MSG_DSDB_LOG                    = 0x0801,
+		MSG_DSDB_PWD_LOG                = 0x0802,
+		MSG_GROUP_LOG                   = 0x0803,
 
 		/* dbwrap messages 4001-4999 (0x0FA0 - 0x1387) */
 		/* MSG_DBWRAP_TDB2_CHANGES		= 4001, */
@@ -153,6 +166,8 @@ interface messaging
 	/* messaging struct sent across the sockets and stored in the tdb */
 
 	typedef [public] struct {
+		[skip] messaging_rec *prev;
+		[skip] messaging_rec *next;
 		uint32 msg_version;
 		messaging_type msg_type;
 		server_id dest;
@@ -167,4 +182,10 @@ interface messaging
 		uint32 num_recs;
 		messaging_rec *recs[num_recs];
 	} messaging_reclog;
+
+        /* This allows this well known service name to be referenced in python and C */
+        const string AUTH_EVENT_NAME  = "auth_event";
+	const string DSDB_EVENT_NAME = "dsdb_event";
+	const string DSDB_PWD_EVENT_NAME   = "dsdb_password_event";
+	const string DSDB_GROUP_EVENT_NAME = "dsdb_group_event";
 }

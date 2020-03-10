@@ -21,6 +21,8 @@
 */
 
 #include "includes.h"
+#include "libsmb/dsgetdcname.h"
+#include "libsmb/namequery.h"
 #include "libads/sitename_cache.h"
 #include "../librpc/gen_ndr/ndr_netlogon.h"
 #include "libads/cldap.h"
@@ -35,11 +37,12 @@ struct ip_service_name {
 	const char *hostname;
 };
 
-static NTSTATUS make_dc_info_from_cldap_reply(TALLOC_CTX *mem_ctx,
-					      uint32_t flags,
-					      struct sockaddr_storage *ss,
-					      struct NETLOGON_SAM_LOGON_RESPONSE_EX *r,
-					      struct netr_DsRGetDCNameInfo **info);
+static NTSTATUS make_dc_info_from_cldap_reply(
+	TALLOC_CTX *mem_ctx,
+	uint32_t flags,
+	const struct sockaddr_storage *ss,
+	struct NETLOGON_SAM_LOGON_RESPONSE_EX *r,
+	struct netr_DsRGetDCNameInfo **info);
 
 /****************************************************************
 ****************************************************************/
@@ -154,7 +157,7 @@ static NTSTATUS dsgetdcname_cache_delete(TALLOC_CTX *mem_ctx,
 
 static NTSTATUS dsgetdcname_cache_store(TALLOC_CTX *mem_ctx,
 					const char *domain_name,
-					const DATA_BLOB *blob)
+					DATA_BLOB blob)
 {
 	time_t expire_time;
 	char *key;
@@ -200,7 +203,8 @@ static NTSTATUS store_cldap_reply(TALLOC_CTX *mem_ctx,
 	}
 
 	if (r->domain_name) {
-		status = dsgetdcname_cache_store(mem_ctx, r->domain_name, &blob);
+		status = dsgetdcname_cache_store(mem_ctx, r->domain_name,
+						 blob);
 		if (!NT_STATUS_IS_OK(status)) {
 			goto done;
 		}
@@ -209,7 +213,7 @@ static NTSTATUS store_cldap_reply(TALLOC_CTX *mem_ctx,
 		}
 	}
 	if (r->dns_domain) {
-		status = dsgetdcname_cache_store(mem_ctx, r->dns_domain, &blob);
+		status = dsgetdcname_cache_store(mem_ctx, r->dns_domain, blob);
 		if (!NT_STATUS_IS_OK(status)) {
 			goto done;
 		}
@@ -274,43 +278,6 @@ static uint32_t get_cldap_reply_server_flags(struct netlogon_samlogon_response *
 		default:
 			return 0;
 	}
-}
-
-/****************************************************************
-****************************************************************/
-
-#define RETURN_ON_FALSE(x) if (!(x)) return false;
-
-static bool check_cldap_reply_required_flags(uint32_t ret_flags,
-					     uint32_t req_flags)
-{
-	if (req_flags == 0) {
-		return true;
-	}
-
-	if (req_flags & DS_PDC_REQUIRED)
-		RETURN_ON_FALSE(ret_flags & NBT_SERVER_PDC);
-
-	if (req_flags & DS_GC_SERVER_REQUIRED)
-		RETURN_ON_FALSE(ret_flags & NBT_SERVER_GC);
-
-	if (req_flags & DS_ONLY_LDAP_NEEDED)
-		RETURN_ON_FALSE(ret_flags & NBT_SERVER_LDAP);
-
-	if ((req_flags & DS_DIRECTORY_SERVICE_REQUIRED) ||
-	    (req_flags & DS_DIRECTORY_SERVICE_PREFERRED))
-		RETURN_ON_FALSE(ret_flags & NBT_SERVER_DS);
-
-	if (req_flags & DS_KDC_REQUIRED)
-		RETURN_ON_FALSE(ret_flags & NBT_SERVER_KDC);
-
-	if (req_flags & DS_TIMESERV_REQUIRED)
-		RETURN_ON_FALSE(ret_flags & NBT_SERVER_TIMESERV);
-
-	if (req_flags & DS_WRITABLE_REQUIRED)
-		RETURN_ON_FALSE(ret_flags & NBT_SERVER_WRITABLE);
-
-	return true;
 }
 
 /****************************************************************
@@ -536,7 +503,8 @@ static NTSTATUS discover_dc_dns(TALLOC_CTX *mem_ctx,
 				struct ip_service_name **returned_dclist,
 				int *return_count)
 {
-	int i, j;
+	int i;
+	size_t j;
 	NTSTATUS status;
 	struct dns_rr_srv *dcs = NULL;
 	int numdcs = 0;
@@ -749,6 +717,8 @@ static void map_dc_and_domain_names(uint32_t flags,
 				*domain_p = domain_name;
 				break;
 			}
+
+			FALL_THROUGH;
 		case DS_RETURN_DNS_NAME:
 		default:
 			if (dns_dc_name && dns_domain_name &&
@@ -770,11 +740,12 @@ static void map_dc_and_domain_names(uint32_t flags,
 /****************************************************************
 ****************************************************************/
 
-static NTSTATUS make_dc_info_from_cldap_reply(TALLOC_CTX *mem_ctx,
-					      uint32_t flags,
-					      struct sockaddr_storage *ss,
-					      struct NETLOGON_SAM_LOGON_RESPONSE_EX *r,
-					      struct netr_DsRGetDCNameInfo **info)
+static NTSTATUS make_dc_info_from_cldap_reply(
+	TALLOC_CTX *mem_ctx,
+	uint32_t flags,
+	const struct sockaddr_storage *ss,
+	struct NETLOGON_SAM_LOGON_RESPONSE_EX *r,
+	struct netr_DsRGetDCNameInfo **info)
 {
 	const char *dc_hostname = NULL;
 	const char *dc_domain_name = NULL;
@@ -940,6 +911,8 @@ static NTSTATUS process_dc_netbios(TALLOC_CTX *mem_ctx,
 	uint32_t nt_version = NETLOGON_NT_VERSION_1 |
 			      NETLOGON_NT_VERSION_5 |
 			      NETLOGON_NT_VERSION_5EX_WITH_IP;
+	size_t len = strlen(lp_netbios_name());
+	char my_acct_name[len+2];
 
 	if (msg_ctx == NULL) {
 		return NT_STATUS_INVALID_PARAMETER;
@@ -950,6 +923,11 @@ static NTSTATUS process_dc_netbios(TALLOC_CTX *mem_ctx,
 	}
 
 	nt_version |= map_ds_flags_to_nt_version(flags);
+
+	snprintf(my_acct_name,
+		 sizeof(my_acct_name),
+		 "%s$",
+		 lp_netbios_name());
 
 	DEBUG(10,("process_dc_netbios\n"));
 
@@ -966,7 +944,7 @@ static NTSTATUS process_dc_netbios(TALLOC_CTX *mem_ctx,
 		}
 
 		status = nbt_getdc(msg_ctx, 10, &dclist[i].ss, domain_name,
-				   NULL, nt_version,
+				   NULL, my_acct_name, ACB_WSTRUST, nt_version,
 				   mem_ctx, &nt_version, &dc_name, &r);
 		if (NT_STATUS_IS_OK(status)) {
 			store_cache = true;

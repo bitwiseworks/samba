@@ -21,14 +21,14 @@
 #define __VFS_TRU64ACL_H__
 
 SMB_ACL_T tru64acl_sys_acl_get_file(vfs_handle_struct *handle,
-				    const char *path_p,
-				    SMB_ACL_TYPE_T type);
+				const struct smb_filename *smb_fname,
+				SMB_ACL_TYPE_T type);
 
 SMB_ACL_T tru64acl_sys_acl_get_fd(vfs_handle_struct *handle,
 				  files_struct *fsp);
 
 int tru64acl_sys_acl_set_file(vfs_handle_struct *handle,
-			      const char *name,
+			      const struct smb_filename *smb_fname,
 			      SMB_ACL_TYPE_T type,
 			      SMB_ACL_T theacl);
 
@@ -37,7 +37,7 @@ int tru64acl_sys_acl_set_fd(vfs_handle_struct *handle,
 			    SMB_ACL_T theacl);
 
 int tru64acl_sys_acl_delete_def_file(vfs_handle_struct *handle,
-				     const char *path);
+				const struct smb_filename *smb_fname);
 
 NTSTATUS vfs_tru64acl_init(void);
 

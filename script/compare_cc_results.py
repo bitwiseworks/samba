@@ -4,12 +4,19 @@
 # Compare the results of native and cross-compiled configure tests
 #
 
+from __future__ import print_function
 import sys
 import difflib
 
-exceptions = ['BUILD_DIRECTORY', 'CROSS_COMPILE', 'CROSS_ANSWERS',
-              'CROSS_EXECUTE', 'SELFTEST_PREFIX', 'LIBSOCKET_WRAPPER_SO_PATH',
-              'defines' ]
+exceptions = [
+    'BUILD_DIRECTORY', 'SELFTEST_PREFIX', 'defines',
+    'CROSS_COMPILE', 'CROSS_ANSWERS', 'CROSS_EXECUTE',
+    'LIBSOCKET_WRAPPER_SO_PATH',
+    'LIBNSS_WRAPPER_SO_PATH',
+    'LIBPAM_WRAPPER_SO_PATH',
+    'LIBUID_WRAPPER_SO_PATH',
+    'LIBRESOLV_WRAPPER_SO_PATH',
+]
 
 base_lines = list()
 base_fname = ''
@@ -29,7 +36,7 @@ for fname in sys.argv[1:]:
     if base_fname:
         diff = list(difflib.unified_diff(base_lines,lines,base_fname,fname))
         if diff:
-            print 'configuration files %s and %s do not match' % (base_fname, fname)
+            print('configuration files %s and %s do not match' % (base_fname, fname))
             for l in diff:
                 sys.stdout.write(l)
             found_diff = True

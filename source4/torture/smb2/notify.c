@@ -1878,7 +1878,7 @@ static bool torture_smb2_notify_tree(struct torture_context *torture,
 		talloc_free(path);
 	}
 
-	/* give a bit of time for the events to propogate */
+	/* give a bit of time for the events to propagate */
 	tv = timeval_current();
 
 	do {
@@ -1904,7 +1904,7 @@ static bool torture_smb2_notify_tree(struct torture_context *torture,
 		}
 	} while (!all_done && timeval_elapsed(&tv) < 20);
 
-	torture_comment(torture, "took %.4f seconds to propogate all events\n",
+	torture_comment(torture, "took %.4f seconds to propagate all events\n",
 			timeval_elapsed(&tv));
 
 	for (i=0;i<ARRAY_SIZE(dirs);i++) {
@@ -2502,9 +2502,9 @@ done:
 /*
    basic testing of SMB2 change notify
 */
-struct torture_suite *torture_smb2_notify_init(void)
+struct torture_suite *torture_smb2_notify_init(TALLOC_CTX *ctx)
 {
-	struct torture_suite *suite = torture_suite_create(talloc_autofree_context(), "notify");
+	struct torture_suite *suite = torture_suite_create(ctx, "notify");
 
 	torture_suite_add_1smb2_test(suite, "valid-req", test_valid_request);
 	torture_suite_add_1smb2_test(suite, "tcon", torture_smb2_notify_tcon);
@@ -2541,9 +2541,9 @@ struct torture_suite *torture_smb2_notify_init(void)
 /*
    basic testing of SMB2 change notify
 */
-struct torture_suite *torture_smb2_notify_inotify_init(void)
+struct torture_suite *torture_smb2_notify_inotify_init(TALLOC_CTX *ctx)
 {
-	struct torture_suite *suite = torture_suite_create(talloc_autofree_context(), "notify-inotify");
+	struct torture_suite *suite = torture_suite_create(ctx, "notify-inotify");
 
 	suite->description = talloc_strdup(suite, "SMB2-NOTIFY tests that use inotify");
 

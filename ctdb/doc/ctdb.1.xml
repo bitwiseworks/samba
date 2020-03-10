@@ -210,17 +210,6 @@
 	</para>
       </listitem>
       </varlistentry>
-
-      <varlistentry><term>--socket=<parameter>FILENAME</parameter></term>
-      <listitem>
-	<para>
-	  Specify that FILENAME is the name of the Unix domain
-	  socket to use when connecting to the local CTDB
-	  daemon. The default is
-	  <filename>/usr/local/var/run/ctdb/ctdbd.socket</filename>.
-	</para>
-      </listitem>
-      </varlistentry>
     </variablelist>
   </refsect1>
 
@@ -292,10 +281,9 @@
 	<title>Virtual Node Number (VNN) map</title>
 	<para>
 	  Consists of the number of virtual nodes and mapping from
-	  virtual node numbers to physical node numbers.  Virtual
-	  nodes host CTDB databases.  Only nodes that are
-	  participating in the VNN map can become lmaster or dmaster
-	  for database records.
+	  virtual node numbers to physical node numbers.  Only nodes
+	  that are participating in the VNN map can become lmaster for
+	  database records.
 	</para>
       </refsect3>
 
@@ -621,43 +609,36 @@ Interface[2]: Name:eth5 Link:up References:2 (active)
 	status of various events.
       </para>
 
+      <para>
+	The commands below require a component to be specified.  In
+	the current version the only valid component is
+	<literal>legacy</literal>.
+      </para>
+
       <variablelist>
 	<varlistentry>
-	  <term>run <parameter>EVENT</parameter> <parameter>TIMEOUT</parameter> <optional><parameter>ARGUMENTS</parameter></optional> </term>
+	  <term>run <parameter>TIMEOUT</parameter> <parameter>COMPONENT</parameter> <parameter>EVENT</parameter> <optional><parameter>ARGUMENTS</parameter></optional> </term>
 	  <listitem>
 	    <para>
 	     This command can be used to manually run specified EVENT
-	     with optional ARGUMENTS.  The event will be allowed to run
-	     a maximum of TIMEOUT seconds.  If TIMEOUT is 0, then there
-	     is no time limit for running the event.
+	     in COMPONENT with optional ARGUMENTS.  The event will be
+	     allowed to run a maximum of TIMEOUT seconds.  If TIMEOUT
+	     is 0, then there is no time limit for running the event.
 	    </para>
 	  </listitem>
 	</varlistentry>
 
 	<varlistentry>
-	  <term>status <optional><parameter>EVENT</parameter></optional> <optional>lastrun|lastpass|lastfail</optional></term>
+	  <term>status <parameter>COMPONENT</parameter> <parameter>EVENT</parameter></term>
 	  <listitem>
 	    <para>
 	      This command displays the last execution status of the
-	      specified EVENT.  If no event is specified, then the status
-	      of last executed monitor event will be displayed.
-	    </para>
-	    <para>
-	      To see the last successful execution of the event, lastpass
-	      can be specified. Similarly lastfail can be specified
-	      to see the last unsuccessful execution of the event.
-	      The optional lastrun can be specified to query the last
-	      execution of the event.
+	      specified EVENT in COMPONENT.
 	    </para>
 	    <para>
 	      The command will terminate with the exit status
 	      corresponding to the overall status of event that is
-	      displayed.  If lastpass is specified, then the command will
-	      always terminate with 0.	If lastfail is specified then the
-	      command will always terminate with non-zero exit status.
-	      If lastrun is specified, then the command will terminate
-	      with 0 or not depending on if the last execution of the
-	      event was successful or not.
+	      displayed.
 	    </para>
 	    <para>
 	      The output is the list of event scripts executed.
@@ -672,7 +653,6 @@ Interface[2]: Name:eth5 Link:up References:2 (active)
 01.reclock           OK         0.013 Sat Dec 17 19:39:11 2016
 05.system            OK         0.029 Sat Dec 17 19:39:11 2016
 06.nfs               OK         0.014 Sat Dec 17 19:39:11 2016
-10.external          DISABLED  
 10.interface         OK         0.037 Sat Dec 17 19:39:11 2016
 11.natgw             OK         0.011 Sat Dec 17 19:39:11 2016
 11.routing           OK         0.007 Sat Dec 17 19:39:11 2016
@@ -686,60 +666,67 @@ Interface[2]: Name:eth5 Link:up References:2 (active)
 60.nfs               OK         0.376 Sat Dec 17 19:39:12 2016
 70.iscsi             OK         0.009 Sat Dec 17 19:39:12 2016
 91.lvs               OK         0.007 Sat Dec 17 19:39:12 2016
-99.timeout           OK         0.007 Sat Dec 17 19:39:12 2016
 	    </screen>
 	  </listitem>
 	</varlistentry>
 
 	<varlistentry>
-	  <term>script list</term>
+	  <term>script list <parameter>COMPONENT</parameter></term>
 	  <listitem>
 	    <para>
-	      List the available event scripts.
+	      List the available event scripts in COMPONENT.  Enabled
+	      scripts are flagged with a '*'.
+	    </para>
+	    <para>
+	      Generally, event scripts are provided by CTDB.  However,
+	      local or 3rd party event scripts may also be available.
+	      These are shown in a separate section after those
+	      provided by CTDB.
 	    </para>
 	    <para>
 	      Example output:
 	    </para>
 	    <screen>
-00.ctdb             
-01.reclock          
-05.system           
-06.nfs              
-10.external          DISABLED
-10.interface        
-11.natgw            
-11.routing          
-13.per_ip_routing   
-20.multipathd       
-31.clamd            
-40.vsftpd           
-41.httpd            
-49.winbind          
-50.samba            
-60.nfs              
-70.iscsi            
-91.lvs              
-99.timeout          
+* 00.ctdb             
+* 01.reclock          
+* 05.system           
+* 06.nfs              
+* 10.interface        
+  11.natgw            
+  11.routing          
+  13.per_ip_routing   
+  20.multipathd       
+  31.clamd            
+  40.vsftpd           
+  41.httpd            
+* 49.winbind          
+* 50.samba            
+* 60.nfs              
+  70.iscsi            
+  91.lvs              
+
+* 02.local            
 	    </screen>
 	  </listitem>
 	</varlistentry>
 
 	<varlistentry>
-	  <term>script enable <parameter>SCRIPT</parameter></term>
+	  <term>script enable <parameter>COMPONENT</parameter> <parameter>SCRIPT</parameter></term>
 	  <listitem>
 	    <para>
-	      Enable the specified event SCRIPT.  Only enabled scripts will be
-	      executed when running any event.
+	      Enable the specified event SCRIPT in COMPONENT.  Only
+	      enabled scripts will be executed when running any event.
 	    </para>
 	  </listitem>
 	</varlistentry>
 
 	<varlistentry>
-	  <term>script disable <parameter>SCRIPT</parameter></term>
+	  <term>script disable <parameter>COMPONENT</parameter> <parameter>SCRIPT</parameter></term>
 	  <listitem>
 	    <para>
-	      Disable the specified event SCRIPT.  This will prevent the script
-	      from executing when running any event.
+	      Disable the specified event SCRIPT in COMPONENT.  This
+	      will prevent the script from executing when running any
+	      event.
 	    </para>
 	  </listitem>
 	</varlistentry>
@@ -767,7 +754,6 @@ Interface[2]: Name:eth5 Link:up References:2 (active)
 01.reclock           OK         0.010 Sat Dec 17 19:40:46 2016
 05.system            OK         0.030 Sat Dec 17 19:40:46 2016
 06.nfs               OK         0.014 Sat Dec 17 19:40:46 2016
-10.external          DISABLED  
 10.interface         OK         0.041 Sat Dec 17 19:40:46 2016
 11.natgw             OK         0.008 Sat Dec 17 19:40:46 2016
 11.routing           OK         0.007 Sat Dec 17 19:40:46 2016
@@ -814,7 +800,6 @@ DatabaseMaxDead         = 5
 RerecoveryTimeout       = 10
 EnableBans              = 1
 NoIPFailback            = 0
-DisableIPFailover       = 0
 VerboseMemoryNames      = 0
 RecdPingTimeout         = 60
 RecdFailCount           = 10
@@ -842,8 +827,6 @@ DBRecordCountWarn       = 100000
 DBRecordSizeWarn        = 10000000
 DBSizeWarn              = 100000000
 PullDBPreallocation     = 10485760
-NoIPHostOnAllDisabled   = 0
-TDBMutexEnabled         = 0
 LockProcessesPerDB      = 200
 RecBufferSizeLimit      = 1000000
 QueueBufferSize         = 1024
@@ -1363,14 +1346,22 @@ DB Statistics: locking.tdb
     <refsect2>
       <title>getdbmap</title>
       <para>
-	This command lists all clustered TDB databases that the CTDB daemon has attached to. Some databases are flagged as PERSISTENT, this means that the database stores data persistently and the data will remain across reboots. One example of such a database is secrets.tdb where information about how the cluster was joined to the domain is stored.
+	This command lists all clustered TDB databases that the CTDB
+	daemon has attached to. Some databases are flagged as PERSISTENT,
+	this means that the database stores data persistently and the
+	data will remain across reboots. One example of such a database
+	is secrets.tdb where information about how the cluster was joined
+	to the domain is stored.  Some database are flagged as REPLICATED,
+	this means that the data in that database is replicated across all
+	the nodes.  But the data will not remain across reboots.  This
+	type of database is used by CTDB to store it's internal state.
       </para>
       <para>
-	If a PERSISTENT database is not in a healthy state the database is
-	flagged as UNHEALTHY. If there's at least one completely healthy node running in
-	the cluster, it's possible that the content is restored by a recovery
-	run automaticly. Otherwise an administrator needs to analyze the
-	problem.
+	If a PERSISTENT database is not in a healthy state the database
+	is flagged as UNHEALTHY. If there's at least one completely
+	healthy node running in the cluster, it's possible that the
+	content is restored by a recovery run automaticly. Otherwise an
+	administrator needs to analyze the problem.
       </para>
       <para>
 	See also "ctdb getdbstatus", "ctdb backupdb", "ctdb restoredb",
@@ -1378,7 +1369,10 @@ DB Statistics: locking.tdb
 	and (if samba or tdb-utils are installed) "tdbtool check".
       </para>
       <para>
-	Most databases are not persistent and only store the state information that the currently running samba daemons need. These databases are always wiped when ctdb/samba starts and when a node is rebooted.
+	Most databases are not persistent and only store the state
+	information that the currently running samba daemons need. These
+	databases are always wiped when ctdb/samba starts and when a
+	node is rebooted.
       </para>
 
       <refsect3>
@@ -1590,7 +1584,7 @@ RUNNING
       </para>
       <para>
 	TCP tickles are useful to "tickle" clients after a IP failover has
-	occured since this will make the client immediately recognize the
+	occurred since this will make the client immediately recognize the
 	TCP connection has been disrupted and that the client will need
 	to reestablish. This greatly speeds up the time it takes for a client
 	to detect and reestablish after an IP failover in the ctdb cluster.
@@ -1670,9 +1664,13 @@ RUNNING
     </refsect2>
 
     <refsect2>
-      <title>process-exists <parameter>PID</parameter></title>
+      <title>process-exists <parameter>PID</parameter> <parameter>[SRVID]</parameter></title>
       <para>
-	This command checks if a specific process exists on the CTDB host. This is mainly used by Samba to check if remote instances of samba are still running or not.
+	This command checks if a specific process exists on the CTDB
+	host. This is mainly used by Samba to check if remote instances
+	of samba are still running or not.  When the optional SRVID
+	argument is specified, the command check if a specific process
+	exists on the CTDB host and has registered for specified SRVID.
       </para>
     </refsect2>
 
@@ -1746,16 +1744,7 @@ HEALTH: NO-HEALTHY-NODES - ERROR - Backup of corrupted TDB in '/usr/local/var/li
     </refsect2>
 
     <refsect2>
-      <title>getmonmode</title>
-      <para>
-	This command prints the monitoring mode of a node.  This
-	indicates when CTDB is monitoring services on the node. The
-	monitoring mode is either ENABLED or DISABLED.
-      </para>
-    </refsect2>
-
-    <refsect2>
-      <title>attach <parameter>DBNAME</parameter> [persistent]</title>
+      <title>attach <parameter>DBNAME</parameter> [persistent|replicated]</title>
       <para>
 	Create a new CTDB database called DBNAME and attach to it on
 	all nodes.
@@ -1823,32 +1812,12 @@ HEALTH: NO-HEALTHY-NODES - ERROR - Backup of corrupted TDB in '/usr/local/var/li
       </para>
     </refsect2>
 
-    <refsect2>
-      <title>check_srvids <parameter>SRVID</parameter> ...</title>
-      <para>
-	This command checks whether a set of srvid message ports are
-	registered on the node or not. The command takes a list of
-	values to check.
-      </para>
-      <refsect3>
-	<title>Example</title>
-	<screen>
-# ctdb check_srvids 1 2 3 14765
-Server id 0:1 does not exist
-Server id 0:2 does not exist
-Server id 0:3 does not exist
-Server id 0:14765 exists
-	</screen>
-      </refsect3>
-    </refsect2>
-
   </refsect1>
 
-  <!-- UNDOCUMENTED: showban stats disablemonitor enablemonitor
+  <!-- UNDOCUMENTED: stats
        isnotrecmaster addtickle deltickle
-       msglisten msgsend
        tfetch tstore readkey writekey
-       checktcpport getdbseqnum ipiface
+       checktcpport getdbseqnum
   -->
 
   <refsect1>

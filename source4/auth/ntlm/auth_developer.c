@@ -24,7 +24,10 @@
 #include "auth/ntlm/auth_proto.h"
 #include "libcli/security/security.h"
 
-_PUBLIC_ NTSTATUS auth4_developer_init(void);
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_AUTH
+
+_PUBLIC_ NTSTATUS auth4_developer_init(TALLOC_CTX *);
 
 static NTSTATUS name_to_ntstatus_want_check(struct auth_method_context *ctx,
 			      		    TALLOC_CTX *mem_ctx,
@@ -49,7 +52,8 @@ static NTSTATUS name_to_ntstatus_want_check(struct auth_method_context *ctx,
 static NTSTATUS name_to_ntstatus_check_password(struct auth_method_context *ctx,
 			      		        TALLOC_CTX *mem_ctx,
 					        const struct auth_usersupplied_info *user_info, 
-					        struct auth_user_info_dc **_user_info_dc)
+					        struct auth_user_info_dc **_user_info_dc,
+						bool *authoritative)
 {
 	NTSTATUS nt_status;
 	struct auth_user_info_dc *user_info_dc;
@@ -137,11 +141,11 @@ static const struct auth_operations name_to_ntstatus_auth_ops = {
 	.check_password	= name_to_ntstatus_check_password
 };
 
-_PUBLIC_ NTSTATUS auth4_developer_init(void)
+_PUBLIC_ NTSTATUS auth4_developer_init(TALLOC_CTX *ctx)
 {
 	NTSTATUS ret;
 
-	ret = auth_register(&name_to_ntstatus_auth_ops);
+	ret = auth_register(ctx, &name_to_ntstatus_auth_ops);
 	if (!NT_STATUS_IS_OK(ret)) {
 		DEBUG(0,("Failed to register 'name_to_ntstatus' auth backend!\n"));
 		return ret;

@@ -588,6 +588,9 @@ _PUBLIC_ enum ndr_err_code ndr_pull_charset(struct ndr_pull *ndr, int ndr_flags,
 		chset = CH_UTF16BE;
 	}
 
+	if ((byte_mul != 0) && (length > UINT32_MAX/byte_mul)) {
+		return ndr_pull_error(ndr, NDR_ERR_BUFSIZE, "length overflow");
+	}
 	NDR_PULL_NEED_BYTES(ndr, length*byte_mul);
 
 	if (!convert_string_talloc(ndr->current_mem_ctx, chset, CH_UNIX,
@@ -636,18 +639,26 @@ _PUBLIC_ enum ndr_err_code ndr_pull_charset_to_null(struct ndr_pull *ndr, int nd
 
 _PUBLIC_ enum ndr_err_code ndr_push_charset(struct ndr_push *ndr, int ndr_flags, const char *var, uint32_t length, uint8_t byte_mul, charset_t chset)
 {
-	ssize_t required;
+	size_t required;
 
 	if (NDR_BE(ndr) && chset == CH_UTF16) {
 		chset = CH_UTF16BE;
 	}
 
+	if ((byte_mul != 0) && (length > SIZE_MAX/byte_mul)) {
+		return ndr_push_error(ndr, NDR_ERR_LENGTH, "length overflow");
+	}
 	required = byte_mul * length;
 	
 	NDR_PUSH_NEED_BYTES(ndr, required);
 
 	if (required) {
 		size_t size = 0;
+
+		if (var == NULL) {
+			return ndr_push_error(ndr, NDR_ERR_INVALID_POINTER, "NULL [ref] pointer");
+		}
+
 		if (!convert_string(CH_UNIX, chset,
 			     var, strlen(var),
 			     ndr->data+ndr->offset, required, &size)) {
@@ -664,6 +675,18 @@ _PUBLIC_ enum ndr_err_code ndr_push_charset(struct ndr_push *ndr, int ndr_flags,
 	ndr->offset += required;
 
 	return NDR_ERR_SUCCESS;
+}
+
+_PUBLIC_ enum ndr_err_code ndr_push_charset_to_null(struct ndr_push *ndr, int ndr_flags, const char *var, uint32_t length, uint8_t byte_mul, charset_t chset)
+{
+	const char *str = var;
+
+	if (str == NULL) {
+		str = "";
+		length = 1;
+	}
+
+	return ndr_push_charset(ndr, ndr_flags, str, length, byte_mul, chset);
 }
 
 /* Return number of elements in a string in the specified charset */

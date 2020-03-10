@@ -78,8 +78,8 @@ struct shadow_copy2_private {
 	char *shadow_cwd; /* Absolute $cwd path. */
 	/* Absolute connectpath - can vary depending on $cwd. */
 	char *shadow_connectpath;
-	/* malloc'ed realpath return. */
-	char *shadow_realpath;
+	/* talloc'ed realpath return. */
+	struct smb_filename *shadow_realpath;
 };
 
 static int shadow_copy2_get_shadow_copy_data(
@@ -1150,19 +1150,28 @@ static int shadow_copy2_rename(vfs_handle_struct *handle,
 }
 
 static int shadow_copy2_symlink(vfs_handle_struct *handle,
-				const char *oldname, const char *newname)
+			const char *link_contents,
+			const struct smb_filename *new_smb_fname)
 {
 	time_t timestamp_old = 0;
 	time_t timestamp_new = 0;
 	char *snappath_old = NULL;
 	char *snappath_new = NULL;
 
-	if (!shadow_copy2_strip_snapshot_internal(talloc_tos(), handle, oldname,
-					 &timestamp_old, NULL, &snappath_old)) {
+	if (!shadow_copy2_strip_snapshot_internal(talloc_tos(),
+				handle,
+				link_contents,
+				&timestamp_old,
+				NULL,
+				&snappath_old)) {
 		return -1;
 	}
-	if (!shadow_copy2_strip_snapshot_internal(talloc_tos(), handle, newname,
-					 &timestamp_new, NULL, &snappath_new)) {
+	if (!shadow_copy2_strip_snapshot_internal(talloc_tos(),
+				handle,
+				new_smb_fname->base_name,
+				&timestamp_new,
+				NULL,
+				&snappath_new)) {
 		return -1;
 	}
 	if ((timestamp_old != 0) || (timestamp_new != 0)) {
@@ -1176,23 +1185,32 @@ static int shadow_copy2_symlink(vfs_handle_struct *handle,
 		errno = EROFS;
 		return -1;
 	}
-	return SMB_VFS_NEXT_SYMLINK(handle, oldname, newname);
+	return SMB_VFS_NEXT_SYMLINK(handle, link_contents, new_smb_fname);
 }
 
 static int shadow_copy2_link(vfs_handle_struct *handle,
-			     const char *oldname, const char *newname)
+			const struct smb_filename *old_smb_fname,
+			const struct smb_filename *new_smb_fname)
 {
 	time_t timestamp_old = 0;
 	time_t timestamp_new = 0;
 	char *snappath_old = NULL;
 	char *snappath_new = NULL;
 
-	if (!shadow_copy2_strip_snapshot_internal(talloc_tos(), handle, oldname,
-					 &timestamp_old, NULL, &snappath_old)) {
+	if (!shadow_copy2_strip_snapshot_internal(talloc_tos(),
+				handle,
+				old_smb_fname->base_name,
+				&timestamp_old,
+				NULL,
+				&snappath_old)) {
 		return -1;
 	}
-	if (!shadow_copy2_strip_snapshot_internal(talloc_tos(), handle, newname,
-					 &timestamp_new, NULL, &snappath_new)) {
+	if (!shadow_copy2_strip_snapshot_internal(talloc_tos(),
+				handle,
+				new_smb_fname->base_name,
+				&timestamp_new,
+				NULL,
+				&snappath_new)) {
 		return -1;
 	}
 	if ((timestamp_old != 0) || (timestamp_new != 0)) {
@@ -1206,7 +1224,7 @@ static int shadow_copy2_link(vfs_handle_struct *handle,
 		errno = EROFS;
 		return -1;
 	}
-	return SMB_VFS_NEXT_LINK(handle, oldname, newname);
+	return SMB_VFS_NEXT_LINK(handle, old_smb_fname, new_smb_fname);
 }
 
 static int shadow_copy2_stat(vfs_handle_struct *handle,
@@ -1505,19 +1523,19 @@ static void store_cwd_data(vfs_handle_struct *handle,
 				const char *connectpath)
 {
 	struct shadow_copy2_private *priv = NULL;
-	char *cwd = NULL;
+	struct smb_filename *cwd_fname = NULL;
 
 	SMB_VFS_HANDLE_GET_DATA(handle, priv, struct shadow_copy2_private,
 				return);
 
 	TALLOC_FREE(priv->shadow_cwd);
-	cwd = SMB_VFS_NEXT_GETWD(handle);
-	if (cwd == NULL) {
+	cwd_fname = SMB_VFS_NEXT_GETWD(handle, talloc_tos());
+	if (cwd_fname == NULL) {
 		smb_panic("getwd failed\n");
 	}
-	DBG_DEBUG("shadow cwd = %s\n", cwd);
-	priv->shadow_cwd = talloc_strdup(priv, cwd);
-	SAFE_FREE(cwd);
+	DBG_DEBUG("shadow cwd = %s\n", cwd_fname->base_name);
+	priv->shadow_cwd = talloc_strdup(priv, cwd_fname->base_name);
+	TALLOC_FREE(cwd_fname);
 	if (priv->shadow_cwd == NULL) {
 		smb_panic("talloc failed\n");
 	}
@@ -1532,7 +1550,7 @@ static void store_cwd_data(vfs_handle_struct *handle,
 }
 
 static int shadow_copy2_chdir(vfs_handle_struct *handle,
-			      const char *fname)
+			       const struct smb_filename *smb_fname)
 {
 	time_t timestamp = 0;
 	char *stripped = NULL;
@@ -1541,9 +1559,14 @@ static int shadow_copy2_chdir(vfs_handle_struct *handle,
 	int saved_errno = 0;
 	char *conv = NULL;
 	size_t rootpath_len = 0;
+	struct smb_filename *conv_smb_fname = NULL;
 
-	if (!shadow_copy2_strip_snapshot_internal(talloc_tos(), handle, fname,
-					&timestamp, &stripped, &snappath)) {
+	if (!shadow_copy2_strip_snapshot_internal(talloc_tos(),
+					handle,
+					smb_fname->base_name,
+					&timestamp,
+					&stripped,
+					&snappath)) {
 		return -1;
 	}
 	if (stripped != NULL) {
@@ -1556,10 +1579,22 @@ static int shadow_copy2_chdir(vfs_handle_struct *handle,
 		if (conv == NULL) {
 			return -1;
 		}
-		fname = conv;
+		conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	} else {
+		conv_smb_fname = cp_smb_filename(talloc_tos(), smb_fname);
 	}
 
-	ret = SMB_VFS_NEXT_CHDIR(handle, fname);
+	if (conv_smb_fname == NULL) {
+		TALLOC_FREE(conv);
+		errno = ENOMEM;
+		return -1;
+	}
+
+	ret = SMB_VFS_NEXT_CHDIR(handle, conv_smb_fname);
 	if (ret == -1) {
 		saved_errno = errno;
 	}
@@ -1576,6 +1611,7 @@ static int shadow_copy2_chdir(vfs_handle_struct *handle,
 
 	TALLOC_FREE(stripped);
 	TALLOC_FREE(conv);
+	TALLOC_FREE(conv_smb_fname);
 
 	if (saved_errno != 0) {
 		errno = saved_errno;
@@ -1624,24 +1660,34 @@ static int shadow_copy2_ntimes(vfs_handle_struct *handle,
 }
 
 static int shadow_copy2_readlink(vfs_handle_struct *handle,
-				 const char *fname, char *buf, size_t bufsiz)
+				const struct smb_filename *smb_fname,
+				char *buf,
+				size_t bufsiz)
 {
 	time_t timestamp = 0;
 	char *stripped = NULL;
 	int saved_errno = 0;
 	int ret;
-	char *conv;
+	struct smb_filename *conv = NULL;
 
-	if (!shadow_copy2_strip_snapshot(talloc_tos(), handle, fname,
+	if (!shadow_copy2_strip_snapshot(talloc_tos(), handle,
+					 smb_fname->base_name,
 					 &timestamp, &stripped)) {
 		return -1;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_READLINK(handle, fname, buf, bufsiz);
+		return SMB_VFS_NEXT_READLINK(handle, smb_fname, buf, bufsiz);
 	}
-	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
+	conv = cp_smb_filename(talloc_tos(), smb_fname);
 	if (conv == NULL) {
+		TALLOC_FREE(stripped);
+		errno = ENOMEM;
+		return -1;
+	}
+	conv->base_name = shadow_copy2_convert(
+		conv, handle, stripped, timestamp);
+	TALLOC_FREE(stripped);
+	if (conv->base_name == NULL) {
 		return -1;
 	}
 	ret = SMB_VFS_NEXT_READLINK(handle, conv, buf, bufsiz);
@@ -1656,24 +1702,33 @@ static int shadow_copy2_readlink(vfs_handle_struct *handle,
 }
 
 static int shadow_copy2_mknod(vfs_handle_struct *handle,
-			      const char *fname, mode_t mode, SMB_DEV_T dev)
+				const struct smb_filename *smb_fname,
+				mode_t mode,
+				SMB_DEV_T dev)
 {
 	time_t timestamp = 0;
 	char *stripped = NULL;
 	int saved_errno = 0;
 	int ret;
-	char *conv;
+	struct smb_filename *conv = NULL;
 
-	if (!shadow_copy2_strip_snapshot(talloc_tos(), handle, fname,
+	if (!shadow_copy2_strip_snapshot(talloc_tos(), handle,
+					 smb_fname->base_name,
 					 &timestamp, &stripped)) {
 		return -1;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_MKNOD(handle, fname, mode, dev);
+		return SMB_VFS_NEXT_MKNOD(handle, smb_fname, mode, dev);
 	}
-	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
+	conv = cp_smb_filename(talloc_tos(), smb_fname);
 	if (conv == NULL) {
+		errno = ENOMEM;
+		return -1;
+	}
+	conv->base_name = shadow_copy2_convert(
+		conv, handle, stripped, timestamp);
+	TALLOC_FREE(stripped);
+	if (conv->base_name == NULL) {
 		return -1;
 	}
 	ret = SMB_VFS_NEXT_MKNOD(handle, conv, mode, dev);
@@ -1687,40 +1742,47 @@ static int shadow_copy2_mknod(vfs_handle_struct *handle,
 	return ret;
 }
 
-static char *shadow_copy2_realpath(vfs_handle_struct *handle,
-				   const char *fname)
+static struct smb_filename *shadow_copy2_realpath(vfs_handle_struct *handle,
+				TALLOC_CTX *ctx,
+				const struct smb_filename *smb_fname)
 {
 	time_t timestamp = 0;
 	char *stripped = NULL;
-	char *tmp = NULL;
-	char *result = NULL;
+	struct smb_filename *result_fname = NULL;
+	struct smb_filename *conv_fname = NULL;
 	int saved_errno = 0;
 
-	if (!shadow_copy2_strip_snapshot(talloc_tos(), handle, fname,
-					 &timestamp, &stripped)) {
+	if (!shadow_copy2_strip_snapshot(talloc_tos(), handle,
+				smb_fname->base_name,
+				&timestamp, &stripped)) {
 		goto done;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_REALPATH(handle, fname);
+		return SMB_VFS_NEXT_REALPATH(handle, ctx, smb_fname);
 	}
 
-	tmp = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
-	if (tmp == NULL) {
+	conv_fname = cp_smb_filename(talloc_tos(), smb_fname);
+	if (conv_fname == NULL) {
+		goto done;
+	}
+	conv_fname->base_name = shadow_copy2_convert(
+		conv_fname, handle, stripped, timestamp);
+	if (conv_fname->base_name == NULL) {
 		goto done;
 	}
 
-	result = SMB_VFS_NEXT_REALPATH(handle, tmp);
+	result_fname = SMB_VFS_NEXT_REALPATH(handle, ctx, conv_fname);
 
 done:
-	if (result == NULL) {
+	if (result_fname == NULL) {
 		saved_errno = errno;
 	}
-	TALLOC_FREE(tmp);
+	TALLOC_FREE(conv_fname);
 	TALLOC_FREE(stripped);
 	if (saved_errno != 0) {
 		errno = saved_errno;
 	}
-	return result;
+	return result_fname;
 }
 
 /**
@@ -2300,7 +2362,8 @@ static int shadow_copy2_rmdir(vfs_handle_struct *handle,
 	return ret;
 }
 
-static int shadow_copy2_chflags(vfs_handle_struct *handle, const char *fname,
+static int shadow_copy2_chflags(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
 				unsigned int flags)
 {
 	time_t timestamp = 0;
@@ -2308,184 +2371,17 @@ static int shadow_copy2_chflags(vfs_handle_struct *handle, const char *fname,
 	int saved_errno = 0;
 	int ret;
 	char *conv;
-
-	if (!shadow_copy2_strip_snapshot(talloc_tos(), handle, fname,
-					 &timestamp, &stripped)) {
-		return -1;
-	}
-	if (timestamp == 0) {
-		return SMB_VFS_NEXT_CHFLAGS(handle, fname, flags);
-	}
-	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
-	if (conv == NULL) {
-		return -1;
-	}
-	ret = SMB_VFS_NEXT_CHFLAGS(handle, conv, flags);
-	if (ret == -1) {
-		saved_errno = errno;
-	}
-	TALLOC_FREE(conv);
-	if (saved_errno != 0) {
-		errno = saved_errno;
-	}
-	return ret;
-}
-
-static ssize_t shadow_copy2_getxattr(vfs_handle_struct *handle,
-				     const char *fname, const char *aname,
-				     void *value, size_t size)
-{
-	time_t timestamp = 0;
-	char *stripped = NULL;
-	ssize_t ret;
-	int saved_errno = 0;
-	char *conv;
-
-	if (!shadow_copy2_strip_snapshot(talloc_tos(), handle, fname,
-					 &timestamp, &stripped)) {
-		return -1;
-	}
-	if (timestamp == 0) {
-		return SMB_VFS_NEXT_GETXATTR(handle, fname, aname, value,
-					     size);
-	}
-	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
-	if (conv == NULL) {
-		return -1;
-	}
-	ret = SMB_VFS_NEXT_GETXATTR(handle, conv, aname, value, size);
-	if (ret == -1) {
-		saved_errno = errno;
-	}
-	TALLOC_FREE(conv);
-	if (saved_errno != 0) {
-		errno = saved_errno;
-	}
-	return ret;
-}
-
-static ssize_t shadow_copy2_listxattr(struct vfs_handle_struct *handle,
-				      const char *fname,
-				      char *list, size_t size)
-{
-	time_t timestamp = 0;
-	char *stripped = NULL;
-	ssize_t ret;
-	int saved_errno = 0;
-	char *conv;
-
-	if (!shadow_copy2_strip_snapshot(talloc_tos(), handle, fname,
-					 &timestamp, &stripped)) {
-		return -1;
-	}
-	if (timestamp == 0) {
-		return SMB_VFS_NEXT_LISTXATTR(handle, fname, list, size);
-	}
-	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
-	if (conv == NULL) {
-		return -1;
-	}
-	ret = SMB_VFS_NEXT_LISTXATTR(handle, conv, list, size);
-	if (ret == -1) {
-		saved_errno = errno;
-	}
-	TALLOC_FREE(conv);
-	if (saved_errno != 0) {
-		errno = saved_errno;
-	}
-	return ret;
-}
-
-static int shadow_copy2_removexattr(vfs_handle_struct *handle,
-				    const char *fname, const char *aname)
-{
-	time_t timestamp = 0;
-	char *stripped = NULL;
-	int saved_errno = 0;
-	int ret;
-	char *conv;
-
-	if (!shadow_copy2_strip_snapshot(talloc_tos(), handle, fname,
-					 &timestamp, &stripped)) {
-		return -1;
-	}
-	if (timestamp == 0) {
-		return SMB_VFS_NEXT_REMOVEXATTR(handle, fname, aname);
-	}
-	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
-	if (conv == NULL) {
-		return -1;
-	}
-	ret = SMB_VFS_NEXT_REMOVEXATTR(handle, conv, aname);
-	if (ret == -1) {
-		saved_errno = errno;
-	}
-	TALLOC_FREE(conv);
-	if (saved_errno != 0) {
-		errno = saved_errno;
-	}
-	return ret;
-}
-
-static int shadow_copy2_setxattr(struct vfs_handle_struct *handle,
-				 const char *fname,
-				 const char *aname, const void *value,
-				 size_t size, int flags)
-{
-	time_t timestamp = 0;
-	char *stripped = NULL;
-	ssize_t ret;
-	int saved_errno = 0;
-	char *conv;
-
-	if (!shadow_copy2_strip_snapshot(talloc_tos(), handle, fname,
-					 &timestamp, &stripped)) {
-		return -1;
-	}
-	if (timestamp == 0) {
-		return SMB_VFS_NEXT_SETXATTR(handle, fname, aname, value, size,
-					     flags);
-	}
-	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
-	if (conv == NULL) {
-		return -1;
-	}
-	ret = SMB_VFS_NEXT_SETXATTR(handle, conv, aname, value, size, flags);
-	if (ret == -1) {
-		saved_errno = errno;
-	}
-	TALLOC_FREE(conv);
-	if (saved_errno != 0) {
-		errno = saved_errno;
-	}
-	return ret;
-}
-
-static int shadow_copy2_chmod_acl(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			mode_t mode)
-{
-	time_t timestamp = 0;
-	char *stripped = NULL;
-	ssize_t ret;
-	int saved_errno = 0;
-	char *conv = NULL;
 	struct smb_filename *conv_smb_fname = NULL;
 
 	if (!shadow_copy2_strip_snapshot(talloc_tos(),
-				handle,
-				smb_fname->base_name,
-				&timestamp,
-				&stripped)) {
+					handle,
+					smb_fname->base_name,
+					&timestamp,
+					&stripped)) {
 		return -1;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_CHMOD_ACL(handle, smb_fname, mode);
+		return SMB_VFS_NEXT_CHFLAGS(handle, smb_fname, flags);
 	}
 	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
 	TALLOC_FREE(stripped);
@@ -2499,15 +2395,210 @@ static int shadow_copy2_chmod_acl(vfs_handle_struct *handle,
 					smb_fname->flags);
 	if (conv_smb_fname == NULL) {
 		TALLOC_FREE(conv);
-		errno = ENOMEM;
 		return -1;
 	}
-	ret = SMB_VFS_NEXT_CHMOD_ACL(handle, conv_smb_fname, mode);
+	ret = SMB_VFS_NEXT_CHFLAGS(handle, smb_fname, flags);
 	if (ret == -1) {
 		saved_errno = errno;
 	}
-	TALLOC_FREE(conv);
 	TALLOC_FREE(conv_smb_fname);
+	TALLOC_FREE(conv);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
+}
+
+static ssize_t shadow_copy2_getxattr(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				const char *aname,
+				void *value,
+				size_t size)
+{
+	time_t timestamp = 0;
+	char *stripped = NULL;
+	ssize_t ret;
+	int saved_errno = 0;
+	char *conv;
+	struct smb_filename *conv_smb_fname = NULL;
+
+	if (!shadow_copy2_strip_snapshot(talloc_tos(),
+				handle,
+				smb_fname->base_name,
+				&timestamp,
+				&stripped)) {
+		return -1;
+	}
+	if (timestamp == 0) {
+		return SMB_VFS_NEXT_GETXATTR(handle, smb_fname, aname, value,
+					     size);
+	}
+	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
+	TALLOC_FREE(stripped);
+	if (conv == NULL) {
+		return -1;
+	}
+
+	conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (conv_smb_fname == NULL) {
+		TALLOC_FREE(conv);
+		return -1;
+	}
+
+	ret = SMB_VFS_NEXT_GETXATTR(handle, conv_smb_fname, aname, value, size);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(conv_smb_fname);
+	TALLOC_FREE(conv);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
+}
+
+static ssize_t shadow_copy2_listxattr(struct vfs_handle_struct *handle,
+				      const struct smb_filename *smb_fname,
+				      char *list, size_t size)
+{
+	time_t timestamp = 0;
+	char *stripped = NULL;
+	ssize_t ret;
+	int saved_errno = 0;
+	char *conv;
+	struct smb_filename *conv_smb_fname = NULL;
+
+	if (!shadow_copy2_strip_snapshot(talloc_tos(),
+				handle,
+				smb_fname->base_name,
+				&timestamp,
+				&stripped)) {
+		return -1;
+	}
+	if (timestamp == 0) {
+		return SMB_VFS_NEXT_LISTXATTR(handle, smb_fname, list, size);
+	}
+	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
+	TALLOC_FREE(stripped);
+	if (conv == NULL) {
+		return -1;
+	}
+	conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (conv_smb_fname == NULL) {
+		TALLOC_FREE(conv);
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_LISTXATTR(handle, conv_smb_fname, list, size);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(conv_smb_fname);
+	TALLOC_FREE(conv);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
+}
+
+static int shadow_copy2_removexattr(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				const char *aname)
+{
+	time_t timestamp = 0;
+	char *stripped = NULL;
+	int saved_errno = 0;
+	int ret;
+	char *conv;
+	struct smb_filename *conv_smb_fname = NULL;
+
+	if (!shadow_copy2_strip_snapshot(talloc_tos(),
+				handle,
+				smb_fname->base_name,
+				&timestamp,
+				&stripped)) {
+		return -1;
+	}
+	if (timestamp == 0) {
+		return SMB_VFS_NEXT_REMOVEXATTR(handle, smb_fname, aname);
+	}
+	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
+	TALLOC_FREE(stripped);
+	if (conv == NULL) {
+		return -1;
+	}
+	conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (conv_smb_fname == NULL) {
+		TALLOC_FREE(conv);
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_REMOVEXATTR(handle, conv_smb_fname, aname);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(conv_smb_fname);
+	TALLOC_FREE(conv);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
+}
+
+static int shadow_copy2_setxattr(struct vfs_handle_struct *handle,
+				 const struct smb_filename *smb_fname,
+				 const char *aname, const void *value,
+				 size_t size, int flags)
+{
+	time_t timestamp = 0;
+	char *stripped = NULL;
+	ssize_t ret;
+	int saved_errno = 0;
+	char *conv;
+	struct smb_filename *conv_smb_fname = NULL;
+
+	if (!shadow_copy2_strip_snapshot(talloc_tos(),
+				handle,
+				smb_fname->base_name,
+				&timestamp,
+				&stripped)) {
+		return -1;
+	}
+	if (timestamp == 0) {
+		return SMB_VFS_NEXT_SETXATTR(handle, smb_fname,
+					aname, value, size, flags);
+	}
+	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
+	TALLOC_FREE(stripped);
+	if (conv == NULL) {
+		return -1;
+	}
+	conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (conv_smb_fname == NULL) {
+		TALLOC_FREE(conv);
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_SETXATTR(handle, conv_smb_fname,
+				aname, value, size, flags);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(conv_smb_fname);
+	TALLOC_FREE(conv);
 	if (saved_errno != 0) {
 		errno = saved_errno;
 	}
@@ -2561,11 +2652,14 @@ static int shadow_copy2_get_real_filename(struct vfs_handle_struct *handle,
 }
 
 static const char *shadow_copy2_connectpath(struct vfs_handle_struct *handle,
-					    const char *fname)
+					const struct smb_filename *smb_fname_in)
 {
 	time_t timestamp = 0;
 	char *stripped = NULL;
 	char *tmp = NULL;
+	const char *fname = smb_fname_in->base_name;
+	struct smb_filename smb_fname = {0};
+	struct smb_filename *result_fname = NULL;
 	char *result = NULL;
 	char *parent_dir = NULL;
 	int saved_errno = 0;
@@ -2588,7 +2682,7 @@ static const char *shadow_copy2_connectpath(struct vfs_handle_struct *handle,
 		goto done;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_CONNECTPATH(handle, fname);
+		return SMB_VFS_NEXT_CONNECTPATH(handle, smb_fname_in);
 	}
 
 	tmp = shadow_copy2_do_convert(talloc_tos(), handle, stripped, timestamp,
@@ -2628,17 +2722,20 @@ static const char *shadow_copy2_connectpath(struct vfs_handle_struct *handle,
 		  (int)rootpath_len, tmp);
 
 	tmp[rootpath_len] = '\0';
-	result = SMB_VFS_NEXT_REALPATH(handle, tmp);
-	if (result == NULL) {
+	smb_fname = (struct smb_filename) { .base_name = tmp };
+
+	result_fname = SMB_VFS_NEXT_REALPATH(handle, priv, &smb_fname);
+	if (result_fname == NULL) {
 		goto done;
 	}
 
 	/*
-	 * SMB_VFS_NEXT_REALPATH returns a malloc'ed string.
+	 * SMB_VFS_NEXT_REALPATH returns a talloc'ed string.
 	 * Don't leak memory.
 	 */
-	SAFE_FREE(priv->shadow_realpath);
-	priv->shadow_realpath = result;
+	TALLOC_FREE(priv->shadow_realpath);
+	priv->shadow_realpath = result_fname;
+	result = priv->shadow_realpath->base_name;
 
 	DBG_DEBUG("connect path is [%s]\n", result);
 
@@ -2656,59 +2753,78 @@ done:
 }
 
 static uint64_t shadow_copy2_disk_free(vfs_handle_struct *handle,
-				       const char *path, uint64_t *bsize,
-				       uint64_t *dfree, uint64_t *dsize)
+				const struct smb_filename *smb_fname,
+				uint64_t *bsize,
+				uint64_t *dfree,
+				uint64_t *dsize)
 {
 	time_t timestamp = 0;
 	char *stripped = NULL;
-	ssize_t ret;
 	int saved_errno = 0;
-	char *conv;
+	char *conv = NULL;
+	struct smb_filename *conv_smb_fname = NULL;
+	uint64_t ret = (uint64_t)-1;
 
-	if (!shadow_copy2_strip_snapshot(talloc_tos(), handle, path,
-					 &timestamp, &stripped)) {
-		return -1;
+	if (!shadow_copy2_strip_snapshot(talloc_tos(),
+				handle,
+				smb_fname->base_name,
+				&timestamp,
+				&stripped)) {
+		return (uint64_t)-1;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_DISK_FREE(handle, path,
+		return SMB_VFS_NEXT_DISK_FREE(handle, smb_fname,
 					      bsize, dfree, dsize);
 	}
-
 	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
 	TALLOC_FREE(stripped);
 	if (conv == NULL) {
-		return -1;
+		return (uint64_t)-1;
 	}
-
-	ret = SMB_VFS_NEXT_DISK_FREE(handle, conv, bsize, dfree, dsize);
-
-	if (ret == -1) {
+	conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (conv_smb_fname == NULL) {
+		TALLOC_FREE(conv);
+		return (uint64_t)-1;
+	}
+	ret = SMB_VFS_NEXT_DISK_FREE(handle, conv_smb_fname,
+				bsize, dfree, dsize);
+	if (ret == (uint64_t)-1) {
 		saved_errno = errno;
 	}
 	TALLOC_FREE(conv);
+	TALLOC_FREE(conv_smb_fname);
 	if (saved_errno != 0) {
 		errno = saved_errno;
 	}
-
 	return ret;
 }
 
-static int shadow_copy2_get_quota(vfs_handle_struct *handle, const char *path,
-				  enum SMB_QUOTA_TYPE qtype, unid_t id,
-				  SMB_DISK_QUOTA *dq)
+static int shadow_copy2_get_quota(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				enum SMB_QUOTA_TYPE qtype,
+				unid_t id,
+				SMB_DISK_QUOTA *dq)
 {
 	time_t timestamp = 0;
 	char *stripped = NULL;
 	int ret;
 	int saved_errno = 0;
 	char *conv;
+	struct smb_filename *conv_smb_fname = NULL;
 
-	if (!shadow_copy2_strip_snapshot(talloc_tos(), handle, path, &timestamp,
-					 &stripped)) {
+	if (!shadow_copy2_strip_snapshot(talloc_tos(),
+				handle,
+				smb_fname->base_name,
+				&timestamp,
+				&stripped)) {
 		return -1;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_GET_QUOTA(handle, path, qtype, id, dq);
+		return SMB_VFS_NEXT_GET_QUOTA(handle, smb_fname, qtype, id, dq);
 	}
 
 	conv = shadow_copy2_convert(talloc_tos(), handle, stripped, timestamp);
@@ -2716,13 +2832,22 @@ static int shadow_copy2_get_quota(vfs_handle_struct *handle, const char *path,
 	if (conv == NULL) {
 		return -1;
 	}
-
-	ret = SMB_VFS_NEXT_GET_QUOTA(handle, conv, qtype, id, dq);
+	conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (conv_smb_fname == NULL) {
+		TALLOC_FREE(conv);
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_GET_QUOTA(handle, conv_smb_fname, qtype, id, dq);
 
 	if (ret == -1) {
 		saved_errno = errno;
 	}
 	TALLOC_FREE(conv);
+	TALLOC_FREE(conv_smb_fname);
 	if (saved_errno != 0) {
 		errno = saved_errno;
 	}
@@ -3098,14 +3223,13 @@ static struct vfs_fn_pointers vfs_shadow_copy2_fns = {
 	.listxattr_fn = shadow_copy2_listxattr,
 	.removexattr_fn = shadow_copy2_removexattr,
 	.setxattr_fn = shadow_copy2_setxattr,
-	.chmod_acl_fn = shadow_copy2_chmod_acl,
 	.chflags_fn = shadow_copy2_chflags,
 	.get_real_filename_fn = shadow_copy2_get_real_filename,
 	.connectpath_fn = shadow_copy2_connectpath,
 };
 
-NTSTATUS vfs_shadow_copy2_init(void);
-NTSTATUS vfs_shadow_copy2_init(void)
+static_decl_vfs;
+NTSTATUS vfs_shadow_copy2_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION,
 				"shadow_copy2", &vfs_shadow_copy2_fns);

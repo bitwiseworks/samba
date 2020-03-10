@@ -7,7 +7,7 @@
 	<manvolnum>8</manvolnum>
 	<refmiscinfo class="source">Samba</refmiscinfo>
 	<refmiscinfo class="manual">System Administration tools</refmiscinfo>
-	<refmiscinfo class="version">4.6</refmiscinfo>
+	<refmiscinfo class="version">&doc.version;</refmiscinfo>
 </refmeta>
 
 
@@ -132,7 +132,7 @@
 		<para>
 			Defines which volfile server to use, defaults to
 			localhost. It could be list of white space
-			seperated elements where each element could be
+			separated elements where each element could be
 		</para>
 		<para>
 			1. unix+/path/to/socket/file
@@ -165,7 +165,7 @@
 	<title>VERSION</title>
 
 	<para>
-		This man page is correct for version 4.6.0 of the Samba suite.
+		This man page is part of version &doc.version; of the Samba suite.
 	</para>
 </refsect1>
 

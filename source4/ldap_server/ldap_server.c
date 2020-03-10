@@ -104,6 +104,7 @@ static void ldapsrv_terminate_connection_done(struct tevent_req *subreq)
 		tevent_req_callback_data(subreq,
 		struct ldapsrv_connection);
 	int sys_errno;
+	bool ok;
 
 	tstream_disconnect_recv(subreq, &sys_errno);
 	TALLOC_FREE(subreq);
@@ -130,9 +131,15 @@ static void ldapsrv_terminate_connection_done(struct tevent_req *subreq)
 					    conn->limits.reason);
 		return;
 	}
-	tevent_req_set_endtime(subreq,
-			       conn->connection->event.ctx,
-			       conn->limits.endtime);
+	ok = tevent_req_set_endtime(subreq,
+				    conn->connection->event.ctx,
+				    conn->limits.endtime);
+	if (!ok) {
+		TALLOC_FREE(conn->sockets.raw);
+		stream_terminate_connection(conn->connection,
+					    conn->limits.reason);
+		return;
+	}
 	tevent_req_set_callback(subreq, ldapsrv_terminate_connection_done, conn);
 }
 
@@ -254,6 +261,18 @@ failed:
 	return -1;
 }
 
+static int ldapsrv_call_destructor(struct ldapsrv_call *call)
+{
+	if (call->conn == NULL) {
+		return 0;
+	}
+
+	DLIST_REMOVE(call->conn->pending_calls, call);
+
+	call->conn = NULL;
+	return 0;
+}
+
 static struct tevent_req *ldapsrv_process_call_send(TALLOC_CTX *mem_ctx,
 						    struct tevent_context *ev,
 						    struct tevent_queue *call_queue,
@@ -281,6 +300,7 @@ static void ldapsrv_accept(struct stream_connection *c,
 	int ret;
 	struct tevent_req *subreq;
 	struct timeval endtime;
+	char *errstring = NULL;
 
 	conn = talloc_zero(c, struct ldapsrv_connection);
 	if (!conn) {
@@ -349,8 +369,13 @@ static void ldapsrv_accept(struct stream_connection *c,
 		conn->require_strong_auth = lpcfg_ldap_server_require_strong_auth(conn->lp_ctx);
 	}
 
-	if (!NT_STATUS_IS_OK(ldapsrv_backend_Init(conn))) {
-		ldapsrv_terminate_connection(conn, "backend Init failed");
+	ret = ldapsrv_backend_Init(conn, &errstring);
+	if (ret != LDB_SUCCESS) {
+		char *reason = talloc_asprintf(conn,
+					       "LDB backend for LDAP Init "
+					       "failed: %s: %s",
+					       errstring, ldb_strerror(ret));
+		ldapsrv_terminate_connection(conn, reason);
 		return;
 	}
 
@@ -437,7 +462,7 @@ static bool ldapsrv_call_read_next(struct ldapsrv_connection *conn)
 	}
 
 	/*
-	 * The minimun size of a LDAP pdu is 7 bytes
+	 * The minimum size of a LDAP pdu is 7 bytes
 	 *
 	 * dumpasn1 -hh ldap-unbind-min.dat
 	 *
@@ -476,9 +501,17 @@ static bool ldapsrv_call_read_next(struct ldapsrv_connection *conn)
 		return false;
 	}
 	if (!timeval_is_zero(&conn->limits.endtime)) {
-		tevent_req_set_endtime(subreq,
-				       conn->connection->event.ctx,
-				       conn->limits.endtime);
+		bool ok;
+		ok = tevent_req_set_endtime(subreq,
+					    conn->connection->event.ctx,
+					    conn->limits.endtime);
+		if (!ok) {
+			ldapsrv_terminate_connection(
+				conn,
+				"ldapsrv_call_read_next: "
+				"no memory for tevent_req_set_endtime");
+			return false;
+		}
 	}
 	tevent_req_set_callback(subreq, ldapsrv_call_read_done, conn);
 	conn->sockets.read_req = subreq;
@@ -504,6 +537,7 @@ static void ldapsrv_call_read_done(struct tevent_req *subreq)
 		ldapsrv_terminate_connection(conn, "no memory");
 		return;
 	}
+	talloc_set_destructor(call, ldapsrv_call_destructor);
 
 	call->conn = conn;
 
@@ -565,7 +599,8 @@ static void ldapsrv_call_read_done(struct tevent_req *subreq)
 	conn->active_call = subreq;
 }
 
-
+static void ldapsrv_call_wait_done(struct tevent_req *subreq);
+static void ldapsrv_call_writev_start(struct ldapsrv_call *call);
 static void ldapsrv_call_writev_done(struct tevent_req *subreq);
 
 static void ldapsrv_call_process_done(struct tevent_req *subreq)
@@ -575,7 +610,6 @@ static void ldapsrv_call_process_done(struct tevent_req *subreq)
 		struct ldapsrv_call);
 	struct ldapsrv_connection *conn = call->conn;
 	NTSTATUS status;
-	DATA_BLOB blob = data_blob_null;
 
 	conn->active_call = NULL;
 
@@ -585,6 +619,61 @@ static void ldapsrv_call_process_done(struct tevent_req *subreq)
 		ldapsrv_terminate_connection(conn, nt_errstr(status));
 		return;
 	}
+
+	if (call->wait_send != NULL) {
+		subreq = call->wait_send(call,
+					 conn->connection->event.ctx,
+					 call->wait_private);
+		if (subreq == NULL) {
+			ldapsrv_terminate_connection(conn,
+					"ldapsrv_call_process_done: "
+					"call->wait_send - no memory");
+			return;
+		}
+		tevent_req_set_callback(subreq,
+					ldapsrv_call_wait_done,
+					call);
+		conn->active_call = subreq;
+		return;
+	}
+
+	ldapsrv_call_writev_start(call);
+}
+
+static void ldapsrv_call_wait_done(struct tevent_req *subreq)
+{
+	struct ldapsrv_call *call =
+		tevent_req_callback_data(subreq,
+		struct ldapsrv_call);
+	struct ldapsrv_connection *conn = call->conn;
+	NTSTATUS status;
+
+	conn->active_call = NULL;
+
+	status = call->wait_recv(subreq);
+	TALLOC_FREE(subreq);
+	if (!NT_STATUS_IS_OK(status)) {
+		const char *reason;
+
+		reason = talloc_asprintf(call, "ldapsrv_call_wait_done: "
+					 "call->wait_recv() - %s",
+					 nt_errstr(status));
+		if (reason == NULL) {
+			reason = nt_errstr(status);
+		}
+
+		ldapsrv_terminate_connection(conn, reason);
+		return;
+	}
+
+	ldapsrv_call_writev_start(call);
+}
+
+static void ldapsrv_call_writev_start(struct ldapsrv_call *call)
+{
+	struct ldapsrv_connection *conn = call->conn;
+	DATA_BLOB blob = data_blob_null;
+	struct tevent_req *subreq = NULL;
 
 	/* build all the replies into a single blob */
 	while (call->replies) {
@@ -956,7 +1045,7 @@ static NTSTATUS add_socket(struct task_server *task,
 				     model_ops, &ldap_stream_nonpriv_ops,
 				     "ip", address, &port,
 				     lpcfg_socket_options(lp_ctx),
-				     ldap_service);
+				     ldap_service, task->process_context);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("ldapsrv failed to bind to %s:%u - %s\n",
 			 address, port, nt_errstr(status)));
@@ -971,7 +1060,8 @@ static NTSTATUS add_socket(struct task_server *task,
 					     &ldap_stream_nonpriv_ops,
 					     "ip", address, &port,
 					     lpcfg_socket_options(lp_ctx),
-					     ldap_service);
+					     ldap_service,
+					     task->process_context);
 		if (!NT_STATUS_IS_OK(status)) {
 			DEBUG(0,("ldapsrv failed to bind to %s:%u - %s\n",
 				 address, port, nt_errstr(status)));
@@ -980,8 +1070,12 @@ static NTSTATUS add_socket(struct task_server *task,
 	}
 
 	/* Load LDAP database, but only to read our settings */
-	ldb = samdb_connect(ldap_service, ldap_service->task->event_ctx, 
-			    lp_ctx, system_session(lp_ctx), 0);
+	ldb = samdb_connect(ldap_service,
+			    ldap_service->task->event_ctx,
+			    lp_ctx,
+			    system_session(lp_ctx),
+			    NULL,
+			    0);
 	if (!ldb) {
 		return NT_STATUS_INTERNAL_DB_CORRUPTION;
 	}
@@ -993,7 +1087,8 @@ static NTSTATUS add_socket(struct task_server *task,
 					     &ldap_stream_nonpriv_ops,
 					     "ip", address, &port,
 					     lpcfg_socket_options(lp_ctx),
-					     ldap_service);
+					     ldap_service,
+					     task->process_context);
 		if (!NT_STATUS_IS_OK(status)) {
 			DEBUG(0,("ldapsrv failed to bind to %s:%u - %s\n",
 				 address, port, nt_errstr(status)));
@@ -1007,7 +1102,8 @@ static NTSTATUS add_socket(struct task_server *task,
 						     &ldap_stream_nonpriv_ops,
 						     "ip", address, &port,
 						     lpcfg_socket_options(lp_ctx),
-						     ldap_service);
+						     ldap_service,
+						     task->process_context);
 			if (!NT_STATUS_IS_OK(status)) {
 				DEBUG(0,("ldapsrv failed to bind to %s:%u - %s\n",
 					 address, port, nt_errstr(status)));
@@ -1035,7 +1131,6 @@ static void ldapsrv_task_init(struct task_server *task)
 	const char *dns_host_name;
 	struct ldapsrv_service *ldap_service;
 	NTSTATUS status;
-	const struct model_ops *model_ops;
 
 	switch (lpcfg_server_role(task->lp_ctx)) {
 	case ROLE_STANDALONE:
@@ -1052,10 +1147,6 @@ static void ldapsrv_task_init(struct task_server *task)
 	}
 
 	task_server_set_title(task, "task[ldapsrv]");
-
-	/* run the ldap server as a single process */
-	model_ops = process_model_startup("single");
-	if (!model_ops) goto failed;
 
 	ldap_service = talloc_zero(task, struct ldapsrv_service);
 	if (ldap_service == NULL) goto failed;
@@ -1100,20 +1191,22 @@ static void ldapsrv_task_init(struct task_server *task)
 		*/
 		for(i = 0; i < num_interfaces; i++) {
 			const char *address = iface_list_n_ip(ifaces, i);
-			status = add_socket(task, task->lp_ctx, model_ops, address, ldap_service);
+			status = add_socket(task, task->lp_ctx, task->model_ops,
+					    address, ldap_service);
 			if (!NT_STATUS_IS_OK(status)) goto failed;
 		}
 	} else {
 		char **wcard;
-		int i;
-		int num_binds = 0;
+		size_t i;
+		size_t num_binds = 0;
 		wcard = iface_list_wildcard(task);
 		if (wcard == NULL) {
 			DEBUG(0,("No wildcard addresses available\n"));
 			goto failed;
 		}
 		for (i=0; wcard[i]; i++) {
-			status = add_socket(task, task->lp_ctx, model_ops, wcard[i], ldap_service);
+			status = add_socket(task, task->lp_ctx, task->model_ops,
+					    wcard[i], ldap_service);
 			if (NT_STATUS_IS_OK(status)) {
 				num_binds++;
 			}
@@ -1130,10 +1223,10 @@ static void ldapsrv_task_init(struct task_server *task)
 	}
 
 	status = stream_setup_socket(task, task->event_ctx, task->lp_ctx,
-				     model_ops, &ldap_stream_nonpriv_ops,
+				     task->model_ops, &ldap_stream_nonpriv_ops,
 				     "unix", ldapi_path, NULL, 
 				     lpcfg_socket_options(task->lp_ctx),
-				     ldap_service);
+				     ldap_service, task->process_context);
 	talloc_free(ldapi_path);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("ldapsrv failed to bind to %s - %s\n",
@@ -1161,10 +1254,11 @@ static void ldapsrv_task_init(struct task_server *task)
 	}
 
 	status = stream_setup_socket(task, task->event_ctx, task->lp_ctx,
-				     model_ops, &ldap_stream_priv_ops,
+				     task->model_ops, &ldap_stream_priv_ops,
 				     "unix", ldapi_path, NULL,
 				     lpcfg_socket_options(task->lp_ctx),
-				     ldap_service);
+				     ldap_service,
+				     task->process_context);
 	talloc_free(ldapi_path);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("ldapsrv failed to bind to %s - %s\n",
@@ -1182,7 +1276,12 @@ failed:
 }
 
 
-NTSTATUS server_service_ldap_init(void)
+NTSTATUS server_service_ldap_init(TALLOC_CTX *ctx)
 {
-	return register_server_service("ldap", ldapsrv_task_init);
+	struct service_details details = {
+		.inhibit_fork_on_accept = false,
+		.inhibit_pre_fork = false
+	};
+	return register_server_service(ctx, "ldap", ldapsrv_task_init,
+				       &details);
 }

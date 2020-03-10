@@ -100,12 +100,22 @@ static wbcErr wbc_create_auth_info(const struct winbindd_response *resp,
 
 	i->account_name	= strdup(resp->data.auth.info3.user_name);
 	BAIL_ON_PTR_ERROR(i->account_name, wbc_status);
-	i->user_principal= NULL;
+	if (resp->data.auth.validation_level == 6) {
+		i->user_principal = strdup(resp->data.auth.info6.principal_name);
+		BAIL_ON_PTR_ERROR(i->user_principal, wbc_status);
+	} else {
+		i->user_principal = NULL;
+	}
 	i->full_name	= strdup(resp->data.auth.info3.full_name);
 	BAIL_ON_PTR_ERROR(i->full_name, wbc_status);
 	i->domain_name	= strdup(resp->data.auth.info3.logon_dom);
 	BAIL_ON_PTR_ERROR(i->domain_name, wbc_status);
-	i->dns_domain_name= NULL;
+	if (resp->data.auth.validation_level == 6) {
+		i->dns_domain_name = strdup(resp->data.auth.info6.dns_domainname);
+		BAIL_ON_PTR_ERROR(i->dns_domain_name, wbc_status);
+	} else {
+		i->dns_domain_name = NULL;
+	}
 
 	i->acct_flags	= resp->data.auth.info3.acct_flags;
 	memcpy(i->user_session_key,
@@ -259,6 +269,7 @@ static wbcErr wbc_create_error_info(const struct winbindd_response *resp,
 
 	e->nt_status = resp->data.auth.nt_status;
 	e->pam_error = resp->data.auth.pam_error;
+	e->authoritative = resp->data.auth.authoritative;
 	e->nt_string = strdup(resp->data.auth.nt_status_string);
 	BAIL_ON_PTR_ERROR(e->nt_string, wbc_status);
 
@@ -726,7 +737,7 @@ wbcErr wbcCtxLogoffUserEx(struct wbcContext *ctx,
 	struct winbindd_request request;
 	struct winbindd_response response;
 	wbcErr wbc_status = WBC_ERR_UNKNOWN_FAILURE;
-	int i;
+	size_t i;
 
 	/* validate input */
 
@@ -1268,7 +1279,7 @@ wbcErr wbcCtxCredentialCache(struct wbcContext *ctx,
 	struct winbindd_response response;
 	struct wbcNamedBlob *initial_blob = NULL;
 	struct wbcNamedBlob *challenge_blob = NULL;
-	int i;
+	size_t i;
 
 	ZERO_STRUCT(request);
 	ZERO_STRUCT(response);

@@ -27,7 +27,6 @@
 #include "printing.h"
 #include "printing/pcap.h"
 #include "printing/queue_process.h"
-#include "serverid.h"
 #include "locking/proto.h"
 #include "smbd/smbd.h"
 #include "rpc_server/rpc_config.h"
@@ -35,6 +34,7 @@
 #include "rpc_server/spoolss/srv_spoolss_nt.h"
 #include "auth.h"
 #include "nt_printing.h"
+#include "util_event.h"
 
 #ifdef __OS2__
 #define pipe(A) os2_pipe(A)
@@ -127,7 +127,7 @@ static void delete_and_reload_printers_full(struct tevent_context *ev,
 	}
 
 	/* finally, purge old snums */
-	delete_and_reload_printers(ev, msg_ctx);
+	delete_and_reload_printers();
 
 	TALLOC_FREE(session_info);
 }
@@ -148,7 +148,7 @@ static void reload_pcap_change_notify(struct tevent_context *ev,
 	 */
 	delete_and_reload_printers_full(ev, msg_ctx);
 
-	message_send_all(msg_ctx, MSG_PRINTER_PCAP, NULL, 0, NULL);
+	messaging_send_all(msg_ctx, MSG_PRINTER_PCAP, NULL, 0);
 }
 
 struct bq_state {
@@ -396,12 +396,6 @@ pid_t start_background_queue(struct tevent_context *ev,
 			exit(1);
 		}
 
-		if (!serverid_register(messaging_server_id(msg_ctx),
-				       FLAG_MSG_GENERAL |
-				       FLAG_MSG_PRINT_GENERAL)) {
-			exit(1);
-		}
-
 		if (!locking_init()) {
 			exit(1);
 		}
@@ -494,7 +488,7 @@ void printing_subsystem_update(struct tevent_context *ev_ctx,
 {
 	if (background_lpq_updater_pid != -1) {
 		if (pcap_cache_loaded(NULL)) {
-			load_printers(ev_ctx, msg_ctx);
+			load_printers();
 		}
 		if (force) {
 			/* Send a sighup to the background process.

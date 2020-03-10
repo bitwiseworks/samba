@@ -231,6 +231,18 @@ static int do_global_checks(void)
 				"must differ.\n\n");
 	}
 
+	if (lp_client_ipc_signing() == SMB_SIGNING_IF_REQUIRED
+	 || lp_client_ipc_signing() == SMB_SIGNING_OFF) {
+		fprintf(stderr, "WARNING: The 'client ipc signing' value "
+			"%s SMB signing is not used when contacting a "
+			"domain controller or other server. "
+			"This setting is not recommended; please be "
+			"aware of the security implications when using "
+			"this configuration setting.\n\n",
+			lp_client_ipc_signing() == SMB_SIGNING_OFF ?
+			"ensures" : "may mean");
+	}
+
 	if (strlen(lp_netbios_name()) > 15) {
 		fprintf(stderr, "WARNING: The 'netbios name' is too long "
 				"(max. 15 chars).\n\n");
@@ -608,12 +620,6 @@ static void do_per_share_checks(int s)
 	vfs_objects = lp_vfs_objects(s);
 	if (vfs_objects && str_list_check(vfs_objects, "fruit")) {
 		uses_fruit = true;
-		if (!lp_ea_support(s) && !lp_ea_support(-1)) {
-			fprintf(stderr,
-				"ERROR: Service \"%s\" uses vfs_fruit, but "
-				"that requires \"ea support = yes\".\n\n",
-				lp_servicename(talloc_tos(), s));
-		}
 	} else {
 		doesnt_use_fruit = true;
 	}
@@ -704,16 +710,6 @@ static void do_per_share_checks(int s)
 
 	if (skip_logic_checks == 0) {
 		ret = do_global_checks();
-	}
-
-	for (s=0;s<1000;s++) {
-		if (VALID_SNUM(s))
-			if (strlen(lp_servicename(talloc_tos(), s)) > 12) {
-				fprintf(stderr, "WARNING: You have some share names that are longer than 12 characters.\n" );
-				fprintf(stderr, "These may not be accessible to some older clients.\n" );
-				fprintf(stderr, "(Eg. Windows9x, WindowsMe, and smbclient prior to Samba 3.0.)\n" );
-				break;
-			}
 	}
 
 	for (s=0;s<1000;s++) {

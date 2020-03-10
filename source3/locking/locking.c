@@ -37,6 +37,7 @@
 
 #include "includes.h"
 #include "system/filesys.h"
+#include "lib/util/server_id.h"
 #include "locking/proto.h"
 #include "smbd/globals.h"
 #include "dbwrap/dbwrap.h"
@@ -103,7 +104,7 @@ void init_strict_lock_struct(files_struct *fsp,
         plock->lock_flav = lp_posix_cifsu_locktype(fsp);
 }
 
-bool strict_lock_default(files_struct *fsp, struct lock_struct *plock)
+bool strict_lock_check_default(files_struct *fsp, struct lock_struct *plock)
 {
 	struct byte_range_lock *br_lck;
 	int strict_locking = lp_strict_locking(fsp->conn->params);
@@ -161,10 +162,6 @@ bool strict_lock_default(files_struct *fsp, struct lock_struct *plock)
 		   (uintmax_t)plock->fnum, fsp_str_dbg(fsp)));
 
 	return ret;
-}
-
-void strict_unlock_default(files_struct *fsp, struct lock_struct *plock)
-{
 }
 
 /****************************************************************************
@@ -428,7 +425,9 @@ void locking_close_file(struct messaging_context *msg_ctx,
  Print out a share mode.
 ********************************************************************/
 
-char *share_mode_str(TALLOC_CTX *ctx, int num, const struct share_mode_entry *e)
+char *share_mode_str(TALLOC_CTX *ctx, int num,
+		     const struct file_id *id,
+		     const struct share_mode_entry *e)
 {
 	struct server_id_buf tmp;
 
@@ -442,7 +441,7 @@ char *share_mode_str(TALLOC_CTX *ctx, int num, const struct share_mode_entry *e)
 		 e->access_mask, (unsigned long long)e->op_mid,
 		 e->op_type, (unsigned long long)e->share_file_id,
 		 (unsigned int)e->uid, (unsigned int)e->flags,
-		 file_id_string_tos(&e->id),
+		 file_id_string_tos(id),
 		 (unsigned int)e->name_hash);
 }
 
@@ -723,7 +722,7 @@ static void remove_share_mode_lease(struct share_mode_data *d,
 
 		status = leases_db_del(&client_guid,
 					&lease_key,
-					&e->id);
+					&d->id);
 
 		DEBUG(10, ("%s: leases_db_del returned %s\n", __func__,
 			   nt_errstr(status)));
@@ -848,7 +847,6 @@ bool set_share_mode(struct share_mode_lock *lck, struct files_struct *fsp,
 	e->lease = lease;
 	e->time.tv_sec = fsp->open_time.tv_sec;
 	e->time.tv_usec = fsp->open_time.tv_usec;
-	e->id = fsp->file_id;
 	e->share_file_id = fsp->fh->gen_id;
 	e->uid = (uint32_t)uid;
 	e->flags = (fsp->posix_flags & FSP_POSIX_FLAGS_OPEN) ?
@@ -863,7 +861,7 @@ struct share_mode_entry *find_share_mode_entry(
 {
 	struct share_mode_data *d = lck->data;
 	struct server_id pid;
-	int i;
+	uint32_t i;
 
 	pid = messaging_server_id(fsp->conn->sconn->msg_ctx);
 
@@ -874,9 +872,6 @@ struct share_mode_entry *find_share_mode_entry(
 			continue;
 		}
 		if (!serverid_equal(&pid, &e->pid)) {
-			continue;
-		}
-		if (!file_id_equal(&fsp->file_id, &e->id)) {
 			continue;
 		}
 		if (fsp->fh->gen_id != e->share_file_id) {
@@ -1320,4 +1315,35 @@ struct timespec get_share_mode_write_time(struct share_mode_lock *lck)
 		return d->changed_write_time;
 	}
 	return d->old_write_time;
+}
+
+bool file_has_open_streams(files_struct *fsp)
+{
+	struct share_mode_lock *lock = NULL;
+	struct share_mode_data *d = NULL;
+	uint32_t i;
+
+	lock = get_existing_share_mode_lock(talloc_tos(), fsp->file_id);
+	if (lock == NULL) {
+		return false;
+	}
+	d = lock->data;
+
+	for (i = 0; i < d->num_share_modes; i++) {
+		struct share_mode_entry *e = &d->share_modes[i];
+
+		if (share_mode_stale_pid(d, i)) {
+			continue;
+		}
+
+		if (e->private_options &
+		    NTCREATEX_OPTIONS_PRIVATE_STREAM_BASEOPEN)
+		{
+			TALLOC_FREE(lock);
+			return true;
+		}
+	}
+
+	TALLOC_FREE(lock);
+	return false;
 }

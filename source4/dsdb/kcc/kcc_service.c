@@ -56,7 +56,12 @@ static WERROR kccsrv_connect_samdb(struct kccsrv_service *service, struct loadpa
 {
 	const struct GUID *ntds_guid;
 
-	service->samdb = samdb_connect(service, service->task->event_ctx, lp_ctx, service->system_session_info, 0);
+	service->samdb = samdb_connect(service,
+				       service->task->event_ctx,
+				       lp_ctx,
+				       service->system_session_info,
+				       NULL,
+				       0);
 	if (!service->samdb) {
 		return WERR_DS_UNAVAILABLE;
 	}
@@ -345,7 +350,11 @@ static void kccsrv_task_init(struct task_server *task)
 /*
   register ourselves as a available server
 */
-NTSTATUS server_service_kcc_init(void)
+NTSTATUS server_service_kcc_init(TALLOC_CTX *ctx)
 {
-	return register_server_service("kcc", kccsrv_task_init);
+	struct service_details details = {
+		.inhibit_fork_on_accept = true,
+		.inhibit_pre_fork = true
+	};
+	return register_server_service(ctx, "kcc", kccsrv_task_init, &details);
 }

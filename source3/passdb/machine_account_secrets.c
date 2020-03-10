@@ -36,6 +36,7 @@
 #include "lib/crypto/crypto.h"
 #include "lib/krb5_wrap/krb5_samba.h"
 #include "lib/util/time_basic.h"
+#include "../libds/common/flags.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_PASSDB
@@ -1317,7 +1318,7 @@ NTSTATUS secrets_fetch_or_upgrade_domain_info(const char *domain,
 
 	last_set_time = secrets_fetch_pass_last_set_time(domain);
 	if (last_set_time == 0) {
-		return NT_STATUS_OK;
+		return NT_STATUS_CANT_ACCESS_DOMAIN_INFO;
 	}
 	unix_to_nt_time(&last_set_nt, last_set_time);
 
@@ -1476,6 +1477,7 @@ NTSTATUS secrets_fetch_or_upgrade_domain_info(const char *domain,
 		DBG_ERR("secrets_domain_info_password_create(pw) failed "
 			"for %s - %s\n", domain, nt_errstr(status));
 		dbwrap_transaction_cancel(db);
+		SAFE_FREE(old_pw);
 		TALLOC_FREE(frame);
 		return status;
 	}
@@ -1600,7 +1602,7 @@ NTSTATUS secrets_store_JoinCtx(const struct libnet_JoinCtx *r)
 		ret = smb_krb5_salt_principal(info->domain_info.dns_domain.string,
 					      info->account_name,
 					      NULL /* userPrincipalName */,
-					      true /* is_computer */,
+					      UF_WORKSTATION_TRUST_ACCOUNT,
 					      info, &p);
 		if (ret != 0) {
 			status = krb5_to_nt_status(ret);

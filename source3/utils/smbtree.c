@@ -24,6 +24,7 @@
 #include "rpc_client/cli_pipe.h"
 #include "../librpc/gen_ndr/ndr_srvsvc_c.h"
 #include "libsmb/libsmb.h"
+#include "libsmb/namequery.h"
 #include "libsmb/clirap.h"
 
 static int use_bcast;
@@ -317,11 +318,12 @@ int main(int argc, char *argv[])
 
 	/* Now do our stuff */
 
-        if (!print_tree(cmdline_auth_info)) {
+        if (!print_tree(popt_get_cmdline_auth_info())) {
 		TALLOC_FREE(frame);
                 return 1;
 	}
 
+	popt_free_cmdline_auth_info();
 	TALLOC_FREE(frame);
 	return 0;
 }

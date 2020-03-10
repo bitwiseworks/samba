@@ -48,9 +48,6 @@
 
 struct mit_samba_context *ks_get_context(krb5_context kcontext);
 
-void ks_free_krb5_db_entry(krb5_context context,
-			   krb5_db_entry *entry);
-
 bool ks_data_eq_string(krb5_data d, const char *s);
 
 krb5_data ks_make_data(void *data, unsigned int len);
@@ -74,9 +71,6 @@ krb5_error_code kdb_samba_db_get_principal(krb5_context context,
 					   unsigned int kflags,
 					   krb5_db_entry **kentry);
 
-void kdb_samba_db_free_principal(krb5_context context,
-				 krb5_db_entry *entry);
-
 krb5_error_code kdb_samba_db_put_principal(krb5_context context,
 					   krb5_db_entry *entry,
 					   char **db_args);
@@ -84,7 +78,7 @@ krb5_error_code kdb_samba_db_put_principal(krb5_context context,
 krb5_error_code kdb_samba_db_delete_principal(krb5_context context,
 					      krb5_const_principal princ);
 
-#if KRB5_KDB_API_VERSION == 8
+#if KRB5_KDB_API_VERSION >= 8
 krb5_error_code kdb_samba_db_iterate(krb5_context context,
 				     char *match_entry,
 				     int (*func)(krb5_pointer, krb5_db_entry *),
@@ -154,12 +148,23 @@ krb5_error_code kdb_samba_db_check_allowed_to_delegate(krb5_context context,
 						       const krb5_db_entry *server,
 						       krb5_const_principal proxy);
 
+#if KRB5_KDB_API_VERSION >= 9
+void kdb_samba_db_audit_as_req(krb5_context kcontext,
+			       krb5_kdc_req *request,
+			       const krb5_address *local_addr,
+			       const krb5_address *remote_addr,
+			       krb5_db_entry *client,
+			       krb5_db_entry *server,
+			       krb5_timestamp authtime,
+			       krb5_error_code error_code);
+#else
 void kdb_samba_db_audit_as_req(krb5_context kcontext,
 			       krb5_kdc_req *request,
 			       krb5_db_entry *client,
 			       krb5_db_entry *server,
 			       krb5_timestamp authtime,
 			       krb5_error_code error_code);
+#endif
 
 /* from kdb_samba_change_pwd.c */
 

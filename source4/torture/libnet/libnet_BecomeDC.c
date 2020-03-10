@@ -92,7 +92,7 @@ bool torture_net_become_dc(struct torture_context *torture)
 	torture_assert(torture, s, "libnet_vampire_cb_state_init");
 
 	ctx = libnet_context_init(torture->ev, torture->lp_ctx);
-	ctx->cred = cmdline_credentials;
+	ctx->cred = popt_get_cmdline_credentials();
 
 	ZERO_STRUCT(b);
 	b.in.domain_dns_name		= torture_join_dom_dns_name(tj);
@@ -148,7 +148,12 @@ bool torture_net_become_dc(struct torture_context *torture)
 	private_dir = talloc_asprintf(s, "%s/%s", location, "private");
 	lpcfg_set_cmdline(lp_ctx, "private dir", private_dir);
 	torture_comment(torture, "Reopen the SAM LDB with system credentials and all replicated data: %s\n", private_dir);
-	ldb = samdb_connect(s, torture->ev, lp_ctx, system_session(lp_ctx), 0);
+	ldb = samdb_connect(s,
+			    torture->ev,
+			    lp_ctx,
+			    system_session(lp_ctx),
+			    NULL,
+			    0);
 	torture_assert_goto(torture, ldb != NULL, ret, cleanup,
 				      talloc_asprintf(torture,
 				      "Failed to open '%s/sam.ldb'\n", private_dir));

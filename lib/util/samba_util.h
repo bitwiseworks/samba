@@ -55,9 +55,6 @@ extern const char *panic_action;
 
 #include "lib/util/memory.h"
 
-#include "../libcli/util/ntstatus.h"
-#include "lib/util/string_wrappers.h"
-
 #include "fault.h"
 
 #include "lib/util/util.h"
@@ -155,7 +152,7 @@ _PUBLIC_ char *generate_random_str(TALLOC_CTX *mem_ctx, size_t len);
  * Characters used are: ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+_-#.,
  */
 _PUBLIC_ char** generate_unique_strs(TALLOC_CTX *mem_ctx, size_t len,
-                                         uint32_t num);
+					 uint32_t num);
 
 /* The following definitions come from lib/util/dprintf.c  */
 
@@ -209,6 +206,11 @@ _PUBLIC_ size_t strhex_to_str(char *p, size_t p_len, const char *strhex, size_t 
 _PUBLIC_ _PURE_ DATA_BLOB strhex_to_data_blob(TALLOC_CTX *mem_ctx, const char *strhex) ;
 
 /**
+ * Parse a hex dump and return a data blob
+ */
+_PUBLIC_ _PURE_ DATA_BLOB hexdump_to_data_blob(TALLOC_CTX *mem_ctx, const char *hexdump, size_t len);
+
+/**
  * Print a buf in hex. Assumes dst is at least (srclen*2)+1 large.
  */
 _PUBLIC_ void hex_encode_buf(char *dst, const uint8_t *src, size_t srclen);
@@ -223,23 +225,7 @@ _PUBLIC_ char *hex_encode_talloc(TALLOC_CTX *mem_ctx, const unsigned char *buff_
 /**
  Unescape a URL encoded string, in place.
 **/
-_PUBLIC_ void rfc1738_unescape(char *buf);
-
-
-/**
- * rfc1738_escape
- * Returns a static buffer that contains the RFC
- * 1738 compliant, escaped version of the given url. (escapes unsafe and % characters)
- **/
-_PUBLIC_ char *rfc1738_escape(TALLOC_CTX *mem_ctx, const char *url);
-
-/**
- * rfc1738_escape_unescaped
- *
- * Returns a static buffer that contains
- * the RFC 1738 compliant, escaped version of the given url (escapes unsafe chars only)
- **/
-_PUBLIC_ char *rfc1738_escape_unescaped(TALLOC_CTX *mem_ctx, const char *url);
+_PUBLIC_ char *rfc1738_unescape(char *buf);
 
 /**
  * rfc1738_escape_part 
@@ -366,7 +352,7 @@ const char **str_list_make_v3_const(TALLOC_CTX *mem_ctx,
  */
 _PUBLIC_ char *afdgets(int fd, TALLOC_CTX *mem_ctx, size_t hint);
 
-char *fgets_slash(TALLOC_CTX *mem_ctx, char *s2, int maxlen, FILE *f);
+char *fgets_slash(TALLOC_CTX *mem_ctx, char *s2, size_t maxlen, FILE *f);
 
 /**
 load a file into memory from a fd.
@@ -556,7 +542,8 @@ _PUBLIC_ int sys_fsusage(const char *path, uint64_t *dfree, uint64_t *dsize);
  * @brief MS-style Filename matching
  */
 
-int ms_fnmatch_protocol(const char *pattern, const char *string, int protocol);
+int ms_fnmatch_protocol(const char *pattern, const char *string, int protocol,
+			bool is_case_sensitive);
 
 /** a generic fnmatch function - uses for non-CIFS pattern matching */
 int gen_fnmatch(const char *pattern, const char *string);
@@ -564,33 +551,7 @@ int gen_fnmatch(const char *pattern, const char *string);
 #include "idtree.h"
 #include "idtree_random.h"
 
-/**
- Close the low 3 fd's and open dev/null in their place
-**/
-_PUBLIC_ void close_low_fds(bool stdin_too, bool stdout_too, bool stderr_too);
-
-/**
- Become a daemon, discarding the controlling terminal.
-**/
-_PUBLIC_ void become_daemon(bool do_fork, bool no_process_group, bool log_stdout);
-
-/**
- Exit daemon and print error message to the log at level 0
- Optionally report failure to systemd if systemd integration is enabled
-**/
-_PUBLIC_ void exit_daemon(const char *msg, int error);
-
-/**
- Report that the daemon is ready to serve connections to the log at level 0
- Optionally report status to systemd if systemd integration is enabled
-**/
-_PUBLIC_ void daemon_ready(const char *daemon);
-
-/*
- * Report the daemon status. For example if it is not ready to serve connections
- * and is waiting for some event to happen.
- */
-_PUBLIC_ void daemon_status(const char *name, const char *msg);
+#include "become_daemon.h"
 
 /**
  * @brief Get a password from the console.
@@ -619,7 +580,7 @@ _PUBLIC_ void daemon_status(const char *name, const char *msg);
  * @param[in]  prompt   The prompt to show to ask for the password.
  *
  * @param[out] buf    The buffer the password should be stored. It NEEDS to be
- *                      empty or filled out.
+ *		      empty or filled out.
  *
  * @param[in]  len      The length of the buffer.
  *
@@ -636,9 +597,15 @@ _PUBLIC_ int samba_getpass(const char *prompt, char *buf, size_t len,
  * Load a ini-style file.
  */
 bool pm_process( const char *fileName,
-                 bool (*sfunc)(const char *, void *),
-                 bool (*pfunc)(const char *, const char *, void *),
+		 bool (*sfunc)(const char *, void *),
+		 bool (*pfunc)(const char *, const char *, void *),
 				 void *userdata);
+bool pm_process_with_flags(const char *filename,
+			   bool allow_empty_values,
+			   bool (*sfunc)(const char *section, void *private_data),
+			   bool (*pfunc)(const char *name, const char *value,
+					 void *private_data),
+			   void *private_data);
 
 void print_asc(int level, const uint8_t *buf,int len);
 void print_asc_cb(const uint8_t *buf, int len,
@@ -686,61 +653,6 @@ int samba_runcmd_recv(struct tevent_req *req, int *perrno);
 #ifdef DEVELOPER
 void samba_start_debugger(void);
 #endif
-
-/**
- * @brief Returns an absolute path to a file in the Samba modules directory.
- *
- * @param name File to find, relative to MODULESDIR.
- *
- * @retval Pointer to a string containing the full path.
- **/
-char *modules_path(TALLOC_CTX *mem_ctx, const char *name);
-
-/**
- * @brief Returns an absolute path to a file in the Samba data directory.
- *
- * @param name File to find, relative to CODEPAGEDIR.
- *
- * @retval Pointer to a talloc'ed string containing the full path.
- **/
-char *data_path(TALLOC_CTX *mem_ctx, const char *name);
-
-/**
- * @brief Returns the platform specific shared library extension.
- *
- * @retval Pointer to a const char * containing the extension.
- **/
-const char *shlib_ext(void);
-
-struct server_id;
-
-struct server_id_buf { char buf[48]; }; /* probably a bit too large ... */
-char *server_id_str_buf(struct server_id id, struct server_id_buf *dst);
-size_t server_id_str_buf_unique(struct server_id id, char *buf, size_t buflen);
-
-bool server_id_same_process(const struct server_id *p1,
-			    const struct server_id *p2);
-bool server_id_equal(const struct server_id *p1, const struct server_id *p2);
-struct server_id server_id_from_string(uint32_t local_vnn,
-				       const char *pid_string);
-
-/**
- * Set the serverid to the special value that represents a disconnected
- * client for (e.g.) durable handles.
- */
-void server_id_set_disconnected(struct server_id *id);
-
-/**
- * check whether a serverid is the special placeholder for
- * a disconnected client
- */
-bool server_id_is_disconnected(const struct server_id *id);
-
-#define SERVER_ID_BUF_LENGTH 24
-void server_id_put(uint8_t buf[SERVER_ID_BUF_LENGTH],
-		   const struct server_id id);
-void server_id_get(struct server_id *id,
-		   const uint8_t buf[SERVER_ID_BUF_LENGTH]);
 
 /*
  * Samba code should use samba_tevent_context_init() instead of

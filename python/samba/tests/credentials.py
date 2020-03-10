@@ -25,12 +25,21 @@ from samba import credentials
 import samba.tests
 import os
 import binascii
+from samba.compat import PY3
+from samba.dcerpc import misc
 
 class CredentialsTests(samba.tests.TestCaseInTempDir):
 
     def setUp(self):
         super(CredentialsTests, self).setUp()
         self.creds = credentials.Credentials()
+        if PY3:
+            # Because Python 2 does not support 'x' mode and Python 3
+            # does not support 'wx' mode in open() function
+            # for exclusive creation
+            self.open_mode = 'x'
+        else:
+            self.open_mode = 'wx'
 
     def test_set_username(self):
         self.creds.set_username("somebody")
@@ -107,6 +116,13 @@ class CredentialsTests(samba.tests.TestCaseInTempDir):
         self.creds.set_workstation("myworksta")
         self.assertEqual("myworksta", self.creds.get_workstation())
 
+    def test_secure_channel_type(self):
+        self.assertEqual(misc.SEC_CHAN_NULL,
+                         self.creds.get_secure_channel_type())
+        self.creds.set_secure_channel_type(misc.SEC_CHAN_BDC)
+        self.assertEqual(misc.SEC_CHAN_BDC,
+                         self.creds.get_secure_channel_type())
+
     def test_get_nt_hash(self):
         password="geheim"
         hex_nthash="c2ae1fe6e648846352453e816f2aeb93"
@@ -114,6 +130,27 @@ class CredentialsTests(samba.tests.TestCaseInTempDir):
         self.assertEqual(password, self.creds.get_password())
         self.assertEqual(binascii.a2b_hex(hex_nthash),
                          self.creds.get_nt_hash())
+
+    def test_get_ntlm_response(self):
+        password="SecREt01"
+        hex_challenge="0123456789abcdef"
+        hex_nthash="cd06ca7c7e10c99b1d33b7485a2ed808"
+        hex_session_key="3f373ea8e4af954f14faa506f8eebdc4"
+        hex_ntlm_response="25a98c1c31e81847466b29b2df4680f39958fb8c213a9cc6"
+        self.creds.set_username("fred")
+        self.creds.set_domain("nurk")
+        self.creds.set_password(password)
+        self.assertEqual(password, self.creds.get_password())
+        self.assertEqual(binascii.a2b_hex(hex_nthash),
+                         self.creds.get_nt_hash())
+        response = self.creds.get_ntlm_response(flags=credentials.CLI_CRED_NTLM_AUTH,
+                                                challenge=binascii.a2b_hex(hex_challenge))
+
+
+        self.assertEqual(response["nt_response"], binascii.a2b_hex(hex_ntlm_response))
+        self.assertEqual(response["nt_session_key"], binascii.a2b_hex(hex_session_key))
+        self.assertEqual(response["flags"], credentials.CLI_CRED_NTLM_AUTH)
+
 
     def test_get_nt_hash_string(self):
         self.creds.set_password_will_be_nt_hash(True)
@@ -167,7 +204,7 @@ class CredentialsTests(samba.tests.TestCaseInTempDir):
         username="user"
 
         passwd_file_name = os.path.join(self.tempdir, "parse_file")
-        passwd_file_fd = open(passwd_file_name, 'wx')
+        passwd_file_fd = open(passwd_file_name, self.open_mode)
         passwd_file_fd.write("realm=%s\n" % realm)
         passwd_file_fd.write("domain=%s\n" % domain)
         passwd_file_fd.write("username=%s\n" % username)
@@ -190,7 +227,7 @@ class CredentialsTests(samba.tests.TestCaseInTempDir):
         username="user"
 
         passwd_file_name = os.path.join(self.tempdir, "parse_file")
-        passwd_file_fd = open(passwd_file_name, 'wx')
+        passwd_file_fd = open(passwd_file_name, self.open_mode)
         passwd_file_fd.write("realm=%s\n" % realm)
         passwd_file_fd.write("domain=%s\n" % domain)
         passwd_file_fd.write("username=%s\\%s\n" % (domain, username))
@@ -215,7 +252,7 @@ class CredentialsTests(samba.tests.TestCaseInTempDir):
         userdom="userdom"
 
         passwd_file_name = os.path.join(self.tempdir, "parse_file")
-        passwd_file_fd = open(passwd_file_name, 'wx')
+        passwd_file_fd = open(passwd_file_name, self.open_mode)
         passwd_file_fd.write("realm=%s\n" % realm)
         passwd_file_fd.write("domain=%s\n" % domain)
         passwd_file_fd.write("username=%s/%s\n" % (userdom, username))
@@ -240,7 +277,7 @@ class CredentialsTests(samba.tests.TestCaseInTempDir):
         userdom="userdom"
 
         passwd_file_name = os.path.join(self.tempdir, "parse_file")
-        passwd_file_fd = open(passwd_file_name, 'wx')
+        passwd_file_fd = open(passwd_file_name, self.open_mode)
         passwd_file_fd.write("username=%s\\%s%%%s\n" % (userdom, username, password))
         passwd_file_fd.write("realm=ignorerealm\n")
         passwd_file_fd.write("domain=ignoredomain\n")
@@ -265,7 +302,7 @@ class CredentialsTests(samba.tests.TestCaseInTempDir):
         userdom="userdom"
 
         passwd_file_name = os.path.join(self.tempdir, "parse_file")
-        passwd_file_fd = open(passwd_file_name, 'wx')
+        passwd_file_fd = open(passwd_file_name, self.open_mode)
         passwd_file_fd.write("realm=ignorerealm\n")
         passwd_file_fd.write("username=%s\\%s%%%s\n" % (userdom, username, password))
         passwd_file_fd.write("domain=ignoredomain\n")
@@ -314,7 +351,7 @@ class CredentialsTests(samba.tests.TestCaseInTempDir):
         lp = samba.tests.env_loadparm()
         os.environ["USER"] = "env_user"
         creds.guess(lp)
-        creds.parse_string("domain\user")
+        creds.parse_string("domain\\user")
         self.assertEqual(creds.get_username(), "user")
         self.assertEqual(creds.get_domain(), "DOMAIN")
         self.assertEqual(creds.get_realm(), None)
@@ -338,7 +375,7 @@ class CredentialsTests(samba.tests.TestCaseInTempDir):
         self.assertEqual(creds.get_domain(), lp.get("workgroup").upper())
         self.assertEqual(creds.get_realm(), realm.upper())
         self.assertEqual(creds.get_principal(), "unknown@realm.example.com")
-        creds.parse_string("domain\user")
+        creds.parse_string("domain\\user")
         self.assertEqual(creds.get_username(), "user")
         self.assertEqual(creds.get_domain(), "DOMAIN")
         self.assertEqual(creds.get_realm(), realm.upper())
@@ -362,7 +399,7 @@ class CredentialsTests(samba.tests.TestCaseInTempDir):
         self.assertEqual(creds.get_domain(), lp.get("workgroup").upper())
         self.assertEqual(creds.get_realm(), realm.upper())
         self.assertEqual(creds.get_principal(), "unknown@realm.example.com")
-        creds.parse_string("domain\user")
+        creds.parse_string("domain\\user")
         self.assertEqual(creds.get_username(), "user")
         self.assertEqual(creds.get_domain(), "DOMAIN")
         self.assertEqual(creds.get_realm(), "DOMAIN")
@@ -402,7 +439,7 @@ class CredentialsTests(samba.tests.TestCaseInTempDir):
         lp = samba.tests.env_loadparm()
         os.environ["USER"] = "env_user"
         creds.guess(lp)
-        creds.parse_string("domain\user%pass")
+        creds.parse_string("domain\\user%pass")
         self.assertEqual(creds.get_username(), "user")
         self.assertEqual(creds.get_domain(), "DOMAIN")
         self.assertEqual(creds.get_password(), "pass")

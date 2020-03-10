@@ -53,7 +53,7 @@ CONFIG="--configfile=$PREFIX/etc/smb.conf"
 export CONFIG
 
 testit "reset password policies beside of minimum password age of 0 days" \
-	$VALGRIND $samba_tool domain passwordsettings $CONFIG set --complexity=default --history-length=default --min-pwd-length=default --min-pwd-age=0 --max-pwd-age=default || failed=`expr $failed + 1`
+	$VALGRIND $samba_tool domain passwordsettings set $CONFIG --complexity=default --history-length=default --min-pwd-length=default --min-pwd-age=0 --max-pwd-age=default || failed=`expr $failed + 1`
 
 TEST_USERNAME="$(mktemp -u alice-XXXXXX)"
 TEST_PRINCIPAL="$TEST_USERNAME@$REALM"
@@ -109,7 +109,7 @@ testit "kpasswd check short user password" \
 ###########################################################
 
 echo "check that a short password is rejected"
-cat > ./tmpkpasswdscript <<EOF
+cat > $PREFIX/tmpkpasswdscript <<EOF
 expect Password
 password ${TEST_PASSWORD}\n
 expect New password
@@ -126,7 +126,7 @@ testit "kpasswd check weak user password" \
 ### check that a strong password is accepted
 ###########################################################
 
-cat > ./tmpkpasswdscript <<EOF
+cat > $PREFIX/tmpkpasswdscript <<EOF
 expect Password
 password ${TEST_PASSWORD}\n
 expect New password
@@ -208,7 +208,7 @@ test_smbclient "Test login with smbclient (ntlm)" \
 ###########################################################
 
 testit "reset password policies" \
-	$VALGRIND $samba_tool domain passwordsettings $CONFIG set --complexity=default --history-length=default --min-pwd-length=default --min-pwd-age=default --max-pwd-age=default || failed=`expr $failed + 1`
+	$VALGRIND $samba_tool domain passwordsettings set $CONFIG --complexity=default --history-length=default --min-pwd-length=default --min-pwd-age=default --max-pwd-age=default || failed=`expr $failed + 1`
 
 testit "delete user" \
 	$VALGRIND $samba_tool user delete $TEST_USERNAME -U"$USERNAME%$PASSWORD" $CONFIG -k no  || failed=`expr $failed + 1`

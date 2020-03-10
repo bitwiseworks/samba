@@ -461,7 +461,7 @@ WERROR dsdb_read_prefixes_from_ldb(struct ldb_context *ldb, TALLOC_CTX *mem_ctx,
  */
 static bool dsdb_schema_unique_attribute(const char *attr)
 {
-	const char *attrs[] = { "objectGUID", "objectSid" , NULL };
+	const char *attrs[] = { "objectGUID", NULL };
 	unsigned int i;
 	for (i=0;attrs[i];i++) {
 		if (ldb_attr_cmp(attr, attrs[i]) == 0) {
@@ -514,6 +514,10 @@ static int dsdb_schema_setup_ldb_schema_attribute(struct ldb_context *ldb,
 		a->flags |= LDB_ATTR_FLAG_SINGLE_VALUE;
 	}
 	
+	if (attr->searchFlags & SEARCH_FLAG_ATTINDEX) {
+		a->flags |= LDB_ATTR_FLAG_INDEXED;
+	}
+
 	
 	return LDB_SUCCESS;
 }
@@ -621,9 +625,15 @@ static int dsdb_schema_setup_ldb_schema_attribute(struct ldb_context *ldb,
 } while (0)
 
 /** Create an dsdb_attribute out of ldb message, attr must be already talloced
+ *
+ * If supplied the attribute will be checked against the prefixmap to
+ * ensure it can be mapped.  However we can't have this attribute
+ * const as dsdb_schema_pfm_attid_from_oid calls
+ * dsdb_schema_pfm_make_attid_impl() which may modify prefixmap in
+ * other situations.
  */
 
-WERROR dsdb_attribute_from_ldb(const struct dsdb_schema *schema,
+WERROR dsdb_attribute_from_ldb(struct dsdb_schema_prefixmap *prefixmap,
 			       struct ldb_message *msg,
 			       struct dsdb_attribute *attr)
 {
@@ -646,13 +656,13 @@ WERROR dsdb_attribute_from_ldb(const struct dsdb_schema *schema,
 
 	GET_STRING_LDB(msg, "lDAPDisplayName", attr, attr, lDAPDisplayName, true);
 	GET_STRING_LDB(msg, "attributeID", attr, attr, attributeID_oid, true);
-	if (!schema->prefixmap || schema->prefixmap->length == 0) {
+	if (!prefixmap || prefixmap->length == 0) {
 		/* set an invalid value */
 		attr->attributeID_id = DRSUAPI_ATTID_INVALID;
 	} else {
-		status = dsdb_schema_pfm_attid_from_oid(schema->prefixmap,
-						    attr->attributeID_oid,
-						    &attr->attributeID_id);
+		status = dsdb_schema_pfm_attid_from_oid(prefixmap,
+							attr->attributeID_oid,
+							&attr->attributeID_id);
 		if (!W_ERROR_IS_OK(status)) {
 			DEBUG(0,("%s: '%s': unable to map attributeID %s: %s\n",
 				__location__, attr->lDAPDisplayName, attr->attributeID_oid,
@@ -676,11 +686,11 @@ WERROR dsdb_attribute_from_ldb(const struct dsdb_schema *schema,
 	GET_UINT32_LDB(msg, "linkID", attr, linkID);
 
 	GET_STRING_LDB(msg, "attributeSyntax", attr, attr, attributeSyntax_oid, true);
-	if (!schema->prefixmap || schema->prefixmap->length == 0) {
+	if (!prefixmap || prefixmap->length == 0) {
 		/* set an invalid value */
 		attr->attributeSyntax_id = DRSUAPI_ATTID_INVALID;
 	} else {
-		status = dsdb_schema_pfm_attid_from_oid(schema->prefixmap,
+		status = dsdb_schema_pfm_attid_from_oid(prefixmap,
 							attr->attributeSyntax_oid,
 							&attr->attributeSyntax_id);
 		if (!W_ERROR_IS_OK(status)) {
@@ -723,7 +733,7 @@ WERROR dsdb_set_attribute_from_ldb_dups(struct ldb_context *ldb,
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
 
-	status = dsdb_attribute_from_ldb(schema, msg, attr);
+	status = dsdb_attribute_from_ldb(schema->prefixmap, msg, attr);
 	if (!W_ERROR_IS_OK(status)) {
 		return status;
 	}
@@ -894,10 +904,24 @@ int dsdb_load_ldb_results_into_schema(TALLOC_CTX *mem_ctx, struct ldb_context *l
 				      char **error_string)
 {
 	unsigned int i;
+	WERROR status;
 
 	schema->ts_last_change = 0;
 	for (i=0; i < attrs_class_res->count; i++) {
-		WERROR status = dsdb_schema_set_el_from_ldb_msg(ldb, schema, attrs_class_res->msgs[i]);
+		const char *prefixMap = NULL;
+		/*
+		 * attrs_class_res also includes the schema object;
+		 * we only want to process classes & attributes
+		 */
+		prefixMap = ldb_msg_find_attr_as_string(
+				attrs_class_res->msgs[i],
+				"prefixMap", NULL);
+		if (prefixMap != NULL) {
+			continue;
+		}
+
+		status = dsdb_schema_set_el_from_ldb_msg(ldb, schema,
+							 attrs_class_res->msgs[i]);
 		if (!W_ERROR_IS_OK(status)) {
 			*error_string = talloc_asprintf(mem_ctx,
 				      "dsdb_load_ldb_results_into_schema: failed to load attribute or class definition: %s:%s",
@@ -918,7 +942,7 @@ int dsdb_load_ldb_results_into_schema(TALLOC_CTX *mem_ctx, struct ldb_context *l
 */
 
 int dsdb_schema_from_ldb_results(TALLOC_CTX *mem_ctx, struct ldb_context *ldb,
-				 struct ldb_result *schema_res,
+				 struct ldb_message *schema_msg,
 				 struct ldb_result *attrs_class_res,
 				 struct dsdb_schema **schema_out,
 				 char **error_string)
@@ -951,7 +975,7 @@ int dsdb_schema_from_ldb_results(TALLOC_CTX *mem_ctx, struct ldb_context *ldb,
 							      false);
 	}
 
-	prefix_val = ldb_msg_find_ldb_val(schema_res->msgs[0], "prefixMap");
+	prefix_val = ldb_msg_find_ldb_val(schema_msg, "prefixMap");
 	if (!prefix_val) {
 		*error_string = talloc_asprintf(mem_ctx, 
 						"schema_fsmo_init: no prefixMap attribute found");
@@ -959,7 +983,7 @@ int dsdb_schema_from_ldb_results(TALLOC_CTX *mem_ctx, struct ldb_context *ldb,
 		talloc_free(tmp_ctx);
 		return LDB_ERR_CONSTRAINT_VIOLATION;
 	}
-	info_val = ldb_msg_find_ldb_val(schema_res->msgs[0], "schemaInfo");
+	info_val = ldb_msg_find_ldb_val(schema_msg, "schemaInfo");
 	if (!info_val) {
 		status = dsdb_schema_info_blob_new(mem_ctx, &info_val_default);
 		if (!W_ERROR_IS_OK(status)) {
@@ -989,7 +1013,7 @@ int dsdb_schema_from_ldb_results(TALLOC_CTX *mem_ctx, struct ldb_context *ldb,
 		return ret;
 	}
 
-	schema->fsmo.master_dn = ldb_msg_find_attr_as_dn(ldb, schema, schema_res->msgs[0], "fSMORoleOwner");
+	schema->fsmo.master_dn = ldb_msg_find_attr_as_dn(ldb, schema, schema_msg, "fSMORoleOwner");
 	if (ldb_dn_compare(samdb_ntds_settings_dn(ldb, tmp_ctx), schema->fsmo.master_dn) == 0) {
 		schema->fsmo.we_are_master = true;
 	} else {

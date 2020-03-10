@@ -2037,43 +2037,59 @@ static int snapper_gmt_rename(vfs_handle_struct *handle,
 }
 
 static int snapper_gmt_symlink(vfs_handle_struct *handle,
-			       const char *oldname, const char *newname)
+				const char *link_contents,
+				const struct smb_filename *new_smb_fname)
 {
-	time_t timestamp_old, timestamp_new;
+	time_t timestamp_old = 0;
+	time_t timestamp_new = 0;
 
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, oldname,
-					&timestamp_old, NULL)) {
+	if (!snapper_gmt_strip_snapshot(talloc_tos(),
+				handle,
+				link_contents,
+				&timestamp_old,
+				NULL)) {
 		return -1;
 	}
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, newname,
-					&timestamp_new, NULL)) {
+	if (!snapper_gmt_strip_snapshot(talloc_tos(),
+				handle,
+				new_smb_fname->base_name,
+				&timestamp_new,
+				NULL)) {
 		return -1;
 	}
 	if ((timestamp_old != 0) || (timestamp_new != 0)) {
 		errno = EROFS;
 		return -1;
 	}
-	return SMB_VFS_NEXT_SYMLINK(handle, oldname, newname);
+	return SMB_VFS_NEXT_SYMLINK(handle, link_contents, new_smb_fname);
 }
 
 static int snapper_gmt_link(vfs_handle_struct *handle,
-			    const char *oldname, const char *newname)
+				const struct smb_filename *old_smb_fname,
+				const struct smb_filename *new_smb_fname)
 {
-	time_t timestamp_old, timestamp_new;
+	time_t timestamp_old = 0;
+	time_t timestamp_new = 0;
 
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, oldname,
-					&timestamp_old, NULL)) {
+	if (!snapper_gmt_strip_snapshot(talloc_tos(),
+				handle,
+				old_smb_fname->base_name,
+				&timestamp_old,
+				NULL)) {
 		return -1;
 	}
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, newname,
-					&timestamp_new, NULL)) {
+	if (!snapper_gmt_strip_snapshot(talloc_tos(),
+				handle,
+				new_smb_fname->base_name,
+				&timestamp_new,
+				NULL)) {
 		return -1;
 	}
 	if ((timestamp_old != 0) || (timestamp_new != 0)) {
 		errno = EROFS;
 		return -1;
 	}
-	return SMB_VFS_NEXT_LINK(handle, oldname, newname);
+	return SMB_VFS_NEXT_LINK(handle, old_smb_fname, new_smb_fname);
 }
 
 static int snapper_gmt_stat(vfs_handle_struct *handle,
@@ -2328,29 +2344,49 @@ static int snapper_gmt_chown(vfs_handle_struct *handle,
 }
 
 static int snapper_gmt_chdir(vfs_handle_struct *handle,
-			     const char *fname)
+			const struct smb_filename *smb_fname)
 {
-	time_t timestamp;
-	char *stripped;
-	int ret, saved_errno;
-	char *conv;
+	time_t timestamp = 0;
+	char *stripped = NULL;
+	int ret;
+	int saved_errno = 0;
+	char *conv = NULL;
+	struct smb_filename *conv_smb_fname = NULL;
 
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, fname,
-					&timestamp, &stripped)) {
+	if (!snapper_gmt_strip_snapshot(talloc_tos(),
+				handle,
+				smb_fname->base_name,
+				&timestamp,
+				&stripped)) {
 		return -1;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_CHDIR(handle, fname);
+		return SMB_VFS_NEXT_CHDIR(handle, smb_fname);
 	}
 	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
 	TALLOC_FREE(stripped);
 	if (conv == NULL) {
 		return -1;
 	}
-	ret = SMB_VFS_NEXT_CHDIR(handle, conv);
-	saved_errno = errno;
+	conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (conv_smb_fname == NULL) {
+		TALLOC_FREE(conv);
+		errno = ENOMEM;
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_CHDIR(handle, conv_smb_fname);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
 	TALLOC_FREE(conv);
-	errno = saved_errno;
+	TALLOC_FREE(conv_smb_fname);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
 	return ret;
 }
 
@@ -2390,92 +2426,128 @@ static int snapper_gmt_ntimes(vfs_handle_struct *handle,
 }
 
 static int snapper_gmt_readlink(vfs_handle_struct *handle,
-				const char *fname, char *buf, size_t bufsiz)
+				const struct smb_filename *smb_fname,
+				char *buf,
+				size_t bufsiz)
 {
-	time_t timestamp;
-	char *stripped;
-	int ret, saved_errno;
-	char *conv;
+	time_t timestamp = 0;
+	char *stripped = NULL;
+	int ret;
+	int saved_errno = 0;
+	struct smb_filename *conv = NULL;
 
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, fname,
+	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle,
+					smb_fname->base_name,
 					&timestamp, &stripped)) {
 		return -1;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_READLINK(handle, fname, buf, bufsiz);
+		return SMB_VFS_NEXT_READLINK(handle, smb_fname, buf, bufsiz);
 	}
-	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
+	conv = cp_smb_filename(talloc_tos(), smb_fname);
 	if (conv == NULL) {
+		TALLOC_FREE(stripped);
+		errno = ENOMEM;
+		return -1;
+	}
+	conv->base_name = snapper_gmt_convert(conv, handle,
+					      stripped, timestamp);
+	TALLOC_FREE(stripped);
+	if (conv->base_name == NULL) {
 		return -1;
 	}
 	ret = SMB_VFS_NEXT_READLINK(handle, conv, buf, bufsiz);
-	saved_errno = errno;
+	if (ret == -1) {
+		saved_errno = errno;
+	}
 	TALLOC_FREE(conv);
-	errno = saved_errno;
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
 	return ret;
 }
 
 static int snapper_gmt_mknod(vfs_handle_struct *handle,
-			     const char *fname, mode_t mode, SMB_DEV_T dev)
+			const struct smb_filename *smb_fname,
+			mode_t mode,
+			SMB_DEV_T dev)
 {
-	time_t timestamp;
-	char *stripped;
-	int ret, saved_errno;
-	char *conv;
+	time_t timestamp = (time_t)0;
+	char *stripped = NULL;
+	int ret, saved_errno = 0;
+	struct smb_filename *conv_smb_fname = NULL;
 
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, fname,
+	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle,
+					smb_fname->base_name,
 					&timestamp, &stripped)) {
 		return -1;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_MKNOD(handle, fname, mode, dev);
+		return SMB_VFS_NEXT_MKNOD(handle, smb_fname, mode, dev);
 	}
-	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
-	if (conv == NULL) {
+	conv_smb_fname = cp_smb_filename(talloc_tos(), smb_fname);
+	if (conv_smb_fname == NULL) {
+		errno = ENOMEM;
 		return -1;
 	}
-	ret = SMB_VFS_NEXT_MKNOD(handle, conv, mode, dev);
-	saved_errno = errno;
-	TALLOC_FREE(conv);
-	errno = saved_errno;
+	conv_smb_fname->base_name = snapper_gmt_convert(conv_smb_fname, handle,
+					      stripped, timestamp);
+	TALLOC_FREE(stripped);
+	if (conv_smb_fname->base_name == NULL) {
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_MKNOD(handle, conv_smb_fname, mode, dev);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(conv_smb_fname);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
 	return ret;
 }
 
-static char *snapper_gmt_realpath(vfs_handle_struct *handle,
-				  const char *fname)
+static struct smb_filename *snapper_gmt_realpath(vfs_handle_struct *handle,
+				TALLOC_CTX *ctx,
+				const struct smb_filename *smb_fname)
 {
-	time_t timestamp;
+	time_t timestamp = 0;
 	char *stripped = NULL;
-	char *tmp = NULL;
-	char *result = NULL;
-	int saved_errno;
+	struct smb_filename *result_fname = NULL;
+	struct smb_filename *conv_smb_fname = NULL;
+	int saved_errno = 0;
 
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, fname,
+	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle,
+					smb_fname->base_name,
 					&timestamp, &stripped)) {
 		goto done;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_REALPATH(handle, fname);
+		return SMB_VFS_NEXT_REALPATH(handle, ctx, smb_fname);
 	}
 
-	tmp = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
-	if (tmp == NULL) {
+	conv_smb_fname = cp_smb_filename(talloc_tos(), smb_fname);
+	if (conv_smb_fname == NULL) {
+		goto done;
+	}
+	conv_smb_fname->base_name = snapper_gmt_convert(conv_smb_fname, handle,
+					      stripped, timestamp);
+	if (conv_smb_fname->base_name == NULL) {
 		goto done;
 	}
 
-	result = SMB_VFS_NEXT_REALPATH(handle, tmp);
-	if (result == NULL) {
-		goto done;
-	}
+	result_fname = SMB_VFS_NEXT_REALPATH(handle, ctx, conv_smb_fname);
 
 done:
-	saved_errno = errno;
-	TALLOC_FREE(tmp);
+	if (result_fname == NULL) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(conv_smb_fname);
 	TALLOC_FREE(stripped);
-	errno = saved_errno;
-	return result;
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return result_fname;
 }
 
 static NTSTATUS snapper_gmt_fget_nt_acl(vfs_handle_struct *handle,
@@ -2641,170 +2713,23 @@ static int snapper_gmt_rmdir(vfs_handle_struct *handle,
 	return ret;
 }
 
-static int snapper_gmt_chflags(vfs_handle_struct *handle, const char *fname,
-			       unsigned int flags)
+static int snapper_gmt_chflags(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				unsigned int flags)
 {
-	time_t timestamp;
-	char *stripped;
-	int ret, saved_errno;
-	char *conv;
-
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, fname,
-					&timestamp, &stripped)) {
-		return -1;
-	}
-	if (timestamp == 0) {
-		return SMB_VFS_NEXT_CHFLAGS(handle, fname, flags);
-	}
-	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
-	if (conv == NULL) {
-		return -1;
-	}
-	ret = SMB_VFS_NEXT_CHFLAGS(handle, conv, flags);
-	saved_errno = errno;
-	TALLOC_FREE(conv);
-	errno = saved_errno;
-	return ret;
-}
-
-static ssize_t snapper_gmt_getxattr(vfs_handle_struct *handle,
-				    const char *fname, const char *aname,
-				    void *value, size_t size)
-{
-	time_t timestamp;
-	char *stripped;
-	ssize_t ret;
-	int saved_errno;
-	char *conv;
-
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, fname,
-					&timestamp, &stripped)) {
-		return -1;
-	}
-	if (timestamp == 0) {
-		return SMB_VFS_NEXT_GETXATTR(handle, fname, aname, value,
-					     size);
-	}
-	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
-	if (conv == NULL) {
-		return -1;
-	}
-	ret = SMB_VFS_NEXT_GETXATTR(handle, conv, aname, value, size);
-	saved_errno = errno;
-	TALLOC_FREE(conv);
-	errno = saved_errno;
-	return ret;
-}
-
-static ssize_t snapper_gmt_listxattr(struct vfs_handle_struct *handle,
-				     const char *fname,
-				     char *list, size_t size)
-{
-	time_t timestamp;
-	char *stripped;
-	ssize_t ret;
-	int saved_errno;
-	char *conv;
-
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, fname,
-					&timestamp, &stripped)) {
-		return -1;
-	}
-	if (timestamp == 0) {
-		return SMB_VFS_NEXT_LISTXATTR(handle, fname, list, size);
-	}
-	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
-	if (conv == NULL) {
-		return -1;
-	}
-	ret = SMB_VFS_NEXT_LISTXATTR(handle, conv, list, size);
-	saved_errno = errno;
-	TALLOC_FREE(conv);
-	errno = saved_errno;
-	return ret;
-}
-
-static int snapper_gmt_removexattr(vfs_handle_struct *handle,
-				   const char *fname, const char *aname)
-{
-	time_t timestamp;
-	char *stripped;
-	int ret, saved_errno;
-	char *conv;
-
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, fname,
-					&timestamp, &stripped)) {
-		return -1;
-	}
-	if (timestamp == 0) {
-		return SMB_VFS_NEXT_REMOVEXATTR(handle, fname, aname);
-	}
-	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
-	if (conv == NULL) {
-		return -1;
-	}
-	ret = SMB_VFS_NEXT_REMOVEXATTR(handle, conv, aname);
-	saved_errno = errno;
-	TALLOC_FREE(conv);
-	errno = saved_errno;
-	return ret;
-}
-
-static int snapper_gmt_setxattr(struct vfs_handle_struct *handle,
-				const char *fname,
-				const char *aname, const void *value,
-				size_t size, int flags)
-{
-	time_t timestamp;
-	char *stripped;
-	ssize_t ret;
-	int saved_errno;
-	char *conv;
-
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, fname,
-					&timestamp, &stripped)) {
-		return -1;
-	}
-	if (timestamp == 0) {
-		return SMB_VFS_NEXT_SETXATTR(handle, fname, aname, value, size,
-					     flags);
-	}
-	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
-	TALLOC_FREE(stripped);
-	if (conv == NULL) {
-		return -1;
-	}
-	ret = SMB_VFS_NEXT_SETXATTR(handle, conv, aname, value, size, flags);
-	saved_errno = errno;
-	TALLOC_FREE(conv);
-	errno = saved_errno;
-	return ret;
-}
-
-static int snapper_gmt_chmod_acl(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			mode_t mode)
-{
-	time_t timestamp;
-	char *stripped;
-	ssize_t ret;
-	int saved_errno;
-	char *conv;
+	time_t timestamp = 0;
+	char *stripped = NULL;
+	int ret = -1;
+	int saved_errno = 0;
+	char *conv = NULL;
 	struct smb_filename *conv_smb_fname = NULL;
 
-	if (!snapper_gmt_strip_snapshot(talloc_tos(),
-				handle,
-				smb_fname->base_name,
-				&timestamp,
-				&stripped)) {
+	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle,
+				smb_fname->base_name, &timestamp, &stripped)) {
 		return -1;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_CHMOD_ACL(handle, smb_fname, mode);
+		return SMB_VFS_NEXT_CHFLAGS(handle, smb_fname, flags);
 	}
 	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
 	TALLOC_FREE(stripped);
@@ -2816,16 +2741,217 @@ static int snapper_gmt_chmod_acl(vfs_handle_struct *handle,
 					NULL,
 					NULL,
 					smb_fname->flags);
+	TALLOC_FREE(conv);
 	if (conv_smb_fname == NULL) {
-		TALLOC_FREE(conv);
 		errno = ENOMEM;
 		return -1;
 	}
-	ret = SMB_VFS_NEXT_CHMOD_ACL(handle, conv_smb_fname, mode);
-	saved_errno = errno;
-	TALLOC_FREE(conv);
+	ret = SMB_VFS_NEXT_CHFLAGS(handle, conv_smb_fname, flags);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
 	TALLOC_FREE(conv_smb_fname);
-	errno = saved_errno;
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
+}
+
+static ssize_t snapper_gmt_getxattr(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				const char *aname,
+				void *value,
+				size_t size)
+{
+	time_t timestamp = 0;
+	char *stripped = NULL;
+	ssize_t ret;
+	int saved_errno = 0;
+	char *conv = NULL;
+	struct smb_filename *conv_smb_fname = NULL;
+
+	if (!snapper_gmt_strip_snapshot(talloc_tos(),
+					handle,
+					smb_fname->base_name,
+					&timestamp,
+					&stripped)) {
+		return -1;
+	}
+	if (timestamp == 0) {
+		return SMB_VFS_NEXT_GETXATTR(handle, smb_fname, aname, value,
+					     size);
+	}
+	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
+	TALLOC_FREE(stripped);
+	if (conv == NULL) {
+		return -1;
+	}
+	conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	TALLOC_FREE(conv);
+	if (conv_smb_fname == NULL) {
+		errno = ENOMEM;
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_GETXATTR(handle, conv_smb_fname, aname, value, size);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(conv_smb_fname);
+	TALLOC_FREE(conv);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
+}
+
+static ssize_t snapper_gmt_listxattr(struct vfs_handle_struct *handle,
+				     const struct smb_filename *smb_fname,
+				     char *list, size_t size)
+{
+	time_t timestamp = 0;
+	char *stripped = NULL;
+	ssize_t ret;
+	int saved_errno = 0;
+	char *conv = NULL;
+	struct smb_filename *conv_smb_fname = NULL;
+
+	if (!snapper_gmt_strip_snapshot(talloc_tos(),
+					handle,
+					smb_fname->base_name,
+					&timestamp,
+					&stripped)) {
+		return -1;
+	}
+	if (timestamp == 0) {
+		return SMB_VFS_NEXT_LISTXATTR(handle, smb_fname, list, size);
+	}
+	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
+	TALLOC_FREE(stripped);
+	if (conv == NULL) {
+		return -1;
+	}
+	conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	TALLOC_FREE(conv);
+	if (conv_smb_fname == NULL) {
+		errno = ENOMEM;
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_LISTXATTR(handle, conv_smb_fname, list, size);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(conv_smb_fname);
+	TALLOC_FREE(conv);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
+}
+
+static int snapper_gmt_removexattr(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				const char *aname)
+{
+	time_t timestamp = 0;
+	char *stripped = NULL;
+	ssize_t ret;
+	int saved_errno = 0;
+	char *conv = NULL;
+	struct smb_filename *conv_smb_fname = NULL;
+
+	if (!snapper_gmt_strip_snapshot(talloc_tos(),
+					handle,
+					smb_fname->base_name,
+					&timestamp,
+					&stripped)) {
+		return -1;
+	}
+	if (timestamp == 0) {
+		return SMB_VFS_NEXT_REMOVEXATTR(handle, smb_fname, aname);
+	}
+	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
+	TALLOC_FREE(stripped);
+	if (conv == NULL) {
+		return -1;
+	}
+	conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	TALLOC_FREE(conv);
+	if (conv_smb_fname == NULL) {
+		errno = ENOMEM;
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_REMOVEXATTR(handle, conv_smb_fname, aname);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(conv_smb_fname);
+	TALLOC_FREE(conv);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
+	return ret;
+}
+
+static int snapper_gmt_setxattr(struct vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				const char *aname, const void *value,
+				size_t size, int flags)
+{
+	time_t timestamp = 0;
+	char *stripped = NULL;
+	ssize_t ret;
+	int saved_errno = 0;
+	char *conv = NULL;
+	struct smb_filename *conv_smb_fname = NULL;
+
+	if (!snapper_gmt_strip_snapshot(talloc_tos(),
+					handle,
+					smb_fname->base_name,
+					&timestamp,
+					&stripped)) {
+		return -1;
+	}
+	if (timestamp == 0) {
+		return SMB_VFS_NEXT_SETXATTR(handle, smb_fname,
+					aname, value, size, flags);
+	}
+	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
+	TALLOC_FREE(stripped);
+	if (conv == NULL) {
+		return -1;
+	}
+	conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	TALLOC_FREE(conv);
+	if (conv_smb_fname == NULL) {
+		errno = ENOMEM;
+		return -1;
+	}
+	ret = SMB_VFS_NEXT_SETXATTR(handle, conv_smb_fname,
+				aname, value, size, flags);
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(conv_smb_fname);
+	TALLOC_FREE(conv);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
 	return ret;
 }
 
@@ -2871,55 +2997,75 @@ static int snapper_gmt_get_real_filename(struct vfs_handle_struct *handle,
 }
 
 static uint64_t snapper_gmt_disk_free(vfs_handle_struct *handle,
-				      const char *path, uint64_t *bsize,
-				      uint64_t *dfree, uint64_t *dsize)
+				const struct smb_filename *smb_fname,
+				uint64_t *bsize,
+				uint64_t *dfree,
+				uint64_t *dsize)
 {
-	time_t timestamp;
-	char *stripped;
-	ssize_t ret;
-	int saved_errno;
-	char *conv;
+	time_t timestamp = 0;
+	char *stripped = NULL;
+	uint64_t ret;
+	int saved_errno = 0;
+	char *conv = NULL;
+	struct smb_filename *conv_smb_fname = NULL;
 
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, path,
-					&timestamp, &stripped)) {
-		return -1;
+	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle,
+			smb_fname->base_name, &timestamp, &stripped)) {
+		return (uint64_t)-1;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_DISK_FREE(handle, path,
+		return SMB_VFS_NEXT_DISK_FREE(handle, smb_fname,
 					      bsize, dfree, dsize);
 	}
 
 	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
 	TALLOC_FREE(stripped);
 	if (conv == NULL) {
-		return -1;
+		return (uint64_t)-1;
+	}
+	conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
+	if (conv_smb_fname == NULL) {
+		TALLOC_FREE(conv);
+		errno = ENOMEM;
+		return (uint64_t)-1;
 	}
 
-	ret = SMB_VFS_NEXT_DISK_FREE(handle, conv, bsize, dfree, dsize);
+	ret = SMB_VFS_NEXT_DISK_FREE(handle, conv_smb_fname,
+				bsize, dfree, dsize);
 
-	saved_errno = errno;
-	TALLOC_FREE(conv);
-	errno = saved_errno;
-
+	if (ret == (uint64_t)-1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(conv_smb_fname);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
 	return ret;
 }
 
-static int snapper_gmt_get_quota(vfs_handle_struct *handle, const char *path,
-				 enum SMB_QUOTA_TYPE qtype, unid_t id,
-				 SMB_DISK_QUOTA *dq)
+static int snapper_gmt_get_quota(vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			enum SMB_QUOTA_TYPE qtype,
+			unid_t id,
+			SMB_DISK_QUOTA *dq)
 {
-	time_t timestamp;
-	char *stripped;
+	time_t timestamp = 0;
+	char *stripped = NULL;
 	int ret;
-	int saved_errno;
-	char *conv;
+	int saved_errno = 0;
+	char *conv = NULL;
+	struct smb_filename *conv_smb_fname = NULL;
 
-	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle, path, &timestamp,
-					&stripped)) {
+	if (!snapper_gmt_strip_snapshot(talloc_tos(), handle,
+				smb_fname->base_name, &timestamp, &stripped)) {
 		return -1;
 	}
 	if (timestamp == 0) {
-		return SMB_VFS_NEXT_GET_QUOTA(handle, path, qtype, id, dq);
+		return SMB_VFS_NEXT_GET_QUOTA(handle, smb_fname, qtype, id, dq);
 	}
 
 	conv = snapper_gmt_convert(talloc_tos(), handle, stripped, timestamp);
@@ -2927,13 +3073,26 @@ static int snapper_gmt_get_quota(vfs_handle_struct *handle, const char *path,
 	if (conv == NULL) {
 		return -1;
 	}
-
-	ret = SMB_VFS_NEXT_GET_QUOTA(handle, conv, qtype, id, dq);
-
-	saved_errno = errno;
+	conv_smb_fname = synthetic_smb_fname(talloc_tos(),
+					conv,
+					NULL,
+					NULL,
+					smb_fname->flags);
 	TALLOC_FREE(conv);
-	errno = saved_errno;
+	if (conv_smb_fname == NULL) {
+		errno = ENOMEM;
+		return -1;
+	}
 
+	ret = SMB_VFS_NEXT_GET_QUOTA(handle, conv_smb_fname, qtype, id, dq);
+
+	if (ret == -1) {
+		saved_errno = errno;
+	}
+	TALLOC_FREE(conv_smb_fname);
+	if (saved_errno != 0) {
+		errno = saved_errno;
+	}
 	return ret;
 }
 
@@ -2969,13 +3128,12 @@ static struct vfs_fn_pointers snapper_fns = {
 	.listxattr_fn = snapper_gmt_listxattr,
 	.removexattr_fn = snapper_gmt_removexattr,
 	.setxattr_fn = snapper_gmt_setxattr,
-	.chmod_acl_fn = snapper_gmt_chmod_acl,
 	.chflags_fn = snapper_gmt_chflags,
 	.get_real_filename_fn = snapper_gmt_get_real_filename,
 };
 
-NTSTATUS vfs_snapper_init(void);
-NTSTATUS vfs_snapper_init(void)
+static_decl_vfs;
+NTSTATUS vfs_snapper_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION,
 				"snapper", &snapper_fns);

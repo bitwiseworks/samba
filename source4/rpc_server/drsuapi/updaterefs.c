@@ -27,11 +27,53 @@
 #include "rpc_server/drsuapi/dcesrv_drsuapi.h"
 #include "auth/session.h"
 #include "librpc/gen_ndr/ndr_drsuapi.h"
+#include "librpc/gen_ndr/ndr_irpc_c.h"
+#include "lib/messaging/irpc.h"
+
+#undef DBGC_CLASS
+#define DBGC_CLASS            DBGC_DRS_REPL
 
 struct repsTo {
 	uint32_t count;
 	struct repsFromToBlob *r;
 };
+
+static WERROR uref_check_dest(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
+			      struct ldb_dn *dn, struct GUID *dest_guid,
+			      uint32_t options)
+{
+	struct repsTo reps;
+	WERROR werr;
+	unsigned int i;
+	bool found = false;
+
+	werr = dsdb_loadreps(sam_ctx, mem_ctx, dn, "repsTo", &reps.r, &reps.count);
+	if (!W_ERROR_IS_OK(werr)) {
+		return werr;
+	}
+
+	for (i=0; i<reps.count; i++) {
+		if (GUID_equal(dest_guid,
+			       &reps.r[i].ctr.ctr1.source_dsa_obj_guid)) {
+			found = true;
+			break;
+		}
+	}
+
+	if (options & DRSUAPI_DRS_ADD_REF) {
+		if (found && !(options & DRSUAPI_DRS_DEL_REF)) {
+			return WERR_DS_DRA_REF_ALREADY_EXISTS;
+		}
+	}
+
+	if (options & DRSUAPI_DRS_DEL_REF) {
+		if (!found && !(options & DRSUAPI_DRS_ADD_REF)) {
+			return WERR_DS_DRA_REF_NOT_FOUND;
+		}
+	}
+
+	return WERR_OK;
+}
 
 /*
   add a replication destination for a given partition GUID
@@ -121,12 +163,19 @@ static WERROR uref_del_dest(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
 	return WERR_OK;	
 }
 
+struct drepl_refresh_state {
+	struct dreplsrv_refresh r;
+};
+
 /**
  * @brief Update the references for the given NC and the destination DSA object
  *
  * This function is callable from non RPC functions (ie. getncchanges), it
  * will validate the request to update reference and then will add/del a repsTo
  * to the specified server referenced by its DSA GUID in the request.
+ *
+ * @param[in]       msg_ctx          Messaging context for sending partition
+ *                                   refresh in dreplsrv
  *
  * @param[in]       b_state          A bind_state object
  *
@@ -139,7 +188,9 @@ static WERROR uref_del_dest(struct ldb_context *sam_ctx, TALLOC_CTX *mem_ctx,
  * @return                           WERR_OK is success, different error
  *                                   otherwise.
  */
-WERROR drsuapi_UpdateRefs(struct drsuapi_bind_state *b_state, TALLOC_CTX *mem_ctx,
+WERROR drsuapi_UpdateRefs(struct imessaging_context *msg_ctx,
+			  struct tevent_context *event_ctx,
+			  struct drsuapi_bind_state *b_state, TALLOC_CTX *mem_ctx,
 			  struct drsuapi_DsReplicaUpdateRefsRequest1 *req)
 {
 	WERROR werr;
@@ -147,6 +198,10 @@ WERROR drsuapi_UpdateRefs(struct drsuapi_bind_state *b_state, TALLOC_CTX *mem_ct
 	struct ldb_dn *dn;
 	struct ldb_dn *nc_root;
 	struct ldb_context *sam_ctx = b_state->sam_ctx_system?b_state->sam_ctx_system:b_state->sam_ctx;
+	struct dcerpc_binding_handle *irpc_handle;
+	struct tevent_req *subreq;
+	struct drepl_refresh_state *state;
+
 
 	DEBUG(4,("DsReplicaUpdateRefs for host '%s' with GUID %s options 0x%08x nc=%s\n",
 		 req->dest_dsa_dns_name, GUID_string(mem_ctx, &req->dest_dsa_guid),
@@ -182,6 +237,22 @@ WERROR drsuapi_UpdateRefs(struct drsuapi_bind_state *b_state, TALLOC_CTX *mem_ct
 		return WERR_DS_DRA_BAD_NC;
 	}
 
+	/*
+	 * First check without a transaction open.
+	 *
+	 * This means that in the usual case, it will never open it and never
+	 * bother to refresh the dreplsrv.
+	 */
+	werr = uref_check_dest(sam_ctx, mem_ctx, dn, &req->dest_dsa_guid,
+			       req->options);
+	if (W_ERROR_EQUAL(werr, WERR_DS_DRA_REF_ALREADY_EXISTS) ||
+	    W_ERROR_EQUAL(werr, WERR_DS_DRA_REF_NOT_FOUND)) {
+		if (req->options & DRSUAPI_DRS_GETCHG_CHECK) {
+			return WERR_OK;
+		}
+		return werr;
+	}
+
 	if (ldb_transaction_start(sam_ctx) != LDB_SUCCESS) {
 		DEBUG(0,(__location__ ": Failed to start transaction on samdb: %s\n",
 			 ldb_errstring(sam_ctx)));
@@ -201,7 +272,7 @@ WERROR drsuapi_UpdateRefs(struct drsuapi_bind_state *b_state, TALLOC_CTX *mem_ct
 	if (req->options & DRSUAPI_DRS_ADD_REF) {
 		struct repsFromTo1 dest;
 		struct repsFromTo1OtherInfo oi;
-		
+
 		ZERO_STRUCT(dest);
 		ZERO_STRUCT(oi);
 
@@ -222,8 +293,35 @@ WERROR drsuapi_UpdateRefs(struct drsuapi_bind_state *b_state, TALLOC_CTX *mem_ct
 	if (ldb_transaction_commit(sam_ctx) != LDB_SUCCESS) {
 		DEBUG(0,(__location__ ": Failed to commit transaction on samdb: %s\n",
 			 ldb_errstring(sam_ctx)));
-		return WERR_DS_DRA_INTERNAL_ERROR;		
+		return WERR_DS_DRA_INTERNAL_ERROR;
 	}
+
+	state = talloc_zero(mem_ctx, struct drepl_refresh_state);
+	if (state == NULL) {
+		return WERR_OK;
+	}
+
+	irpc_handle = irpc_binding_handle_by_name(mem_ctx, msg_ctx,
+						  "dreplsrv", &ndr_table_irpc);
+	if (irpc_handle == NULL) {
+		/* dreplsrv is not running yet */
+		TALLOC_FREE(state);
+		return WERR_OK;
+	}
+
+        /*
+	 * [Taken from auth_sam_trigger_repl_secret in auth_sam.c]
+	 *
+         * This seem to rely on the current IRPC implementation,
+         * which delivers the message in the _send function.
+         *
+         * TODO: we need a ONE_WAY IRPC handle and register
+         * a callback and wait for it to be triggered!
+         */
+	subreq = dcerpc_dreplsrv_refresh_r_send(state, event_ctx,
+						irpc_handle, &state->r);
+	TALLOC_FREE(subreq);
+	TALLOC_FREE(state);
 
 	return WERR_OK;
 
@@ -278,7 +376,8 @@ WERROR dcesrv_drsuapi_DsReplicaUpdateRefs(struct dcesrv_call_state *dce_call, TA
 		}
 	}
 
-	werr = drsuapi_UpdateRefs(b_state, mem_ctx, req);
+	werr = drsuapi_UpdateRefs(dce_call->msg_ctx, dce_call->event_ctx,
+				  b_state, mem_ctx, req);
 
 #if 0
 	NDR_PRINT_FUNCTION_DEBUG(drsuapi_DsReplicaUpdateRefs, NDR_BOTH, r);

@@ -3,6 +3,7 @@
 # This is a port of the original in testprogs/ejs/ldap.js
 
 # Copyright (C) Jelmer Vernooij <jelmer@samba.org> 2008-2011
+# Copyright (C) Catalyst.Net Ltd 2017
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -19,6 +20,7 @@
 
 
 
+from __future__ import print_function
 import optparse
 import sys
 import time
@@ -165,7 +167,8 @@ systemOnly: FALSE
         try:
                  self.ldb.add_ldif(ldif)
                  self.fail()
-        except LdbError, (num, _):
+        except LdbError as e1:
+                 (num, _) = e1.args
                  self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         ldif = """
@@ -341,7 +344,8 @@ systemOnly: FALSE
         try:
             self.ldb.add_ldif(ldif)
             self.fail("Should have failed to add duplicate attributeID value")
-        except LdbError, (enum, estr):
+        except LdbError as e2:
+            (enum, estr) = e2.args
             self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
 
@@ -385,7 +389,8 @@ systemOnly: FALSE
         try:
             self.ldb.add_ldif(ldif)
             self.fail("Should have failed to add duplicate governsID conflicting with attributeID value")
-        except LdbError, (enum, estr):
+        except LdbError as e3:
+            (enum, estr) = e3.args
             self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
 
@@ -428,7 +433,8 @@ systemOnly: FALSE
         try:
             self.ldb.add_ldif(ldif)
             self.fail("Should have failed to add attribute with duplicate CN")
-        except LdbError, (enum, estr):
+        except LdbError as e4:
+            (enum, estr) = e4.args
             self.assertEquals(enum, ERR_ENTRY_ALREADY_EXISTS)
 
     def test_duplicate_implicit_ldapdisplayname(self):
@@ -471,7 +477,8 @@ systemOnly: FALSE
         try:
             self.ldb.add_ldif(ldif)
             self.fail("Should have failed to add attribute with duplicate of the implicit ldapDisplayName")
-        except LdbError, (enum, estr):
+        except LdbError as e5:
+            (enum, estr) = e5.args
             self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
 
@@ -516,7 +523,8 @@ systemOnly: FALSE
         try:
             self.ldb.add_ldif(ldif)
             self.fail("Should have failed to add attribute with duplicate ldapDisplayName")
-        except LdbError, (enum, estr):
+        except LdbError as e6:
+            (enum, estr) = e6.args
             self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
 
@@ -564,7 +572,8 @@ systemOnly: FALSE
         try:
             self.ldb.add_ldif(ldif)
             self.fail("Should have failed to add class with duplicate ldapDisplayName")
-        except LdbError, (enum, estr):
+        except LdbError as e7:
+            (enum, estr) = e7.args
             self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
 
@@ -618,7 +627,8 @@ ldapDisplayName: """ + attr_ldap_display_name + """
         try:
             self.ldb.modify_ldif(ldif)
             self.fail("Should have failed to modify schema to have attribute with duplicate ldapDisplayName")
-        except LdbError, (enum, estr):
+        except LdbError as e8:
+            (enum, estr) = e8.args
             self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
 
@@ -672,7 +682,8 @@ attributeId: """ + attributeID + """
         try:
             self.ldb.modify_ldif(ldif)
             self.fail("Should have failed to modify schema to have attribute with duplicate attributeID")
-        except LdbError, (enum, estr):
+        except LdbError as e9:
+            (enum, estr) = e9.args
             self.assertEquals(enum, ERR_CONSTRAINT_VIOLATION)
 
     def test_remove_ldapdisplayname(self):
@@ -707,7 +718,8 @@ replace: ldapDisplayName
         try:
             self.ldb.modify_ldif(ldif)
             self.fail("Should have failed to remove the ldapdisplayname")
-        except LdbError, (enum, estr):
+        except LdbError as e10:
+            (enum, estr) = e10.args
             self.assertEquals(enum, ERR_OBJECT_CLASS_VIOLATION)
 
     def test_rename_ldapdisplayname(self):
@@ -776,7 +788,8 @@ attributeId: """ + attributeID + """.1
         try:
             self.ldb.modify_ldif(ldif)
             self.fail("Should have failed to modify schema to have different attributeID")
-        except LdbError, (enum, estr):
+        except LdbError as e11:
+            (enum, estr) = e11.args
             self.assertEquals(enum, ERR_CONSTRAINT_VIOLATION)
 
 
@@ -813,8 +826,379 @@ attributeId: """ + attributeID + """
         try:
             self.ldb.modify_ldif(ldif)
             self.fail("Should have failed to modify schema to have the same attributeID")
-        except LdbError, (enum, estr):
+        except LdbError as e12:
+            (enum, estr) = e12.args
             self.assertEquals(enum, ERR_CONSTRAINT_VIOLATION)
+
+
+    def test_generated_linkID(self):
+        """
+        Test that we automatically generate a linkID if the
+        OID "1.2.840.113556.1.2.50" is given as the linkID
+        of a new attribute, and that we don't get/can't add
+        duplicate linkIDs. Also test that we can add a backlink
+        by providing the attributeID or ldapDisplayName of
+        a forwards link in the linkID attribute.
+        """
+
+        # linkID generation isn't available before 2003
+        res = self.ldb.search(base="", expression="", scope=SCOPE_BASE,
+                         attrs=["domainControllerFunctionality"])
+        self.assertEquals(len(res), 1)
+        dc_level = int(res[0]["domainControllerFunctionality"][0])
+        if dc_level < DS_DOMAIN_FUNCTION_2003:
+            return
+
+        rand = str(random.randint(1,100000))
+
+        attr_name_1 = "test-generated-linkID" + time.strftime("%s", time.gmtime()) + "-" + rand
+        attr_ldap_display_name_1 = attr_name_1.replace("-", "")
+        attributeID_1 = "1.3.6.1.4.1.7165.4.6.1.6.16." + rand
+        ldif = """
+dn: CN=%s,%s""" % (attr_name_1, self.schema_dn) + """
+objectClass: top
+objectClass: attributeSchema
+adminDescription: """ + attr_name_1 + """
+adminDisplayName: """ + attr_name_1 + """
+cn: """ + attr_name_1 + """
+attributeId: """ + attributeID_1 + """
+linkID: 1.2.840.113556.1.2.50
+attributeSyntax: 2.5.5.1
+ldapDisplayName: """ + attr_ldap_display_name_1 + """
+omSyntax: 127
+instanceType: 4
+isSingleValued: TRUE
+systemOnly: FALSE
+"""
+
+        try:
+            self.ldb.add_ldif(ldif)
+        except LdbError as e13:
+            (enum, estr) = e13.args
+            self.fail(estr)
+
+        attr_name_2 = "test-generated-linkID-2" + time.strftime("%s", time.gmtime()) + "-" + rand
+        attr_ldap_display_name_2 = attr_name_2.replace("-", "")
+        attributeID_2 = "1.3.6.1.4.1.7165.4.6.1.6.17." + rand
+        ldif = """
+dn: CN=%s,%s""" % (attr_name_2, self.schema_dn) + """
+objectClass: top
+objectClass: attributeSchema
+adminDescription: """ + attr_name_2 + """
+adminDisplayName: """ + attr_name_2 + """
+cn: """ + attr_name_2 + """
+attributeId: """ + attributeID_2 + """
+linkID: 1.2.840.113556.1.2.50
+attributeSyntax: 2.5.5.1
+ldapDisplayName: """ + attr_ldap_display_name_2 + """
+omSyntax: 127
+instanceType: 4
+isSingleValued: TRUE
+systemOnly: FALSE
+"""
+
+        try:
+            self.ldb.add_ldif(ldif)
+        except LdbError as e14:
+            (enum, estr) = e14.args
+            self.fail(estr)
+
+        res = self.ldb.search("CN=%s,%s" % (attr_name_1, self.schema_dn),
+                              scope=SCOPE_BASE,
+                              attrs=["linkID"])
+        self.assertEquals(len(res), 1)
+        linkID_1 = int(res[0]["linkID"][0])
+
+        res = self.ldb.search("CN=%s,%s" % (attr_name_2, self.schema_dn),
+                              scope=SCOPE_BASE,
+                              attrs=["linkID"])
+        self.assertEquals(len(res), 1)
+        linkID_2 = int(res[0]["linkID"][0])
+
+        # 0 should never be generated as a linkID
+        self.assertFalse(linkID_1 == 0)
+        self.assertFalse(linkID_2 == 0)
+
+        # The generated linkID should always be even, because
+        # it should assume we're adding a forward link.
+        self.assertTrue(linkID_1 % 2 == 0)
+        self.assertTrue(linkID_2 % 2 == 0)
+
+        self.assertFalse(linkID_1 == linkID_2)
+
+        # This is only necessary against Windows, since we depend
+        # on the previously added links in the next ones and Windows
+        # won't refresh the schema as we add them.
+        ldif = """
+dn:
+changetype: modify
+replace: schemaupdatenow
+schemaupdatenow: 1
+"""
+        self.ldb.modify_ldif(ldif)
+
+        # If we add a new link with the same linkID, it should fail
+        attr_name = "test-generated-linkID-duplicate" + time.strftime("%s", time.gmtime()) + "-" + rand
+        attr_ldap_display_name = attr_name.replace("-", "")
+        attributeID = "1.3.6.1.4.1.7165.4.6.1.6.18." + rand
+        ldif = """
+dn: CN=%s,%s""" % (attr_name, self.schema_dn) + """
+objectClass: top
+objectClass: attributeSchema
+adminDescription: """ + attr_name + """
+adminDisplayName: """ + attr_name + """
+cn: """ + attr_name + """
+attributeId: """ + attributeID + """
+linkID: """ + str(linkID_1) + """
+attributeSyntax: 2.5.5.1
+ldapDisplayName: """ + attr_ldap_display_name + """
+omSyntax: 127
+instanceType: 4
+isSingleValued: TRUE
+systemOnly: FALSE
+"""
+
+        try:
+            self.ldb.add_ldif(ldif)
+            self.fail("Should have failed to add duplicate linkID value")
+        except LdbError as e15:
+            (enum, estr) = e15.args
+            self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
+
+        # If we add another attribute with the attributeID or lDAPDisplayName
+        # of a forward link in its linkID field, it should add as a backlink
+
+        attr_name_3 = "test-generated-linkID-backlink" + time.strftime("%s", time.gmtime()) + "-" + rand
+        attr_ldap_display_name_3 = attr_name_3.replace("-", "")
+        attributeID_3 = "1.3.6.1.4.1.7165.4.6.1.6.19." + rand
+        ldif = """
+dn: CN=%s,%s""" % (attr_name_3, self.schema_dn) + """
+objectClass: top
+objectClass: attributeSchema
+adminDescription: """ + attr_name_3 + """
+adminDisplayName: """ + attr_name_3 + """
+cn: """ + attr_name_3 + """
+attributeId: """ + attributeID_3 + """
+linkID: """ + str(linkID_1+1) + """
+attributeSyntax: 2.5.5.1
+ldapDisplayName: """ + attr_ldap_display_name_3 + """
+omSyntax: 127
+instanceType: 4
+isSingleValued: TRUE
+systemOnly: FALSE
+"""
+
+        try:
+            self.ldb.add_ldif(ldif)
+        except LdbError as e16:
+            (enum, estr) = e16.args
+            self.fail(estr)
+
+        res = self.ldb.search("CN=%s,%s" % (attr_name_3, self.schema_dn),
+                              scope=SCOPE_BASE,
+                              attrs=["linkID"])
+        self.assertEquals(len(res), 1)
+        linkID = int(res[0]["linkID"][0])
+        self.assertEquals(linkID, linkID_1 + 1)
+
+        attr_name_4 = "test-generated-linkID-backlink-2" + time.strftime("%s", time.gmtime()) + "-" + rand
+        attr_ldap_display_name_4 = attr_name_4.replace("-", "")
+        attributeID_4 = "1.3.6.1.4.1.7165.4.6.1.6.20." + rand
+        ldif = """
+dn: CN=%s,%s""" % (attr_name_4, self.schema_dn) + """
+objectClass: top
+objectClass: attributeSchema
+adminDescription: """ + attr_name_4 + """
+adminDisplayName: """ + attr_name_4 + """
+cn: """ + attr_name_4 + """
+attributeId: """ + attributeID_4 + """
+linkID: """ + attr_ldap_display_name_2 + """
+attributeSyntax: 2.5.5.1
+ldapDisplayName: """ + attr_ldap_display_name_4 + """
+omSyntax: 127
+instanceType: 4
+isSingleValued: TRUE
+systemOnly: FALSE
+"""
+
+        try:
+            self.ldb.add_ldif(ldif)
+        except LdbError as e17:
+            (enum, estr) = e17.args
+            self.fail(estr)
+
+        res = self.ldb.search("CN=%s,%s" % (attr_name_4, self.schema_dn),
+                              scope=SCOPE_BASE,
+                              attrs=["linkID"])
+        self.assertEquals(len(res), 1)
+        linkID = int(res[0]["linkID"][0])
+        self.assertEquals(linkID, linkID_2 + 1)
+
+        # If we then try to add another backlink in the same way
+        # for the same forwards link, we should fail.
+
+        attr_name = "test-generated-linkID-backlink-duplicate" + time.strftime("%s", time.gmtime()) + "-" + rand
+        attr_ldap_display_name = attr_name.replace("-", "")
+        attributeID = "1.3.6.1.4.1.7165.4.6.1.6.21." + rand
+        ldif = """
+dn: CN=%s,%s""" % (attr_name, self.schema_dn) + """
+objectClass: top
+objectClass: attributeSchema
+adminDescription: """ + attr_name + """
+adminDisplayName: """ + attr_name + """
+cn: """ + attr_name + """
+attributeId: """ + attributeID + """
+linkID: """ + attributeID_1 + """
+attributeSyntax: 2.5.5.1
+ldapDisplayName: """ + attr_ldap_display_name + """
+omSyntax: 127
+instanceType: 4
+isSingleValued: TRUE
+systemOnly: FALSE
+"""
+
+        try:
+            self.ldb.add_ldif(ldif)
+            self.fail("Should have failed to add duplicate backlink")
+        except LdbError as e18:
+            (enum, estr) = e18.args
+            self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
+
+        # If we try to supply the attributeID or ldapDisplayName
+        # of an existing backlink in the linkID field of a new link,
+        # it should fail.
+
+        attr_name = "test-generated-linkID-backlink-invalid" + time.strftime("%s", time.gmtime()) + "-" + rand
+        attr_ldap_display_name = attr_name.replace("-", "")
+        attributeID = "1.3.6.1.4.1.7165.4.6.1.6.22." + rand
+        ldif = """
+dn: CN=%s,%s""" % (attr_name, self.schema_dn) + """
+objectClass: top
+objectClass: attributeSchema
+adminDescription: """ + attr_name + """
+adminDisplayName: """ + attr_name + """
+cn: """ + attr_name + """
+attributeId: """ + attributeID + """
+linkID: """ + attributeID_3 + """
+attributeSyntax: 2.5.5.1
+ldapDisplayName: """ + attr_ldap_display_name + """
+omSyntax: 127
+instanceType: 4
+isSingleValued: TRUE
+systemOnly: FALSE
+"""
+
+        try:
+            self.ldb.add_ldif(ldif)
+            self.fail("Should have failed to add backlink of backlink")
+        except LdbError as e19:
+            (enum, estr) = e19.args
+            self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
+
+        attr_name = "test-generated-linkID-backlink-invalid-2" + time.strftime("%s", time.gmtime()) + "-" + rand
+        attr_ldap_display_name = attr_name.replace("-", "")
+        attributeID = "1.3.6.1.4.1.7165.4.6.1.6.23." + rand
+        ldif = """
+dn: CN=%s,%s""" % (attr_name, self.schema_dn) + """
+objectClass: top
+objectClass: attributeSchema
+adminDescription: """ + attr_name + """
+adminDisplayName: """ + attr_name + """
+cn: """ + attr_name + """
+attributeId: """ + attributeID + """
+linkID: """ + attr_ldap_display_name_4 + """
+attributeSyntax: 2.5.5.1
+ldapDisplayName: """ + attr_ldap_display_name + """
+omSyntax: 127
+instanceType: 4
+isSingleValued: TRUE
+systemOnly: FALSE
+"""
+
+        try:
+            self.ldb.add_ldif(ldif)
+            self.fail("Should have failed to add backlink of backlink")
+        except LdbError as e20:
+            (enum, estr) = e20.args
+            self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
+
+    def test_generated_mAPIID(self):
+        """
+        Test that we automatically generate a mAPIID if the
+        OID "1.2.840.113556.1.2.49" is given as the mAPIID
+        of a new attribute, and that we don't get/can't add
+        duplicate mAPIIDs.
+        """
+
+        rand = str(random.randint(1,100000))
+
+        attr_name_1 = "test-generated-mAPIID" + time.strftime("%s", time.gmtime()) + "-" + rand
+        attr_ldap_display_name_1 = attr_name_1.replace("-", "")
+        attributeID_1 = "1.3.6.1.4.1.7165.4.6.1.6.24." + rand
+        ldif = """
+dn: CN=%s,%s""" % (attr_name_1, self.schema_dn) + """
+objectClass: top
+objectClass: attributeSchema
+adminDescription: """ + attr_name_1 + """
+adminDisplayName: """ + attr_name_1 + """
+cn: """ + attr_name_1 + """
+attributeId: """ + attributeID_1 + """
+mAPIID: 1.2.840.113556.1.2.49
+attributeSyntax: 2.5.5.1
+ldapDisplayName: """ + attr_ldap_display_name_1 + """
+omSyntax: 127
+instanceType: 4
+isSingleValued: TRUE
+systemOnly: FALSE
+"""
+
+        try:
+            self.ldb.add_ldif(ldif)
+        except LdbError as e21:
+            (enum, estr) = e21.args
+            self.fail(estr)
+
+        res = self.ldb.search("CN=%s,%s" % (attr_name_1, self.schema_dn),
+                              scope=SCOPE_BASE,
+                              attrs=["mAPIID"])
+        self.assertEquals(len(res), 1)
+        mAPIID_1 = int(res[0]["mAPIID"][0])
+
+        ldif = """
+dn:
+changetype: modify
+replace: schemaupdatenow
+schemaupdatenow: 1
+"""
+        self.ldb.modify_ldif(ldif)
+
+        # If we add a new attribute with the same mAPIID, it should fail
+        attr_name = "test-generated-mAPIID-duplicate" + time.strftime("%s", time.gmtime()) + "-" + rand
+        attr_ldap_display_name = attr_name.replace("-", "")
+        attributeID = "1.3.6.1.4.1.7165.4.6.1.6.25." + rand
+        ldif = """
+dn: CN=%s,%s""" % (attr_name, self.schema_dn) + """
+objectClass: top
+objectClass: attributeSchema
+adminDescription: """ + attr_name + """
+adminDisplayName: """ + attr_name + """
+cn: """ + attr_name + """
+attributeId: """ + attributeID + """
+mAPIID: """ + str(mAPIID_1) + """
+attributeSyntax: 2.5.5.1
+ldapDisplayName: """ + attr_ldap_display_name + """
+omSyntax: 127
+instanceType: 4
+isSingleValued: TRUE
+systemOnly: FALSE
+"""
+
+        try:
+            self.ldb.add_ldif(ldif)
+            self.fail("Should have failed to add duplicate mAPIID value")
+        except LdbError as e22:
+            (enum, estr) = e22.args
+            self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
 
     def test_change_governsID(self):
@@ -851,7 +1235,8 @@ governsId: """ + governsID + """.1
         try:
             self.ldb.modify_ldif(ldif)
             self.fail("Should have failed to modify schema to have different governsID")
-        except LdbError, (enum, estr):
+        except LdbError as e23:
+            (enum, estr) = e23.args
             self.assertEquals(enum, ERR_CONSTRAINT_VIOLATION)
 
 
@@ -889,7 +1274,8 @@ governsId: """ + governsID + """.1
         try:
             self.ldb.modify_ldif(ldif)
             self.fail("Should have failed to modify schema to have the same governsID")
-        except LdbError, (enum, estr):
+        except LdbError as e24:
+            (enum, estr) = e24.args
             self.assertEquals(enum, ERR_CONSTRAINT_VIOLATION)
 
 
@@ -1030,7 +1416,8 @@ systemOnly: FALSE
         try:
             self.ldb.add_ldif(ldif_fail)
             self.fail("Adding attribute with preset msDS-IntId should fail")
-        except LdbError, (num, _):
+        except LdbError as e25:
+            (num, _) = e25.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         # add the new attribute and update schema
@@ -1057,7 +1444,8 @@ systemOnly: FALSE
         try:
             self.ldb.modify(msg)
             self.fail("Modifying msDS-IntId should return error")
-        except LdbError, (num, _):
+        except LdbError as e26:
+            (num, _) = e26.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         # 2. Create attribute with systemFlags = FLAG_SCHEMA_BASE_OBJECT
@@ -1073,7 +1461,8 @@ systemOnly: FALSE
         try:
             self.ldb.add_ldif(ldif_fail)
             self.fail("Adding attribute with preset msDS-IntId should fail")
-        except LdbError, (num, _):
+        except LdbError as e27:
+            (num, _) = e27.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         # add the new attribute and update schema
@@ -1100,7 +1489,8 @@ systemOnly: FALSE
         try:
             self.ldb.modify(msg)
             self.fail("Modifying msDS-IntId should return error")
-        except LdbError, (num, _):
+        except LdbError as e28:
+            (num, _) = e28.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
 
@@ -1160,7 +1550,8 @@ systemOnly: FALSE
         try:
             self.ldb.modify(msg)
             self.fail("Modifying msDS-IntId should return error")
-        except LdbError, (num, _):
+        except LdbError as e29:
+            (num, _) = e29.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         # 2. Create Class with systemFlags = FLAG_SCHEMA_BASE_OBJECT
@@ -1198,7 +1589,8 @@ systemOnly: FALSE
         try:
             self.ldb.modify(msg)
             self.fail("Modifying msDS-IntId should return error")
-        except LdbError, (num, _):
+        except LdbError as e30:
+            (num, _) = e30.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         res = self.ldb.search(class_dn, scope=SCOPE_BASE, attrs=["msDS-IntId"])
         self.assertEquals(len(res), 1)
@@ -1224,7 +1616,7 @@ systemOnly: FALSE
                     #self.assertTrue("msDS-IntId" in ldb_msg, "msDS-IntId expected on: %s" % ldb_msg.dn)
                     if "msDS-IntId" not in ldb_msg:
                         count = count + 1
-                        print "%3d warning: msDS-IntId expected on: %-30s %s" % (count, ldb_msg["attributeID"], ldb_msg["cn"])
+                        print("%3d warning: msDS-IntId expected on: %-30s %s" % (count, ldb_msg["attributeID"], ldb_msg["cn"]))
             else:
                 self.assertTrue("msDS-IntId" not in ldb_msg)
 
@@ -1252,7 +1644,8 @@ class SchemaTests_msDS_isRODC(samba.tests.TestCase):
             ntds_search_dn = "CN=NTDS Settings,%s" % ldb_msg['dn']
             try:
                 res_check = self.ldb.search(ntds_search_dn, attrs=["objectCategory"])
-            except LdbError, (num, _):
+            except LdbError as e:
+                (num, _) = e.args
                 self.assertEquals(num, ERR_NO_SUCH_OBJECT)
                 print("Server entry %s doesn't have a NTDS settings object" % res[0]['dn'])
             else:

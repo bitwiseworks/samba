@@ -1127,6 +1127,7 @@ static WERROR dcesrv_srvsvc_fill_share_info(struct share_info *info, int *count,
 		*((int *)info[i].value) = max_users;
 		i++;
 
+		FALL_THROUGH;
 	case 501:
 	case 1:
 		info[i].name = SHARE_TYPE;
@@ -1147,6 +1148,7 @@ static WERROR dcesrv_srvsvc_fill_share_info(struct share_info *info, int *count,
 		W_ERROR_HAVE_NO_MEMORY(info[i].value);
 		i++;
 
+		FALL_THROUGH;
 	case 1004:
 		if (comment) {
 			info[i].name = SHARE_COMMENT;
@@ -1156,6 +1158,8 @@ static WERROR dcesrv_srvsvc_fill_share_info(struct share_info *info, int *count,
 
 			i++;
 		}
+
+		FALL_THROUGH;
 	case 0:
 		if (name &&
 		    strcasecmp(share_name, name) != 0) {
@@ -2101,7 +2105,7 @@ static WERROR dcesrv_srvsvc_NetSetFileSecurity(struct dcesrv_call_state *dce_cal
 	io = talloc(mem_ctx, union smb_setfileinfo);
 	W_ERROR_HAVE_NO_MEMORY(io);
 
-	io->set_secdesc.level			= RAW_FILEINFO_SEC_DESC;
+	io->set_secdesc.level			= RAW_SFILEINFO_SEC_DESC;
 	io->set_secdesc.in.file.path		= r->in.file;
 	io->set_secdesc.in.secinfo_flags	= r->in.securityinformation;
 	io->set_secdesc.in.sd			= r->in.sd_buf->sd;

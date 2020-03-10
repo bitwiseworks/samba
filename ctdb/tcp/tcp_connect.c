@@ -75,6 +75,7 @@ void ctdb_tcp_tnode_cb(uint8_t *data, size_t cnt, void *private_data)
 	tnode->connect_te = tevent_add_timer(node->ctdb->ev, tnode,
 					     timeval_current_ofs(3, 0),
 					     ctdb_tcp_node_connect, node);
+	TALLOC_FREE(data);
 }
 
 /*
@@ -249,6 +250,7 @@ static void ctdb_listen_event(struct tevent_context *ev, struct tevent_fd *fde,
 	len = sizeof(addr);
 	fd = accept(ctcp->listen_fd, (struct sockaddr *)&addr, &len);
 	if (fd == -1) return;
+	smb_set_close_on_exec(fd);
 
 	nodeid = ctdb_ip_to_nodeid(ctdb, &addr);
 

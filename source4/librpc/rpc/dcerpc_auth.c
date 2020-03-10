@@ -136,12 +136,15 @@ _PUBLIC_ NTSTATUS dcerpc_bind_auth_none(struct dcerpc_pipe *p,
 
 struct bind_auth_state {
 	struct dcerpc_pipe *pipe;
+	struct ndr_syntax_id syntax;
+	struct ndr_syntax_id transfer_syntax;
 	struct dcerpc_auth out_auth_info;
 	struct dcerpc_auth in_auth_info;
 	bool more_processing;	/* Is there anything more to do after the
 				 * first bind itself received? */
 };
 
+static void bind_auth_next_gensec_done(struct tevent_req *subreq);
 static void bind_auth_recv_alter(struct tevent_req *subreq);
 
 static void bind_auth_next_step(struct composite_context *c)
@@ -149,7 +152,6 @@ static void bind_auth_next_step(struct composite_context *c)
 	struct bind_auth_state *state;
 	struct dcecli_security *sec;
 	struct tevent_req *subreq;
-	bool more_processing = false;
 
 	state = talloc_get_type(c->private_data, struct bind_auth_state);
 	sec = &state->pipe->conn->security_state;
@@ -188,15 +190,31 @@ static void bind_auth_next_step(struct composite_context *c)
 	state->pipe->inhibit_timeout_processing = true;
 	state->pipe->timed_out = false;
 
-	c->status = gensec_update_ev(sec->generic_state, state,
-				  state->pipe->conn->event_ctx,
-				  state->in_auth_info.credentials,
-				  &state->out_auth_info.credentials);
-	if (state->pipe->timed_out) {
-		composite_error(c, NT_STATUS_IO_TIMEOUT);
-		return;
-	}
+	subreq = gensec_update_send(state,
+				    state->pipe->conn->event_ctx,
+				    sec->generic_state,
+				    state->in_auth_info.credentials);
+	if (composite_nomem(subreq, c)) return;
+	tevent_req_set_callback(subreq, bind_auth_next_gensec_done, c);
+}
+
+static void bind_auth_next_gensec_done(struct tevent_req *subreq)
+{
+	struct composite_context *c =
+		tevent_req_callback_data(subreq,
+		struct composite_context);
+	struct bind_auth_state *state =
+		talloc_get_type_abort(c->private_data,
+		struct bind_auth_state);
+	struct dcerpc_pipe *p = state->pipe;
+	struct dcecli_security *sec = &p->conn->security_state;
+	bool more_processing = false;
+
 	state->pipe->inhibit_timeout_processing = false;
+
+	c->status = gensec_update_recv(subreq, state,
+				       &state->out_auth_info.credentials);
+	TALLOC_FREE(subreq);
 
 	if (NT_STATUS_EQUAL(c->status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
 		more_processing = true;
@@ -204,6 +222,13 @@ static void bind_auth_next_step(struct composite_context *c)
 	}
 
 	if (!composite_is_ok(c)) return;
+
+	if (!more_processing) {
+		if (state->pipe->conn->flags & DCERPC_HEADER_SIGNING) {
+			gensec_want_feature(sec->generic_state,
+					GENSEC_FEATURE_SIGN_PKT_HEADER);
+		}
+	}
 
 	if (state->out_auth_info.credentials.length == 0) {
 		composite_done(c);
@@ -271,10 +296,6 @@ static void bind_auth_recv_bindreply(struct tevent_req *subreq)
 	TALLOC_FREE(subreq);
 	if (!composite_is_ok(c)) return;
 
-	if (state->pipe->conn->flags & DCERPC_HEADER_SIGNING) {
-		gensec_want_feature(sec->generic_state, GENSEC_FEATURE_SIGN_PKT_HEADER);
-	}
-
 	if (!state->more_processing) {
 		/* The first gensec_update has not requested a second run, so
 		 * we're done here. */
@@ -285,6 +306,8 @@ static void bind_auth_recv_bindreply(struct tevent_req *subreq)
 	bind_auth_next_step(c);
 }
 
+
+static void dcerpc_bind_auth_gensec_done(struct tevent_req *subreq);
 
 /**
    Bind to a DCE/RPC pipe, send async request
@@ -310,7 +333,6 @@ struct composite_context *dcerpc_bind_auth_send(TALLOC_CTX *mem_ctx,
 	struct bind_auth_state *state;
 	struct dcecli_security *sec;
 	struct tevent_req *subreq;
-	struct ndr_syntax_id syntax, transfer_syntax;
 	const char *target_principal = NULL;
 
 	/* composite context allocation and setup */
@@ -324,8 +346,8 @@ struct composite_context *dcerpc_bind_auth_send(TALLOC_CTX *mem_ctx,
 	state->pipe = p;
 
 	c->status = dcerpc_init_syntaxes(p, table,
-					 &syntax,
-					 &transfer_syntax);
+					 &state->syntax,
+					 &state->transfer_syntax);
 	if (!composite_is_ok(c)) return c;
 
 	sec = &p->conn->security_state;
@@ -419,20 +441,37 @@ struct composite_context *dcerpc_bind_auth_send(TALLOC_CTX *mem_ctx,
 
 	state->pipe->inhibit_timeout_processing = true;
 	state->pipe->timed_out = false;
-	c->status = gensec_update_ev(sec->generic_state, state,
-				  p->conn->event_ctx,
-				  data_blob_null,
-				  &state->out_auth_info.credentials);
-	if (state->pipe->timed_out) {
-		composite_error(c, NT_STATUS_IO_TIMEOUT);
-		return c;
-	}
+
+	subreq = gensec_update_send(state,
+				    p->conn->event_ctx,
+				    sec->generic_state,
+				    data_blob_null);
+	if (composite_nomem(subreq, c)) return c;
+	tevent_req_set_callback(subreq, dcerpc_bind_auth_gensec_done, c);
+
+	return c;
+}
+
+static void dcerpc_bind_auth_gensec_done(struct tevent_req *subreq)
+{
+	struct composite_context *c =
+		tevent_req_callback_data(subreq,
+		struct composite_context);
+	struct bind_auth_state *state =
+		talloc_get_type_abort(c->private_data,
+		struct bind_auth_state);
+	struct dcerpc_pipe *p = state->pipe;
+	struct dcecli_security *sec = &p->conn->security_state;
+
 	state->pipe->inhibit_timeout_processing = false;
 
+	c->status = gensec_update_recv(subreq, state,
+				       &state->out_auth_info.credentials);
+	TALLOC_FREE(subreq);
 	if (!NT_STATUS_IS_OK(c->status) &&
 	    !NT_STATUS_EQUAL(c->status, NT_STATUS_MORE_PROCESSING_REQUIRED)) {
 		composite_error(c, c->status);
-		return c;
+		return;
 	}
 
 	state->more_processing = NT_STATUS_EQUAL(c->status,
@@ -440,7 +479,7 @@ struct composite_context *dcerpc_bind_auth_send(TALLOC_CTX *mem_ctx,
 
 	if (state->out_auth_info.credentials.length == 0) {
 		composite_done(c);
-		return c;
+		return;
 	}
 
 	if (gensec_have_feature(sec->generic_state, GENSEC_FEATURE_SIGN_PKT_HEADER)) {
@@ -459,11 +498,11 @@ struct composite_context *dcerpc_bind_auth_send(TALLOC_CTX *mem_ctx,
 	/* The first request always is a dcerpc_bind. The subsequent ones
 	 * depend on gensec results */
 	subreq = dcerpc_bind_send(state, p->conn->event_ctx, p,
-				  &syntax, &transfer_syntax);
-	if (composite_nomem(subreq, c)) return c;
+				  &state->syntax, &state->transfer_syntax);
+	if (composite_nomem(subreq, c)) return;
 	tevent_req_set_callback(subreq, bind_auth_recv_bindreply, c);
 
-	return c;
+	return;
 }
 
 

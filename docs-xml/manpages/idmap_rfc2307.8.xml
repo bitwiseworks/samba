@@ -7,7 +7,7 @@
 	<manvolnum>8</manvolnum>
 	<refmiscinfo class="source">Samba</refmiscinfo>
 	<refmiscinfo class="manual">System Administration tools</refmiscinfo>
-	<refmiscinfo class="version">4.6</refmiscinfo>
+	<refmiscinfo class="version">&doc.version;</refmiscinfo>
 </refmeta>
 
 <refnamediv>
@@ -70,13 +70,13 @@
 		</varlistentry>
 		<varlistentry>
 			<term>bind_path_user</term>
-			<listitem><para>Specifies the bind path where
+			<listitem><para>Specifies the search base where
 			user objects can be found in the LDAP
 			server.</para></listitem>
 		</varlistentry>
 		<varlistentry>
 			<term>bind_path_group</term>
-			<listitem><para>Specifies the bind path where
+			<listitem><para>Specifies the search base where
 			group objects can be found in the LDAP
 			server.</para></listitem>
 		</varlistentry>

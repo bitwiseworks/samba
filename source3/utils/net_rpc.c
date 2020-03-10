@@ -22,6 +22,7 @@
 
 #include "includes.h"
 #include "utils/net.h"
+#include "libsmb/namequery.h"
 #include "rpc_client/cli_pipe.h"
 #include "../libcli/auth/libcli_auth.h"
 #include "../librpc/gen_ndr/ndr_samr_c.h"
@@ -46,6 +47,7 @@
 #include "nsswitch/libwbclient/wbclient.h"
 #include "passdb.h"
 #include "../libcli/smb/smbXcli_base.h"
+#include "libsmb/dsgetdcname.h"
 
 static int net_mode_share;
 static NTSTATUS sync_files(struct copy_clistate *cp_clistate, const char *mask);
@@ -5120,7 +5122,7 @@ static void show_userlist(struct rpc_pipe_client *pipe_hnd,
 					       &result);
 
 	if (!NT_STATUS_IS_OK(status) || !W_ERROR_IS_OK(result)) {
-		DEBUG(1, ("Coult not query secdesc for share %s\n",
+		DEBUG(1, ("Could not query secdesc for share %s\n",
 			  netname));
 		return;
 	}
@@ -7438,35 +7440,10 @@ bool net_rpc_check(struct net_context *c, unsigned flags)
 	return ret;
 }
 
-/* dump sam database via samsync rpc calls */
-static int rpc_samdump(struct net_context *c, int argc, const char **argv) {
-	if (c->display_usage) {
-		d_printf(  "%s\n"
-			   "net rpc samdump\n"
-			   "    %s\n",
-			 _("Usage:"),
-			 _("Dump remote SAM database"));
-		return 0;
-	}
-
-	return run_rpc_command(c, NULL, &ndr_table_netlogon,
-			       NET_FLAGS_ANONYMOUS,
-			       rpc_samdump_internals, argc, argv);
-}
-
 /* syncronise sam database via samsync rpc calls */
 static int rpc_vampire(struct net_context *c, int argc, const char **argv)
 {
 	struct functable func[] = {
-		{
-			"ldif",
-			rpc_vampire_ldif,
-			NET_TRANSPORT_RPC,
-			N_("Dump remote SAM database to ldif"),
-			N_("net rpc vampire ldif\n"
-			   "    Dump remote SAM database to LDIF file or "
-			   "stdout")
-		},
 		{
 			"keytab",
 			rpc_vampire_keytab,
@@ -8266,14 +8243,6 @@ int net_rpc(struct net_context *c, int argc, const char **argv)
 			N_("Shutdown a remote server"),
 			N_("net rpc shutdown\n"
 			   "    Shutdown a remote server")
-		},
-		{
-			"samdump",
-			rpc_samdump,
-			NET_TRANSPORT_RPC,
-			N_("Dump SAM data of remote NT PDC"),
-			N_("net rpc samdump\n"
-			   "    Dump SAM data of remote NT PDC")
 		},
 		{
 			"vampire",

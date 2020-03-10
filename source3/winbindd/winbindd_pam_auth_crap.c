@@ -19,10 +19,11 @@
 
 #include "includes.h"
 #include "winbindd.h"
+#include "rpc_client/util_netlogon.h"
+#include "libcli/security/dom_sid.h"
 
 struct winbindd_pam_auth_crap_state {
 	struct winbindd_response *response;
-	struct netr_SamInfo3 *info3;
 	uint32_t flags;
 };
 
@@ -45,18 +46,56 @@ struct tevent_req *winbindd_pam_auth_crap_send(
 		return NULL;
 	}
 
-	if (request->flags & WBFLAG_PAM_AUTH_PAC) {
+	state->flags = request->flags;
+
+	if (state->flags & WBFLAG_PAM_AUTH_PAC) {
+		bool is_trusted = false;
+		uint16_t validation_level;
+		union netr_Validation *validation = NULL;
 		NTSTATUS status;
 
-		state->flags = request->flags;
-		status = winbindd_pam_auth_pac_send(cli, &state->info3);
-		if (NT_STATUS_IS_OK(status)) {
-			/* Defer filling out response to recv */
-			tevent_req_done(req);
-		} else {
-			tevent_req_nterror(req, status);
+		status = winbindd_pam_auth_pac_verify(cli,
+						      &is_trusted,
+						      &validation_level,
+						      &validation);
+		if (tevent_req_nterror(req, status)) {
+			return tevent_req_post(req, ev);
 		}
 
+		state->response = talloc_zero(state,
+					      struct winbindd_response);
+		if (tevent_req_nomem(state->response, req)) {
+			return tevent_req_post(req, ev);
+		}
+		state->response->result = WINBINDD_PENDING;
+		state->response->length = sizeof(struct winbindd_response);
+
+		status = append_auth_data(state->response,
+					  state->response,
+					  state->flags,
+					  validation_level,
+					  validation,
+					  NULL, NULL);
+		TALLOC_FREE(validation);
+		if (tevent_req_nterror(req, status)) {
+			return tevent_req_post(req, ev);
+		}
+
+		if (is_trusted && (state->flags & WBFLAG_PAM_INFO3_TEXT)) {
+			bool ok;
+
+			ok = add_trusted_domain_from_auth(
+				state->response->data.auth.validation_level,
+				&state->response->data.auth.info3,
+				&state->response->data.auth.info6);
+			if (!ok) {
+				DBG_ERR("add_trusted_domain_from_auth failed\n");
+				tevent_req_nterror(req, NT_STATUS_LOGON_FAILURE);
+				return tevent_req_post(req, ev);
+			}
+		}
+
+		tevent_req_done(req);
 		return tevent_req_post(req, ev);
 	}
 
@@ -116,6 +155,23 @@ static void winbindd_pam_auth_crap_done(struct tevent_req *subreq)
 		tevent_req_nterror(req, map_nt_error_from_unix(err));
 		return;
 	}
+
+	if (NT_STATUS_IS_OK(NT_STATUS(state->response->data.auth.nt_status)) &&
+	    (state->flags & WBFLAG_PAM_INFO3_TEXT))
+	{
+		bool ok;
+
+		ok = add_trusted_domain_from_auth(
+			state->response->data.auth.validation_level,
+			&state->response->data.auth.info3,
+			&state->response->data.auth.info6);
+		if (!ok) {
+			DBG_ERR("add_trusted_domain_from_auth failed\n");
+			tevent_req_nterror(req, NT_STATUS_LOGON_FAILURE);
+			return;
+		}
+	}
+
 	tevent_req_done(req);
 }
 
@@ -129,11 +185,6 @@ NTSTATUS winbindd_pam_auth_crap_recv(struct tevent_req *req,
 	if (tevent_req_is_nterror(req, &status)) {
 		set_auth_errors(response, status);
 		return status;
-	}
-
-	if (state->flags & WBFLAG_PAM_AUTH_PAC) {
-		return append_auth_data(response, response, state->flags,
-					state->info3, NULL, NULL);
 	}
 
 	*response = *state->response;

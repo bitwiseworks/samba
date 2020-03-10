@@ -62,6 +62,19 @@ extern const struct dom_sid global_sid_Unix_NFS_Groups;
 extern const struct dom_sid global_sid_Unix_NFS_Mode;
 extern const struct dom_sid global_sid_Unix_NFS_Other;
 
+enum lsa_SidType;
+
+NTSTATUS dom_sid_lookup_predefined_name(const char *name,
+					const struct dom_sid **sid,
+					enum lsa_SidType *type,
+					const struct dom_sid **authority_sid,
+					const char **authority_name);
+NTSTATUS dom_sid_lookup_predefined_sid(const struct dom_sid *sid,
+				       const char **name,
+				       enum lsa_SidType *type,
+				       const struct dom_sid **authority_sid,
+				       const char **authority_name);
+
 int dom_sid_compare_auth(const struct dom_sid *sid1,
 			 const struct dom_sid *sid2);
 int dom_sid_compare(const struct dom_sid *sid1, const struct dom_sid *sid2);
@@ -83,6 +96,7 @@ NTSTATUS dom_sid_split_rid(TALLOC_CTX *mem_ctx, const struct dom_sid *sid,
 			   struct dom_sid **domain, uint32_t *rid);
 bool dom_sid_in_domain(const struct dom_sid *domain_sid,
 		       const struct dom_sid *sid);
+bool dom_sid_is_valid_account_domain(const struct dom_sid *sid);
 
 #define DOM_SID_STR_BUFLEN (15*11+25)
 int dom_sid_string_buf(const struct dom_sid *sid, char *buf, int buflen);

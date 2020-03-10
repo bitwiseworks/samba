@@ -64,7 +64,7 @@ struct async_info {
 	void *parms;
 };
 
-NTSTATUS ntvfs_cifs_init(void);
+NTSTATUS ntvfs_cifs_init(TALLOC_CTX *);
 
 #define CHECK_UPSTREAM_OPEN do { \
 	if (!smbXcli_conn_is_connected(p->transport->conn)) { \
@@ -296,6 +296,7 @@ static NTSTATUS cvfs_connect(struct ntvfs_module_context *ntvfs,
 	io.in.dest_ports = lpcfg_smb_ports(ntvfs->ctx->lp_ctx);
 	io.in.socket_options = lpcfg_socket_options(ntvfs->ctx->lp_ctx);
 	io.in.called_name = host;
+	io.in.existing_conn = NULL;
 	io.in.credentials = credentials;
 	io.in.fallback_to_anonymous = false;
 	io.in.workgroup = lpcfg_workgroup(ntvfs->ctx->lp_ctx);
@@ -1201,7 +1202,7 @@ static NTSTATUS cvfs_notify(struct ntvfs_module_context *ntvfs,
 /*
   initialise the CIFS->CIFS backend, registering ourselves with the ntvfs subsystem
  */
-NTSTATUS ntvfs_cifs_init(void)
+NTSTATUS ntvfs_cifs_init(TALLOC_CTX *ctx)
 {
 	NTSTATUS ret;
 	struct ntvfs_ops ops;

@@ -38,7 +38,25 @@
     </para>
 
     <para>
-      The tunable variables are listed alphabetically.
+      Tunables can be set at startup from the
+      <filename>/usr/local/etc/ctdb/ctdb.tunables</filename>
+      configuration file.
+
+      <literallayout>
+<replaceable>TUNABLE</replaceable>=<replaceable>VALUE</replaceable>
+      </literallayout>
+    </para>
+
+    <para>
+      For example:
+
+      <screen format="linespecific">
+MonitorInterval=20
+      </screen>
+    </para>
+
+    <para>
+      The available tunable variables are listed alphabetically below.
     </para>
 
     <refsect2>
@@ -49,6 +67,30 @@
 	This can be used to temporarily block any new processes from
 	attaching to and accessing the databases.  This is mainly used
 	for detaching a volatile database using 'ctdb detach'.
+      </para>
+    </refsect2>
+
+    <refsect2>
+      <title>AllowMixedVersions</title>
+      <para>Default: 0</para>
+      <para>
+	CTDB will not allow incompatible versions to co-exist in
+	a cluster.  If a version mismatch is found, then losing CTDB
+	will shutdown.	To disable the incompatible version check,
+	set this tunable to 1.
+      </para>
+      <para>
+	For version checking, CTDB uses major and minor version.
+	For example, CTDB 4.6.1 and CTDB CTDB 4.6.2 are matching versions;
+	CTDB 4.5.x and CTDB 4.6.y do not match.
+      </para>
+      <para>
+	CTDB with version check support will lose to CTDB without
+	version check support.	Between two different CTDB versions with
+	version check support, one running for less time will lose.
+	If the running time for both CTDB versions with version check
+	support is equal (to seconds), then the older version will lose.
+	The losing CTDB daemon will shutdown.
       </para>
     </refsect2>
 
@@ -132,23 +174,6 @@
       <para>
 	This timeout controls how long we will defer the request from the
 	client before timing it out and returning an error to the client.
-      </para>
-    </refsect2>
-
-    <refsect2>
-      <title>DisableIPFailover</title>
-      <para>Default: 0</para>
-      <para>
-	When set to non-zero, ctdb will not perform failover or
-	failback. Even if a node fails while holding public IPs, ctdb
-	will not recover the IPs or assign them to another node.
-      </para>
-      <para>
-	When this tunable is enabled, ctdb will no longer attempt
-	to recover the cluster by failing IP addresses over to other
-	nodes. This leads to a service outage until the administrator
-	has manually performed IP failover to replacement nodes using the
-	'ctdb moveip' command.
       </para>
     </refsect2>
 
@@ -401,28 +426,14 @@
     </refsect2>
 
     <refsect2>
-      <title>NoIPHostOnAllDisabled</title>
-      <para>Default: 0</para>
-      <para>
-	If no nodes are HEALTHY then by default ctdb will happily host
-	public IPs on disabled (unhealthy or administratively disabled)
-	nodes.	This can cause problems, for example if the underlying
-	cluster filesystem is not mounted.  When set to 1 and a node
-	is disabled, any IPs hosted by this node will be released and
-	the node will not takeover any IPs until it is no longer disabled.
-      </para>
-    </refsect2>
-
-    <refsect2>
       <title>NoIPTakeover</title>
       <para>Default: 0</para>
       <para>
 	When set to 1, ctdb will not allow IP addresses to be failed
 	over to other nodes.  Any IP addresses already hosted on
-	healthy nodes will remain.  Usually IP addresses hosted on
-	unhealthy nodes will also remain, if NoIPHostOnAllDisabled is
-	0.  However, if NoIPHostOnAllDisabled is 1 then IP addresses
-	will be released by unhealthy nodes and will become un-hosted.
+	healthy nodes will remain.  Any IP addresses hosted on
+	unhealthy nodes will be released by unhealthy nodes and will
+	become un-hosted.
       </para>
     </refsect2>
 
@@ -584,7 +595,7 @@
       <para>
 	Some databases have seqnum tracking enabled, so that samba will
 	be able to detect asynchronously when there has been updates
-	to the database.  Everytime a database is updated its sequence
+	to the database.  Every time a database is updated its sequence
 	number is increased.
       </para>
       <para>
@@ -629,17 +640,6 @@
       <para>
 	This is the duration in seconds in which ctdb tries to complete IP
 	failover.
-      </para>
-    </refsect2>
-
-    <refsect2>
-      <title>TDBMutexEnabled</title>
-      <para>Default: 0</para>
-      <para>
-	This paramter enables TDB_MUTEX_LOCKING feature on volatile
-	databases if the robust mutexes are supported. This optimizes the
-	record locking using robust mutexes and is much more efficient
-	that using posix locks.
       </para>
     </refsect2>
 
@@ -720,6 +720,14 @@
   </refsect1>
 
   <refsect1>
+    <title>FILES></title>
+
+    <simplelist>
+      <member><filename>/usr/local/etc/ctdb/ctdb.tunables</filename></member>
+    </simplelist>
+  </refsect1>
+
+  <refsect1>
     <title>SEE ALSO</title>
     <para>
       <citerefentry><refentrytitle>ctdb</refentrytitle>
@@ -728,7 +736,7 @@
       <citerefentry><refentrytitle>ctdbd</refentrytitle>
       <manvolnum>1</manvolnum></citerefentry>,
 
-      <citerefentry><refentrytitle>ctdbd.conf</refentrytitle>
+      <citerefentry><refentrytitle>ctdb.conf</refentrytitle>
       <manvolnum>5</manvolnum></citerefentry>,
 
       <citerefentry><refentrytitle>ctdb</refentrytitle>

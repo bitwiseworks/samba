@@ -166,7 +166,12 @@ static NTSTATUS dcesrv_samr_Connect(struct dcesrv_call_state *dce_call, TALLOC_C
 	}
 
 	/* make sure the sam database is accessible */
-	c_state->sam_ctx = samdb_connect(c_state, dce_call->event_ctx, dce_call->conn->dce_ctx->lp_ctx, dce_call->conn->auth_state.session_info, 0);
+	c_state->sam_ctx = samdb_connect(c_state,
+					 dce_call->event_ctx,
+					 dce_call->conn->dce_ctx->lp_ctx,
+					 dce_call->conn->auth_state.session_info,
+					 dce_call->conn->remote_address,
+					 0);
 	if (c_state->sam_ctx == NULL) {
 		talloc_free(c_state);
 		return NT_STATUS_INVALID_SYSTEM_SERVICE;
@@ -2776,6 +2781,7 @@ static NTSTATUS dcesrv_samr_QueryUserInfo(struct dcesrv_call_state *dce_call, TA
 						      "badPasswordTime",
 						      "logonCount",
 						      "pwdLastSet",
+						      "msDS-ResultantPSO",
 						      "msDS-UserPasswordExpiryTimeComputed",
 						      "accountExpires",
 						      "userAccountControl",
@@ -2882,6 +2888,7 @@ static NTSTATUS dcesrv_samr_QueryUserInfo(struct dcesrv_call_state *dce_call, TA
 		static const char * const attrs2[] = {"lastLogon",
 						      "lastLogoff",
 						      "pwdLastSet",
+						      "msDS-ResultantPSO",
 						      "msDS-UserPasswordExpiryTimeComputed",
 						      "accountExpires",
 						      "sAMAccountName",
@@ -4180,9 +4187,12 @@ static NTSTATUS dcesrv_samr_GetDomPwInfo(struct dcesrv_call_state *dce_call, TAL
 
 	ZERO_STRUCTP(r->out.info);
 
-	sam_ctx = samdb_connect(mem_ctx, dce_call->event_ctx,
-					 dce_call->conn->dce_ctx->lp_ctx,
-					 dce_call->conn->auth_state.session_info, 0);
+	sam_ctx = samdb_connect(mem_ctx,
+				dce_call->event_ctx,
+				dce_call->conn->dce_ctx->lp_ctx,
+				dce_call->conn->auth_state.session_info,
+				dce_call->conn->remote_address,
+				0);
 	if (sam_ctx == NULL) {
 		return NT_STATUS_INVALID_SYSTEM_SERVICE;
 	}

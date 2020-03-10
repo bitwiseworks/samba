@@ -30,13 +30,23 @@
 
 static void tevent_common_immediate_cancel(struct tevent_immediate *im)
 {
+	const char *create_location = im->create_location;
+	bool busy = im->busy;
+
+	if (im->destroyed) {
+		tevent_abort(im->event_ctx, "tevent_immediate use after free");
+		return;
+	}
+
 	if (!im->event_ctx) {
 		return;
 	}
 
-	tevent_debug(im->event_ctx, TEVENT_DEBUG_TRACE,
-		     "Cancel immediate event %p \"%s\"\n",
-		     im, im->handler_name);
+	if (im->handler_name != NULL) {
+		tevent_debug(im->event_ctx, TEVENT_DEBUG_TRACE,
+			     "Cancel immediate event %p \"%s\"\n",
+			     im, im->handler_name);
+	}
 
 	/* let the backend free im->additional_data */
 	if (im->cancel_fn) {
@@ -44,15 +54,15 @@ static void tevent_common_immediate_cancel(struct tevent_immediate *im)
 	}
 
 	DLIST_REMOVE(im->event_ctx->immediate_events, im);
-	im->event_ctx		= NULL;
-	im->handler		= NULL;
-	im->private_data	= NULL;
-	im->handler_name	= NULL;
-	im->schedule_location	= NULL;
-	im->cancel_fn		= NULL;
-	im->additional_data	= NULL;
 
-	talloc_set_destructor(im, NULL);
+	*im = (struct tevent_immediate) {
+		.create_location	= create_location,
+		.busy			= busy,
+	};
+
+	if (!busy) {
+		talloc_set_destructor(im, NULL);
+	}
 }
 
 /*
@@ -60,7 +70,21 @@ static void tevent_common_immediate_cancel(struct tevent_immediate *im)
 */
 static int tevent_common_immediate_destructor(struct tevent_immediate *im)
 {
+	if (im->destroyed) {
+		tevent_common_check_double_free(im,
+						"tevent_immediate double free");
+		goto done;
+	}
+
 	tevent_common_immediate_cancel(im);
+
+	im->destroyed = true;
+
+done:
+	if (im->busy) {
+		return -1;
+	}
+
 	return 0;
 }
 
@@ -74,19 +98,26 @@ void tevent_common_schedule_immediate(struct tevent_immediate *im,
 				      const char *handler_name,
 				      const char *location)
 {
+	const char *create_location = im->create_location;
+	bool busy = im->busy;
+	struct tevent_wrapper_glue *glue = im->wrapper;
+
 	tevent_common_immediate_cancel(im);
 
 	if (!handler) {
 		return;
 	}
 
-	im->event_ctx		= ev;
-	im->handler		= handler;
-	im->private_data	= private_data;
-	im->handler_name	= handler_name;
-	im->schedule_location	= location;
-	im->cancel_fn		= NULL;
-	im->additional_data	= NULL;
+	*im = (struct tevent_immediate) {
+		.event_ctx		= ev,
+		.wrapper		= glue,
+		.handler		= handler,
+		.private_data		= private_data,
+		.handler_name		= handler_name,
+		.create_location	= create_location,
+		.schedule_location	= location,
+		.busy			= busy,
+	};
 
 	DLIST_ADD_END(ev->immediate_events, im);
 	talloc_set_destructor(im, tevent_common_immediate_destructor);
@@ -96,18 +127,15 @@ void tevent_common_schedule_immediate(struct tevent_immediate *im,
 		     handler_name, im);
 }
 
-/*
-  trigger the first immediate event and return true
-  if no event was triggered return false
-*/
-bool tevent_common_loop_immediate(struct tevent_context *ev)
+int tevent_common_invoke_immediate_handler(struct tevent_immediate *im,
+					   bool *removed)
 {
-	struct tevent_immediate *im = ev->immediate_events;
-	tevent_immediate_handler_t handler;
-	void *private_data;
+	struct tevent_context *handler_ev = im->event_ctx;
+	struct tevent_context *ev = im->event_ctx;
+	struct tevent_immediate cur = *im;
 
-	if (!im) {
-		return false;
+	if (removed != NULL) {
+		*removed = false;
 	}
 
 	tevent_debug(ev, TEVENT_DEBUG_TRACE,
@@ -118,21 +146,63 @@ bool tevent_common_loop_immediate(struct tevent_context *ev)
 	 * remember the handler and then clear the event
 	 * the handler might reschedule the event
 	 */
-	handler = im->handler;
-	private_data = im->private_data;
 
-	DLIST_REMOVE(im->event_ctx->immediate_events, im);
-	im->event_ctx		= NULL;
-	im->handler		= NULL;
-	im->private_data	= NULL;
-	im->handler_name	= NULL;
-	im->schedule_location	= NULL;
-	im->cancel_fn		= NULL;
-	im->additional_data	= NULL;
+	im->busy = true;
+	im->handler_name = NULL;
+	tevent_common_immediate_cancel(im);
+	if (cur.wrapper != NULL) {
+		handler_ev = cur.wrapper->wrap_ev;
 
-	talloc_set_destructor(im, NULL);
+		tevent_wrapper_push_use_internal(handler_ev, cur.wrapper);
+		cur.wrapper->ops->before_immediate_handler(
+					cur.wrapper->wrap_ev,
+					cur.wrapper->private_state,
+					cur.wrapper->main_ev,
+					im,
+					cur.handler_name,
+					cur.schedule_location);
+	}
+	cur.handler(handler_ev, im, cur.private_data);
+	if (cur.wrapper != NULL) {
+		cur.wrapper->ops->after_immediate_handler(
+					cur.wrapper->wrap_ev,
+					cur.wrapper->private_state,
+					cur.wrapper->main_ev,
+					im,
+					cur.handler_name,
+					cur.schedule_location);
+		tevent_wrapper_pop_use_internal(handler_ev, cur.wrapper);
+	}
+	im->busy = false;
 
-	handler(ev, im, private_data);
+	if (im->destroyed) {
+		talloc_set_destructor(im, NULL);
+		TALLOC_FREE(im);
+		if (removed != NULL) {
+			*removed = true;
+		}
+	}
+
+	return 0;
+}
+
+/*
+  trigger the first immediate event and return true
+  if no event was triggered return false
+*/
+bool tevent_common_loop_immediate(struct tevent_context *ev)
+{
+	struct tevent_immediate *im = ev->immediate_events;
+	int ret;
+
+	if (!im) {
+		return false;
+	}
+
+	ret = tevent_common_invoke_immediate_handler(im, NULL);
+	if (ret != 0) {
+		tevent_abort(ev, "tevent_common_invoke_immediate_handler() failed");
+	}
 
 	return true;
 }

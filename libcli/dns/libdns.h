@@ -22,32 +22,22 @@
 #ifndef __LIBDNS_H__
 #define __LIBDNS_H__
 
-/** Send an dns request to a dns server using UDP
- *
- *@param mem_ctx        talloc memory context to use
- *@param ev             tevent context to use
- *@param server_address address of the server as a string
- *@param query          dns query to send
- *@param query_len      length of the query
- *@return tevent_req with the active request or NULL on out-of-memory
- */
-struct tevent_req *dns_udp_request_send(TALLOC_CTX *mem_ctx,
-					struct tevent_context *ev,
-					const char *server_address,
-					const uint8_t *query,
-					size_t query_len);
+#include "lib/util/data_blob.h"
+#include "lib/util/time.h"
+#include "librpc/gen_ndr/dns.h"
 
-/** Get the dns response from a dns server via UDP
- *
- *@param req       tevent_req struct returned from dns_request_send
- *@param mem_ctx   talloc memory context to use for the reply string
- *@param reply     buffer that will be allocated and filled with the dns reply
- *@param reply_len length of the reply buffer
- *@return 0/errno
+/*
+ * DNS request with fallback to TCP on truncation
  */
-int dns_udp_request_recv(struct tevent_req *req,
-			 TALLOC_CTX *mem_ctx,
-			 uint8_t **reply,
-			 size_t *reply_len);
+
+struct tevent_req *dns_cli_request_send(TALLOC_CTX *mem_ctx,
+					struct tevent_context *ev,
+					const char *nameserver,
+					const char *name,
+					enum dns_qclass qclass,
+					enum dns_qtype qtype);
+int dns_cli_request_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
+			 struct dns_name_packet **reply);
+
 
 #endif /*__LIBDNS_H__*/

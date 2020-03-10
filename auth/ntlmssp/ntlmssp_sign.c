@@ -26,6 +26,9 @@
 #include "../lib/crypto/crc32.h"
 #include "../auth/ntlmssp/ntlmssp_private.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_AUTH
+
 #define CLI_SIGN "session key to client-to-server signing key magic constant"
 #define CLI_SEAL "session key to client-to-server sealing key magic constant"
 #define SRV_SIGN "session key to server-to-client signing key magic constant"
@@ -685,7 +688,7 @@ NTSTATUS ntlmssp_sign_reset(struct ntlmssp_state *ntlmssp_state,
 NTSTATUS ntlmssp_sign_init(struct ntlmssp_state *ntlmssp_state)
 {
 	if (ntlmssp_state->session_key.length < 8) {
-		DEBUG(3, ("NO session key, cannot intialise signing\n"));
+		DEBUG(3, ("NO session key, cannot initialise signing\n"));
 		return NT_STATUS_NO_USER_SESSION_KEY;
 	}
 

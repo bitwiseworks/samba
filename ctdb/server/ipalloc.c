@@ -19,17 +19,17 @@
    along with this program; if not, see <http://www.gnu.org/licenses/>.
 */
 
-#include <talloc.h>
-
 #include "replace.h"
 #include "system/network.h"
+
+#include <talloc.h>
 
 #include "lib/util/debug.h"
 
 #include "common/logging.h"
 #include "common/rb_tree.h"
 
-#include "protocol/protocol_api.h"
+#include "protocol/protocol_util.h"
 
 #include "server/ipalloc_private.h"
 
@@ -40,7 +40,6 @@ ipalloc_state_init(TALLOC_CTX *mem_ctx,
 		   enum ipalloc_algorithm algorithm,
 		   bool no_ip_takeover,
 		   bool no_ip_failback,
-		   bool no_ip_host_on_all_disabled,
 		   uint32_t *force_rebalance_nodes)
 {
 	struct ipalloc_state *ipalloc_state =
@@ -52,25 +51,12 @@ ipalloc_state_init(TALLOC_CTX *mem_ctx,
 
 	ipalloc_state->num = num_nodes;
 
-	ipalloc_state->noiphost =
-		talloc_zero_array(ipalloc_state,
-				  bool,
-				  ipalloc_state->num);
-	if (ipalloc_state->noiphost == NULL) {
-		DEBUG(DEBUG_ERR, (__location__ " Out of memory\n"));
-		goto fail;
-	}
-
 	ipalloc_state->algorithm = algorithm;
 	ipalloc_state->no_ip_takeover = no_ip_takeover;
 	ipalloc_state->no_ip_failback = no_ip_failback;
-	ipalloc_state->no_ip_host_on_all_disabled = no_ip_host_on_all_disabled;
 	ipalloc_state->force_rebalance_nodes = force_rebalance_nodes;
 
 	return ipalloc_state;
-fail:
-	talloc_free(ipalloc_state);
-	return NULL;
 }
 
 static void *add_ip_callback(void *parm, void *data)
@@ -165,13 +151,19 @@ static bool populate_bitmap(struct ipalloc_state *ipalloc_state)
 
 	for (ip = ipalloc_state->all_ips; ip != NULL; ip = ip->next) {
 
-		ip->available_on = talloc_zero_array(ip, bool,
-						     ipalloc_state->num);
+		ip->known_on = bitmap_talloc(ip, ipalloc_state->num);
+		if (ip->known_on == NULL) {
+			return false;
+		}
+
+		ip->available_on = bitmap_talloc(ip, ipalloc_state->num);
 		if (ip->available_on == NULL) {
 			return false;
 		}
 
 		for (i = 0; i < ipalloc_state->num; i++) {
+			struct ctdb_public_ip_list *known =
+				&ipalloc_state->known_public_ips[i];
 			struct ctdb_public_ip_list *avail =
 				&ipalloc_state->available_public_ips[i];
 
@@ -179,7 +171,22 @@ static bool populate_bitmap(struct ipalloc_state *ipalloc_state)
 			for (j = 0; j < avail->num; j++) {
 				if (ctdb_sock_addr_same_ip(
 					    &ip->addr, &avail->ip[j].addr)) {
-					ip->available_on[i] = true;
+					bitmap_set(ip->available_on, i);
+					break;
+				}
+			}
+
+			/* Optimisation: available => known */
+			if (bitmap_query(ip->available_on, i)) {
+				bitmap_set(ip->known_on, i);
+				continue;
+			}
+
+			/* Check to see if "ip" is known on node "i" */
+			for (j = 0; j < known->num; j++) {
+				if (ctdb_sock_addr_same_ip(
+					    &ip->addr, &known->ip[j].addr)) {
+					bitmap_set(ip->known_on, i);
 					break;
 				}
 			}
@@ -187,55 +194,6 @@ static bool populate_bitmap(struct ipalloc_state *ipalloc_state)
 	}
 
 	return true;
-}
-
-static bool all_nodes_are_disabled(struct ctdb_node_map *nodemap)
-{
-	int i;
-
-	for (i=0;i<nodemap->num;i++) {
-		if (!(nodemap->node[i].flags &
-		      (NODE_FLAGS_INACTIVE|NODE_FLAGS_DISABLED))) {
-			/* Found one completely healthy node */
-			return false;
-		}
-	}
-
-	return true;
-}
-
-/* Set internal flags for IP allocation:
- *   Clear ip flags
- *   Set NOIPHOST ip flag for each INACTIVE node
- *   if all nodes are disabled:
- *     Set NOIPHOST ip flags from per-node NoIPHostOnAllDisabled tunable
- *   else
- *     Set NOIPHOST ip flags for disabled nodes
- */
-void ipalloc_set_node_flags(struct ipalloc_state *ipalloc_state,
-			    struct ctdb_node_map *nodemap)
-{
-	int i;
-	bool all_disabled = all_nodes_are_disabled(nodemap);
-
-	for (i=0;i<nodemap->num;i++) {
-		/* Can not host IPs on INACTIVE node */
-		if (nodemap->node[i].flags & NODE_FLAGS_INACTIVE) {
-			ipalloc_state->noiphost[i] = true;
-		}
-
-		/* If node is disabled then it can only host IPs if
-		 * all nodes are disabled and NoIPHostOnAllDisabled is
-		 * unset
-		 */
-		if (nodemap->node[i].flags & NODE_FLAGS_DISABLED) {
-			if (!(all_disabled &&
-			      ipalloc_state->no_ip_host_on_all_disabled == 0)) {
-
-				ipalloc_state->noiphost[i] = true;
-			}
-		}
-	}
 }
 
 void ipalloc_set_public_ips(struct ipalloc_state *ipalloc_state,

@@ -22,6 +22,7 @@
 
 #include "includes.h"
 #include "rpc_server/dcerpc_server.h"
+#include "rpc_server/common/common.h"
 #include "librpc/gen_ndr/ndr_backupkey.h"
 #include "dsdb/common/util.h"
 #include "dsdb/samdb/samdb.h"
@@ -360,6 +361,8 @@ static WERROR get_and_verify_access_check(TALLOC_CTX *sub_ctx,
 					  uint32_t access_check_len,
 					  struct auth_session_info *session_info)
 {
+	struct bkrp_access_check_v2 uncrypted_accesscheckv2;
+	struct bkrp_access_check_v3 uncrypted_accesscheckv3;
 	gnutls_cipher_hd_t cipher_handle = { 0 };
 	gnutls_cipher_algorithm_t cipher_algo;
 	DATA_BLOB blob_us;
@@ -422,7 +425,6 @@ static WERROR get_and_verify_access_check(TALLOC_CTX *sub_ctx,
 		uint32_t hash_size = 20;
 		uint8_t hash[hash_size];
 		gnutls_hash_hd_t dig_ctx;
-		struct bkrp_access_check_v2 uncrypted_accesscheckv2;
 
 		ndr_err = ndr_pull_struct_blob(&blob_us, sub_ctx, &uncrypted_accesscheckv2,
 					(ndr_pull_flags_fn_t)ndr_pull_bkrp_access_check_v2);
@@ -457,7 +459,6 @@ static WERROR get_and_verify_access_check(TALLOC_CTX *sub_ctx,
 		uint32_t hash_size = 64;
 		uint8_t hash[hash_size];
 		gnutls_hash_hd_t dig_ctx;
-		struct bkrp_access_check_v3 uncrypted_accesscheckv3;
 
 		ndr_err = ndr_pull_struct_blob(&blob_us, sub_ctx, &uncrypted_accesscheckv3,
 					(ndr_pull_flags_fn_t)ndr_pull_bkrp_access_check_v3);
@@ -1774,9 +1775,12 @@ static WERROR dcesrv_bkrp_BackupKey(struct dcesrv_call_state *dce_call,
 		return WERR_NOT_SUPPORTED;
 	}
 
-	ldb_ctx = samdb_connect(mem_ctx, dce_call->event_ctx,
-				dce_call->conn->dce_ctx->lp_ctx,
-				system_session(dce_call->conn->dce_ctx->lp_ctx), 0);
+	/*
+	 * Save the current remote session details so they can used by the
+	 * audit logging module. This allows the audit logging to report the
+	 * remote users details, rather than the system users details.
+	 */
+	ldb_ctx = dcesrv_samdb_connect_as_system(mem_ctx, dce_call);
 
 	if (samdb_rodc(ldb_ctx, &is_rodc) != LDB_SUCCESS) {
 		talloc_unlink(mem_ctx, ldb_ctx);

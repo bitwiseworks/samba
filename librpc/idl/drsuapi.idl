@@ -70,7 +70,9 @@ interface drsuapi
         } drsuapi_DrsUpdate;
 
 	/*****************/
-        /* Function 0x00 */
+        /* Function 0x00 drsuapi_DsBind() */
+
+        /* MS-DRSR 5.39 DRS_EXTENSIONS_INT */
         typedef [bitmap32bit] bitmap {
 		DRSUAPI_SUPPORTED_EXTENSION_BASE			= 0x00000001,
 		DRSUAPI_SUPPORTED_EXTENSION_ASYNC_REPLICATION		= 0x00000002,
@@ -458,6 +460,7 @@ interface drsuapi
 		DRSUAPI_ATTID_ou				= 0x0000000b,
 		DRSUAPI_ATTID_description			= 0x0000000d,
 		DRSUAPI_ATTID_member				= 0x0000001f,
+		DRSUAPI_ATTID_distinguishedName			= 0x00000031,
 		DRSUAPI_ATTID_instanceType			= 0x00020001,
 		DRSUAPI_ATTID_whenCreated			= 0x00020002,
 		DRSUAPI_ATTID_possSuperiors			= 0x00020008,
@@ -547,8 +550,13 @@ interface drsuapi
 		DRSUAPI_ATTID_transportAddressAttribute		= 0x0009037f,
 		DRSUAPI_ATTID_msDS_Behavior_Version		= 0x000905b3,
 		DRSUAPI_ATTID_msDS_KeyVersionNumber		= 0x000906f6,
+		DRSUAPI_ATTID_msDS_NonMembers			= 0x00090701,
+		DRSUAPI_ATTID_msDS_MembersForAzRole		= 0x0009070e,
 		DRSUAPI_ATTID_msDS_HasDomainNCs			= 0x0009071c,
 		DRSUAPI_ATTID_msDS_hasMasterNCs			= 0x0009072c,
+		DRSUAPI_ATTID_msDS_NeverRevealGroup		= 0x00090786,
+		DRSUAPI_ATTID_msDS_RevealOnDemandGroup		= 0x00090788,
+		DRSUAPI_ATTID_msDS_HostServiceAccount		= 0x00090808,
 		DRSUAPI_ATTID_isRecycled			= 0x0009080a,
 
 		DRSUAPI_ATTID_INVALID				= 0xFFFFFFFF
@@ -561,7 +569,7 @@ interface drsuapi
 		[size_is(num_attids)] drsuapi_DsAttributeId attids[];
 	} drsuapi_DsPartialAttributeSet;
 
-	typedef struct {
+	typedef [public] struct {
 		GUID destination_dsa_guid;
 		GUID source_dsa_invocation_id; /* the 'invocationId' field of the CN=NTDS Settings object */
 		[ref] drsuapi_DsReplicaObjectIdentifier *naming_context;

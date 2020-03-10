@@ -18,8 +18,8 @@
  */
 
 struct keyval_pair {
-	char *key;
-	char *val;
+	const char *key;
+	const char *val;
 };
 
 struct gp_inifile_context {
@@ -35,12 +35,19 @@ struct gp_inifile_context {
 NTSTATUS gp_inifile_init_context(TALLOC_CTX *mem_ctx, uint32_t flags,
 				 const char *unix_path, const char *suffix,
 				 struct gp_inifile_context **ctx_ret);
-
+NTSTATUS gp_inifile_init_context_direct(TALLOC_CTX *mem_ctx,
+					const char *unix_path,
+					struct gp_inifile_context **ctx_ret);
 NTSTATUS parse_gpt_ini(TALLOC_CTX *ctx,
 		       const char *filename,
 		       uint32_t *version,
 		       char **display_name);
-NTSTATUS gp_inifile_getstring(struct gp_inifile_context *ctx, const char *key, char **ret);
+NTSTATUS gp_inifile_getstring(struct gp_inifile_context *ctx, const char *key, const char **ret);
 NTSTATUS gp_inifile_getint(struct gp_inifile_context *ctx, const char *key, int *ret);
 NTSTATUS gp_inifile_getbool(struct gp_inifile_context *ctx, const char *key, bool *ret);
 
+NTSTATUS gp_inifile_enum_section(struct gp_inifile_context *ctx,
+				 const char *section,
+				 size_t *num_ini_keys,
+				 const char ***ini_keys,
+				 const char ***ini_values);

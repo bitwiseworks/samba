@@ -56,13 +56,29 @@
 			((req->flags2 & FLAGS2_READ_PERMIT_EXECUTE) && \
 			 (fsp->access_mask & FILE_EXECUTE))))
 
+/*
+ * This is not documented in revision 49 of [MS-SMB2] but should be added in a
+ * later revision (and torture test smb2.read.access as well as
+ * smb2.ioctl_copy_chunk_bad_access against Server 2012R2 confirms this)
+ *
+ * If FILE_EXECUTE is granted to a handle then the SMB2 server acts as if
+ * FILE_READ_DATA has also been granted. We must still keep the original granted
+ * mask, because with ioctl requests, access checks are made on the file handle,
+ * "below" the SMB2 server, and the object store below the SMB layer is not
+ * aware of this arrangement (see smb2.ioctl.copy_chunk_bad_access torture
+ * test).
+ */
+#define CHECK_READ_SMB2(fsp) \
+	(((fsp)->fh->fd != -1) && \
+	 ((fsp)->can_read || (fsp->access_mask & FILE_EXECUTE)))
+
 /* An IOCTL readability check (validating read access
  * when the IOCTL code requires it)
  * http://social.technet.microsoft.com/wiki/contents/articles/24653.decoding-io-control-codes-ioctl-fsctl-and-deviceiocodes-with-table-of-known-values.aspx
  * ). On Windows servers, this is done by the IO manager, which is unaware of
  * the "if execute is granted then also grant read" arrangement.
  */
-#define CHECK_READ_IOCTL(fsp, req) (((fsp)->fh->fd != -1) && ((fsp)->can_read))
+#define CHECK_READ_IOCTL(fsp) (((fsp)->fh->fd != -1) && ((fsp)->can_read))
 
 #define CHECK_WRITE(fsp) ((fsp)->can_write && ((fsp)->fh->fd != -1))
 
@@ -198,6 +214,7 @@ copy an IP address from one buffer to another
 *****************************************************************************/
 
 #define IS_DC  (lp_server_role()==ROLE_DOMAIN_PDC || lp_server_role()==ROLE_DOMAIN_BDC || lp_server_role() == ROLE_ACTIVE_DIRECTORY_DC) 
+#define IS_AD_DC  (lp_server_role() == ROLE_ACTIVE_DIRECTORY_DC)
 
 /*
  * If you add any entries to KERBEROS_VERIFY defines, please modify the below expressions

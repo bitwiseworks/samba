@@ -6,7 +6,7 @@ bld.SAMBA3_SUBSYSTEM('TOKEN_UTIL',
 
 bld.SAMBA3_SUBSYSTEM('USER_UTIL',
                      source='user_util.c',
-                     deps='TOKEN_UTIL')
+                     deps='TOKEN_UTIL tirpc nsl')
 
 bld.SAMBA3_SUBSYSTEM('AUTH_COMMON',
                     source='''auth_util.c
@@ -43,21 +43,6 @@ bld.SAMBA3_MODULE('auth_winbind',
                  subsystem='auth',
                  source='auth_winbind.c',
                  deps='samba-util',
-                 init_function='',
-                 internal_module=True)
-
-bld.SAMBA3_MODULE('auth_wbc',
-                 subsystem='auth',
-                 source='auth_wbc.c',
-                 deps='samba-util',
-                 init_function='',
-                 internal_module=bld.SAMBA3_IS_STATIC_MODULE('auth_wbc'),
-                 enabled=bld.SAMBA3_IS_ENABLED_MODULE('auth_wbc'))
-
-bld.SAMBA3_MODULE('auth_domain',
-                 subsystem='auth',
-                 source='auth_domain.c',
-                 deps='RPC_CLIENT_SCHANNEL trusts_util',
                  init_function='',
                  internal_module=True)
 

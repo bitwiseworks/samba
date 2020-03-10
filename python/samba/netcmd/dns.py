@@ -15,15 +15,21 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
+import logging
 
 import samba.getopt as options
 from samba import WERRORError
+from samba import werror
 from struct import pack
 from socket import inet_ntoa
 from socket import inet_ntop
 from socket import AF_INET
 from socket import AF_INET6
 import shlex
+
+from samba import remove_dc
+from samba.samdb import SamDB
+from samba.auth import system_session
 
 from samba.netcmd import (
     Command,
@@ -33,6 +39,7 @@ from samba.netcmd import (
     )
 from samba.dcerpc import dnsp, dnsserver
 
+from samba.dnsserver import ARecord, AAAARecord, PTRRecord, CNameRecord, NSRecord, MXRecord, SOARecord, SRVRecord, TXTRecord
 
 def dns_connect(server, lp, creds):
     if server.lower() == 'localhost':
@@ -40,7 +47,7 @@ def dns_connect(server, lp, creds):
     binding_str = "ncacn_ip_tcp:%s[sign]" % server
     try:
         dns_conn = dnsserver.dnsserver(binding_str, lp, creds)
-    except RuntimeError, e:
+    except RuntimeError as e:
         raise CommandError('Connecting to DNS RPC server %s failed with %s' % (server, e))
 
     return dns_conn
@@ -133,7 +140,7 @@ def ip4_array_string(array):
     ret = []
     if not array:
         return ret
-    for i in xrange(array.AddrCount):
+    for i in range(array.AddrCount):
         addr = inet_ntop(AF_INET, pack('I', array.AddrArray[i]))
         ret.append(addr)
     return ret
@@ -143,7 +150,7 @@ def dns_addr_array_string(array):
     ret = []
     if not array:
         return ret
-    for i in xrange(array.AddrCount):
+    for i in range(array.AddrCount):
         if array.AddrArray[i].MaxSa[0] == 0x02:
             x = "".join([chr(b) for b in array.AddrArray[i].MaxSa])[4:8]
             addr = inet_ntop(AF_INET, x)
@@ -395,167 +402,6 @@ def print_dnsrecords(outf, records):
                 print_dns_record(outf, dns_rec)
 
 
-#
-# Always create a copy of strings when creating DNS_RPC_RECORDs
-# to overcome the bug in pidl generated python bindings.
-#
-
-class ARecord(dnsserver.DNS_RPC_RECORD):
-    def __init__(self, ip_addr, serial=1, ttl=900, rank=dnsp.DNS_RANK_ZONE,
-                    node_flag=0):
-        super(ARecord, self).__init__()
-        self.wType = dnsp.DNS_TYPE_A
-        self.dwFlags = rank | node_flag
-        self.dwSerial = serial
-        self.dwTtlSeconds = ttl
-        self._ip_addr = ip_addr[:]
-        self.data = self._ip_addr
-
-
-class AAAARecord(dnsserver.DNS_RPC_RECORD):
-
-    def __init__(self, ip6_addr, serial=1, ttl=900, rank=dnsp.DNS_RANK_ZONE,
-                    node_flag=0):
-        super(AAAARecord, self).__init__()
-        self.wType = dnsp.DNS_TYPE_AAAA
-        self.dwFlags = rank | node_flag
-        self.dwSerial = serial
-        self.dwTtlSeconds = ttl
-        self._ip6_addr = ip6_addr[:]
-        self.data = self._ip6_addr
-
-
-class PTRRecord(dnsserver.DNS_RPC_RECORD):
-
-    def __init__(self, ptr, serial=1, ttl=900, rank=dnsp.DNS_RANK_ZONE,
-                 node_flag=0):
-        super(PTRRecord, self).__init__()
-        self.wType = dnsp.DNS_TYPE_PTR
-        self.dwFlags = rank | node_flag
-        self.dwSerial = serial
-        self.dwTtlSeconds = ttl
-        self._ptr = ptr[:]
-        ptr_name = dnsserver.DNS_RPC_NAME()
-        ptr_name.str = self._ptr
-        ptr_name.len = len(ptr)
-        self.data = ptr_name
-
-
-class CNameRecord(dnsserver.DNS_RPC_RECORD):
-
-    def __init__(self, cname, serial=1, ttl=900, rank=dnsp.DNS_RANK_ZONE,
-                    node_flag=0):
-        super(CNameRecord, self).__init__()
-        self.wType = dnsp.DNS_TYPE_CNAME
-        self.dwFlags = rank | node_flag
-        self.dwSerial = serial
-        self.dwTtlSeconds = ttl
-        self._cname = cname[:]
-        cname_name = dnsserver.DNS_RPC_NAME()
-        cname_name.str = self._cname
-        cname_name.len = len(cname)
-        self.data = cname_name
-
-
-class NSRecord(dnsserver.DNS_RPC_RECORD):
-
-    def __init__(self, dns_server, serial=1, ttl=900, rank=dnsp.DNS_RANK_ZONE,
-                    node_flag=0):
-        super(NSRecord, self).__init__()
-        self.wType = dnsp.DNS_TYPE_NS
-        self.dwFlags = rank | node_flag
-        self.dwSerial = serial
-        self.dwTtlSeconds = ttl
-        self._dns_server = dns_server[:]
-        ns = dnsserver.DNS_RPC_NAME()
-        ns.str = self._dns_server
-        ns.len = len(dns_server)
-        self.data = ns
-
-
-class MXRecord(dnsserver.DNS_RPC_RECORD):
-
-    def __init__(self, mail_server, preference, serial=1, ttl=900,
-                 rank=dnsp.DNS_RANK_ZONE, node_flag=0):
-        super(MXRecord, self).__init__()
-        self.wType = dnsp.DNS_TYPE_MX
-        self.dwFlags = rank | node_flag
-        self.dwSerial = serial
-        self.dwTtlSeconds = ttl
-        self._mail_server = mail_server[:]
-        mx = dnsserver.DNS_RPC_RECORD_NAME_PREFERENCE()
-        mx.wPreference = preference
-        mx.nameExchange.str = self._mail_server
-        mx.nameExchange.len = len(mail_server)
-        self.data = mx
-
-
-class SOARecord(dnsserver.DNS_RPC_RECORD):
-
-    def __init__(self, mname, rname, serial=1, refresh=900, retry=600,
-                 expire=86400, minimum=3600, ttl=3600, rank=dnsp.DNS_RANK_ZONE,
-                 node_flag=dnsp.DNS_RPC_FLAG_AUTH_ZONE_ROOT):
-        super(SOARecord, self).__init__()
-        self.wType = dnsp.DNS_TYPE_SOA
-        self.dwFlags = rank | node_flag
-        self.dwSerial = serial
-        self.dwTtlSeconds = ttl
-        self._mname = mname[:]
-        self._rname = rname[:]
-        soa = dnsserver.DNS_RPC_RECORD_SOA()
-        soa.dwSerialNo = serial
-        soa.dwRefresh = refresh
-        soa.dwRetry = retry
-        soa.dwExpire = expire
-        soa.dwMinimumTtl = minimum
-        soa.NamePrimaryServer.str = self._mname
-        soa.NamePrimaryServer.len = len(mname)
-        soa.ZoneAdministratorEmail.str = self._rname
-        soa.ZoneAdministratorEmail.len = len(rname)
-        self.data = soa
-
-
-class SRVRecord(dnsserver.DNS_RPC_RECORD):
-
-    def __init__(self, target, port, priority=0, weight=100, serial=1, ttl=900,
-                rank=dnsp.DNS_RANK_ZONE, node_flag=0):
-        super(SRVRecord, self).__init__()
-        self.wType = dnsp.DNS_TYPE_SRV
-        self.dwFlags = rank | node_flag
-        self.dwSerial = serial
-        self.dwTtlSeconds = ttl
-        self._target = target[:]
-        srv = dnsserver.DNS_RPC_RECORD_SRV()
-        srv.wPriority = priority
-        srv.wWeight = weight
-        srv.wPort = port
-        srv.nameTarget.str = self._target
-        srv.nameTarget.len = len(target)
-        self.data = srv
-
-
-class TXTRecord(dnsserver.DNS_RPC_RECORD):
-
-    def __init__(self, slist, serial=1, ttl=900, rank=dnsp.DNS_RANK_ZONE,
-                node_flag=0):
-        super(TXTRecord, self).__init__()
-        self.wType = dnsp.DNS_TYPE_TXT
-        self.dwFlags = rank | node_flag
-        self.dwSerial = serial
-        self.dwTtlSeconds = ttl
-        self._slist = []
-        for s in slist:
-            self._slist.append(s[:])
-        names = []
-        for s in self._slist:
-            name = dnsserver.DNS_RPC_NAME()
-            name.str = s
-            name.len = len(s)
-            names.append(name)
-        txt = dnsserver.DNS_RPC_RECORD_STRING()
-        txt.count = len(slist)
-        txt.str = names
-        self.data = txt
 
 
 # Convert data into a dns record
@@ -624,7 +470,7 @@ def dns_record_match(dns_conn, server, zone, name, record_type, data):
             dnsserver.DNS_CLIENT_VERSION_LONGHORN, 0, server, zone, name, None,
             record_type, select_flags, None, None)
     except WERRORError as e:
-        if e.args[1] == 'WERR_DNS_ERROR_NAME_DOES_NOT_EXIST':
+        if e.args[0] == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST:
             # Either the zone doesn't exist, or there were no records.
             # We can't differentiate the two.
             return None
@@ -677,7 +523,7 @@ def dns_record_match(dns_conn, server, zone, name, record_type, data):
         elif record_type == dnsp.DNS_TYPE_TXT:
             if rec.data.count == urec.data.count:
                 found = True
-                for i in xrange(rec.data.count):
+                for i in range(rec.data.count):
                     found = found and \
                             (rec.data.str[i].str == urec.data.str[i].str)
 
@@ -900,7 +746,7 @@ class cmd_zonecreate(Command):
                                             0, 'ResetDwordProperty', typeid,
                                             name_and_param)
         except WERRORError as e:
-            if e.args[1] == 'WERR_DNS_ERROR_ZONE_ALREADY_EXISTS':
+            if e.args[0] == werror.WERR_DNS_ERROR_ZONE_ALREADY_EXISTS:
                 self.outf.write('Zone already exists.')
             raise e
 
@@ -934,7 +780,7 @@ class cmd_zonedelete(Command):
                                             dnsserver.DNSSRV_TYPEID_NULL,
                                             None)
         except WERRORError as e:
-            if e.args[1] == 'WERR_DNS_ERROR_ZONE_DOES_NOT_EXIST':
+            if e.args[0] == werror.WERR_DNS_ERROR_ZONE_DOES_NOT_EXIST:
                 self.outf.write('Zone does not exist and so could not be deleted.')
             raise e
 
@@ -978,7 +824,8 @@ class cmd_query(Command):
         record_type = dns_type_flag(rtype)
 
         if name.find('*') != -1:
-            raise CommandError('Wildcard searches not supported. To dump entire zone use "@"')
+            self.outf.write('use "@" to dump entire domain, looking up %s\n' %
+                            name)
 
         select_flags = 0
         if authority:
@@ -1013,7 +860,7 @@ class cmd_query(Command):
                 dnsserver.DNS_CLIENT_VERSION_LONGHORN, 0, server, zone, name,
                 None, record_type, select_flags, None, None)
         except WERRORError as e:
-            if e.args[1] == 'WERR_DNS_ERROR_NAME_DOES_NOT_EXIST':
+            if e.args[0] == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST:
                 self.outf.write('Record or zone does not exist.')
             raise e
 
@@ -1093,7 +940,7 @@ class cmd_add_record(Command):
             dns_conn.DnssrvUpdateRecord2(dnsserver.DNS_CLIENT_VERSION_LONGHORN,
                                          0, server, zone, name, add_rec_buf, None)
         except WERRORError as e:
-            if e.args[1] == 'WERR_DNS_ERROR_NAME_DOES_NOT_EXIST':
+            if e.args[0] == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST:
                 self.outf.write('Zone does not exist; record could not be added.\n')
             raise e
 
@@ -1164,7 +1011,7 @@ class cmd_update_record(Command):
                                          add_rec_buf,
                                          del_rec_buf)
         except WERRORError as e:
-            if e.args[1] == 'WERR_DNS_ERROR_NAME_DOES_NOT_EXIST':
+            if e.args[0] == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST:
                 self.outf.write('Zone does not exist; record could not be updated.\n')
             raise e
 
@@ -1219,11 +1066,59 @@ class cmd_delete_record(Command):
                                          None,
                                          del_rec_buf)
         except WERRORError as e:
-            if e.args[1] == 'WERR_DNS_ERROR_NAME_DOES_NOT_EXIST':
+            if e.args[0] == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST:
                 self.outf.write('Zone does not exist; record could not be deleted.\n')
             raise e
 
         self.outf.write('Record deleted successfully\n')
+
+
+class cmd_cleanup_record(Command):
+    """Cleanup DNS records for a DNS host.
+
+    example:
+
+        samba-tool dns cleanup dc1 dc1.samdom.test.site -U USER%PASSWORD
+
+    NOTE: This command in many cases will only mark the `dNSTombstoned` attr
+    as `TRUE` on the DNS records. Querying will no longer return results but
+    there may still be some placeholder entries in the database.
+    """
+
+    synopsis = '%prog <server> <dnshostname>'
+
+    takes_args = ['server', 'dnshostname']
+
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "versionopts": options.VersionOptions,
+        "credopts": options.CredentialsOptions,
+    }
+
+    takes_options = [
+        Option("-v", "--verbose", help="Be verbose", action="store_true"),
+        Option("-q", "--quiet", help="Be quiet", action="store_true"),
+    ]
+
+    def run(self, server, dnshostname, sambaopts=None, credopts=None,
+            versionopts=None, verbose=False, quiet=False):
+        lp = sambaopts.get_loadparm()
+        creds = credopts.get_credentials(lp)
+
+        logger = self.get_logger()
+        if verbose:
+            logger.setLevel(logging.DEBUG)
+        elif quiet:
+            logger.setLevel(logging.WARNING)
+        else:
+            logger.setLevel(logging.INFO)
+
+        samdb = SamDB(url="ldap://%s" % server,
+                      session_info=system_session(),
+                      credentials=creds, lp=lp)
+
+        remove_dc.remove_dns_references(samdb, logger, dnshostname,
+                                        ignore_no_name=True)
 
 
 class cmd_dns(SuperCommand):
@@ -1240,3 +1135,4 @@ class cmd_dns(SuperCommand):
     subcommands['add'] = cmd_add_record()
     subcommands['update'] = cmd_update_record()
     subcommands['delete'] = cmd_delete_record()
+    subcommands['cleanup'] = cmd_cleanup_record()

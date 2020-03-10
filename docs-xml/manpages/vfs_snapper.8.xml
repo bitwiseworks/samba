@@ -7,7 +7,7 @@
 	<manvolnum>8</manvolnum>
 	<refmiscinfo class="source">Samba</refmiscinfo>
 	<refmiscinfo class="manual">System Administration tools</refmiscinfo>
-	<refmiscinfo class="version">4.6</refmiscinfo>
+	<refmiscinfo class="version">&doc.version;</refmiscinfo>
 </refmeta>
 
 
@@ -55,7 +55,7 @@
 	<para>
 		The underlying share path must have a corresponding snapper
 		configuration file. The snapshot directory tree must allow
-		access for relavent users.
+		access for relevant users.
 	</para>
 
 	<programlisting>
@@ -107,7 +107,7 @@
 	<title>VERSION</title>
 
 	<para>
-		This man page is correct for version 4.3.0 of the Samba suite.
+		This man page is part of version &doc.version; of the Samba suite.
 	</para>
 </refsect1>
 

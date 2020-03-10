@@ -32,11 +32,12 @@ struct wb_lookupname_state {
 };
 
 static void wb_lookupname_done(struct tevent_req *subreq);
-static void wb_lookupname_root_done(struct tevent_req *subreq);
 
 struct tevent_req *wb_lookupname_send(TALLOC_CTX *mem_ctx,
 				      struct tevent_context *ev,
-				      const char *dom_name, const char *name,
+				      const char *namespace,
+				      const char *dom_name,
+				      const char *name,
 				      uint32_t flags)
 {
 	struct tevent_req *req, *subreq;
@@ -62,9 +63,9 @@ struct tevent_req *wb_lookupname_send(TALLOC_CTX *mem_ctx,
 		return tevent_req_post(req, ev);
 	}
 
-	domain = find_lookup_domain_from_name(state->dom_name);
+	domain = find_lookup_domain_from_name(namespace);
 	if (domain == NULL) {
-		DEBUG(5, ("Could not find domain for %s\n", state->dom_name));
+		DEBUG(5, ("Could not find domain for %s\n", namespace));
 		tevent_req_nterror(req, NT_STATUS_NONE_MAPPED);
 		return tevent_req_post(req, ev);
 	}
@@ -81,46 +82,6 @@ struct tevent_req *wb_lookupname_send(TALLOC_CTX *mem_ctx,
 }
 
 static void wb_lookupname_done(struct tevent_req *subreq)
-{
-	struct tevent_req *req = tevent_req_callback_data(
-		subreq, struct tevent_req);
-	struct wb_lookupname_state *state = tevent_req_data(
-		req, struct wb_lookupname_state);
-	struct winbindd_domain *root_domain;
-	NTSTATUS status, result;
-
-	status = dcerpc_wbint_LookupName_recv(subreq, state, &result);
-	TALLOC_FREE(subreq);
-	if (tevent_req_nterror(req, status)) {
-		return;
-	}
-	if (NT_STATUS_IS_OK(result)) {
-		tevent_req_done(req);
-		return;
-	}
-
-	/*
-	 * "our" DC did not find it, lets retry with the forest root
-	 * domain
-	 */
-
-	root_domain = find_root_domain();
-	if (root_domain == NULL) {
-		tevent_req_nterror(req, result);
-		return;
-	}
-
-	subreq = dcerpc_wbint_LookupName_send(
-		state, state->ev, dom_child_handle(root_domain),
-		state->dom_name,
-		state->name, state->flags, &state->type, &state->sid);
-	if (tevent_req_nomem(subreq, req)) {
-		return;
-	}
-	tevent_req_set_callback(subreq, wb_lookupname_root_done, req);
-}
-
-static void wb_lookupname_root_done(struct tevent_req *subreq)
 {
 	struct tevent_req *req = tevent_req_callback_data(
 		subreq, struct tevent_req);

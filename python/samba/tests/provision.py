@@ -42,6 +42,7 @@ def create_dummy_secretsdb(path, lp=None):
     paths = ProvisionPaths()
     paths.secrets = path
     paths.private_dir = os.path.dirname(path)
+    paths.binddns_dir = os.path.dirname(path)
     paths.keytab = "no.keytab"
     paths.dns_keytab = "no.dns.keytab"
     secrets_ldb = setup_secretsdb(paths, None, None, lp=lp)
@@ -59,12 +60,13 @@ class ProvisionTestCase(samba.tests.TestCaseInTempDir):
         secrets_tdb_path = os.path.join(self.tempdir, "secrets.tdb")
         paths.secrets = path
         paths.private_dir = os.path.dirname(path)
+        paths.binddns_dir = os.path.dirname(path)
         paths.keytab = "no.keytab"
         paths.dns_keytab = "no.dns.keytab"
         ldb = setup_secretsdb(paths, None, None, lp=env_loadparm())
         try:
             self.assertEquals("LSA Secrets",
-                 ldb.searchone(basedn="CN=LSA Secrets", attribute="CN"))
+                 ldb.searchone(basedn="CN=LSA Secrets", attribute="CN").decode('utf8'))
         finally:
             del ldb
             os.unlink(path)
@@ -171,7 +173,7 @@ class ProvisionResultTests(TestCase):
         result = self.base_result()
         entries = self.report_logger(result)
         self.assertEquals(entries, [
-            ('INFO', 'Once the above files are installed, your Samba4 server '
+            ('INFO', 'Once the above files are installed, your Samba AD server '
                 'will be ready to use'),
             ('INFO', 'Server Role:           domain controller'),
             ('INFO', 'Hostname:              hostnaam'),

@@ -25,6 +25,9 @@
 #include "../lib/util/tevent_ntstatus.h"
 #include "lib/tevent_wait.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_SMB2
+
 static struct tevent_req *smbd_smb2_close_send(TALLOC_CTX *mem_ctx,
 					       struct tevent_context *ev,
 					       struct smbd_smb2_request *smb2req,
@@ -67,7 +70,7 @@ NTSTATUS smbd_smb2_request_process_close(struct smbd_smb2_request *req)
 		return smbd_smb2_request_error(req, NT_STATUS_FILE_CLOSED);
 	}
 
-	subreq = smbd_smb2_close_send(req, req->sconn->ev_ctx,
+	subreq = smbd_smb2_close_send(req, req->ev_ctx,
 				      req, in_fsp, in_flags);
 	if (subreq == NULL) {
 		return smbd_smb2_request_error(req, NT_STATUS_NO_MEMORY);

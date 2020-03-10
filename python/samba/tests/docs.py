@@ -42,7 +42,7 @@ def get_documented_parameters(sourcedir):
         raise Exception("Unable to find parameters.all.xml")
     try:
         p = open(os.path.join(path, "parameters.all.xml"), 'r')
-    except IOError, e:
+    except IOError as e:
         raise Exception("Error opening parameters file")
     out = p.read()
 
@@ -65,7 +65,7 @@ def get_documented_tuples(sourcedir, omit_no_default=True):
         raise Exception("Unable to find parameters.all.xml")
     try:
         p = open(os.path.join(path, "parameters.all.xml"), 'r')
-    except IOError, e:
+    except IOError as e:
         raise Exception("Error opening parameters file")
     out = p.read()
 
@@ -99,16 +99,15 @@ def get_documented_tuples(sourcedir, omit_no_default=True):
 class SmbDotConfTests(TestCase):
 
     # defines the cases where the defaults may differ from the documentation
-    special_cases = set(['log level', 'path', 'ldapsam:trusted', 'spoolss: architecture',
-                         'share:fake_fscaps', 'ldapsam:editposix', 'rpc_daemon:DAEMON',
-                         'rpc_server:SERVER', 'panic action', 'homedir map', 'NIS homedir',
+    special_cases = set(['log level', 'path',
+                         'panic action', 'homedir map', 'NIS homedir',
                          'server string', 'netbios name', 'socket options', 'use mmap',
                          'ctdbd socket', 'printing', 'printcap name', 'queueresume command',
                          'queuepause command','lpresume command', 'lppause command',
                          'lprm command', 'lpq command', 'print command', 'template homedir',
-                         'spoolss: os_major', 'spoolss: os_minor', 'spoolss: os_build',
-                         'max open files', 'fss: prune stale', 'fss: sequence timeout',
-                         'include system krb5 conf'])
+                         'max open files',
+                         'include system krb5 conf', 'rpc server dynamic port range',
+                         'mit kdc command'])
 
     def setUp(self):
         super(SmbDotConfTests, self).setUp()
@@ -162,14 +161,18 @@ class SmbDotConfTests(TestCase):
             exceptions = ['client lanman auth',
                           'client plaintext auth',
                           'registry shares',
-                          'smb ports'])
+                          'smb ports',
+                          'rpc server dynamic port range',
+                          'name resolve order'])
         self._test_empty(['bin/testparm'])
 
     def test_default_s4(self):
         self._test_default(['bin/samba-tool', 'testparm'])
         self._set_defaults(['bin/samba-tool', 'testparm'])
         self._set_arbitrary(['bin/samba-tool', 'testparm'],
-            exceptions = ['smb ports'])
+            exceptions = ['smb ports',
+                          'rpc server dynamic port range',
+                          'name resolve order'])
         self._test_empty(['bin/samba-tool', 'testparm'])
 
     def _test_default(self, program):
@@ -178,7 +181,11 @@ class SmbDotConfTests(TestCase):
 
         for tuples in self.defaults:
             param, default, context, param_type = tuples
+
             if param in self.special_cases:
+                continue
+            # bad, bad parametric options - we don't have their default values
+            if ':' in param:
                 continue
             section = None
             if context == "G":
@@ -190,10 +197,11 @@ class SmbDotConfTests(TestCase):
             p = subprocess.Popen(program + ["-s", self.smbconf,
                     "--section-name", section, "--parameter-name", param],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.topdir).communicate()
-            if p[0].upper().strip() != default.upper():
-                if not (p[0].upper().strip() == "" and default == '""'):
+            result = p[0].decode().upper().strip()
+            if result != default.upper():
+                if not (result == "" and default == '""'):
                     doc_triple = "%s\n      Expected: %s" % (param, default)
-                    failset.add("%s\n      Got: %s" % (doc_triple, p[0].upper().strip()))
+                    failset.add("%s\n      Got: %s" % (doc_triple, result))
 
         if len(failset) > 0:
             self.fail(self._format_message(failset,
@@ -206,7 +214,7 @@ class SmbDotConfTests(TestCase):
         for tuples in self.defaults:
             param, default, context, param_type = tuples
 
-            if param in ['printing']:
+            if param in ['printing', 'rpc server dynamic port range']:
                 continue
 
             section = None
@@ -220,10 +228,11 @@ class SmbDotConfTests(TestCase):
                     "--section-name", section, "--parameter-name", param,
                     "--option", "%s = %s" % (param, default)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.topdir).communicate()
-            if p[0].upper().strip() != default.upper():
-                if not (p[0].upper().strip() == "" and default == '""'):
+            result = p[0].decode().upper().strip()
+            if result != default.upper():
+                if not (result == "" and default == '""'):
                     doc_triple = "%s\n      Expected: %s" % (param, default)
-                    failset.add("%s\n      Got: %s" % (doc_triple, p[0].upper().strip()))
+                    failset.add("%s\n      Got: %s" % (doc_triple, result))
 
         if len(failset) > 0:
             self.fail(self._format_message(failset,
@@ -278,10 +287,11 @@ class SmbDotConfTests(TestCase):
                     "--section-name", section, "--parameter-name", param,
                     "--option", "%s = %s" % (param, value_to_use)],
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.topdir).communicate()
-            if p[0].upper().strip() != value_to_use.upper():
+            result = p[0].decode().upper().strip()
+            if result != value_to_use.upper():
                 # currently no way to distinguish command lists
                 if param_type == 'list':
-                    if ", ".join(p[0].upper().strip().split()) == value_to_use.upper():
+                    if ", ".join(result.split()) == value_to_use.upper():
                         continue
 
                 # currently no way to identify octal
@@ -313,7 +323,7 @@ class SmbDotConfTests(TestCase):
 
             # testparm doesn't display a value if they are equivalent
             if (value_to_use.lower() != opposite_value.lower()):
-                for line in p[0].splitlines():
+                for line in p[0].decode().splitlines():
                     if not line.strip().startswith(param):
                         continue
 
@@ -345,7 +355,7 @@ class SmbDotConfTests(TestCase):
                 stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.topdir).communicate()
         output = ""
 
-        for line in p[0].splitlines():
+        for line in p[0].decode().splitlines():
             if line.strip().startswith('#'):
                 continue
             if line.strip().startswith("idmap config *"):

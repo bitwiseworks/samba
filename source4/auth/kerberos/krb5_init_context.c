@@ -77,7 +77,7 @@ static void smb_krb5_debug_close(void *private_data) {
 #ifdef SAMBA4_USES_HEIMDAL
 static void smb_krb5_debug_wrapper(const char *timestr, const char *msg, void *private_data)
 {
-	DEBUG(3, ("Kerberos: %s\n", msg));
+	DEBUGC(DBGC_KERBEROS, 3, ("Kerberos: %s\n", msg));
 }
 #endif
 
@@ -261,10 +261,14 @@ static krb5_error_code smb_krb5_send_and_recv_func_int(krb5_context context,
 		status = NT_STATUS_INVALID_PARAMETER;
 		switch (hi->proto) {
 		case KRB5_KRBHST_UDP:
-			status = socket_create(name, SOCKET_TYPE_DGRAM, &smb_krb5->sock, 0);
+			status = socket_create(smb_krb5, name,
+					       SOCKET_TYPE_DGRAM,
+					       &smb_krb5->sock, 0);
 			break;
 		case KRB5_KRBHST_TCP:
-			status = socket_create(name, SOCKET_TYPE_STREAM, &smb_krb5->sock, 0);
+			status = socket_create(smb_krb5, name,
+					       SOCKET_TYPE_STREAM,
+					       &smb_krb5->sock, 0);
 			break;
 		case KRB5_KRBHST_HTTP:
 			TALLOC_FREE(frame);
@@ -274,8 +278,6 @@ static krb5_error_code smb_krb5_send_and_recv_func_int(krb5_context context,
 			talloc_free(smb_krb5);
 			continue;
 		}
-
-		talloc_steal(smb_krb5, smb_krb5->sock);
 
 		remote_addr = socket_address_from_sockaddr(smb_krb5, a->ai_addr, a->ai_addrlen);
 		if (!remote_addr) {

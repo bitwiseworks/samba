@@ -41,6 +41,9 @@
 #include "lib/util/util_tdb.h"
 #include "libds/common/roles.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_AUTH
+
 /**
  * Fill in credentials for the machine trust account, from the secrets database.
  *
@@ -106,7 +109,7 @@ static NTSTATUS cli_credentials_set_secrets_lct(struct cli_credentials *cred,
 
 	whenChanged = ldb_msg_find_ldb_val(msg, "whenChanged");
 	if (!whenChanged || ldb_val_to_time(whenChanged, &lct) != LDB_SUCCESS) {
-		/* This attribute is mandetory */
+		/* This attribute is mandatory */
 		talloc_free(mem_ctx);
 		return NT_STATUS_NOT_FOUND;
 	}
@@ -117,7 +120,10 @@ static NTSTATUS cli_credentials_set_secrets_lct(struct cli_credentials *cred,
 		return NT_STATUS_NOT_FOUND;
 	}
 
-	if (lct == secrets_tdb_last_change_time && secrets_tdb_password && strcmp(password, secrets_tdb_password) != 0) {
+	if ((lct == secrets_tdb_last_change_time) &&
+	    (secrets_tdb_password != NULL) &&
+	    (password != NULL) &&
+	    (strcmp(password, secrets_tdb_password) != 0)) {
 		talloc_free(mem_ctx);
 		return NT_STATUS_NOT_FOUND;
 	}
@@ -232,16 +238,25 @@ _PUBLIC_ NTSTATUS cli_credentials_set_machine_account(struct cli_credentials *cr
 {
 	struct db_context *db_ctx;
 	char *secrets_tdb_path;
+	int hash_size, tdb_flags;
 
 	secrets_tdb_path = lpcfg_private_db_path(cred, lp_ctx, "secrets");
 	if (secrets_tdb_path == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	db_ctx = dbwrap_local_open(cred, lp_ctx, secrets_tdb_path, 0,
-				   TDB_DEFAULT, O_RDWR, 0600,
-				   DBWRAP_LOCK_ORDER_1,
-				   DBWRAP_FLAG_NONE);
+	hash_size = lpcfg_tdb_hash_size(lp_ctx, secrets_tdb_path);
+	tdb_flags = lpcfg_tdb_flags(lp_ctx, TDB_DEFAULT);
+
+	db_ctx = dbwrap_local_open(
+		cred,
+		secrets_tdb_path,
+		hash_size,
+		tdb_flags,
+		O_RDWR,
+		0600,
+		DBWRAP_LOCK_ORDER_1,
+		DBWRAP_FLAG_NONE);
 	TALLOC_FREE(secrets_tdb_path);
 
 	/*
@@ -369,7 +384,8 @@ _PUBLIC_ NTSTATUS cli_credentials_set_machine_account_db_ctx(struct cli_credenti
 				if (security != SEC_ADS) {
 					break;
 				}
-				/* fall through */
+
+				FALL_THROUGH;
 			case ROLE_ACTIVE_DIRECTORY_DC:
 				use_kerberos = CRED_AUTO_USE_KERBEROS;
 				break;

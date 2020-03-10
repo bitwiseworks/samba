@@ -15,6 +15,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import print_function
 """Tests for samba.dcerpc.dnsserver"""
 
 import os
@@ -211,7 +212,7 @@ class DnsserverTests(RpcInterfaceTestCase):
 
         zone_dn = None
         for zone in zones:
-            if zone_name in str(zone.dn):
+            if "DC=%s," % zone_name in str(zone.dn):
                 zone_dn = zone.dn
                 break
 
@@ -224,7 +225,8 @@ class DnsserverTests(RpcInterfaceTestCase):
 
         for old_packed_record in records:
             if record_name in str(old_packed_record.dn):
-                return (old_packed_record.dn, ndr_unpack(dnsp.DnssrvRpcRecord, old_packed_record["dnsRecord"][0]))
+                rec = ndr_unpack(dnsp.DnssrvRpcRecord, old_packed_record["dnsRecord"][0])
+                return (old_packed_record.dn, rec)
 
     def test_duplicate_matching(self):
         """
@@ -322,6 +324,35 @@ class DnsserverTests(RpcInterfaceTestCase):
                 self.assert_num_records(self.custom_zone, "testrecord", record_type_str)
                 self.delete_record(self.custom_zone, "testrecord", record_type_str, record_str)
 
+    def check_params(self, wDataLength, rank, flags, dwTtlSeconds, dwReserved, data,
+                     wType, dwTimeStamp=0, zone="zone", rec_name="testrecord"):
+        res = self.get_record_from_db(zone, rec_name)
+        self.assertIsNotNone(res, "Expected record %s but was not found over LDAP." % data)
+        (rec_dn, rec) = res
+        self.assertEqual(wDataLength, rec.wDataLength, "Unexpected data length for record %s. Got %s, expected %s." % (data, rec.wDataLength, wDataLength))
+        self.assertEqual(rank, rec.rank, "Unexpected rank for record %s. Got %s, expected %s." % (data, rec.rank, rank))
+        self.assertEqual(flags, rec.flags, "Unexpected flags for record %s. Got %s, expected %s." % (data, rec.flags, flags))
+        self.assertEqual(dwTtlSeconds, rec.dwTtlSeconds, "Unexpected time to live for record %s. Got %s, expected %s." % (data, rec.dwTtlSeconds, dwTtlSeconds))
+        self.assertEqual(dwReserved, rec.dwReserved, "Unexpected dwReserved for record %s. Got %s, expected %s." % (data, rec.dwReserved, dwReserved))
+        self.assertEqual(data.lower(), rec.data.lower(), "Unexpected data for record %s. Got %s, expected %s." % (data, rec.data.lower(), data.lower()))
+        self.assertEqual(wType, rec.wType, "Unexpected wType for record %s. Got %s, expected %s." % (data, rec.wType, wType))
+        self.assertEqual(dwTimeStamp, rec.dwTimeStamp, "Unexpected timestamp for record %s. Got %s, expected %s." % (data, rec.dwTimeStamp, dwTimeStamp))
+
+    def test_record_params(self):
+        """
+        Make sure that, when we add records to the database,
+        they're added with reasonable parameters.
+        """
+        self.add_record(self.custom_zone, "testrecord", "A", "192.168.50.50")
+        self.check_params(4, 240, 0, 900, 0, "192.168.50.50", 1)
+        self.delete_record(self.custom_zone, "testrecord", "A", "192.168.50.50")
+        self.add_record(self.custom_zone, "testrecord", "AAAA", "AAAA:AAAA::")
+        self.check_params(16, 240, 0, 900, 0, "AAAA:AAAA:0000:0000:0000:0000:0000:0000", 28)
+        self.delete_record(self.custom_zone, "testrecord", "AAAA", "AAAA:AAAA::")
+        self.add_record(self.custom_zone, "testrecord", "CNAME", "cnamedest")
+        self.check_params(13, 240, 0, 900, 0, "cnamedest", 5)
+        self.delete_record(self.custom_zone, "testrecord", "CNAME", "cnamedest")
+
     def test_reject_invalid_commands(self):
         """
         Make sure that we can't add a variety of invalid records,
@@ -337,7 +368,7 @@ class DnsserverTests(RpcInterfaceTestCase):
                     self.assert_num_records(self.custom_zone, "testrecord", record_type_str, expected_num=0)
                     self.delete_record(self.custom_zone, "testrecord", record_type_str, record_str, assertion=False)
                 except AssertionError as e:
-                    print e
+                    print(e)
                     num_failures = num_failures + 1
 
         # Also try to update valid records to invalid ones, making sure this fails
@@ -348,7 +379,7 @@ class DnsserverTests(RpcInterfaceTestCase):
                 try:
                     self.add_record(self.custom_zone, "testrecord", record_type_str, record_str, assertion=False)
                 except AssertionError as e:
-                    print e
+                    print(e)
                     num_failures = num_failures + 1
                 self.delete_record(self.custom_zone, "testrecord", record_type_str, good_record_str)
 
@@ -494,7 +525,7 @@ class DnsserverTests(RpcInterfaceTestCase):
                 # an alias can only map to one CNAME record.
                 # Also, on Windows, when the empty string is added and
                 # another record is added afterwards, the empty string
-                # will be silently overriden by the new one, so it
+                # will be silently overridden by the new one, so it
                 # fails this test for the empty string.
                 expected_num = 1 if record_type_str == 'CNAME' else 2
 

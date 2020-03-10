@@ -48,6 +48,7 @@
 #include "libcli/ldap/ldap_client.h"
 #include "auth/auth.h"
 #include "auth/credentials/credentials.h"
+#include "dsdb/common/util.h"
 
 struct ildb_private {
 	struct ldap_connection *ldap;
@@ -476,7 +477,7 @@ static int ildb_search(struct ildb_context *ac)
 	}
 
 	if (req->op.search.scope == LDB_SCOPE_DEFAULT) {
-		msg->r.SearchRequest.scope = LDB_SCOPE_SUBTREE;
+		msg->r.SearchRequest.scope = LDAP_SEARCH_SCOPE_SUB;
 	} else {
 		msg->r.SearchRequest.scope = req->op.search.scope;
 	}
@@ -833,7 +834,9 @@ static int ildb_connect(struct ldb_context *ldb, const char *url,
 	/* caller can optionally setup credentials using the opaque token 'credentials' */
 	creds = talloc_get_type(ldb_get_opaque(ldb, "credentials"), struct cli_credentials);
 	if (creds == NULL) {
-		struct auth_session_info *session_info = talloc_get_type(ldb_get_opaque(ldb, "sessionInfo"), struct auth_session_info);
+		struct auth_session_info *session_info = talloc_get_type(
+			ldb_get_opaque(ldb, DSDB_SESSION_INFO),
+			struct auth_session_info);
 		if (session_info) {
 			creds = session_info->credentials;
 		}
@@ -863,7 +866,9 @@ static int ildb_connect(struct ldb_context *ldb, const char *url,
 	return LDB_SUCCESS;
 
 failed:
-	ldb_set_errstring(ldb, ldap_errstr(ildb->ldap, module, status));
+	if (ildb != NULL && ildb->ldap != NULL) {
+		ldb_set_errstring(ldb, ldap_errstr(ildb->ldap, module, status));
+	}
 	talloc_free(module);
 	if (NT_STATUS_IS_LDAP(status)) {
 		return NT_STATUS_LDAP_CODE(status);

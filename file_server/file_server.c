@@ -26,7 +26,6 @@
 #include "lib/param/param.h"
 #include "source4/smbd/service.h"
 #include "source4/smbd/process_model.h"
-#include "file_server/file_server.h"
 #include "dynconfig.h"
 #include "nsswitch/winbind_client.h"
 
@@ -93,9 +92,13 @@ static void s3fs_task_init(struct task_server *task)
 }
 
 /* called at smbd startup - register ourselves as a server service */
-NTSTATUS server_service_s3fs_init(void);
+NTSTATUS server_service_s3fs_init(TALLOC_CTX *);
 
-NTSTATUS server_service_s3fs_init(void)
+NTSTATUS server_service_s3fs_init(TALLOC_CTX *ctx)
 {
-	return register_server_service("s3fs", s3fs_task_init);
+	struct service_details details = {
+		.inhibit_fork_on_accept = true,
+		.inhibit_pre_fork = true
+	};
+	return register_server_service(ctx, "s3fs", s3fs_task_init, &details);
 }

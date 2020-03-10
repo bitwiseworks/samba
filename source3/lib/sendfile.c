@@ -24,6 +24,7 @@
  */
 
 #include "includes.h"
+#include "system/filesys.h"
 
 #if defined(LINUX_SENDFILE_API)
 
@@ -36,8 +37,10 @@
 ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, off_t offset, size_t count)
 {
 	size_t total=0;
-	ssize_t ret;
+	ssize_t ret = -1;
 	size_t hdr_len = 0;
+	int old_flags = 0;
+	bool socket_flags_changed = false;
 
 	/*
 	 * Send the header first.
@@ -48,8 +51,25 @@ ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, off_t offset
 		hdr_len = header->length;
 		while (total < hdr_len) {
 			ret = sys_send(tofd, header->data + total,hdr_len - total, MSG_MORE);
-			if (ret == -1)
-				return -1;
+			if (ret == -1) {
+				if (errno == EAGAIN || errno == EWOULDBLOCK) {
+					/*
+					 * send() must complete before we can
+					 * send any other outgoing data on the
+					 * socket. Ensure socket is in blocking
+					 * mode. For SMB2 by default the socket
+					 * is in non-blocking mode.
+					 */
+					old_flags = fcntl(tofd, F_GETFL, 0);
+					ret = set_blocking(tofd, true);
+					if (ret == -1) {
+						goto out;
+					}
+					socket_flags_changed = true;
+					continue;
+				}
+				goto out;
+			}
 			total += ret;
 		}
 	}
@@ -59,8 +79,34 @@ ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, off_t offset
 		ssize_t nwritten;
 		do {
 			nwritten = sendfile(tofd, fromfd, &offset, total);
-		} while (nwritten == -1 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK));
+		} while (nwritten == -1 && errno == EINTR);
 		if (nwritten == -1) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				if (socket_flags_changed) {
+					/*
+					 * We're already in blocking
+					 * mode. This is an error.
+					 */
+					ret = -1;
+					goto out;
+				}
+
+				/*
+				 * Sendfile must complete before we can
+				 * send any other outgoing data on the socket.
+				 * Ensure socket is in blocking mode.
+				 * For SMB2 by default the socket is in
+				 * non-blocking mode.
+				 */
+				old_flags = fcntl(tofd, F_GETFL, 0);
+				ret = set_blocking(tofd, true);
+				if (ret == -1) {
+					goto out;
+				}
+				socket_flags_changed = true;
+				continue;
+			}
+
 			if (errno == ENOSYS || errno == EINVAL) {
 				/* Ok - we're in a world of pain here. We just sent
 				 * the header, but the sendfile failed. We have to
@@ -72,17 +118,41 @@ ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, off_t offset
 				 */
 				errno = EINTR; /* Normally we can never return this. */
 			}
-			return -1;
+			ret = -1;
+			goto out;
 		}
 		if (nwritten == 0) {
 			/*
 			 * EOF, return a short read
 			 */
-			return hdr_len + (count - total);
+			ret = hdr_len + (count - total);
+			goto out;
 		}
 		total -= nwritten;
 	}
-	return count + hdr_len;
+
+	ret = count + hdr_len;
+
+  out:
+
+	if (socket_flags_changed) {
+		int saved_errno;
+		int err;
+
+		if (ret == -1) {
+			saved_errno = errno;
+		}
+		/* Restore the old state of the socket. */
+		err = fcntl(tofd, F_SETFL, old_flags);
+		if (err == -1) {
+			return -1;
+		}
+		if (ret == -1) {
+			errno = saved_errno;
+		}
+	}
+
+	return ret;
 }
 
 #elif defined(SOLARIS_SENDFILE_API)
@@ -99,6 +169,9 @@ ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, off_t offset
 	size_t total, xferred;
 	struct sendfilevec vec[2];
 	ssize_t hdr_len = 0;
+	int old_flags = 0;
+	ssize_t ret = -1;
+	bool socket_flags_changed = false;
 
 	if (header) {
 		sfvcnt = 2;
@@ -135,17 +208,37 @@ ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, off_t offset
 		xferred = 0;
 
 			nwritten = sendfilev(tofd, vec, sfvcnt, &xferred);
-		if  (nwritten == -1 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
+		if  (nwritten == -1 && errno == EINTR) {
 			if (xferred == 0)
 				continue; /* Nothing written yet. */
 			else
 				nwritten = xferred;
 		}
 
-		if (nwritten == -1)
-			return -1;
-		if (nwritten == 0)
-			return -1; /* I think we're at EOF here... */
+		if (nwritten == -1) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				/*
+				 * Sendfile must complete before we can
+				 * send any other outgoing data on the socket.
+				 * Ensure socket is in blocking mode.
+				 * For SMB2 by default the socket is in
+				 * non-blocking mode.
+				 */
+				old_flags = fcntl(tofd, F_GETFL, 0);
+				ret = set_blocking(tofd, true);
+				if (ret == -1) {
+					goto out;
+				}
+				socket_flags_changed = true;
+				continue;
+			}
+			ret = -1;
+			goto out;
+		}
+		if (nwritten == 0) {
+			ret = -1;
+			goto out; /* I think we're at EOF here... */
+		}
 
 		/*
 		 * If this was a short (signal interrupted) write we may need
@@ -167,7 +260,28 @@ ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, off_t offset
 		}
 		total -= nwritten;
 	}
-	return count + hdr_len;
+	ret = count + hdr_len;
+
+  out:
+
+	if (socket_flags_changed) {
+		int saved_errno;
+		int err;
+
+		if (ret == -1) {
+			saved_errno = errno;
+		}
+		/* Restore the old state of the socket. */
+		err = fcntl(tofd, F_SETFL, old_flags);
+		if (err == -1) {
+			return -1;
+		}
+		if (ret == -1) {
+			errno = saved_errno;
+		}
+	}
+
+	return ret;
 }
 
 #elif defined(HPUX_SENDFILE_API)
@@ -180,6 +294,9 @@ ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, off_t offset
 	size_t total=0;
 	struct iovec hdtrl[2];
 	size_t hdr_len = 0;
+	int old_flags = 0;
+	ssize_t ret = -1;
+	bool socket_flags_changed = false;
 
 	if (header) {
 		/* Set up the header/trailer iovec. */
@@ -205,11 +322,31 @@ ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, off_t offset
 
 		do {
 			nwritten = sendfile(tofd, fromfd, offset, total, &hdtrl[0], 0);
-		} while (nwritten == -1 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK));
-		if (nwritten == -1)
-			return -1;
-		if (nwritten == 0)
-			return -1; /* I think we're at EOF here... */
+		} while (nwritten == -1 && errno == EINTR);
+		if (nwritten == -1) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				/*
+				 * Sendfile must complete before we can
+				 * send any other outgoing data on the socket.
+				 * Ensure socket is in blocking mode.
+				 * For SMB2 by default the socket is in
+				 * non-blocking mode.
+				 */
+				old_flags = fcntl(tofd, F_GETFL, 0);
+				ret = set_blocking(tofd, true);
+				if (ret == -1) {
+					goto out;
+				}
+				socket_flags_changed = true;
+				continue;
+			}
+			ret = -1;
+			goto out;
+		}
+		if (nwritten == 0) {
+			ret = -1; /* I think we're at EOF here... */
+			goto out;
+		}
 
 		/*
 		 * If this was a short (signal interrupted) write we may need
@@ -233,7 +370,28 @@ ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, off_t offset
 		total -= nwritten;
 		offset += nwritten;
 	}
-	return count + hdr_len;
+	ret = count + hdr_len;
+
+  out:
+
+	if (socket_flags_changed) {
+		int saved_errno;
+		int err;
+
+		if (ret == -1) {
+			saved_errno = errno;
+		}
+		/* Restore the old state of the socket. */
+		err = fcntl(tofd, F_SETFL, old_flags);
+		if (err == -1) {
+			return -1;
+		}
+		if (ret == -1) {
+			errno = saved_errno;
+		}
+	}
+
+	return ret;
 }
 
 #elif defined(FREEBSD_SENDFILE_API) || defined(DARWIN_SENDFILE_API)
@@ -247,9 +405,11 @@ ssize_t sys_sendfile(int tofd, int fromfd,
 {
 	struct sf_hdtr	sf_header = {0};
 	struct iovec	io_header = {0};
+	int old_flags = 0;
 
 	off_t	nwritten;
-	int	ret;
+	ssize_t	ret = -1;
+	bool socket_flags_changed = false;
 
 	if (header) {
 		sf_header.headers = &io_header;
@@ -270,9 +430,26 @@ ssize_t sys_sendfile(int tofd, int fromfd,
 #else
 		ret = sendfile(fromfd, tofd, offset, count, &sf_header, &nwritten, 0);
 #endif
-		if (ret == -1 && errno != EINTR && errno != EAGAIN && errno != EWOULDBLOCK) {
+		if (ret == -1 && errno != EINTR) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				/*
+				 * Sendfile must complete before we can
+				 * send any other outgoing data on the socket.
+				 * Ensure socket is in blocking mode.
+				 * For SMB2 by default the socket is in
+				 * non-blocking mode.
+				 */
+				old_flags = fcntl(tofd, F_GETFL, 0);
+				ret = set_blocking(tofd, true);
+				if (ret == -1) {
+					goto out;
+				}
+				socket_flags_changed = true;
+				continue;
+			}
 			/* Send failed, we are toast. */
-			return -1;
+			ret = -1;
+			goto out;
 		}
 
 		if (nwritten == 0) {
@@ -299,7 +476,28 @@ ssize_t sys_sendfile(int tofd, int fromfd,
 		count -= nwritten;
 	}
 
-	return nwritten;
+	ret = nwritten;
+
+  out:
+
+	if (socket_flags_changed) {
+		int saved_errno;
+		int err;
+
+		if (ret == -1) {
+			saved_errno = errno;
+		}
+		/* Restore the old state of the socket. */
+		err = fcntl(tofd, F_SETFL, old_flags);
+		if (err == -1) {
+			return -1;
+		}
+		if (ret == -1) {
+			errno = saved_errno;
+		}
+	}
+
+	return ret;
 }
 
 #elif defined(AIX_SENDFILE_API)
@@ -312,6 +510,9 @@ ssize_t sys_sendfile(int tofd, int fromfd,
 ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, off_t offset, size_t count)
 {
 	struct sf_parms hdtrl;
+	int old_flags = 0;
+	ssize_t ret = -1;
+	bool socket_flags_changed = false;
 
 	/* Set up the header/trailer struct params. */
 	if (header) {
@@ -329,8 +530,6 @@ ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, off_t offset
 	hdtrl.file_bytes = count;
 
 	while ( hdtrl.file_bytes + hdtrl.header_length ) {
-		ssize_t ret;
-
 		/*
 		 Return Value
 
@@ -348,12 +547,50 @@ ssize_t sys_sendfile(int tofd, int fromfd, const DATA_BLOB *header, off_t offset
 		*/
 		do {
 			ret = send_file(&tofd, &hdtrl, 0);
-		} while ((ret == 1) || (ret == -1 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)));
-		if ( ret == -1 )
-			return -1;
+		} while ((ret == 1) || (ret == -1 && errno == EINTR));
+		if ( ret == -1 ) {
+			if (errno == EAGAIN || errno == EWOULDBLOCK) {
+				/*
+				 * Sendfile must complete before we can
+				 * send any other outgoing data on the socket.
+				 * Ensure socket is in blocking mode.
+				 * For SMB2 by default the socket is in
+				 * non-blocking mode.
+				 */
+				old_flags = fcntl(tofd, F_GETFL, 0);
+				ret = set_blocking(tofd, true);
+				if (ret == -1) {
+					goto out;
+				}
+				socket_flags_changed = true;
+				continue;
+			}
+			goto out;
+		}
 	}
 
-	return count + header->length;
+	ret = count + header->length;
+
+  out:
+
+	if (socket_flags_changed) {
+		int saved_errno;
+		int err;
+
+		if (ret == -1) {
+			saved_errno = errno;
+		}
+		/* Restore the old state of the socket. */
+		err = fcntl(tofd, F_SETFL, old_flags);
+		if (err == -1) {
+			return -1;
+		}
+		if (ret == -1) {
+			errno = saved_errno;
+		}
+	}
+
+	return ret;
 }
 /* END AIX SEND_FILE */
 

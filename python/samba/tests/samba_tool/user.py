@@ -121,7 +121,7 @@ class UserCmdTestCase(SambaToolCmdTest):
             return
 
         def find_package(packages, name, start_idx=0):
-            for i in xrange(start_idx, len(packages)):
+            for i in range(start_idx, len(packages)):
                 if packages[i].name == name:
                     return (i, packages[i])
             return (None, None)
@@ -234,9 +234,9 @@ class UserCmdTestCase(SambaToolCmdTest):
             creds.set_anonymous()
             creds.set_password(newpasswd)
             nthash = creds.get_nt_hash()
-            unicodePwd = base64.b64encode(creds.get_nt_hash())
-            virtualClearTextUTF8 = base64.b64encode(newpasswd)
-            virtualClearTextUTF16 = base64.b64encode(unicode(newpasswd, 'utf-8').encode('utf-16-le'))
+            unicodePwd = base64.b64encode(creds.get_nt_hash()).decode('utf8')
+            virtualClearTextUTF8 = base64.b64encode(newpasswd).decode('utf8')
+            virtualClearTextUTF16 = base64.b64encode(unicode(newpasswd, 'utf-8').encode('utf-16-le')).decode('utf8')
 
             (result, out, err) = self.runsubcmd("user", "setpassword",
                                                 user["name"],
@@ -306,9 +306,9 @@ class UserCmdTestCase(SambaToolCmdTest):
 
 
     def test_setexpiry(self):
-        twodays = time.time() + (2 * 24 * 60 * 60)
-
         for user in self.users:
+            twodays = time.time() + (2 * 24 * 60 * 60)
+
             (result, out, err) = self.runsubcmd("user", "setexpiry", user["name"],
                                                 "--days=2",
                                                 "-H", "ldap://%s" % os.environ["DC_SERVER"],
@@ -316,7 +316,6 @@ class UserCmdTestCase(SambaToolCmdTest):
             self.assertCmdSuccess(result, out, err, "Can we run setexpiry with names")
             self.assertIn("Expiry for user '%s' set to 2 days." % user["name"], out)
 
-        for user in self.users:
             found = self._find_user(user["name"])
 
             expires = nttime2unix(int("%s" % found.get("accountExpires")))
@@ -366,6 +365,60 @@ class UserCmdTestCase(SambaToolCmdTest):
             name = userobj.get("samaccountname", idx=0)
             found = self.assertMatch(out, name,
                                      "user '%s' not found" % name)
+
+    def test_show(self):
+        for user in self.users:
+            (result, out, err) = self.runsubcmd(
+                "user", "show", user["name"],
+                "--attributes=sAMAccountName,company",
+                "-H", "ldap://%s" % os.environ["DC_SERVER"],
+                "-U%s%%%s" % (os.environ["DC_USERNAME"],
+                os.environ["DC_PASSWORD"]))
+            self.assertCmdSuccess(result, out, err, "Error running show")
+
+            expected_out = """dn: CN=%s %s,CN=Users,%s
+company: %s
+sAMAccountName: %s
+
+""" % (user["given-name"], user["surname"], self.samdb.domain_dn(),
+       user["company"], user["name"])
+
+            self.assertEqual(out, expected_out,
+                             "Unexpected show output for user '%s'" %
+                             user["name"])
+
+    def test_move(self):
+        full_ou_dn = str(self.samdb.normalize_dn_in_domain("OU=movetest"))
+        (result, out, err) =  self.runsubcmd("ou", "create", full_ou_dn)
+        self.assertCmdSuccess(result, out, err)
+        self.assertEquals(err, "", "There shouldn't be any error message")
+        self.assertIn('Created ou "%s"' % full_ou_dn, out)
+
+        for user in self.users:
+            (result, out, err) = self.runsubcmd(
+                "user", "move", user["name"], full_ou_dn)
+            self.assertCmdSuccess(result, out, err, "Error running move")
+            self.assertIn('Moved user "%s" into "%s"' %
+                          (user["name"], full_ou_dn), out)
+
+        # Should fail as users objects are in OU
+        (result, out, err) =  self.runsubcmd("ou", "delete", full_ou_dn)
+        self.assertCmdFail(result)
+        self.assertIn(("subtree_delete: Unable to delete a non-leaf node "
+                       "(it has %d children)!") % len(self.users), err)
+
+        for user in self.users:
+            new_dn = "CN=Users,%s" % self.samdb.domain_dn()
+            (result, out, err) = self.runsubcmd(
+                "user", "move", user["name"], new_dn)
+            self.assertCmdSuccess(result, out, err, "Error running move")
+            self.assertIn('Moved user "%s" into "%s"' %
+                          (user["name"], new_dn), out)
+
+        (result, out, err) = self.runsubcmd("ou", "delete", full_ou_dn)
+        self.assertCmdSuccess(result, out, err,
+                              "Failed to delete ou '%s'" % full_ou_dn)
+
     def test_getpwent(self):
         try:
             import pwd

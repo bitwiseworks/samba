@@ -35,6 +35,7 @@ struct msg_dgm_ref {
 
 static pid_t dgm_pid = 0;
 static struct msg_dgm_ref *refs = NULL;
+static struct msg_dgm_ref *next_ref = NULL;
 
 static int msg_dgm_ref_destructor(struct msg_dgm_ref *r);
 static void msg_dgm_ref_recv(struct tevent_context *ev,
@@ -73,6 +74,18 @@ void *messaging_dgm_ref(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 
 	if (refs == NULL) {
 		int ret;
+
+		if (tevent_context_is_wrapper(ev)) {
+			/*
+			 * This is really a programmer error!
+			 *
+			 * The main/raw tevent context should
+			 * have been registered first!
+			 */
+			DBG_ERR("Should not be used with a wrapper tevent context\n");
+			*err = EINVAL;
+			return NULL;
+		}
 
 		ret = messaging_dgm_init(ev, unique, socket_dir, lockfile_dir,
 					 msg_dgm_ref_recv, NULL);
@@ -121,16 +134,16 @@ static void msg_dgm_ref_recv(struct tevent_context *ev,
 			     const uint8_t *msg, size_t msg_len,
 			     int *fds, size_t num_fds, void *private_data)
 {
-	struct msg_dgm_ref *r, *next;
+	struct msg_dgm_ref *r;
 
 	/*
 	 * We have to broadcast incoming messages to all refs. The first ref
 	 * that grabs the fd's will get them.
 	 */
-	for (r = refs; r != NULL; r = next) {
+	for (r = refs; r != NULL; r = next_ref) {
 		bool active;
 
-		next = r->next;
+		next_ref = r->next;
 
 		active = messaging_dgm_fde_active(r->fde);
 		if (!active) {
@@ -150,6 +163,11 @@ static int msg_dgm_ref_destructor(struct msg_dgm_ref *r)
 	if (refs == NULL) {
 		abort();
 	}
+
+	if (r == next_ref) {
+		next_ref = r->next;
+	}
+
 	DLIST_REMOVE(refs, r);
 
 	TALLOC_FREE(r->fde);

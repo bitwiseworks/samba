@@ -46,18 +46,6 @@ from samba.kcc.debug import DEBUG, DEBUG_FN, logger
 from samba.kcc import debug
 
 
-def sort_replica_by_dsa_guid(rep1, rep2):
-    """Helper to sort NCReplicas by their DSA guids
-
-    The guids need to be sorted in their NDR form.
-
-    :param rep1: An NC replica
-    :param rep2: Another replica
-    :return: -1, 0, or 1, indicating sort order.
-    """
-    return cmp(ndr_pack(rep1.rep_dsa_guid), ndr_pack(rep2.rep_dsa_guid))
-
-
 def sort_dsa_by_gc_and_guid(dsa1, dsa2):
     """Helper to sort DSAs by guid global catalog status
 
@@ -94,10 +82,10 @@ class KCC(object):
     Service can then utilize to replicate naming contexts
 
     :param unix_now: The putative current time in seconds since 1970.
-    :param read_only: Don't write to the database.
+    :param readonly: Don't write to the database.
     :param verify: Check topological invariants for the generated graphs
     :param debug: Write verbosely to stderr.
-    "param dot_file_dir: write diagnostic Graphviz files in this directory
+    :param dot_file_dir: write diagnostic Graphviz files in this directory
     """
     def __init__(self, unix_now, readonly=False, verify=False, debug=False,
                  dot_file_dir=None):
@@ -152,7 +140,8 @@ class KCC(object):
                                     self.samdb.get_config_basedn(),
                                     scope=ldb.SCOPE_SUBTREE,
                                     expression="(objectClass=interSiteTransport)")
-        except ldb.LdbError, (enum, estr):
+        except ldb.LdbError as e2:
+            (enum, estr) = e2.args
             raise KCCError("Unable to find inter-site transports - (%s)" %
                            estr)
 
@@ -186,7 +175,8 @@ class KCC(object):
                                     self.samdb.get_config_basedn(),
                                     scope=ldb.SCOPE_SUBTREE,
                                     expression="(objectClass=siteLink)")
-        except ldb.LdbError, (enum, estr):
+        except ldb.LdbError as e3:
+            (enum, estr) = e3.args
             raise KCCError("Unable to find inter-site siteLinks - (%s)" % estr)
 
         for msg in res:
@@ -249,7 +239,8 @@ class KCC(object):
                                     self.samdb.get_config_basedn(),
                                     scope=ldb.SCOPE_SUBTREE,
                                     expression="(objectClass=site)")
-        except ldb.LdbError, (enum, estr):
+        except ldb.LdbError as e4:
+            (enum, estr) = e4.args
             raise KCCError("Unable to find sites - (%s)" % estr)
 
         for msg in res:
@@ -267,7 +258,8 @@ class KCC(object):
         try:
             res = self.samdb.search(base=dn, scope=ldb.SCOPE_BASE,
                                     attrs=["objectGUID"])
-        except ldb.LdbError, (enum, estr):
+        except ldb.LdbError as e5:
+            (enum, estr) = e5.args
             DEBUG_FN("Search for dn '%s' [from %s] failed: %s. "
                      "This typically happens in --importldif mode due "
                      "to lack of module support." % (dn, dn_query, estr))
@@ -282,11 +274,12 @@ class KCC(object):
                                                      scope=ldb.SCOPE_BASE,
                                                      attrs=["dsServiceName"])
                 dn = ldb.Dn(self.samdb,
-                            service_name_res[0]["dsServiceName"][0])
+                            service_name_res[0]["dsServiceName"][0].decode('utf8'))
 
                 res = self.samdb.search(base=dn, scope=ldb.SCOPE_BASE,
                                         attrs=["objectGUID"])
-            except ldb.LdbError, (enum, estr):
+            except ldb.LdbError as e:
+                (enum, estr) = e.args
                 raise KCCError("Unable to find my nTDSDSA - (%s)" % estr)
 
         if len(res) != 1:
@@ -326,7 +319,8 @@ class KCC(object):
                                     self.samdb.get_config_basedn(),
                                     scope=ldb.SCOPE_SUBTREE,
                                     expression="(objectClass=crossRef)")
-        except ldb.LdbError, (enum, estr):
+        except ldb.LdbError as e6:
+            (enum, estr) = e6.args
             raise KCCError("Unable to find partitions - (%s)" % estr)
 
         for msg in res:
@@ -524,7 +518,7 @@ class KCC(object):
         :return: None
         """
         # TODO Figure out how best to handle the RODC case
-        # The RODC is ITSG, but shouldn't act on anyone's behalf.
+        # The RODC is ISTG, but shouldn't act on anyone's behalf.
         if self.my_dsa.is_ro():
             return
 
@@ -541,8 +535,9 @@ class KCC(object):
                 if s_dnstr not in local_dsas:
                     from_dsa = self.get_dsa(s_dnstr)
                     # Samba ONLY: ISTG removes connections to dead DCs
-                    if from_dsa is None and '\\0ADEL' in s_dnstr:
-                        logger.info("DSA appears deleted, removing connection %s" % s_dnstr)
+                    if from_dsa is None or '\\0ADEL' in s_dnstr:
+                        logger.info("DSA appears deleted, removing connection %s"
+                                    % s_dnstr)
                         cn.to_be_deleted = True
                         continue
                     connections_and_dsas.append((cn, dsa, from_dsa))
@@ -863,8 +858,6 @@ class KCC(object):
         :param current_dsa: optional DSA on whose behalf we are acting.
         :return: None
         """
-        count = 0
-
         ro = False
         if current_dsa is None:
             current_dsa = self.my_dsa
@@ -909,11 +902,10 @@ class KCC(object):
                                      drsuapi.DRSUAPI_DRS_PER_SYNC |
                                      drsuapi.DRSUAPI_DRS_ADD_REF |
                                      drsuapi.DRSUAPI_DRS_SPECIAL_SECRET_PROCESSING |
-                                     drsuapi.DRSUAPI_DRS_GET_ALL_GROUP_MEMBERSHIP |
                                      drsuapi.DRSUAPI_DRS_NONGC_RO_REP)
                     if t_repsFrom.replica_flags != replica_flags:
                         t_repsFrom.replica_flags = replica_flags
-                c_rep.commit_repsFrom(self.samdb)
+                c_rep.commit_repsFrom(self.samdb, ro=self.readonly)
             else:
                 if dnstr not in needed_rep_table:
                     delete_reps.add(dnstr)
@@ -1095,9 +1087,9 @@ class KCC(object):
 
             if self.readonly:
                 # Display any to be deleted or modified repsTo
-                text = n_rep.dumpstr_reps_to()
-                if text:
-                    logger.info("REMOVING REPS-TO:\n%s" % text)
+                for rt in n_rep.rep_repsTo:
+                    if rt.to_be_deleted:
+                        logger.info("REMOVING REPS-TO: %s" % rt)
 
                 # Peform deletion from our tables but perform
                 # no database modification
@@ -1501,7 +1493,7 @@ class KCC(object):
                             cn.set_modified(True)
 
                     # Display any modified connection
-                    if self.readonly:
+                    if self.readonly or ldsa.is_ro():
                         if cn.to_be_modified:
                             logger.info("TO BE MODIFIED:\n%s" % cn)
 
@@ -1585,11 +1577,11 @@ class KCC(object):
                                     rbh.dsa_dnstr, link_sched)
 
             # Display any added connection
-            if self.readonly:
+            if self.readonly or lbh.is_ro():
                 if cn.to_be_added:
                     logger.info("TO BE ADDED:\n%s" % cn)
 
-                    lbh.commit_connections(self.samdb, ro=True)
+                lbh.commit_connections(self.samdb, ro=True)
             else:
                 lbh.commit_connections(self.samdb)
 
@@ -2015,14 +2007,13 @@ class KCC(object):
 
         if not needed:
             debug.DEBUG_RED("%s lacks 'should be present' status, "
-                            "aborting construct_intersite_graph!" %
+                            "aborting construct_intrasite_graph!" %
                             nc_x.nc_dnstr)
             return
 
         # Create a NCReplica that matches what the local replica
         # should say.  We'll use this below in our r_list
-        l_of_x = NCReplica(dc_local.dsa_dnstr, dc_local.dsa_guid,
-                           nc_x.nc_dnstr)
+        l_of_x = NCReplica(dc_local, nc_x.nc_dnstr)
 
         l_of_x.identify_by_basedn(self.samdb)
 
@@ -2189,7 +2180,7 @@ class KCC(object):
         # on the local DC
         r_list.append(l_of_x)
 
-        r_list.sort(sort_replica_by_dsa_guid)
+        r_list.sort(key=lambda rep: ndr_pack(rep.rep_dsa_guid))
         r_len = len(r_list)
 
         max_node_edges = self.intrasite_max_node_edges(r_len)
@@ -2480,7 +2471,8 @@ class KCC(object):
                 self.samdb = SamDB(url=dburl,
                                    session_info=system_session(),
                                    credentials=creds, lp=lp)
-            except ldb.LdbError, (num, msg):
+            except ldb.LdbError as e1:
+                (num, msg) = e1.args
                 raise KCCError("Unable to open sam database %s : %s" %
                                (dburl, msg))
 
@@ -2591,15 +2583,20 @@ class KCC(object):
                                dot_file_dir=self.dot_file_dir)
 
                 dot_edges = []
+                dot_colours = []
                 for link in self.sitelink_table.values():
+                    from hashlib import md5
+                    colour = '#' + md5(link.dnstr).hexdigest()[:6]
                     for a, b in itertools.combinations(link.site_list, 2):
-                        dot_edges.append((str(a), str(b)))
+                        dot_edges.append((a[1], b[1]))
+                        dot_colours.append(colour)
                 properties = ('connected',)
                 verify_and_dot('dsa_sitelink_initial', dot_edges,
                                directed=False,
                                label=self.my_dsa_dnstr, properties=properties,
                                debug=DEBUG, verify=self.verify,
-                               dot_file_dir=self.dot_file_dir)
+                               dot_file_dir=self.dot_file_dir,
+                               edge_colors=dot_colours)
 
             if forget_local_links:
                 for dsa in self.my_site.dsa_table.values():
@@ -2719,7 +2716,7 @@ class KCC(object):
         try:
             self.samdb = ldif_import_export.ldif_to_samdb(dburl, lp, ldif_file,
                                                           forced_local_dsa)
-        except ldif_import_export.LdifError, e:
+        except ldif_import_export.LdifError as e:
             logger.critical(e)
             return 1
         return 0
@@ -2744,7 +2741,7 @@ class KCC(object):
         try:
             ldif_import_export.samdb_to_ldif_file(self.samdb, dburl, lp, creds,
                                                   ldif_file)
-        except ldif_import_export.LdifError, e:
+        except ldif_import_export.LdifError as e:
             logger.critical(e)
             return 1
         return 0

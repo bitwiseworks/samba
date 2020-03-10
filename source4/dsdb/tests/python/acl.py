@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # This is unit with tests for LDAP access checks
 
+from __future__ import print_function
 import optparse
 import sys
 import base64
@@ -12,7 +13,7 @@ import samba
 from samba.tests.subunitrun import SubunitOptions, TestProgram
 
 import samba.getopt as options
-from samba.join import dc_join
+from samba.join import DCJoinContext
 
 from ldb import (
     SCOPE_BASE, SCOPE_SUBTREE, LdbError, ERR_NO_SUCH_OBJECT,
@@ -30,6 +31,7 @@ from samba.credentials import Credentials, DONT_USE_KERBEROS
 import samba.tests
 from samba.tests import delete_force
 import samba.dsdb
+from samba.tests.password_test import PasswordCommon
 
 parser = optparse.OptionParser("acl.py [options] <host>")
 sambaopts = options.SambaOptions(parser)
@@ -74,6 +76,7 @@ class AclTests(samba.tests.TestCase):
         self.user_pass = "samba123@"
         self.configuration_dn = self.ldb_admin.get_config_basedn().get_linearized()
         self.sd_utils = sd_utils.SDUtils(self.ldb_admin)
+        self.addCleanup(self.delete_admin_connection)
         #used for anonymous login
         self.creds_tmp = Credentials()
         self.creds_tmp.set_username("")
@@ -81,7 +84,7 @@ class AclTests(samba.tests.TestCase):
         self.creds_tmp.set_domain(creds.get_domain())
         self.creds_tmp.set_realm(creds.get_realm())
         self.creds_tmp.set_workstation(creds.get_workstation())
-        print "baseDN: %s" % self.base_dn
+        print("baseDN: %s" % self.base_dn)
 
     def get_user_dn(self, name):
         return "CN=%s,CN=Users,%s" % (name, self.base_dn)
@@ -108,6 +111,10 @@ class AclTests(samba.tests.TestCase):
             pass
         else:
             self.fail()
+
+    def delete_admin_connection(self):
+        del self.sd_utils
+        del self.ldb_admin
 
 #tests on ldap add operations
 class AclAddTests(AclTests):
@@ -151,6 +158,10 @@ class AclAddTests(AclTests):
         delete_force(self.ldb_admin, self.get_user_dn(self.regular_user))
         delete_force(self.ldb_admin, self.get_user_dn("test_add_anonymous"))
 
+        del self.ldb_notowner
+        del self.ldb_owner
+        del self.ldb_user
+
     # Make sure top OU is deleted (and so everything under it)
     def assert_top_ou_deleted(self):
         res = self.ldb_admin.search(self.base_dn,
@@ -190,7 +201,8 @@ class AclAddTests(AclTests):
             self.ldb_user.newuser(self.test_user1, self.user_pass, userou=self.ou2)
             self.ldb_user.newgroup("test_add_group1", groupou="OU=test_add_ou2,OU=test_add_ou1",
                                    grouptype=samba.dsdb.GTYPE_DISTRIBUTION_DOMAIN_LOCAL_GROUP)
-        except LdbError, (num, _):
+        except LdbError as e:
+            (num, _) = e.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             self.fail()
@@ -214,7 +226,8 @@ class AclAddTests(AclTests):
         try:
             self.ldb_user.newgroup("test_add_group1", groupou="OU=test_add_ou2,OU=test_add_ou1",
                                    grouptype=samba.dsdb.GTYPE_DISTRIBUTION_DOMAIN_LOCAL_GROUP)
-        except LdbError, (num, _):
+        except LdbError as e1:
+            (num, _) = e1.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             self.fail()
@@ -250,7 +263,8 @@ class AclAddTests(AclTests):
         anonymous = SamDB(url=ldaphost, credentials=self.creds_tmp, lp=lp)
         try:
             anonymous.newuser("test_add_anonymous", self.user_pass)
-        except LdbError, (num, _):
+        except LdbError as e2:
+            (num, _) = e2.args
             self.assertEquals(num, ERR_OPERATIONS_ERROR)
         else:
             self.fail()
@@ -287,11 +301,15 @@ class AclModifyTests(AclTests):
         delete_force(self.ldb_admin, self.get_user_dn("test_modify_user2"))
         delete_force(self.ldb_admin, self.get_user_dn("test_anonymous"))
 
+        del self.ldb_user
+        del self.ldb_user2
+        del self.ldb_user3
+
     def test_modify_u1(self):
         """5 Modify one attribute if you have DS_WRITE_PROPERTY for it"""
         mod = "(OA;;WP;bf967953-0de6-11d0-a285-00aa003049e2;;%s)" % str(self.user_sid)
         # First test object -- User
-        print "Testing modify on User object"
+        print("Testing modify on User object")
         self.ldb_admin.newuser("test_modify_user1", self.user_pass)
         self.sd_utils.dacl_add_ace(self.get_user_dn("test_modify_user1"), mod)
         ldif = """
@@ -304,7 +322,7 @@ displayName: test_changed"""
                 expression="(distinguishedName=%s)" % self.get_user_dn("test_modify_user1"))
         self.assertEqual(res[0]["displayName"][0], "test_changed")
         # Second test object -- Group
-        print "Testing modify on Group object"
+        print("Testing modify on Group object")
         self.ldb_admin.newgroup("test_modify_group1",
                                 grouptype=samba.dsdb.GTYPE_DISTRIBUTION_DOMAIN_LOCAL_GROUP)
         self.sd_utils.dacl_add_ace("CN=test_modify_group1,CN=Users," + self.base_dn, mod)
@@ -317,7 +335,7 @@ displayName: test_changed"""
         res = self.ldb_admin.search(self.base_dn, expression="(distinguishedName=%s)" % str("CN=test_modify_group1,CN=Users," + self.base_dn))
         self.assertEqual(res[0]["displayName"][0], "test_changed")
         # Third test object -- Organizational Unit
-        print "Testing modify on OU object"
+        print("Testing modify on OU object")
         #delete_force(self.ldb_admin, "OU=test_modify_ou1," + self.base_dn)
         self.ldb_admin.create_ou("OU=test_modify_ou1," + self.base_dn)
         self.sd_utils.dacl_add_ace("OU=test_modify_ou1," + self.base_dn, mod)
@@ -334,7 +352,7 @@ displayName: test_changed"""
         """6 Modify two attributes as you have DS_WRITE_PROPERTY granted only for one of them"""
         mod = "(OA;;WP;bf967953-0de6-11d0-a285-00aa003049e2;;%s)" % str(self.user_sid)
         # First test object -- User
-        print "Testing modify on User object"
+        print("Testing modify on User object")
         #delete_force(self.ldb_admin, self.get_user_dn("test_modify_user1"))
         self.ldb_admin.newuser("test_modify_user1", self.user_pass)
         self.sd_utils.dacl_add_ace(self.get_user_dn("test_modify_user1"), mod)
@@ -357,13 +375,14 @@ replace: url
 url: www.samba.org"""
         try:
             self.ldb_user.modify_ldif(ldif)
-        except LdbError, (num, _):
+        except LdbError as e3:
+            (num, _) = e3.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             # This 'modify' operation should always throw ERR_INSUFFICIENT_ACCESS_RIGHTS
             self.fail()
         # Second test object -- Group
-        print "Testing modify on Group object"
+        print("Testing modify on Group object")
         self.ldb_admin.newgroup("test_modify_group1",
                                 grouptype=samba.dsdb.GTYPE_DISTRIBUTION_DOMAIN_LOCAL_GROUP)
         self.sd_utils.dacl_add_ace("CN=test_modify_group1,CN=Users," + self.base_dn, mod)
@@ -385,7 +404,8 @@ replace: url
 url: www.samba.org"""
         try:
             self.ldb_user.modify_ldif(ldif)
-        except LdbError, (num, _):
+        except LdbError as e4:
+            (num, _) = e4.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             # This 'modify' operation should always throw ERR_INSUFFICIENT_ACCESS_RIGHTS
@@ -400,13 +420,14 @@ replace: displayName
 displayName: test_changed"""
         try:
             self.ldb_user.modify_ldif(ldif)
-        except LdbError, (num, _):
+        except LdbError as e5:
+            (num, _) = e5.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             # This 'modify' operation should always throw ERR_INSUFFICIENT_ACCESS_RIGHTS
             self.fail()
         # Second test object -- Organizational Unit
-        print "Testing modify on OU object"
+        print("Testing modify on OU object")
         self.ldb_admin.create_ou("OU=test_modify_ou1," + self.base_dn)
         self.sd_utils.dacl_add_ace("OU=test_modify_ou1," + self.base_dn, mod)
         ldif = """
@@ -427,7 +448,8 @@ replace: url
 url: www.samba.org"""
         try:
             self.ldb_user.modify_ldif(ldif)
-        except LdbError, (num, _):
+        except LdbError as e6:
+            (num, _) = e6.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             # This 'modify' operation should always throw ERR_INSUFFICIENT_ACCESS_RIGHTS
@@ -436,7 +458,7 @@ url: www.samba.org"""
     def test_modify_u3(self):
         """7 Modify one attribute as you have no what so ever rights granted"""
         # First test object -- User
-        print "Testing modify on User object"
+        print("Testing modify on User object")
         self.ldb_admin.newuser("test_modify_user1", self.user_pass)
         # Modify on attribute you do not have rights for granted
         ldif = """
@@ -446,14 +468,15 @@ replace: url
 url: www.samba.org"""
         try:
             self.ldb_user.modify_ldif(ldif)
-        except LdbError, (num, _):
+        except LdbError as e7:
+            (num, _) = e7.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             # This 'modify' operation should always throw ERR_INSUFFICIENT_ACCESS_RIGHTS
             self.fail()
 
         # Second test object -- Group
-        print "Testing modify on Group object"
+        print("Testing modify on Group object")
         self.ldb_admin.newgroup("test_modify_group1",
                                 grouptype=samba.dsdb.GTYPE_DISTRIBUTION_DOMAIN_LOCAL_GROUP)
         # Modify on attribute you do not have rights for granted
@@ -464,14 +487,15 @@ replace: url
 url: www.samba.org"""
         try:
             self.ldb_user.modify_ldif(ldif)
-        except LdbError, (num, _):
+        except LdbError as e8:
+            (num, _) = e8.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             # This 'modify' operation should always throw ERR_INSUFFICIENT_ACCESS_RIGHTS
             self.fail()
 
         # Second test object -- Organizational Unit
-        print "Testing modify on OU object"
+        print("Testing modify on OU object")
         #delete_force(self.ldb_admin, "OU=test_modify_ou1," + self.base_dn)
         self.ldb_admin.create_ou("OU=test_modify_ou1," + self.base_dn)
         # Modify on attribute you do not have rights for granted
@@ -482,7 +506,8 @@ replace: url
 url: www.samba.org"""
         try:
             self.ldb_user.modify_ldif(ldif)
-        except LdbError, (num, _):
+        except LdbError as e9:
+            (num, _) = e9.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             # This 'modify' operation should always throw ERR_INSUFFICIENT_ACCESS_RIGHTS
@@ -498,7 +523,8 @@ add: adminDescription
 adminDescription: blah blah blah"""
         try:
             self.ldb_user.modify_ldif(ldif)
-        except LdbError, (num, _):
+        except LdbError as e10:
+            (num, _) = e10.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             # This 'modify' operation should always throw ERR_INSUFFICIENT_ACCESS_RIGHTS
@@ -522,7 +548,8 @@ Member: """ +  self.get_user_dn(self.user_with_sm)
 #the user has no rights granted, this should fail
         try:
             self.ldb_user2.modify_ldif(ldif)
-        except LdbError, (num, _):
+        except LdbError as e11:
+            (num, _) = e11.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             # This 'modify' operation should always throw ERR_INSUFFICIENT_ACCESS_RIGHTS
@@ -544,7 +571,8 @@ add: Member
 Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         try:
             self.ldb_user2.modify_ldif(ldif)
-        except LdbError, (num, _):
+        except LdbError as e12:
+            (num, _) = e12.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             self.fail()
@@ -564,7 +592,8 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
         self.sd_utils.dacl_add_ace("CN=test_modify_group2,CN=Users," + self.base_dn, mod)
         try:
             self.ldb_user2.modify_ldif(ldif)
-        except LdbError, (num, _):
+        except LdbError as e13:
+            (num, _) = e13.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             self.fail()
@@ -611,7 +640,8 @@ Member: CN=test_modify_user2,CN=Users,""" + self.base_dn
                                           "description")
         try:
             anonymous.modify(m)
-        except LdbError, (num, _):
+        except LdbError as e14:
+            (num, _) = e14.args
             self.assertEquals(num, ERR_OPERATIONS_ERROR)
         else:
             self.fail()
@@ -621,18 +651,9 @@ class AclSearchTests(AclTests):
 
     def setUp(self):
         super(AclSearchTests, self).setUp()
-        # Get the old "dSHeuristics" if it was set
-        dsheuristics = self.ldb_admin.get_dsheuristics()
-        # Reset the "dSHeuristics" as they were before
-        self.addCleanup(self.ldb_admin.set_dsheuristics, dsheuristics)
-        # Set the "dSHeuristics" to activate the correct "userPassword" behaviour
-        self.ldb_admin.set_dsheuristics("000000001")
-        # Get the old "minPwdAge"
-        minPwdAge = self.ldb_admin.get_minPwdAge()
-        # Reset the "minPwdAge" as it was before
-        self.addCleanup(self.ldb_admin.set_minPwdAge, minPwdAge)
-        # Set it temporarely to "0"
-        self.ldb_admin.set_minPwdAge("0")
+
+        # permit password changes during this test
+        PasswordCommon.allow_password_changes(self, self.ldb_admin)
 
         self.u1 = "search_u1"
         self.u2 = "search_u2"
@@ -696,6 +717,10 @@ class AclSearchTests(AclTests):
         delete_force(self.ldb_admin, self.get_user_dn("search_u3"))
         delete_force(self.ldb_admin, self.get_user_dn("group1"))
 
+        del self.ldb_user
+        del self.ldb_user2
+        del self.ldb_user3
+
     def test_search_anonymous1(self):
         """Verify access of rootDSE with the correct request"""
         anonymous = SamDB(url=ldaphost, credentials=self.creds_tmp, lp=lp)
@@ -717,20 +742,23 @@ class AclSearchTests(AclTests):
         anonymous = SamDB(url=ldaphost, credentials=self.creds_tmp, lp=lp)
         try:
             res = anonymous.search("", expression="(objectClass=*)", scope=SCOPE_SUBTREE)
-        except LdbError, (num, _):
+        except LdbError as e15:
+            (num, _) = e15.args
             self.assertEquals(num, ERR_OPERATIONS_ERROR)
         else:
             self.fail()
         try:
             res = anonymous.search(self.base_dn, expression="(objectClass=*)", scope=SCOPE_SUBTREE)
-        except LdbError, (num, _):
+        except LdbError as e16:
+            (num, _) = e16.args
             self.assertEquals(num, ERR_OPERATIONS_ERROR)
         else:
             self.fail()
         try:
             res = anonymous.search(anonymous.get_config_basedn(), expression="(objectClass=*)",
                                         scope=SCOPE_SUBTREE)
-        except LdbError, (num, _):
+        except LdbError as e17:
+            (num, _) = e17.args
             self.assertEquals(num, ERR_OPERATIONS_ERROR)
         else:
             self.fail()
@@ -836,11 +864,12 @@ class AclSearchTests(AclTests):
         self.ldb_admin.create_ou("OU=ou5,OU=ou3,OU=ou2,OU=ou1," + self.base_dn, sd=tmp_desc)
         self.ldb_admin.create_ou("OU=ou6,OU=ou4,OU=ou2,OU=ou1," + self.base_dn, sd=tmp_desc)
 
-        print "Testing correct behavior on nonaccessible search base"
+        print("Testing correct behavior on nonaccessible search base")
         try:
              self.ldb_user3.search("OU=ou3,OU=ou2,OU=ou1," + self.base_dn, expression="(objectClass=*)",
                                    scope=SCOPE_BASE)
-        except LdbError, (num, _):
+        except LdbError as e18:
+            (num, _) = e18.args
             self.assertEquals(num, ERR_NO_SUCH_OBJECT)
         else:
             self.fail()
@@ -914,14 +943,14 @@ class AclSearchTests(AclTests):
                                     scope=SCOPE_SUBTREE)
         ok_list = ['dn']
         self.assertEquals(len(res), 1)
-        res_list = res[0].keys()
+        res_list = list(res[0].keys())
         self.assertEquals(res_list, ok_list)
 
         res = self.ldb_user.search("OU=ou2,OU=ou1," + self.base_dn, expression="(objectClass=*)",
                                     scope=SCOPE_BASE, attrs=["ou"])
 
         self.assertEquals(len(res), 1)
-        res_list = res[0].keys()
+        res_list = list(res[0].keys())
         self.assertEquals(res_list, ok_list)
 
         #give read property on ou and assert user can only see dn and ou
@@ -932,7 +961,7 @@ class AclSearchTests(AclTests):
                                     scope=SCOPE_SUBTREE)
         ok_list = ['dn', 'ou']
         self.assertEquals(len(res), 1)
-        res_list = res[0].keys()
+        res_list = list(res[0].keys())
         self.assertEquals(sorted(res_list), sorted(ok_list))
 
         #give read property on Public Information and assert user can see ou and other members
@@ -943,7 +972,7 @@ class AclSearchTests(AclTests):
                                     scope=SCOPE_SUBTREE)
 
         ok_list = ['dn', 'objectClass', 'ou', 'distinguishedName', 'name', 'objectGUID', 'objectCategory']
-        res_list = res[0].keys()
+        res_list = list(res[0].keys())
         self.assertEquals(sorted(res_list), sorted(ok_list))
 
     def test_search6(self):
@@ -968,7 +997,7 @@ class AclSearchTests(AclTests):
                                     scope=SCOPE_SUBTREE)
         self.assertEquals(len(res), 1)
         ok_list = ['dn', 'ou']
-        res_list = res[0].keys()
+        res_list = list(res[0].keys())
         self.assertEquals(sorted(res_list), sorted(ok_list))
 
         #give read property on Public Information and assert user can see ou and other members
@@ -978,8 +1007,76 @@ class AclSearchTests(AclTests):
                                    scope=SCOPE_SUBTREE)
         self.assertEquals(len(res), 1)
         ok_list = ['dn', 'objectClass', 'ou', 'distinguishedName', 'name', 'objectGUID', 'objectCategory']
-        res_list = res[0].keys()
+        res_list = list(res[0].keys())
         self.assertEquals(sorted(res_list), sorted(ok_list))
+
+    def assert_search_on_attr(self, dn, samdb, attr, expected_list):
+
+        expected_num = len(expected_list)
+        res = samdb.search(dn, expression="(%s=*)" % attr, scope=SCOPE_SUBTREE)
+        self.assertEquals(len(res), expected_num)
+
+        res_list = [ x["dn"] for x in res if x["dn"] in expected_list ]
+        self.assertEquals(sorted(res_list), sorted(expected_list))
+
+    def test_search7(self):
+        """Checks object search visibility when users don't have full rights"""
+        self.create_clean_ou("OU=ou1," + self.base_dn)
+        mod = "(A;;LC;;;%s)(A;;LC;;;%s)" % (str(self.user_sid),
+                                            str(self.group_sid))
+        self.sd_utils.dacl_add_ace("OU=ou1," + self.base_dn, mod)
+        tmp_desc = security.descriptor.from_sddl("D:(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;DA)" + mod,
+                                                 self.domain_sid)
+        self.ldb_admin.create_ou("OU=ou2,OU=ou1," + self.base_dn, sd=tmp_desc)
+        self.ldb_admin.create_ou("OU=ou3,OU=ou2,OU=ou1," + self.base_dn,
+                                 sd=tmp_desc)
+        self.ldb_admin.create_ou("OU=ou4,OU=ou2,OU=ou1," + self.base_dn,
+                                 sd=tmp_desc)
+        self.ldb_admin.create_ou("OU=ou5,OU=ou3,OU=ou2,OU=ou1," + self.base_dn,
+                                 sd=tmp_desc)
+        self.ldb_admin.create_ou("OU=ou6,OU=ou4,OU=ou2,OU=ou1," + self.base_dn,
+                                 sd=tmp_desc)
+
+        ou2_dn = Dn(self.ldb_admin,  "OU=ou2,OU=ou1," + self.base_dn)
+        ou1_dn = Dn(self.ldb_admin,  "OU=ou1," + self.base_dn)
+
+        # even though unprivileged users can't read these attributes for OU2,
+        # the object should still be visible in searches, because they have
+        # 'List Contents' rights still. This isn't really disclosive because
+        # ALL objects have these attributes
+        visible_attrs = ["objectClass", "distinguishedName", "name",
+                         "objectGUID"]
+        two_objects = [ou2_dn, ou1_dn]
+
+        for attr in visible_attrs:
+            # a regular user should just see the 2 objects
+            self.assert_search_on_attr(str(ou1_dn), self.ldb_user3, attr,
+                                       expected_list=two_objects)
+
+            # whereas the following users have LC rights for all the objects,
+            # so they should see them all
+            self.assert_search_on_attr(str(ou1_dn), self.ldb_user, attr,
+                                       expected_list=self.full_list)
+            self.assert_search_on_attr(str(ou1_dn), self.ldb_user2, attr,
+                                       expected_list=self.full_list)
+
+        # however when searching on the following attributes, objects will not
+        # be visible unless the user has Read Property rights
+        hidden_attrs = ["objectCategory", "instanceType", "ou", "uSNChanged",
+                        "uSNCreated", "whenCreated"]
+        one_object = [ou1_dn]
+
+        for attr in hidden_attrs:
+            self.assert_search_on_attr(str(ou1_dn), self.ldb_user3, attr,
+                                       expected_list=one_object)
+            self.assert_search_on_attr(str(ou1_dn), self.ldb_user, attr,
+                                       expected_list=one_object)
+            self.assert_search_on_attr(str(ou1_dn), self.ldb_user2, attr,
+                                       expected_list=one_object)
+
+            # admin has RP rights so can still see all the objects
+            self.assert_search_on_attr(str(ou1_dn), self.ldb_admin, attr,
+                                       expected_list=self.full_list)
 
 #tests on ldap delete operations
 class AclDeleteTests(AclTests):
@@ -997,6 +1094,8 @@ class AclDeleteTests(AclTests):
         delete_force(self.ldb_admin, self.get_user_dn(self.regular_user))
         delete_force(self.ldb_admin, self.get_user_dn("test_anonymous"))
 
+        del self.ldb_user
+
     def test_delete_u1(self):
         """User is prohibited by default to delete another User object"""
         # Create user that we try to delete
@@ -1004,7 +1103,8 @@ class AclDeleteTests(AclTests):
         # Here delete User object should ALWAYS through exception
         try:
             self.ldb_user.delete(self.get_user_dn("test_delete_user1"))
-        except LdbError, (num, _):
+        except LdbError as e19:
+            (num, _) = e19.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             self.fail()
@@ -1042,7 +1142,8 @@ class AclDeleteTests(AclTests):
 
         try:
             anonymous.delete(self.get_user_dn("test_anonymous"))
-        except LdbError, (num, _):
+        except LdbError as e20:
+            (num, _) = e20.args
             self.assertEquals(num, ERR_OPERATIONS_ERROR)
         else:
             self.fail()
@@ -1085,6 +1186,8 @@ class AclRenameTests(AclTests):
         delete_force(self.ldb_admin, "%s,%s" % (self.ou1, self.base_dn))
         delete_force(self.ldb_admin, self.get_user_dn(self.regular_user))
 
+        del self.ldb_user
+
     def test_rename_u1(self):
         """Regular user fails to rename 'User object' within single OU"""
         # Create OU structure
@@ -1093,7 +1196,8 @@ class AclRenameTests(AclTests):
         try:
             self.ldb_user.rename("CN=%s,%s,%s" % (self.testuser1, self.ou1, self.base_dn), \
                                      "CN=%s,%s,%s" % (self.testuser5, self.ou1, self.base_dn))
-        except LdbError, (num, _):
+        except LdbError as e21:
+            (num, _) = e21.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             self.fail()
@@ -1250,7 +1354,8 @@ class AclRenameTests(AclTests):
         self.sd_utils.dacl_add_ace(ou2_dn, mod)
         try:
             self.ldb_user.rename(ou2_dn, ou3_dn)
-        except LdbError, (num, _):
+        except LdbError as e22:
+            (num, _) = e22.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             # This rename operation should always throw ERR_INSUFFICIENT_ACCESS_RIGHTS
@@ -1281,7 +1386,8 @@ class AclRenameTests(AclTests):
         # Rename 'User object' having SD and CC to AU
         try:
             self.ldb_admin.rename(user_dn, rename_user_dn)
-        except LdbError, (num, _):
+        except LdbError as e23:
+            (num, _) = e23.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             self.fail()
@@ -1321,6 +1427,9 @@ class AclCARTests(AclTests):
         delete_force(self.ldb_admin, self.get_user_dn(self.user_with_wp))
         delete_force(self.ldb_admin, self.get_user_dn(self.user_with_pc))
 
+        del self.ldb_user
+        del self.ldb_user2
+
     def test_change_password1(self):
         """Try a password change operation without any CARs given"""
         #users have change password by default - remove for negative testing
@@ -1334,11 +1443,12 @@ class AclCARTests(AclTests):
 dn: """ + self.get_user_dn(self.user_with_wp) + """
 changetype: modify
 delete: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"samba123@\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"samba123@\"".encode('utf-16-le')).decode('utf8') + """
 add: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')).decode('utf8') + """
 """)
-        except LdbError, (num, _):
+        except LdbError as e24:
+            (num, _) = e24.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         else:
             # for some reason we get constraint violation instead of insufficient access error
@@ -1360,11 +1470,12 @@ unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')) 
 dn: """ + self.get_user_dn(self.user_with_wp) + """
 changetype: modify
 delete: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"samba123@\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"samba123@\"".encode('utf-16-le')).decode('utf8') + """
 add: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')).decode('utf8') + """
 """)
-        except LdbError, (num, _):
+        except LdbError as e25:
+            (num, _) = e25.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         else:
             # for some reason we get constraint violation instead of insufficient access error
@@ -1380,9 +1491,9 @@ unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')) 
 dn: """ + self.get_user_dn(self.user_with_wp) + """
 changetype: modify
 delete: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"samba123@\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"samba123@\"".encode('utf-16-le')).decode('utf8') + """
 add: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')).decode('utf8') + """
 """)
 
     def test_change_password5(self):
@@ -1403,7 +1514,8 @@ dBCSPwd: XXXXXXXXXXXXXXXX
 add: dBCSPwd
 dBCSPwd: YYYYYYYYYYYYYYYY
 """)
-        except LdbError, (num, _):
+        except LdbError as e26:
+            (num, _) = e26.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
         else:
             self.fail()
@@ -1421,7 +1533,8 @@ userPassword: thatsAcomplPASS1
 add: userPassword
 userPassword: thatsAcomplPASS2
 """)
-        except LdbError, (num, _):
+        except LdbError as e27:
+            (num, _) = e27.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             self.fail()
@@ -1439,7 +1552,8 @@ add: userPassword
 userPassword: thatsAcomplPASS2
 """)
             # This fails on Windows 2000 domain level with constraint violation
-        except LdbError, (num, _):
+        except LdbError as e28:
+            (num, _) = e28.args
             self.assertTrue(num == ERR_CONSTRAINT_VIOLATION or
                             num == ERR_UNWILLING_TO_PERFORM)
         else:
@@ -1457,18 +1571,18 @@ userPassword: thatsAcomplPASS2
 dn: """ + self.get_user_dn(self.user_with_pc) + """
 changetype: modify
 delete: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"samba123@\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"samba123@\"".encode('utf-16-le')).decode('utf8') + """
 add: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS1\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS1\"".encode('utf-16-le')).decode('utf8') + """
 """)
         #then someone else's
         self.ldb_user2.modify_ldif("""
 dn: """ + self.get_user_dn(self.user_with_wp) + """
 changetype: modify
 delete: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"samba123@\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"samba123@\"".encode('utf-16-le')).decode('utf8') + """
 add: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')).decode('utf8') + """
 """)
 
     def test_reset_password1(self):
@@ -1478,9 +1592,10 @@ unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')) 
 dn: """ + self.get_user_dn(self.user_with_wp) + """
 changetype: modify
 replace: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS1\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS1\"".encode('utf-16-le')).decode('utf8') + """
 """)
-        except LdbError, (num, _):
+        except LdbError as e29:
+            (num, _) = e29.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             self.fail()
@@ -1490,7 +1605,7 @@ unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS1\"".encode('utf-16-le')) 
 dn: """ + self.get_user_dn(self.user_with_wp) + """
 changetype: modify
 replace: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS1\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS1\"".encode('utf-16-le')).decode('utf8') + """
 """)
 
     def test_reset_password2(self):
@@ -1502,7 +1617,8 @@ changetype: modify
 replace: userPassword
 userPassword: thatsAcomplPASS1
 """)
-        except LdbError, (num, _):
+        except LdbError as e30:
+            (num, _) = e30.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             self.fail()
@@ -1516,7 +1632,8 @@ replace: userPassword
 userPassword: thatsAcomplPASS1
 """)
             # This fails on Windows 2000 domain level with constraint violation
-        except LdbError, (num, _):
+        except LdbError as e31:
+            (num, _) = e31.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
     def test_reset_password3(self):
@@ -1528,9 +1645,10 @@ userPassword: thatsAcomplPASS1
 dn: """ + self.get_user_dn(self.user_with_wp) + """
 changetype: modify
 replace: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS1\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS1\"".encode('utf-16-le')).decode('utf8') + """
 """)
-        except LdbError, (num, _):
+        except LdbError as e32:
+            (num, _) = e32.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             self.fail()
@@ -1546,7 +1664,8 @@ changetype: modify
 replace: userPassword
 userPassword: thatsAcomplPASS1
 """)
-        except LdbError, (num, _):
+        except LdbError as e33:
+            (num, _) = e33.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
         else:
             self.fail()
@@ -1559,7 +1678,7 @@ userPassword: thatsAcomplPASS1
 dn: """ + self.get_user_dn(self.user_with_wp) + """
 changetype: modify
 replace: unicodePwd
-unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS1\"".encode('utf-16-le')) + """
+unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS1\"".encode('utf-16-le')).decode('utf8') + """
 """)
 
     def test_reset_password6(self):
@@ -1574,7 +1693,8 @@ replace: userPassword
 userPassword: thatsAcomplPASS1
 """)
             # This fails on Windows 2000 domain level with constraint violation
-        except LdbError, (num, _):
+        except LdbError as e34:
+            (num, _) = e34.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
 class AclExtendedTests(AclTests):
@@ -1605,6 +1725,10 @@ class AclExtendedTests(AclTests):
         delete_force(self.ldb_admin, self.get_user_dn(self.u3))
         delete_force(self.ldb_admin, "CN=ext_group1,OU=ext_ou1," + self.base_dn)
         delete_force(self.ldb_admin, "ou=ext_ou1," + self.base_dn)
+
+        del self.ldb_user1
+        del self.ldb_user2
+        del self.ldb_user3
 
     def test_ntSecurityDescriptor(self):
         #create empty ou
@@ -1683,6 +1807,8 @@ class AclUndeleteTests(AclTests):
         delete_force(self.ldb_admin, self.new_dn_ou)
         delete_force(self.ldb_admin, self.ou1 + self.base_dn)
 
+        del self.ldb_user
+
     def GUID_string(self, guid):
         return ldb.schema_format_value("objectGUID", guid)
 
@@ -1726,7 +1852,8 @@ class AclUndeleteTests(AclTests):
         try:
             self.undelete_deleted(self.deleted_dn1, self.testuser1_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e35:
+            (num, _) = e35.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
 
         # seems that permissions on isDeleted and distinguishedName are irrelevant
@@ -1742,7 +1869,8 @@ class AclUndeleteTests(AclTests):
         try:
             self.undelete_deleted_with_mod(self.deleted_dn3, self.testuser3_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e36:
+            (num, _) = e36.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
 
         # undelete in an ou, in which we have no right to create children
@@ -1751,7 +1879,8 @@ class AclUndeleteTests(AclTests):
         try:
             self.undelete_deleted(self.deleted_dn4, self.new_dn_ou)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e37:
+            (num, _) = e37.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
 
         # delete is not required
@@ -1765,7 +1894,8 @@ class AclUndeleteTests(AclTests):
         try:
             self.undelete_deleted(self.deleted_dn4, self.testuser4_dn)
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e38:
+            (num, _) = e38.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
 
 class AclSPNTests(AclTests):
@@ -1779,11 +1909,12 @@ class AclSPNTests(AclTests):
         self.computerdn = "CN=%s,CN=computers,%s" % (self.computername, self.base_dn)
         self.dc_dn = "CN=%s,OU=Domain Controllers,%s" % (self.dcname, self.base_dn)
         self.site = "Default-First-Site-Name"
-        self.rodcctx = dc_join(server=host, creds=creds, lp=lp,
-            site=self.site, netbios_name=self.rodcname, targetdir=None,
-            domain=None)
-        self.dcctx = dc_join(server=host, creds=creds, lp=lp, site=self.site,
-                netbios_name=self.dcname, targetdir=None, domain=None)
+        self.rodcctx = DCJoinContext(server=host, creds=creds, lp=lp,
+                                     site=self.site, netbios_name=self.rodcname,
+                                     targetdir=None, domain=None)
+        self.dcctx = DCJoinContext(server=host, creds=creds, lp=lp,
+                                   site=self.site, netbios_name=self.dcname,
+                                   targetdir=None, domain=None)
         self.ldb_admin.newuser(self.test_user, self.user_pass)
         self.ldb_user1 = self.get_ldb_connection(self.test_user, self.user_pass)
         self.user_sid1 = self.sd_utils.get_object_sid(self.get_user_dn(self.test_user))
@@ -1798,8 +1929,10 @@ class AclSPNTests(AclTests):
         delete_force(self.ldb_admin, "cn=%s,cn=computers,%s" % (self.computername, self.base_dn))
         delete_force(self.ldb_admin, self.get_user_dn(self.test_user))
 
+        del self.ldb_user1
+
     def replace_spn(self, _ldb, dn, spn):
-        print "Setting spn %s on %s" % (spn, dn)
+        print("Setting spn %s on %s" % (spn, dn))
         res = self.ldb_admin.search(dn, expression="(objectClass=*)",
                                     scope=SCOPE_BASE, attrs=["servicePrincipalName"])
         if "servicePrincipalName" in res[0].keys():
@@ -1873,7 +2006,8 @@ class AclSPNTests(AclTests):
         netbiosdomain = self.dcctx.get_domain_name()
         try:
             self.replace_spn(self.ldb_user1, ctx.acct_dn, "HOST/%s/%s" % (ctx.myname, netbiosdomain))
-        except LdbError, (num, _):
+        except LdbError as e39:
+            (num, _) = e39.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
 
         mod = "(OA;;SW;f3a64788-5306-11d1-a9c5-0000f80367c1;;%s)" % str(self.user_sid1)
@@ -1910,26 +2044,31 @@ class AclSPNTests(AclTests):
         try:
             self.replace_spn(self.ldb_user1, ctx.acct_dn, "ldap/%s.%s/ForestDnsZones.%s" %
                              (ctx.myname, ctx.dnsdomain, ctx.dnsdomain))
-        except LdbError, (num, _):
+        except LdbError as e40:
+            (num, _) = e40.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         try:
             self.replace_spn(self.ldb_user1, ctx.acct_dn, "ldap/%s.%s/DomainDnsZones.%s" %
                              (ctx.myname, ctx.dnsdomain, ctx.dnsdomain))
-        except LdbError, (num, _):
+        except LdbError as e41:
+            (num, _) = e41.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         try:
             self.replace_spn(self.ldb_user1, ctx.acct_dn, "nosuchservice/%s/%s" % ("abcd", "abcd"))
-        except LdbError, (num, _):
+        except LdbError as e42:
+            (num, _) = e42.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         try:
             self.replace_spn(self.ldb_user1, ctx.acct_dn, "GC/%s.%s/%s" %
                              (ctx.myname, ctx.dnsdomain, netbiosdomain))
-        except LdbError, (num, _):
+        except LdbError as e43:
+            (num, _) = e43.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         try:
             self.replace_spn(self.ldb_user1, ctx.acct_dn, "E3514235-4B06-11D1-AB04-00C04FC2DCD2/%s/%s" %
                              (ctx.ntds_guid, ctx.dnsdomain))
-        except LdbError, (num, _):
+        except LdbError as e44:
+            (num, _) = e44.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
     def test_computer_spn(self):
@@ -1973,7 +2112,8 @@ class AclSPNTests(AclTests):
         #user has neither WP nor Validated-SPN, access denied expected
         try:
             self.replace_spn(self.ldb_user1, self.computerdn, "HOST/%s/%s" % (self.computername, netbiosdomain))
-        except LdbError, (num, _):
+        except LdbError as e45:
+            (num, _) = e45.args
             self.assertEquals(num, ERR_INSUFFICIENT_ACCESS_RIGHTS)
 
         mod = "(OA;;SW;f3a64788-5306-11d1-a9c5-0000f80367c1;;%s)" % str(self.user_sid1)
@@ -1990,36 +2130,43 @@ class AclSPNTests(AclTests):
 
         try:
             self.replace_spn(self.ldb_user1, self.computerdn, "HOST/%s/%s" % (self.computername, netbiosdomain))
-        except LdbError, (num, _):
+        except LdbError as e46:
+            (num, _) = e46.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         try:
             self.replace_spn(self.ldb_user1, self.computerdn, "HOST/%s.%s/%s" %
                              (self.computername, self.dcctx.dnsdomain, netbiosdomain))
-        except LdbError, (num, _):
+        except LdbError as e47:
+            (num, _) = e47.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         try:
             self.replace_spn(self.ldb_user1, self.computerdn, "HOST/%s/%s" %
                              (self.computername, self.dcctx.dnsdomain))
-        except LdbError, (num, _):
+        except LdbError as e48:
+            (num, _) = e48.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         try:
             self.replace_spn(self.ldb_user1, self.computerdn, "HOST/%s.%s/%s" %
                              (self.computername, self.dcctx.dnsdomain, self.dcctx.dnsdomain))
-        except LdbError, (num, _):
+        except LdbError as e49:
+            (num, _) = e49.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         try:
             self.replace_spn(self.ldb_user1, self.computerdn, "GC/%s.%s/%s" %
                              (self.computername, self.dcctx.dnsdomain, self.dcctx.dnsforest))
-        except LdbError, (num, _):
+        except LdbError as e50:
+            (num, _) = e50.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         try:
             self.replace_spn(self.ldb_user1, self.computerdn, "ldap/%s/%s" % (self.computername, netbiosdomain))
-        except LdbError, (num, _):
+        except LdbError as e51:
+            (num, _) = e51.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         try:
             self.replace_spn(self.ldb_user1, self.computerdn, "ldap/%s.%s/ForestDnsZones.%s" %
                              (self.computername, self.dcctx.dnsdomain, self.dcctx.dnsdomain))
-        except LdbError, (num, _):
+        except LdbError as e52:
+            (num, _) = e52.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
     def test_spn_rwdc(self):

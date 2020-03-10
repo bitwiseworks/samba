@@ -33,51 +33,76 @@ struct dcerpc_binding_handle;
 /* The following definitions come from rpc_client/cli_netlogon.c  */
 
 NTSTATUS rpccli_pre_open_netlogon_creds(void);
-NTSTATUS rpccli_create_netlogon_creds(const char *server_computer,
-				      const char *server_netbios_domain,
-				      const char *client_account,
-				      enum netr_SchannelType sec_chan_type,
-				      struct messaging_context *msg_ctx,
-				      TALLOC_CTX *mem_ctx,
-				      struct netlogon_creds_cli_context **netlogon_creds);
-NTSTATUS rpccli_create_netlogon_creds_with_creds(struct cli_credentials *creds,
-						 const char *server_computer,
-						 struct messaging_context *msg_ctx,
-						 TALLOC_CTX *mem_ctx,
-						 struct netlogon_creds_cli_context **netlogon_creds);
-NTSTATUS rpccli_setup_netlogon_creds(struct cli_state *cli,
-				     enum dcerpc_transport_t transport,
-				     struct netlogon_creds_cli_context *netlogon_creds,
-				     bool force_reauth,
-				     struct samr_Password current_nt_hash,
-				     const struct samr_Password *previous_nt_hash);
-NTSTATUS rpccli_setup_netlogon_creds_with_creds(struct cli_state *cli,
-						enum dcerpc_transport_t transport,
-						struct netlogon_creds_cli_context *netlogon_creds,
-						bool force_reauth,
-						struct cli_credentials *creds);
-NTSTATUS rpccli_netlogon_password_logon(struct netlogon_creds_cli_context *creds,
-					struct dcerpc_binding_handle *binding_handle,
-					TALLOC_CTX *mem_ctx,
-					uint32_t logon_parameters,
-					const char *domain,
-					const char *username,
-					const char *password,
-					const char *workstation,
-					enum netr_LogonInfoClass logon_type,
-					struct netr_SamInfo3 **info3);
-NTSTATUS rpccli_netlogon_network_logon(struct netlogon_creds_cli_context *creds,
-				       struct dcerpc_binding_handle *binding_handle,
-				       TALLOC_CTX *mem_ctx,
-				       uint32_t logon_parameters,
-				       const char *username,
-				       const char *domain,
-				       const char *workstation,
-				       const uint8_t chal[8],
-				       DATA_BLOB lm_response,
-				       DATA_BLOB nt_response,
-				       uint8_t *authoritative,
-				       uint32_t *flags,
-				       struct netr_SamInfo3 **info3);
+NTSTATUS rpccli_create_netlogon_creds_ctx(
+	struct cli_credentials *creds,
+	const char *server_computer,
+	struct messaging_context *msg_ctx,
+	TALLOC_CTX *mem_ctx,
+	struct netlogon_creds_cli_context **creds_ctx);
+NTSTATUS rpccli_setup_netlogon_creds_locked(
+	struct cli_state *cli,
+	enum dcerpc_transport_t transport,
+	struct netlogon_creds_cli_context *creds_ctx,
+	bool force_reauth,
+	struct cli_credentials *cli_creds,
+	uint32_t *negotiate_flags);
+NTSTATUS rpccli_setup_netlogon_creds(
+	struct cli_state *cli,
+	enum dcerpc_transport_t transport,
+	struct netlogon_creds_cli_context *creds_ctx,
+	bool force_reauth,
+	struct cli_credentials *cli_creds);
+NTSTATUS rpccli_connect_netlogon(
+	struct cli_state *cli,
+	enum dcerpc_transport_t transport,
+	struct netlogon_creds_cli_context *creds_ctx,
+	bool force_reauth,
+	struct cli_credentials *trust_creds,
+	struct rpc_pipe_client **_rpccli);
+NTSTATUS rpccli_netlogon_password_logon(
+	struct netlogon_creds_cli_context *creds,
+	struct dcerpc_binding_handle *binding_handle,
+	TALLOC_CTX *mem_ctx,
+	uint32_t logon_parameters,
+	const char *domain,
+	const char *username,
+	const char *password,
+	const char *workstation,
+	enum netr_LogonInfoClass logon_type,
+	uint8_t *authoritative,
+	uint32_t *flags,
+	uint16_t *_validation_level,
+	union netr_Validation **_validation);
+NTSTATUS rpccli_netlogon_network_logon(
+	struct netlogon_creds_cli_context *creds_ctx,
+	struct dcerpc_binding_handle *binding_handle,
+	TALLOC_CTX *mem_ctx,
+	uint32_t logon_parameters,
+	const char *username,
+	const char *domain,
+	const char *workstation,
+	const uint8_t chal[8],
+	DATA_BLOB lm_response,
+	DATA_BLOB nt_response,
+	enum netr_LogonInfoClass logon_type,
+	uint8_t *authoritative,
+	uint32_t *flags,
+	uint16_t *_validation_level,
+	union netr_Validation **_validation);
+NTSTATUS rpccli_netlogon_interactive_logon(
+	struct netlogon_creds_cli_context *creds_ctx,
+	struct dcerpc_binding_handle *binding_handle,
+	TALLOC_CTX *mem_ctx,
+	uint32_t logon_parameters,
+	const char *username,
+	const char *domain,
+	const char *workstation,
+	DATA_BLOB lm_hash,
+	DATA_BLOB nt_hash,
+	enum netr_LogonInfoClass logon_type,
+	uint8_t *authoritative,
+	uint32_t *flags,
+	uint16_t *_validation_level,
+	union netr_Validation **_validation);
 
 #endif /* _RPC_CLIENT_CLI_NETLOGON_H_ */

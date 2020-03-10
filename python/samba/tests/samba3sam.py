@@ -18,6 +18,7 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
+from __future__ import print_function
 """Tests for the samba3sam LDB module, which maps Samba3 LDAP to AD LDAP."""
 
 import os
@@ -41,7 +42,7 @@ def read_datafile(filename):
     return open(os.path.join(datadir, filename), 'r').read()
 
 def ldb_debug(l, text):
-    print text
+    print(text)
 
 
 class MapBaseTestCase(TestCaseInTempDir):
@@ -53,7 +54,7 @@ class MapBaseTestCase(TestCaseInTempDir):
                  "@TO": "sambaDomainName=TESTS," + s3.basedn})
 
         ldb.add({"dn": "@MODULES",
-                 "@LIST": "rootdse,paged_results,server_sort,asq,samldb,password_hash,operational,objectguid,rdn_name,samba3sam,samba3sid,show_deleted,dsdb_flags_ignore,partition"})
+                 "@LIST": "rootdse,paged_results,server_sort,asq,samldb,password_hash,operational,objectguid,rdn_name,samba3sam,samba3sid,show_deleted_ignore,dsdb_flags_ignore,partition"})
 
         ldb.add({"dn": "@PARTITION",
             "partition": ["%s" % (s4.basedn_casefold),
@@ -73,7 +74,7 @@ class MapBaseTestCase(TestCaseInTempDir):
         def make_s4dn(basedn, rdn):
             return "%s,%s" % (rdn, basedn)
 
-        self.ldbfile = os.path.join(self.tempdir, "test.ldb")
+        self.ldbfile = os.path.join(self.tempdir, "sam.ldb")
         self.ldburl = "tdb://" + self.ldbfile
 
         tempdir = self.tempdir

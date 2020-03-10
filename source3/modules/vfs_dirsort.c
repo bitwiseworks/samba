@@ -154,7 +154,15 @@ static DIR *dirsort_opendir(vfs_handle_struct *handle,
 	}
 
 	if (ISDOT(data->smb_fname->base_name)) {
-		data->smb_fname->base_name = vfs_GetWd(data, handle->conn);
+		struct smb_filename *cwd_fname = vfs_GetWd(data, handle->conn);
+		if (cwd_fname == NULL) {
+			TALLOC_FREE(data);
+			return NULL;
+		}
+		TALLOC_FREE(data->smb_fname->base_name);
+		data->smb_fname->base_name = talloc_move(data->smb_fname,
+						&cwd_fname->base_name);
+		TALLOC_FREE(cwd_fname);
 	}
 
 	/* Open the underlying directory and count the number of entries */
@@ -379,7 +387,7 @@ static struct vfs_fn_pointers vfs_dirsort_fns = {
 };
 
 static_decl_vfs;
-NTSTATUS vfs_dirsort_init(void)
+NTSTATUS vfs_dirsort_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "dirsort",
 				&vfs_dirsort_fns);

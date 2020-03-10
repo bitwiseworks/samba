@@ -59,7 +59,8 @@ struct max_n {
   not contain a '.', otherwise it points at the last dot in 'n'.
 */
 static int ms_fnmatch_core(const char *p, const char *n, 
-			   struct max_n *max_n, const char *ldot)
+			   struct max_n *max_n, const char *ldot,
+			   bool is_case_sensitive)
 {
 	codepoint_t c, c2;
 	int i;
@@ -76,7 +77,7 @@ static int ms_fnmatch_core(const char *p, const char *n,
 			}
 			for (i=0; n[i]; i += size_n) {
 				next_codepoint(n+i, &size_n);
-				if (ms_fnmatch_core(p, n+i, max_n+1, ldot) == 0) {
+				if (ms_fnmatch_core(p, n+i, max_n+1, ldot, is_case_sensitive) == 0) {
 					return 0;
 				}
 			}
@@ -95,9 +96,9 @@ static int ms_fnmatch_core(const char *p, const char *n,
 			}
 			for (i=0; n[i]; i += size_n) {
 				next_codepoint(n+i, &size_n);
-				if (ms_fnmatch_core(p, n+i, max_n+1, ldot) == 0) return 0;
+				if (ms_fnmatch_core(p, n+i, max_n+1, ldot, is_case_sensitive) == 0) return 0;
 				if (n+i == ldot) {
-					if (ms_fnmatch_core(p, n+i+size_n, max_n+1, ldot) == 0) return 0;
+					if (ms_fnmatch_core(p, n+i+size_n, max_n+1, ldot, is_case_sensitive) == 0) return 0;
 					if (!max_n->postdot || max_n->postdot > n) max_n->postdot = n;
 					return -1;
 				}
@@ -140,8 +141,13 @@ static int ms_fnmatch_core(const char *p, const char *n,
 
 		default:
 			c2 = next_codepoint(n, &size_n);
-			if (c != c2 && codepoint_cmpi(c, c2) != 0) {
-				return -1;
+			if (c != c2) {
+				if (is_case_sensitive) {
+					return -1;
+				}
+				if (codepoint_cmpi(c, c2) != 0) {
+					return -1;
+				}
 			}
 			n += size_n;
 			break;
@@ -155,10 +161,11 @@ static int ms_fnmatch_core(const char *p, const char *n,
 	return -1;
 }
 
-int ms_fnmatch_protocol(const char *pattern, const char *string, int protocol)
+int ms_fnmatch_protocol(const char *pattern, const char *string, int protocol,
+			bool is_case_sensitive)
 {
-	int ret, count, i;
-	struct max_n *max_n = NULL;
+	int ret = -1;
+	size_t count, i;
 
 	if (strcmp(string, "..") == 0) {
 		string = ".";
@@ -193,7 +200,8 @@ int ms_fnmatch_protocol(const char *pattern, const char *string, int protocol)
 				p[i] = '<';
 			}
 		}
-		ret = ms_fnmatch_protocol(p, string, PROTOCOL_NT1);
+		ret = ms_fnmatch_protocol(p, string, PROTOCOL_NT1,
+					  is_case_sensitive);
 		talloc_free(p);
 		return ret;
 	}
@@ -202,14 +210,18 @@ int ms_fnmatch_protocol(const char *pattern, const char *string, int protocol)
 		if (pattern[i] == '*' || pattern[i] == '<') count++;
 	}
 
-	max_n = talloc_zero_array(NULL, struct max_n, count);
-	if (max_n == NULL) {
-		return -1;
+	/* If the pattern includes '*' or '<' */
+	if (count >= 1) {
+		struct max_n max_n[count];
+
+		memset(max_n, 0, sizeof(struct max_n) * count);
+
+		ret = ms_fnmatch_core(pattern, string, max_n, strrchr(string, '.'),
+				      is_case_sensitive);
+	} else {
+		ret = ms_fnmatch_core(pattern, string, NULL, strrchr(string, '.'),
+				      is_case_sensitive);
 	}
-
-	ret = ms_fnmatch_core(pattern, string, max_n, strrchr(string, '.'));
-
-	talloc_free(max_n);
 
 	return ret;
 }
@@ -218,5 +230,5 @@ int ms_fnmatch_protocol(const char *pattern, const char *string, int protocol)
 /** a generic fnmatch function - uses for non-CIFS pattern matching */
 int gen_fnmatch(const char *pattern, const char *string)
 {
-	return ms_fnmatch_protocol(pattern, string, PROTOCOL_NT1);
+	return ms_fnmatch_protocol(pattern, string, PROTOCOL_NT1, false);
 }

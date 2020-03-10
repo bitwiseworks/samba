@@ -20,7 +20,11 @@
    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-#include "includes.h"
+#include "replace.h"
+#include <talloc.h>
+#include "libcli/util/ntstatus.h"
+#include "lib/util/memory.h"
+#include "lib/util/byteorder.h"
 #include "system/filesys.h"
 #include "../lib/tdb/include/tdb.h"
 #include "../lib/util/util_tdb.h"
@@ -128,7 +132,7 @@ void tdb_read_unlock_bystring(struct tdb_context *tdb, const char *keyval)
  Output is int32_t in native byte order.
 ****************************************************************************/
 
-int32_t tdb_fetch_int32_byblob(struct tdb_context *tdb, TDB_DATA key)
+static int32_t tdb_fetch_int32_byblob(struct tdb_context *tdb, TDB_DATA key)
 {
 	TDB_DATA data;
 	int32_t ret;
@@ -159,7 +163,8 @@ int32_t tdb_fetch_int32(struct tdb_context *tdb, const char *keystr)
  Input is int32_t in native byte order. Output in tdb is in little-endian.
 ****************************************************************************/
 
-int tdb_store_int32_byblob(struct tdb_context *tdb, TDB_DATA key, int32_t v)
+static int tdb_store_int32_byblob(struct tdb_context *tdb, TDB_DATA key,
+				  int32_t v)
 {
 	TDB_DATA data;
 	int32_t v_store;
@@ -186,7 +191,8 @@ int tdb_store_int32(struct tdb_context *tdb, const char *keystr, int32_t v)
  Output is uint32_t in native byte order.
 ****************************************************************************/
 
-bool tdb_fetch_uint32_byblob(struct tdb_context *tdb, TDB_DATA key, uint32_t *value)
+static bool tdb_fetch_uint32_byblob(struct tdb_context *tdb, TDB_DATA key,
+				    uint32_t *value)
 {
 	TDB_DATA data;
 
@@ -216,7 +222,8 @@ bool tdb_fetch_uint32(struct tdb_context *tdb, const char *keystr, uint32_t *val
  Input is uint32_t in native byte order. Output in tdb is in little-endian.
 ****************************************************************************/
 
-bool tdb_store_uint32_byblob(struct tdb_context *tdb, TDB_DATA key, uint32_t value)
+static bool tdb_store_uint32_byblob(struct tdb_context *tdb, TDB_DATA key,
+				    uint32_t value)
 {
 	TDB_DATA data;
 	uint32_t v_store;

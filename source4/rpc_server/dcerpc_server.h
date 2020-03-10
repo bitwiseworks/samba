@@ -93,6 +93,11 @@ struct dcesrv_call_state {
 	struct ncacn_packet pkt;
 
 	/*
+	 * Used during async bind/alter_context.
+	 */
+	struct ncacn_packet ack_pkt;
+
+	/*
 	  which list this request is in, if any
 	 */
 	enum dcesrv_call_list list;
@@ -148,6 +153,32 @@ struct dcesrv_call_state {
 	struct dcerpc_auth _out_auth_info;
 	struct dcerpc_auth *out_auth_info;
 };
+
+/*
+* DCERPC Handles
+* --------------
+* The various handles that are used in the RPC servers should be
+* created and fetch using the dcesrv_handle_* functions.
+*
+* Use
+* dcesrv_handle_new(struct dcesrv_connection \*, uint8 handle_type)
+* to obtain a new handle of the specified type. Handle types are
+* unique within each pipe.
+*
+* The handle can later be fetched again using:
+*
+* struct dcesrv_handle *dcesrv_handle_fetch(
+*         struct dcesrv_connection *dce_conn,
+*         struct policy_handle *p,
+*         uint8 handle_type)
+*
+* and destroyed by:
+*
+* 	dcesrv_handle_destroy(struct dcesrv_handle *).
+*
+* User data should be stored in the 'data' member of the dcesrv_handle
+* struct.
+*/
 
 #define DCESRV_HANDLE_ANY 255
 
@@ -283,6 +314,16 @@ struct dcesrv_connection {
 
 	/* the negotiated bind time features */
 	uint16_t bind_time_features;
+
+	/*
+	 * This is used to block the connection during
+	 * pending authentication.
+	 */
+	struct tevent_req *(*wait_send)(TALLOC_CTX *mem_ctx,
+					struct tevent_context *ev,
+					void *private_data);
+	NTSTATUS (*wait_recv)(struct tevent_req *req);
+	void *wait_private;
 };
 
 
@@ -405,9 +446,7 @@ struct dcesrv_handle *dcesrv_handle_fetch(
 					  struct dcesrv_connection_context *context, 
 					  struct policy_handle *p,
 					  uint8_t handle_type);
-struct socket_address *dcesrv_connection_get_my_addr(struct dcesrv_connection *conn, TALLOC_CTX *mem_ctx);
 
-struct socket_address *dcesrv_connection_get_peer_addr(struct dcesrv_connection *conn, TALLOC_CTX *mem_ctx);
 const struct tsocket_address *dcesrv_connection_get_local_address(struct dcesrv_connection *conn);
 const struct tsocket_address *dcesrv_connection_get_remote_address(struct dcesrv_connection *conn);
 
@@ -454,7 +493,8 @@ NTSTATUS dcesrv_add_ep(struct dcesrv_context *dce_ctx,
 		       struct loadparm_context *lp_ctx,
 		       struct dcesrv_endpoint *e,
 		       struct tevent_context *event_ctx,
-		       const struct model_ops *model_ops);
+		       const struct model_ops *model_ops,
+		       void *process_context);
 
 /**
  * retrieve credentials from a dce_call

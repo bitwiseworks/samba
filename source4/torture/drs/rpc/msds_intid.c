@@ -33,6 +33,7 @@
 #include "torture/drs/proto.h"
 #include "lib/tsocket/tsocket.h"
 #include "libcli/resolve/resolve.h"
+#include "lib/util/util_paths.h"
 
 struct DsSyncBindInfo {
 	struct dcerpc_pipe *drs_pipe;
@@ -113,7 +114,7 @@ struct DsIntIdTestCtx {
 		"instanceType: 4\n" \
 		"isSingleValued: TRUE\n" \
 		"systemOnly: FALSE\n" \
-		"linkID: 88880\n" \
+		"linkID: 1.2.840.113556.1.2.50\n" \
 		"\n" \
 		"# schemaUpdateNow\n" \
 		"DN:\n" \
@@ -185,7 +186,7 @@ static struct DsIntIdTestCtx *_dsintid_create_context(struct torture_context *tc
 	}
 
 	/* populate test suite context */
-	ctx->creds = cmdline_credentials;
+	ctx->creds = popt_get_cmdline_credentials();
 	ctx->dsa_bind.server_binding = server_binding;
 
 	ctx->ldap_url = talloc_asprintf(ctx, "ldap://%s",

@@ -16,6 +16,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
+from __future__ import print_function
 import optparse
 import sys
 import os
@@ -143,7 +144,8 @@ otherLoginWorkstations: AFTER"
         try:
             res = notify1.result()
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e10:
+            (num, _) = e10.args
             self.assertEquals(num, ERR_TIME_LIMIT_EXCEEDED)
         self.assertIsNotNone(msg3)
 
@@ -161,7 +163,7 @@ delete: otherLoginWorkstations
         max_notifications = 5
 
         notifies = [None] * (max_notifications + 1)
-        for i in xrange(0, max_notifications + 1):
+        for i in range(0, max_notifications + 1):
             notifies[i] = self.ldb.search_iterator(base=self.base_dn,
                                                    expression="(objectClass=*)",
                                                    scope=ldb.SCOPE_SUBTREE,
@@ -170,13 +172,14 @@ delete: otherLoginWorkstations
                                                    timeout=1)
         num_admin_limit = 0
         num_time_limit = 0
-        for i in xrange(0, max_notifications + 1):
+        for i in range(0, max_notifications + 1):
             try:
                 for msg in notifies[i]:
                     continue
                 res = notifies[i].result()
                 self.fail()
-            except LdbError, (num, _):
+            except LdbError as e:
+                (num, _) = e.args
                 if num == ERR_ADMIN_LIMIT_EXCEEDED:
                     num_admin_limit += 1
                     continue
@@ -206,7 +209,8 @@ delete: otherLoginWorkstations
                     self.fail()
                 res = hnd.result()
                 self.fail()
-            except LdbError, (num, _):
+            except LdbError as e1:
+                (num, _) = e1.args
                 self.assertEquals(num, ERR_TIME_LIMIT_EXCEEDED)
 
             try:
@@ -220,7 +224,8 @@ delete: otherLoginWorkstations
                     self.fail()
                 res = hnd.result()
                 self.fail()
-            except LdbError, (num, _):
+            except LdbError as e2:
+                (num, _) = e2.args
                 self.assertEquals(num, ERR_TIME_LIMIT_EXCEEDED)
 
             try:
@@ -234,7 +239,8 @@ delete: otherLoginWorkstations
                     self.fail()
                 res = hnd.result()
                 self.fail()
-            except LdbError, (num, _):
+            except LdbError as e3:
+                (num, _) = e3.args
                 self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
             try:
@@ -248,7 +254,8 @@ delete: otherLoginWorkstations
                     self.fail()
                 res = hnd.result()
                 self.fail()
-            except LdbError, (num, _):
+            except LdbError as e4:
+                (num, _) = e4.args
                 self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
             try:
@@ -262,7 +269,8 @@ delete: otherLoginWorkstations
                     self.fail()
                 res = hnd.result()
                 self.fail()
-            except LdbError, (num, _):
+            except LdbError as e5:
+                (num, _) = e5.args
                 self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
             try:
@@ -276,7 +284,8 @@ delete: otherLoginWorkstations
                     self.fail()
                 res = hnd.result()
                 self.fail()
-            except LdbError, (num, _):
+            except LdbError as e6:
+                (num, _) = e6.args
                 self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
             try:
@@ -290,7 +299,8 @@ delete: otherLoginWorkstations
                     self.fail()
                 res = hnd.result()
                 self.fail()
-            except LdbError, (num, _):
+            except LdbError as e7:
+                (num, _) = e7.args
                 self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
             try:
@@ -304,7 +314,8 @@ delete: otherLoginWorkstations
                     self.fail()
                 res = hnd.result()
                 self.fail()
-            except LdbError, (num, _):
+            except LdbError as e8:
+                (num, _) = e8.args
                 self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         res = self.ldb.search(base=self.ldb.get_schema_basedn(),
@@ -328,9 +339,10 @@ delete: otherLoginWorkstations
                     self.fail()
                 res = hnd.result()
                 self.fail()
-            except LdbError, (num, _):
+            except LdbError as e9:
+                (num, _) = e9.args
                 if num != ERR_UNWILLING_TO_PERFORM:
-                    print "va[%s]" % va
+                    print("va[%s]" % va)
                 self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         try:
@@ -345,9 +357,10 @@ delete: otherLoginWorkstations
                 self.fail()
             res = hnd.result()
             self.fail()
-        except LdbError, (num, _):
+        except LdbError as e11:
+            (num, _) = e11.args
             if num != ERR_UNWILLING_TO_PERFORM:
-                print "va[%s]" % va
+                print("va[%s]" % va)
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
 if not "://" in url:

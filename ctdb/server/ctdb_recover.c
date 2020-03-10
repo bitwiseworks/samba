@@ -115,15 +115,7 @@ ctdb_control_getdbmap(struct ctdb_context *ctdb, uint32_t opcode, TDB_DATA indat
 	dbid_map->num = len;
 	for (i=0,ctdb_db=ctdb->db_list;ctdb_db;i++,ctdb_db=ctdb_db->next){
 		dbid_map->dbs[i].db_id       = ctdb_db->db_id;
-		if (ctdb_db->persistent != 0) {
-			dbid_map->dbs[i].flags |= CTDB_DB_FLAGS_PERSISTENT;
-		}
-		if (ctdb_db->readonly != 0) {
-			dbid_map->dbs[i].flags |= CTDB_DB_FLAGS_READONLY;
-		}
-		if (ctdb_db->sticky != 0) {
-			dbid_map->dbs[i].flags |= CTDB_DB_FLAGS_STICKY;
-		}
+		dbid_map->dbs[i].flags       = ctdb_db->db_flags;
 	}
 
 	return 0;
@@ -513,15 +505,14 @@ int32_t ctdb_control_push_db(struct ctdb_context *ctdb, TDB_DATA indata)
 	DEBUG(DEBUG_DEBUG,("finished push of %u records for dbid 0x%x\n",
 		 reply->count, reply->db_id));
 
-	if (ctdb_db->readonly) {
+	if (ctdb_db_readonly(ctdb_db)) {
 		DEBUG(DEBUG_CRIT,("Clearing the tracking database for dbid 0x%x\n",
 				  ctdb_db->db_id));
 		if (tdb_wipe_all(ctdb_db->rottdb) != 0) {
 			DEBUG(DEBUG_ERR,("Failed to wipe tracking database for 0x%x. Dropping read-only delegation support\n", ctdb_db->db_id));
-			ctdb_db->readonly = false;
 			tdb_close(ctdb_db->rottdb);
 			ctdb_db->rottdb = NULL;
-			ctdb_db->readonly = false;
+			ctdb_db_reset_readonly(ctdb_db);
 		}
 		while (ctdb_db->revokechild_active != NULL) {
 			talloc_free(ctdb_db->revokechild_active);
@@ -702,7 +693,7 @@ int32_t ctdb_control_db_push_confirm(struct ctdb_context *ctdb,
 		return -1;
 	}
 
-	if (ctdb_db->readonly) {
+	if (ctdb_db_readonly(ctdb_db)) {
 		DEBUG(DEBUG_ERR,
 		      ("Clearing the tracking database for dbid 0x%x\n",
 		       ctdb_db->db_id));
@@ -711,10 +702,9 @@ int32_t ctdb_control_db_push_confirm(struct ctdb_context *ctdb,
 			      ("Failed to wipe tracking database for 0x%x."
 			       " Dropping read-only delegation support\n",
 			       ctdb_db->db_id));
-			ctdb_db->readonly = false;
 			tdb_close(ctdb_db->rottdb);
 			ctdb_db->rottdb = NULL;
-			ctdb_db->readonly = false;
+			ctdb_db_reset_readonly(ctdb_db);
 		}
 
 		while (ctdb_db->revokechild_active != NULL) {
@@ -1054,12 +1044,11 @@ static void ctdb_end_recovery_callback(struct ctdb_context *ctdb, int status, vo
 {
 	struct recovery_callback_state *state = talloc_get_type(p, struct recovery_callback_state);
 
-	ctdb_enable_monitoring(ctdb);
 	CTDB_INCREMENT_STAT(ctdb, num_recoveries);
 
 	if (status != 0) {
 		DEBUG(DEBUG_ERR,(__location__ " recovered event script failed (status %d)\n", status));
-		if (status == -ETIME) {
+		if (status == -ETIMEDOUT) {
 			ctdb_ban_self(ctdb);
 		}
 	}
@@ -1084,7 +1073,7 @@ int32_t ctdb_control_end_recovery(struct ctdb_context *ctdb,
 	int ret;
 	struct recovery_callback_state *state;
 
-	DEBUG(DEBUG_NOTICE,("Recovery has finished\n"));
+	DEBUG(DEBUG_ERR,("Recovery has finished\n"));
 
 	ctdb_persistent_finish_trans3_commits(ctdb);
 
@@ -1093,16 +1082,12 @@ int32_t ctdb_control_end_recovery(struct ctdb_context *ctdb,
 
 	state->c    = c;
 
-	ctdb_disable_monitoring(ctdb);
-
 	ret = ctdb_event_script_callback(ctdb, state,
 					 ctdb_end_recovery_callback, 
 					 state, 
 					 CTDB_EVENT_RECOVERED, "%s", "");
 
 	if (ret != 0) {
-		ctdb_enable_monitoring(ctdb);
-
 		DEBUG(DEBUG_ERR,(__location__ " Failed to end recovery\n"));
 		talloc_free(state);
 		return -1;
@@ -1133,8 +1118,6 @@ static void run_start_recovery_event(struct ctdb_context *ctdb,
 				     struct recovery_callback_state *state)
 {
 	int ret;
-
-	ctdb_disable_monitoring(ctdb);
 
 	ret = ctdb_event_script_callback(ctdb, state,
 					 ctdb_start_recovery_callback,
@@ -1210,7 +1193,7 @@ int32_t ctdb_control_start_recovery(struct ctdb_context *ctdb,
 	struct recovery_callback_state *state;
 	uint32_t recmaster = c->hdr.srcnode;
 
-	DEBUG(DEBUG_NOTICE, ("Recovery has started\n"));
+	DEBUG(DEBUG_ERR, ("Recovery has started\n"));
 	gettimeofday(&ctdb->last_recovery_started, NULL);
 
 	state = talloc(ctdb, struct recovery_callback_state);
@@ -1604,13 +1587,13 @@ int32_t ctdb_control_set_recmaster(struct ctdb_context *ctdb, uint32_t opcode, T
 	new_recmaster = ((uint32_t *)(&indata.dptr[0]))[0];
 
 	if (ctdb->pnn != new_recmaster && ctdb->recovery_master == ctdb->pnn) {
-		DEBUG(DEBUG_NOTICE,
+		DEBUG(DEBUG_ERR,
 		      ("Remote node (%u) is now the recovery master\n",
 		       new_recmaster));
 	}
 
 	if (ctdb->pnn == new_recmaster && ctdb->recovery_master != new_recmaster) {
-		DEBUG(DEBUG_NOTICE,
+		DEBUG(DEBUG_ERR,
 		      ("This node (%u) is now the recovery master\n",
 		       ctdb->pnn));
 	}
@@ -1622,8 +1605,7 @@ int32_t ctdb_control_set_recmaster(struct ctdb_context *ctdb, uint32_t opcode, T
 
 int32_t ctdb_control_stop_node(struct ctdb_context *ctdb)
 {
-	DEBUG(DEBUG_NOTICE, ("Stopping node\n"));
-	ctdb_disable_monitoring(ctdb);
+	DEBUG(DEBUG_ERR, ("Stopping node\n"));
 	ctdb->nodes[ctdb->pnn]->flags |= NODE_FLAGS_STOPPED;
 
 	return 0;
@@ -1631,7 +1613,7 @@ int32_t ctdb_control_stop_node(struct ctdb_context *ctdb)
 
 int32_t ctdb_control_continue_node(struct ctdb_context *ctdb)
 {
-	DEBUG(DEBUG_NOTICE, ("Continue node\n"));
+	DEBUG(DEBUG_ERR, ("Continue node\n"));
 	ctdb->nodes[ctdb->pnn]->flags &= ~NODE_FLAGS_STOPPED;
 
 	return 0;

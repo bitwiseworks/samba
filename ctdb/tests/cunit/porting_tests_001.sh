@@ -11,16 +11,16 @@ remove_socket ()
 
 test_cleanup remove_socket
 
-result_filter ()
-{
-	sed -e 's|^\(\.\./common/system_linux\.c\):[0-9][0-9]*|\1:LINE|'
-}
-
-uid=$(id -u)
-if [ "$uid" -eq 0 ] ; then
-    ok "../common/system_linux.c:LINE interface 'fake' not found"
+os=$(uname)
+if [ "$os" = "Linux" ] ; then
+	uid=$(id -u)
+	if [ "$uid" -eq 0 ] ; then
+		ok "ctdb_sys_check_iface_exists: Interface 'fake' not found"
+	else
+		ok "ctdb_sys_check_iface_exists: Failed to open raw socket"
+	fi
 else
-    ok "../common/system_linux.c:LINE failed to open raw socket"
+	ok_null
 fi
 
 unit_test porting_tests --socket=${socket}

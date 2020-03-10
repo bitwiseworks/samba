@@ -29,6 +29,7 @@
 
 #include "includes.h"
 #include "ldb_module.h"
+#include "lib/util/server_id.h"
 #include "dsdb/samdb/samdb.h"
 #include "dsdb/samdb/ldb_modules/util.h"
 #include "lib/messaging/irpc.h"
@@ -386,7 +387,9 @@ static int ridalloc_create_rid_set_ntds(struct ldb_module *module, TALLOC_CTX *m
 	}
 	msg->elements[0].flags = LDB_FLAG_MOD_ADD;
 
-	ret = dsdb_module_modify(module, msg, DSDB_FLAG_NEXT_MODULE, parent);
+	ret = dsdb_module_modify(module, msg,
+				 DSDB_FLAG_NEXT_MODULE|DSDB_FLAG_AS_SYSTEM,
+				 parent);
 	if (ret != LDB_SUCCESS) {
 		ldb_asprintf_errstring(ldb, "Failed to add rIDSetReferences to %s - %s",
 				       ldb_dn_get_linearized(msg->dn),
@@ -436,6 +439,12 @@ int ridalloc_create_own_rid_set(struct ldb_module *module, TALLOC_CTX *mem_ctx,
 
 	status = dsdb_get_extended_dn_guid(fsmo_role_dn, &fsmo_role_guid, "GUID");
 	if (!NT_STATUS_IS_OK(status)) {
+		talloc_free(tmp_ctx);
+		return ldb_operr(ldb_module_get_ctx(module));
+	}
+
+	/* clear the cache so we don't get an old ntds_guid */
+	if (ldb_set_opaque(ldb, "cache.ntds_guid", NULL) != LDB_SUCCESS) {
 		talloc_free(tmp_ctx);
 		return ldb_operr(ldb_module_get_ctx(module));
 	}
@@ -676,7 +685,7 @@ int ridalloc_allocate_rid(struct ldb_module *module, uint32_t *rid, struct ldb_r
 		return ret;
 	}
 
-	ret = dsdb_module_modify(module, msg, DSDB_FLAG_NEXT_MODULE, parent);
+	ret = dsdb_module_modify(module, msg, DSDB_FLAG_NEXT_MODULE|DSDB_FLAG_AS_SYSTEM, parent);
 	if (ret != LDB_SUCCESS) {
 		talloc_free(tmp_ctx);
 		return ret;
@@ -806,7 +815,7 @@ int ridalloc_allocate_rid_pool_fsmo(struct ldb_module *module, struct dsdb_fsmo_
 		return ret;
 	}
 
-	ret = dsdb_module_modify(module, msg, DSDB_FLAG_NEXT_MODULE, parent);
+	ret = dsdb_module_modify(module, msg, DSDB_FLAG_NEXT_MODULE|DSDB_FLAG_AS_SYSTEM, parent);
 	if (ret != LDB_SUCCESS) {
 		ldb_asprintf_errstring(ldb, "Failed to modify RID Set object %s - %s",
 				       ldb_dn_get_linearized(rid_set_dn), ldb_errstring(ldb));

@@ -688,7 +688,7 @@ int dsdb_check_single_valued_link(const struct dsdb_attribute *attr,
   place. For example, the recyclebin feature is marked as enabled both
   on the CN=Partitions,CN=Configurration object and on the NTDS DN of
   each DC in the forest. It seems likely that it is the job of the KCC
-  to propogate between the two
+  to propagate between the two
  */
 int dsdb_check_optional_feature(struct ldb_module *module, struct GUID op_feature_guid, bool *feature_enabled)
 {
@@ -719,7 +719,7 @@ int dsdb_check_optional_feature(struct ldb_module *module, struct GUID op_featur
 				"Could not find the feature object - dn: %s\n",
 				ldb_dn_get_linearized(feature_dn));
 		talloc_free(tmp_ctx);
-		return LDB_ERR_OPERATIONS_ERROR;
+		return LDB_ERR_NO_SUCH_OBJECT;
 	}
 	if (res->msgs[0]->num_elements > 0) {
 		const char *attrs2[] = {"msDS-OptionalFeatureGUID", NULL};
@@ -832,8 +832,29 @@ int dsdb_next_callback(struct ldb_request *req, struct ldb_reply *ares)
 {
 	struct ldb_request *up_req = talloc_get_type(req->context, struct ldb_request);
 
-	talloc_steal(up_req, req);
-	return up_req->callback(up_req, ares);
+	if (!ares) {
+		return ldb_module_done(up_req, NULL, NULL,
+				       LDB_ERR_OPERATIONS_ERROR);
+	}
+
+	if (ares->error != LDB_SUCCESS || ares->type == LDB_REPLY_DONE) {
+		return ldb_module_done(up_req, ares->controls,
+				       ares->response, ares->error);
+	}
+
+	/* Otherwise pass on the callback */
+	switch (ares->type) {
+	case LDB_REPLY_ENTRY:
+		return ldb_module_send_entry(up_req, ares->message,
+					     ares->controls);
+
+	case LDB_REPLY_REFERRAL:
+		return ldb_module_send_referral(up_req,
+						ares->referral);
+	default:
+		/* Can't happen */
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
 }
 
 /*
@@ -1029,7 +1050,9 @@ bool dsdb_module_am_system(struct ldb_module *module)
 {
 	struct ldb_context *ldb = ldb_module_get_ctx(module);
 	struct auth_session_info *session_info
-		= talloc_get_type(ldb_get_opaque(ldb, "sessionInfo"), struct auth_session_info);
+		= talloc_get_type(
+			ldb_get_opaque(ldb, DSDB_SESSION_INFO),
+			struct auth_session_info);
 	return security_session_user_level(session_info, NULL) == SECURITY_SYSTEM;
 }
 
@@ -1037,7 +1060,9 @@ bool dsdb_module_am_administrator(struct ldb_module *module)
 {
 	struct ldb_context *ldb = ldb_module_get_ctx(module);
 	struct auth_session_info *session_info
-		= talloc_get_type(ldb_get_opaque(ldb, "sessionInfo"), struct auth_session_info);
+		= talloc_get_type(
+			ldb_get_opaque(ldb, DSDB_SESSION_INFO),
+			struct auth_session_info);
 	return security_session_user_level(session_info, NULL) == SECURITY_ADMINISTRATOR;
 }
 
@@ -1055,7 +1080,7 @@ int dsdb_recyclebin_enabled(struct ldb_module *module, bool *enabled)
 	ret = dsdb_check_optional_feature(module, recyclebin_guid, enabled);
 	if (ret != LDB_SUCCESS) {
 		ldb_asprintf_errstring(ldb, "Could not verify if Recycle Bin is enabled \n");
-		return LDB_ERR_UNWILLING_TO_PERFORM;
+		return ret;
 	}
 
 	return LDB_SUCCESS;

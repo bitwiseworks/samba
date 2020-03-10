@@ -97,11 +97,6 @@ typedef struct {
 	SPOOLSS_NOTIFY_MSG_GROUP	*msg_groups;
 } SPOOLSS_NOTIFY_MSG_CTR;
 
-#define SPLHND_PRINTER		1
-#define SPLHND_SERVER	 	2
-#define SPLHND_PORTMON_TCP	3
-#define SPLHND_PORTMON_LOCAL	4
-
 /*
  * The printer attributes.
  * I #defined all of them (grabbed form MSDN)
@@ -169,13 +164,13 @@ bool printer_driver_files_in_use(TALLOC_CTX *mem_ctx,
 bool delete_driver_files(const struct auth_session_info *server_info,
 			 const struct spoolss_DriverInfo8 *r);
 
-WERROR move_driver_to_download_area(struct auth_session_info *session_info,
-				    struct spoolss_AddDriverInfoCtr *r,
+WERROR move_driver_to_download_area(const struct auth_session_info *session_info,
+				    const struct spoolss_AddDriverInfoCtr *r,
 				    const char *driver_directory);
 
 WERROR clean_up_driver_struct(TALLOC_CTX *mem_ctx,
-			      struct auth_session_info *session_info,
-			      struct spoolss_AddDriverInfoCtr *r,
+			      const struct auth_session_info *session_info,
+			      const struct spoolss_AddDriverInfoCtr *r,
 			      uint32_t flags,
 			      const char **driver_directory);
 

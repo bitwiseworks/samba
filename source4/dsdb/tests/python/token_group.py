@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 # test tokengroups attribute against internal token calculation
 
+from __future__ import print_function
 import optparse
 import sys
 import os
@@ -24,7 +25,7 @@ from samba.dsdb import GTYPE_SECURITY_GLOBAL_GROUP, GTYPE_SECURITY_UNIVERSAL_GRO
 import samba.tests
 from samba.tests import delete_force
 from samba.dcerpc import samr, security
-from samba.auth import AUTH_SESSION_INFO_DEFAULT_GROUPS, AUTH_SESSION_INFO_AUTHENTICATED, AUTH_SESSION_INFO_SIMPLE_PRIVILEGES
+from samba.auth import AUTH_SESSION_INFO_DEFAULT_GROUPS, AUTH_SESSION_INFO_AUTHENTICATED, AUTH_SESSION_INFO_SIMPLE_PRIVILEGES, AUTH_SESSION_INFO_NTLM
 
 
 parser = optparse.OptionParser("token_group.py [options] <host>")
@@ -71,6 +72,9 @@ class StaticTokenTest(samba.tests.TestCase):
         session_info_flags = ( AUTH_SESSION_INFO_DEFAULT_GROUPS |
                                AUTH_SESSION_INFO_AUTHENTICATED |
                                AUTH_SESSION_INFO_SIMPLE_PRIVILEGES)
+        if creds.get_kerberos_state() == DONT_USE_KERBEROS:
+            session_info_flags |= AUTH_SESSION_INFO_NTLM
+
         session = samba.auth.user_session(self.ldb, lp_ctx=lp, dn=self.user_sid_dn,
                                           session_info_flags=session_info_flags)
 
@@ -118,6 +122,9 @@ class StaticTokenTest(samba.tests.TestCase):
             self.fail(msg="calculated groups don't match against user DN tokenGroups")
 
     def test_pac_groups(self):
+        if creds.get_kerberos_state() == DONT_USE_KERBEROS:
+            self.skipTest("Kerberos disabled, skipping PAC test")
+
         settings = {}
         settings["lp_ctx"] = lp
         settings["target_hostname"] = lp.get("netbios name")
@@ -145,10 +152,10 @@ class StaticTokenTest(samba.tests.TestCase):
         # Run the actual call loop.
         while client_finished == False and server_finished == False:
             if not client_finished:
-                print "running client gensec_update"
+                print("running client gensec_update")
                 (client_finished, client_to_server) = gensec_client.update(server_to_client)
             if not server_finished:
-                print "running server gensec_update"
+                print("running server gensec_update")
                 (server_finished, server_to_client) = gensec_server.update(client_to_server)
 
         session = gensec_server.session_info()
@@ -276,6 +283,10 @@ class DynamicTokenTest(samba.tests.TestCase):
         session_info_flags = ( AUTH_SESSION_INFO_DEFAULT_GROUPS |
                                AUTH_SESSION_INFO_AUTHENTICATED |
                                AUTH_SESSION_INFO_SIMPLE_PRIVILEGES)
+
+        if creds.get_kerberos_state() == DONT_USE_KERBEROS:
+            session_info_flags |= AUTH_SESSION_INFO_NTLM
+
         session = samba.auth.user_session(self.ldb, lp_ctx=lp, dn=self.user_sid_dn,
                                           session_info_flags=session_info_flags)
 
@@ -336,6 +347,10 @@ class DynamicTokenTest(samba.tests.TestCase):
 
         sidset1 = set(dn_tokengroups)
         sidset2 = set(self.user_sids)
+
+        # The SIDs on the DN do not include the NTLM authentication SID
+        sidset2.discard(samba.dcerpc.security.SID_NT_NTLM_AUTHENTICATION)
+
         if len(sidset1.difference(sidset2)):
             print("token sids don't match")
             print("difference : %s" % sidset1.difference(sidset2))
@@ -369,10 +384,10 @@ class DynamicTokenTest(samba.tests.TestCase):
         # Run the actual call loop.
         while client_finished == False and server_finished == False:
             if not client_finished:
-                print "running client gensec_update"
+                print("running client gensec_update")
                 (client_finished, client_to_server) = gensec_client.update(server_to_client)
             if not server_finished:
-                print "running server gensec_update"
+                print("running server gensec_update")
                 (server_finished, server_to_client) = gensec_server.update(client_to_server)
 
         session = gensec_server.session_info()
@@ -403,7 +418,7 @@ class DynamicTokenTest(samba.tests.TestCase):
             if "memberOf" in obj:
                 for dn in obj["memberOf"]:
                     first = obj.dn.get_casefold()
-                    second = ldb.Dn(self.admin_ldb, dn).get_casefold()
+                    second = ldb.Dn(self.admin_ldb, dn.decode('utf8')).get_casefold()
                     aSet.add((first, second))
                     aSetR.add((second, first))
                     vSet.add(first)
@@ -461,7 +476,7 @@ class DynamicTokenTest(samba.tests.TestCase):
             if "memberOf" in obj:
                 for dn in obj["memberOf"]:
                     first = obj.dn.get_casefold()
-                    second = ldb.Dn(self.admin_ldb, dn).get_casefold()
+                    second = ldb.Dn(self.admin_ldb, dn.decode('utf8')).get_casefold()
                     aSet.add((first, second))
                     aSetR.add((second, first))
                     vSet.add(first)

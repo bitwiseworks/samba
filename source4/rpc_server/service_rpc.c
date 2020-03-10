@@ -39,7 +39,7 @@
 #include "../libcli/named_pipe_auth/npa_tstream.h"
 #include "smbd/process_model.h"
 
-NTSTATUS server_service_rpc_init(void);
+NTSTATUS server_service_rpc_init(TALLOC_CTX *);
 
 /*
   open the dcerpc server sockets
@@ -81,6 +81,10 @@ static void dcesrv_task_init(struct task_server *task)
 
 		enum dcerpc_transport_t transport =
 			dcerpc_binding_get_transport(e->ep_description);
+		const char *transport_str
+			= derpc_transport_string_by_transport(transport);
+
+		struct dcesrv_if_list *iface_list;
 
 		/*
 		 * Ensure that -Msingle sets e->use_single_process for
@@ -112,10 +116,22 @@ static void dcesrv_task_init(struct task_server *task)
 		}
 
 		status = dcesrv_add_ep(dce_ctx, task->lp_ctx, e, task->event_ctx,
-				       this_model_ops);
+				       this_model_ops, task->process_context);
 		if (!NT_STATUS_IS_OK(status)) {
 			goto failed;
 		}
+
+		DEBUG(5,("Added endpoint on %s "
+			 "using process model %s for",
+			 transport_str,
+			 this_model_ops->name));
+
+		for (iface_list = e->interface_list;
+		     iface_list != NULL;
+		     iface_list = iface_list->next) {
+			DEBUGADD(5, (" %s", iface_list->iface.name));
+		}
+		DEBUGADD(5, ("\n"));
 	}
 
 	irpc_add_name(task->msg_ctx, "rpc_server");
@@ -124,7 +140,18 @@ failed:
 	task_server_terminate(task, "Failed to startup dcerpc server task", true);	
 }
 
-NTSTATUS server_service_rpc_init(void)
+NTSTATUS server_service_rpc_init(TALLOC_CTX *ctx)
 {
-	return register_server_service("rpc", dcesrv_task_init);
+	struct service_details details = {
+		/* 
+		 * This is a SNOWFLAKE, but sadly one that we
+		 * will have to keep for now.  The RPC server
+		 * code above overstamps the SINGLE process model
+		 * most of the time, but we need to be in forking
+		 * mode by defult to get a forking NETLOGON server
+		 */
+		.inhibit_fork_on_accept = false,
+		.inhibit_pre_fork = true
+	};
+	return register_server_service(ctx, "rpc", dcesrv_task_init, &details);
 }

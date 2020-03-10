@@ -41,7 +41,7 @@
 #include "system/network.h"
 #include "system/passwd.h"
 
-NTSTATUS server_service_ntp_signd_init(void);
+NTSTATUS server_service_ntp_signd_init(TALLOC_CTX *);
 
 /*
   top level context structure for the ntp_signd server
@@ -494,8 +494,6 @@ static void ntp_signd_task_init(struct task_server *task)
 	struct ntp_signd_server *ntp_signd;
 	NTSTATUS status;
 
-	const struct model_ops *model_ops;
-
 	const char *address;
 
 	if (!directory_create_or_exist_strict(lpcfg_ntp_signd_socket_directory(task->lp_ctx), geteuid(), 0750)) {
@@ -503,15 +501,6 @@ static void ntp_signd_task_init(struct task_server *task)
 					      lpcfg_ntp_signd_socket_directory(task->lp_ctx));
 		task_server_terminate(task,
 				      error, true);
-		return;
-	}
-
-	/* within the ntp_signd task we want to be a single process, so
-	   ask for the single process model ops and pass these to the
-	   stream_setup_socket() call. */
-	model_ops = process_model_startup("single");
-	if (!model_ops) {
-		DEBUG(0,("Can't find 'single' process model_ops\n"));
 		return;
 	}
 
@@ -526,7 +515,12 @@ static void ntp_signd_task_init(struct task_server *task)
 	ntp_signd->task = task;
 
 	/* Must be system to get at the password hashes */
-	ntp_signd->samdb = samdb_connect(ntp_signd, task->event_ctx, task->lp_ctx, system_session(task->lp_ctx), 0);
+	ntp_signd->samdb = samdb_connect(ntp_signd,
+					 task->event_ctx,
+					 task->lp_ctx,
+					 system_session(task->lp_ctx),
+					 NULL,
+					 0);
 	if (ntp_signd->samdb == NULL) {
 		task_server_terminate(task, "ntp_signd failed to open samdb", true);
 		return;
@@ -537,11 +531,12 @@ static void ntp_signd_task_init(struct task_server *task)
 	status = stream_setup_socket(ntp_signd->task,
 				     ntp_signd->task->event_ctx,
 				     ntp_signd->task->lp_ctx,
-				     model_ops, 
+				     task->model_ops,
 				     &ntp_signd_stream_ops, 
 				     "unix", address, NULL,
 				     lpcfg_socket_options(ntp_signd->task->lp_ctx),
-				     ntp_signd);
+				     ntp_signd,
+				     ntp_signd->task->process_context);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("Failed to bind to %s - %s\n",
 			 address, nt_errstr(status)));
@@ -552,7 +547,12 @@ static void ntp_signd_task_init(struct task_server *task)
 
 
 /* called at smbd startup - register ourselves as a server service */
-NTSTATUS server_service_ntp_signd_init(void)
+NTSTATUS server_service_ntp_signd_init(TALLOC_CTX *ctx)
 {
-	return register_server_service("ntp_signd", ntp_signd_task_init);
+	struct service_details details = {
+		.inhibit_fork_on_accept = true,
+		.inhibit_pre_fork = true
+	};
+	return register_server_service(ctx, "ntp_signd", ntp_signd_task_init,
+				       &details);
 }

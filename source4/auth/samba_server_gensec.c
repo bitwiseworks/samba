@@ -27,10 +27,11 @@
 #include "auth/gensec/gensec.h"
 #include "param/param.h"
 
-NTSTATUS samba_server_gensec_start(TALLOC_CTX *mem_ctx,
+static NTSTATUS samba_server_gensec_start_settings(TALLOC_CTX *mem_ctx,
 				   struct tevent_context *event_ctx,
 				   struct imessaging_context *msg_ctx,
 				   struct loadparm_context *lp_ctx,
+				   struct gensec_settings *settings,
 				   struct cli_credentials *server_credentials,
 				   const char *target_service,
 				   struct gensec_security **gensec_context)
@@ -57,7 +58,7 @@ NTSTATUS samba_server_gensec_start(TALLOC_CTX *mem_ctx,
 	}
 
 	nt_status = gensec_server_start(tmp_ctx,
-					lpcfg_gensec_settings(mem_ctx, lp_ctx),
+					settings,
 					auth_context,
 					&gensec_ctx);
 	if (!NT_STATUS_IS_OK(nt_status)) {
@@ -74,4 +75,78 @@ NTSTATUS samba_server_gensec_start(TALLOC_CTX *mem_ctx,
 	*gensec_context = talloc_steal(mem_ctx, gensec_ctx);
 	talloc_free(tmp_ctx);
 	return nt_status;
+}
+
+NTSTATUS samba_server_gensec_start(TALLOC_CTX *mem_ctx,
+				   struct tevent_context *event_ctx,
+				   struct imessaging_context *msg_ctx,
+				   struct loadparm_context *lp_ctx,
+				   struct cli_credentials *server_credentials,
+				   const char *target_service,
+				   struct gensec_security **gensec_context)
+{
+	struct gensec_settings *settings = NULL;
+	NTSTATUS status;
+
+	settings = lpcfg_gensec_settings(mem_ctx, lp_ctx);
+	if (settings == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	status = samba_server_gensec_start_settings(mem_ctx, event_ctx,
+						    msg_ctx, lp_ctx,
+						    settings, server_credentials,
+						    target_service,
+						    gensec_context);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(settings);
+		return status;
+	}
+
+	talloc_reparent(mem_ctx, *gensec_context, settings);
+	return NT_STATUS_OK;
+}
+
+NTSTATUS samba_server_gensec_krb5_start(TALLOC_CTX *mem_ctx,
+					struct tevent_context *event_ctx,
+					struct imessaging_context *msg_ctx,
+					struct loadparm_context *lp_ctx,
+					struct cli_credentials *server_credentials,
+					const char *target_service,
+					struct gensec_security **gensec_context)
+{
+	struct gensec_settings *settings = NULL;
+	const struct gensec_security_ops **backends = NULL;
+	size_t idx = 0;
+	NTSTATUS status;
+
+	settings = lpcfg_gensec_settings(mem_ctx, lp_ctx);
+	if (settings == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+	backends = talloc_zero_array(settings,
+				     const struct gensec_security_ops *, 3);
+	if (backends == NULL) {
+			TALLOC_FREE(settings);
+		return NT_STATUS_NO_MEMORY;
+	}
+	settings->backends = backends;
+
+	gensec_init();
+
+	backends[idx++] = gensec_security_by_oid(NULL, GENSEC_OID_KERBEROS5);
+
+	backends[idx++] = gensec_security_by_oid(NULL, GENSEC_OID_SPNEGO);
+
+	status = samba_server_gensec_start_settings(mem_ctx, event_ctx,
+						    msg_ctx, lp_ctx,
+						    settings, server_credentials,
+						    target_service,
+						    gensec_context);
+	if (!NT_STATUS_IS_OK(status)) {
+		TALLOC_FREE(settings);
+		return status;
+	}
+
+	talloc_reparent(mem_ctx, *gensec_context, settings);
+	return NT_STATUS_OK;
 }

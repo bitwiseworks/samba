@@ -30,6 +30,9 @@
 #include "rpc_server/drsuapi/dcesrv_drsuapi.h"
 #include "librpc/gen_ndr/ndr_drsuapi.h"
 
+#undef DBGC_CLASS
+#define DBGC_CLASS            DBGC_DRS_REPL
+
 /*
   add special SPNs needed for DRS replication to machine accounts when
   an AddEntry is done to create a nTDSDSA object
@@ -186,6 +189,8 @@ WERROR dcesrv_drsuapi_DsAddEntry(struct dcesrv_call_state *dce_call, TALLOC_CTX 
 	case 2:
 		ret = ldb_transaction_start(b_state->sam_ctx);
 		if (ret != LDB_SUCCESS) {
+			DBG_ERR("DsAddEntry start transaction failed: %s\n",
+				ldb_errstring(b_state->sam_ctx));
 			return WERR_DS_DRA_INTERNAL_ERROR;
 		}
 

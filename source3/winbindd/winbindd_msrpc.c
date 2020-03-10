@@ -313,7 +313,7 @@ static NTSTATUS msrpc_sid_to_name(struct winbindd_domain *domain,
 
 	DEBUG(5,("Mapped sid to [%s]\\[%s]\n", domains[0], *name));
 
-	name_map_status = normalize_name_map(mem_ctx, domain, *name,
+	name_map_status = normalize_name_map(mem_ctx, domain->name, *name,
 					     &mapped_name);
 	if (NT_STATUS_IS_OK(name_map_status) ||
 	    NT_STATUS_EQUAL(name_map_status, NT_STATUS_FILE_RENAMED))
@@ -377,7 +377,7 @@ static NTSTATUS msrpc_rids_to_names(struct winbindd_domain *domain,
 
 		if ((*types)[i] != SID_NAME_UNKNOWN) {
 			name_map_status = normalize_name_map(mem_ctx,
-							     domain,
+							     domain->name,
 							     ret_names[i],
 							     &mapped_name);
 			if (NT_STATUS_IS_OK(name_map_status) ||
@@ -576,11 +576,8 @@ static NTSTATUS msrpc_lookup_groupmem(struct winbindd_domain *domain,
 				       group_rid,
 				       &group_pol,
 				       &result);
-	if (!NT_STATUS_IS_OK(status)) {
+	if (any_nt_status_not_ok(status, result, &status)) {
 		return status;
-	}
-	if (!NT_STATUS_IS_OK(result)) {
-		return result;
 	}
 
         /* Step #1: Get a list of user rids that are the members of the
@@ -604,12 +601,8 @@ static NTSTATUS msrpc_lookup_groupmem(struct winbindd_domain *domain,
 		dcerpc_samr_Close(b, mem_ctx, &group_pol, &_result);
 	}
 
-	if (!NT_STATUS_IS_OK(status)) {
+	if (any_nt_status_not_ok(status, result, &status)) {
 		return status;
-	}
-
-	if (!NT_STATUS_IS_OK(result)) {
-		return result;
 	}
 
 	if (!rids || !rids->count) {
@@ -927,12 +920,8 @@ static NTSTATUS msrpc_lockout_policy(struct winbindd_domain *domain,
 					     DomainLockoutInformation,
 					     &info,
 					     &result);
-	if (!NT_STATUS_IS_OK(status)) {
-		goto done;
-	}
-	if (!NT_STATUS_IS_OK(result)) {
-		status = result;
-		goto done;
+	if (any_nt_status_not_ok(status, result, &status)) {
+		return status;
 	}
 
 	*lockout_policy = info->info12;
@@ -994,6 +983,60 @@ static NTSTATUS msrpc_password_policy(struct winbindd_domain *domain,
 	return status;
 }
 
+static enum lsa_LookupNamesLevel winbindd_lookup_level(
+	struct winbindd_domain *domain)
+{
+	enum lsa_LookupNamesLevel level = LSA_LOOKUP_NAMES_DOMAINS_ONLY;
+
+	if (domain->internal) {
+		level = LSA_LOOKUP_NAMES_ALL;
+	} else if (domain->secure_channel_type == SEC_CHAN_DNS_DOMAIN) {
+		if (domain->domain_flags & NETR_TRUST_FLAG_IN_FOREST) {
+			/*
+			 * TODO:
+			 *
+			 * Depending on what we want to resolve. We need to use:
+			 * 1. LsapLookupXForestReferral(5)/LSA_LOOKUP_NAMES_FOREST_TRUSTS_ONLY
+			 *    if we want to pass the request into the direction of the forest
+			 *    root domain. The forest root domain uses
+			 *    LsapLookupXForestResolve(6)/LSA_LOOKUP_NAMES_UPLEVEL_TRUSTS_ONLY2
+			 *    when passing the request to trusted forests.
+			 * 2. LsapLookupGC(4)/LSA_LOOKUP_NAMES_UPLEVEL_TRUSTS_ONLY
+			 *    if we're not a GC and want to resolve a name within our own forest.
+			 *
+			 * As we don't support more than one domain in our own forest
+			 * and always try to be a GC for now, we just set
+			 * LSA_LOOKUP_NAMES_FOREST_TRUSTS_ONLY.
+			 */
+			level = LSA_LOOKUP_NAMES_FOREST_TRUSTS_ONLY;
+		} else if (domain->domain_trust_attribs & LSA_TRUST_ATTRIBUTE_FOREST_TRANSITIVE) {
+			/*
+			 * This is LsapLookupXForestResolve(6)/LSA_LOOKUP_NAMES_UPLEVEL_TRUSTS_ONLY2
+			 */
+			level = LSA_LOOKUP_NAMES_UPLEVEL_TRUSTS_ONLY2;
+		} else {
+			/*
+			 * This is LsapLookupTDL(3)/LSA_LOOKUP_NAMES_PRIMARY_DOMAIN_ONLY
+			 */
+			level = LSA_LOOKUP_NAMES_PRIMARY_DOMAIN_ONLY;
+		}
+	} else if (domain->secure_channel_type == SEC_CHAN_DOMAIN) {
+		/*
+		 * This is LsapLookupTDL(3)/LSA_LOOKUP_NAMES_PRIMARY_DOMAIN_ONLY
+		 */
+		level = LSA_LOOKUP_NAMES_PRIMARY_DOMAIN_ONLY;
+	} else if (domain->rodc) {
+		level = LSA_LOOKUP_NAMES_RODC_REFERRAL_TO_FULL_DC;
+	} else {
+		/*
+		 * This is LsapLookupPDC(2)/LSA_LOOKUP_NAMES_DOMAINS_ONLY
+		 */
+		level = LSA_LOOKUP_NAMES_DOMAINS_ONLY;
+	}
+
+	return level;
+}
+
 NTSTATUS winbindd_lookup_sids(TALLOC_CTX *mem_ctx,
 			      struct winbindd_domain *domain,
 			      uint32_t num_sids,
@@ -1010,6 +1053,7 @@ NTSTATUS winbindd_lookup_sids(TALLOC_CTX *mem_ctx,
 	unsigned int orig_timeout;
 	bool use_lookupsids3 = false;
 	bool retried = false;
+	enum lsa_LookupNamesLevel level = LSA_LOOKUP_NAMES_ALL;
 
  connect:
 	status = cm_connect_lsat(domain, mem_ctx, &cli, &lsa_policy);
@@ -1023,6 +1067,8 @@ NTSTATUS winbindd_lookup_sids(TALLOC_CTX *mem_ctx,
 		use_lookupsids3 = true;
 	}
 
+	level = winbindd_lookup_level(domain);
+
 	/*
 	 * This call can take a long time
 	 * allow the server to time out.
@@ -1035,6 +1081,7 @@ NTSTATUS winbindd_lookup_sids(TALLOC_CTX *mem_ctx,
 						&lsa_policy,
 						num_sids,
 						sids,
+						level,
 						domains,
 						names,
 						types,
@@ -1062,12 +1109,8 @@ NTSTATUS winbindd_lookup_sids(TALLOC_CTX *mem_ctx,
 		status = NT_STATUS_ACCESS_DENIED;
 	}
 
-	if (!NT_STATUS_IS_OK(status)) {
+	if (any_nt_status_not_ok(status, result, &status)) {
 		return status;
-	}
-
-	if (!NT_STATUS_IS_OK(result)) {
-		return result;
 	}
 
 	return NT_STATUS_OK;
@@ -1089,6 +1132,7 @@ static NTSTATUS winbindd_lookup_names(TALLOC_CTX *mem_ctx,
 	unsigned int orig_timeout = 0;
 	bool use_lookupnames4 = false;
 	bool retried = false;
+	enum lsa_LookupNamesLevel level = LSA_LOOKUP_NAMES_ALL;
 
  connect:
 	status = cm_connect_lsat(domain, mem_ctx, &cli, &lsa_policy);
@@ -1101,6 +1145,8 @@ static NTSTATUS winbindd_lookup_names(TALLOC_CTX *mem_ctx,
 	if (cli->transport->transport == NCACN_IP_TCP) {
 		use_lookupnames4 = true;
 	}
+
+	level = winbindd_lookup_level(domain);
 
 	/*
 	 * This call can take a long time
@@ -1115,7 +1161,7 @@ static NTSTATUS winbindd_lookup_names(TALLOC_CTX *mem_ctx,
 						 num_names,
 						 (const char **) names,
 						 domains,
-						 1,
+						 level,
 						 sids,
 						 types,
 						 use_lookupnames4,
@@ -1141,12 +1187,8 @@ static NTSTATUS winbindd_lookup_names(TALLOC_CTX *mem_ctx,
 		status = NT_STATUS_ACCESS_DENIED;
 	}
 
-	if (!NT_STATUS_IS_OK(status)) {
+	if (any_nt_status_not_ok(status, result, &status)) {
 		return status;
-	}
-
-	if (!NT_STATUS_IS_OK(result)) {
-		return result;
 	}
 
 	return NT_STATUS_OK;

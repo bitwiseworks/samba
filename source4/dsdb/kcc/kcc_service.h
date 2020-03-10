@@ -80,6 +80,10 @@ struct kccsrv_service {
 
 	time_t last_deleted_check;
 
+	time_t last_dns_scavenge;
+
+	time_t last_dns_tombstone_collection;
+
 	time_t last_full_scan_deleted_check;
 
 	bool am_rodc;
@@ -91,6 +95,7 @@ struct kccsrv_service {
 struct kcc_connection_list;
 
 #include "dsdb/kcc/garbage_collect_tombstones.h"
+#include "dsdb/kcc/scavenge_dns_records.h"
 #include "dsdb/kcc/kcc_service_proto.h"
 
 #endif /* _DSDB_REPL_KCC_SERVICE_H_ */

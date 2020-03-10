@@ -40,13 +40,6 @@
     </para>
 
     <para>
-      ctdbd_wrapper constructs command-line options for ctdbd from
-      configuration variables specified in
-      <citerefentry><refentrytitle>ctdbd.conf</refentrytitle>
-      <manvolnum>5</manvolnum></citerefentry>.
-    </para>
-
-    <para>
       See <citerefentry><refentrytitle>ctdb</refentrytitle>
       <manvolnum>7</manvolnum></citerefentry> for an overview of CTDB.
     </para>
@@ -58,7 +51,7 @@
       <citerefentry><refentrytitle>ctdbd</refentrytitle>
       <manvolnum>1</manvolnum></citerefentry>,
 
-      <citerefentry><refentrytitle>ctdbd.conf</refentrytitle>
+      <citerefentry><refentrytitle>ctdb.sysconfig</refentrytitle>
       <manvolnum>5</manvolnum></citerefentry>,
 
       <citerefentry><refentrytitle>ctdb</refentrytitle>

@@ -38,7 +38,7 @@
 #include <popt.h>
 #include "lib/util/dlinklist.h"
 #include "dlz_minimal.h"
-#include "dns_server/dnsserver_common.h"
+#include "dnsserver_common.h"
 
 struct b9_options {
 	const char *url;
@@ -614,6 +614,8 @@ _PUBLIC_ isc_result_t dlz_create(const char *dlzname,
 	isc_result_t result;
 	struct ldb_dn *dn;
 	NTSTATUS nt_status;
+	int ret;
+	char *errstring = NULL;
 
 	if (dlz_bind9_state != NULL) {
 		*dbdata = dlz_bind9_state;
@@ -682,18 +684,38 @@ _PUBLIC_ isc_result_t dlz_create(const char *dlzname,
 	}
 
 	if (state->options.url == NULL) {
-		state->options.url = lpcfg_private_path(state, state->lp, "dns/sam.ldb");
+		state->options.url = talloc_asprintf(state,
+						     "%s/dns/sam.ldb",
+						     lpcfg_binddns_dir(state->lp));
 		if (state->options.url == NULL) {
 			result = ISC_R_NOMEMORY;
 			goto failed;
 		}
+
+		if (!file_exist(state->options.url)) {
+			state->options.url = talloc_asprintf(state,
+							     "%s/dns/sam.ldb",
+							     lpcfg_private_dir(state->lp));
+			if (state->options.url == NULL) {
+				result = ISC_R_NOMEMORY;
+				goto failed;
+			}
+		}
 	}
 
-	state->samdb = samdb_connect_url(state, state->ev_ctx, state->lp,
-					system_session(state->lp), 0, state->options.url);
-	if (state->samdb == NULL) {
-		state->log(ISC_LOG_ERROR, "samba_dlz: Failed to connect to %s",
-			state->options.url);
+	ret = samdb_connect_url(state,
+				state->ev_ctx,
+				state->lp,
+				system_session(state->lp),
+				0,
+				state->options.url,
+				NULL,
+				&state->samdb,
+				&errstring);
+	if (ret != LDB_SUCCESS) {
+		state->log(ISC_LOG_ERROR,
+			   "samba_dlz: Failed to connect to %s: %s",
+			   errstring, ldb_strerror(ret));
 		result = ISC_R_FAILURE;
 		goto failed;
 	}
@@ -865,8 +887,8 @@ static isc_result_t dlz_lookup_types(struct dlz_bind9_data *state,
 			return ISC_R_NOMEMORY;
 		}
 
-		werr = dns_common_lookup(state->samdb, tmp_ctx, dn,
-					 &records, &num_records, NULL);
+		werr = dns_common_wildcard_lookup(state->samdb, tmp_ctx, dn,
+					 &records, &num_records);
 		if (W_ERROR_IS_OK(werr)) {
 			break;
 		}
@@ -997,7 +1019,7 @@ _PUBLIC_ isc_result_t dlz_allnodes(const char *zone, void *dbdata,
 			return ISC_R_NOMEMORY;
 		}
 
-		werr = dns_common_extract(el, el_ctx, &recs, &num_recs);
+		werr = dns_common_extract(state->samdb, el, el_ctx, &recs, &num_recs);
 		if (!W_ERROR_IS_OK(werr)) {
 			state->log(ISC_LOG_ERROR, "samba_dlz: failed to parse dnsRecord for %s, %s",
 				   ldb_dn_get_linearized(dn), win_errstr(werr));
@@ -1266,6 +1288,7 @@ _PUBLIC_ isc_boolean_t dlz_ssumatch(const char *signer, const char *name, const 
 	DATA_BLOB ap_req;
 	struct cli_credentials *server_credentials;
 	char *keytab_name;
+	char *keytab_file = NULL;
 	int ret;
 	int ldb_ret;
 	NTSTATUS nt_status;
@@ -1276,6 +1299,9 @@ _PUBLIC_ isc_boolean_t dlz_ssumatch(const char *signer, const char *name, const 
 	struct ldb_result *res;
 	const char * attrs[] = { NULL };
 	uint32_t access_mask;
+	struct gensec_settings *settings = NULL;
+	const struct gensec_security_ops **backends = NULL;
+	size_t idx = 0;
 
 	/* Remove cached credentials, if any */
 	if (state->session_info) {
@@ -1304,8 +1330,33 @@ _PUBLIC_ isc_boolean_t dlz_ssumatch(const char *signer, const char *name, const 
 	cli_credentials_set_krb5_context(server_credentials, state->smb_krb5_ctx);
 	cli_credentials_set_conf(server_credentials, state->lp);
 
-	keytab_name = talloc_asprintf(tmp_ctx, "FILE:%s/dns.keytab",
-					lpcfg_private_dir(state->lp));
+	keytab_file = talloc_asprintf(tmp_ctx,
+				      "%s/dns.keytab",
+				      lpcfg_binddns_dir(state->lp));
+	if (keytab_file == NULL) {
+		state->log(ISC_LOG_ERROR, "samba_dlz: Out of memory!");
+		talloc_free(tmp_ctx);
+		return ISC_FALSE;
+	}
+
+	if (!file_exist(keytab_file)) {
+		keytab_file = talloc_asprintf(tmp_ctx,
+					      "%s/dns.keytab",
+					      lpcfg_private_dir(state->lp));
+		if (keytab_file == NULL) {
+			state->log(ISC_LOG_ERROR, "samba_dlz: Out of memory!");
+			talloc_free(tmp_ctx);
+			return ISC_FALSE;
+		}
+	}
+
+	keytab_name = talloc_asprintf(tmp_ctx, "FILE:%s", keytab_file);
+	if (keytab_name == NULL) {
+		state->log(ISC_LOG_ERROR, "samba_dlz: Out of memory!");
+		talloc_free(tmp_ctx);
+		return ISC_FALSE;
+	}
+
 	ret = cli_credentials_set_keytab_name(server_credentials, state->lp, keytab_name,
 						CRED_SPECIFIED);
 	if (ret != 0) {
@@ -1316,8 +1367,27 @@ _PUBLIC_ isc_boolean_t dlz_ssumatch(const char *signer, const char *name, const 
 	}
 	talloc_free(keytab_name);
 
-	nt_status = gensec_server_start(tmp_ctx,
-					lpcfg_gensec_settings(tmp_ctx, state->lp),
+	settings = lpcfg_gensec_settings(tmp_ctx, state->lp);
+	if (settings == NULL) {
+		state->log(ISC_LOG_ERROR, "samba_dlz: lpcfg_gensec_settings failed");
+		talloc_free(tmp_ctx);
+		return ISC_FALSE;
+	}
+	backends = talloc_zero_array(settings,
+				     const struct gensec_security_ops *, 3);
+	if (backends == NULL) {
+		state->log(ISC_LOG_ERROR, "samba_dlz: talloc_zero_array gensec_security_ops failed");
+		talloc_free(tmp_ctx);
+		return ISC_FALSE;
+	}
+	settings->backends = backends;
+
+	gensec_init();
+
+	backends[idx++] = gensec_security_by_oid(NULL, GENSEC_OID_KERBEROS5);
+	backends[idx++] = gensec_security_by_oid(NULL, GENSEC_OID_SPNEGO);
+
+	nt_status = gensec_server_start(tmp_ctx, settings,
 					state->auth_context, &gensec_ctx);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		state->log(ISC_LOG_ERROR, "samba_dlz: failed to start gensec server");
@@ -1327,14 +1397,26 @@ _PUBLIC_ isc_boolean_t dlz_ssumatch(const char *signer, const char *name, const 
 
 	gensec_set_credentials(gensec_ctx, server_credentials);
 
-	nt_status = gensec_start_mech_by_name(gensec_ctx, "spnego");
+	nt_status = gensec_start_mech_by_oid(gensec_ctx, GENSEC_OID_SPNEGO);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		state->log(ISC_LOG_ERROR, "samba_dlz: failed to start spnego");
 		talloc_free(tmp_ctx);
 		return ISC_FALSE;
 	}
 
-	nt_status = gensec_update_ev(gensec_ctx, tmp_ctx, state->ev_ctx, ap_req, &ap_req);
+	/*
+	 * We only allow SPNEGO/KRB5 and make sure the backend
+	 * to is RPC/IPC free.
+	 *
+	 * See gensec_gssapi_update_internal() as
+	 * GENSEC_SERVER.
+	 *
+	 * It allows gensec_update() not to block.
+	 *
+	 * If that changes in future we need to use
+	 * gensec_update_send/recv here!
+	 */
+	nt_status = gensec_update(gensec_ctx, tmp_ctx, ap_req, &ap_req);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		state->log(ISC_LOG_ERROR, "samba_dlz: spnego update failed");
 		talloc_free(tmp_ctx);
@@ -1398,22 +1480,6 @@ _PUBLIC_ isc_boolean_t dlz_ssumatch(const char *signer, const char *name, const 
 	talloc_free(tmp_ctx);
 	return ISC_TRUE;
 }
-
-/*
-  see if two DNS names are the same
- */
-static bool dns_name_equal(const char *name1, const char *name2)
-{
-	size_t len1 = strlen(name1);
-	size_t len2 = strlen(name2);
-	if (name1[len1-1] == '.') len1--;
-	if (name2[len2-1] == '.') len2--;
-	if (len1 != len2) {
-		return false;
-	}
-	return strncasecmp_m(name1, name2, len1) == 0;
-}
-
 
 /*
   see if two dns records match
@@ -1514,7 +1580,10 @@ static bool b9_set_session_info(struct dlz_bind9_data *state, const char *name)
 		return true;
 	}
 
-	ret = ldb_set_opaque(state->samdb, "sessionInfo", state->session_info);
+	ret = ldb_set_opaque(
+		state->samdb,
+		DSDB_SESSION_INFO,
+		state->session_info);
 	if (ret != LDB_SUCCESS) {
 		state->log(ISC_LOG_ERROR, "samba_dlz: unable to set session info");
 		return false;
@@ -1528,7 +1597,10 @@ static bool b9_set_session_info(struct dlz_bind9_data *state, const char *name)
  */
 static void b9_reset_session_info(struct dlz_bind9_data *state)
 {
-	ldb_set_opaque(state->samdb, "sessionInfo", system_session(state->lp));
+	ldb_set_opaque(
+		state->samdb,
+		DSDB_SESSION_INFO,
+		system_session(state->lp));
 }
 
 /*
@@ -1559,12 +1631,7 @@ _PUBLIC_ isc_result_t dlz_addrdataset(const char *name, const char *rdatastr, vo
 		return ISC_R_NOMEMORY;
 	}
 
-	unix_to_nt_time(&t, time(NULL));
-	t /= 10*1000*1000; /* convert to seconds (NT time is in 100ns units) */
-	t /= 3600;         /* convert to hours */
-
 	rec->rank        = DNS_RANK_ZONE;
-	rec->dwTimeStamp = (uint32_t)t;
 
 	if (!b9_parse(state, rdatastr, rec)) {
 		state->log(ISC_LOG_INFO, "samba_dlz: failed to parse rdataset '%s'", rdatastr);
@@ -1626,6 +1693,15 @@ _PUBLIC_ isc_result_t dlz_addrdataset(const char *name, const char *rdatastr, vo
 			return ISC_R_NOMEMORY;
 		}
 		num_recs++;
+
+		if (dns_name_is_static(recs, num_recs)) {
+			rec->dwTimeStamp = 0;
+		} else {
+			unix_to_nt_time(&t, time(NULL));
+			t /= 10 * 1000 * 1000; /* convert to seconds */
+			t /= 3600;	     /* convert to hours */
+			rec->dwTimeStamp = (uint32_t)t;
+		}
 	}
 
 	recs[i] = *rec;

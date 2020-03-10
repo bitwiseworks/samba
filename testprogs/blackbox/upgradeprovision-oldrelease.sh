@@ -79,10 +79,20 @@ dbcheck_full_clean_well_known_acls() {
 }
 
 upgradeprovision() {
+	# bring the really old Samba schema in line with a more recent 2008R2 schema
 	$PYTHON $BINDIR/samba_upgradeprovision -s "$PREFIX_ABS/${RELEASE}_upgrade/etc/smb.conf" --debugchange
+
+	# on top of this, also apply 2008R2 changes we accidentally missed in the past
+	$BINDIR/samba-tool domain schemaupgrade -H tdb://$PREFIX_ABS/${RELEASE}_upgrade/private/sam.ldb --ldf-file=samba-4.7-missing-for-schema45.ldif,fix-forest-rev.ldf
+
+	# add missing domain prep for 2008R2
+	$BINDIR/samba-tool domain functionalprep -H tdb://$PREFIX_ABS/${RELEASE}_upgrade/private/sam.ldb --domain --function-level 2008_R2
 }
 
 upgradeprovision_full() {
+	# add missing domain prep for 2008R2
+	$BINDIR/samba-tool domain functionalprep -H tdb://$PREFIX_ABS/${RELEASE}_upgrade_full/private/sam.ldb --domain --function-level 2008_R2
+
 	$PYTHON $BINDIR/samba_upgradeprovision -s "$PREFIX_ABS/${RELEASE}_upgrade_full/etc/smb.conf" --full --debugchange
 }
 
@@ -91,12 +101,12 @@ samba_upgradedns() {
 }
 
 referenceprovision() {
-        $PYTHON $BINDIR/samba-tool domain provision --server-role="dc" --domain=SAMBA --host-name=ares --realm=${RELEASE}.samba.corp --targetdir=$PREFIX_ABS/${RELEASE}_upgrade_reference --use-ntvfs --host-ip=127.0.0.1 --host-ip6=::1 --function-level=2003
+        $PYTHON $BINDIR/samba-tool domain provision --server-role="dc" --domain=SAMBA --host-name=ares --realm=${RELEASE}.samba.corp --targetdir=$PREFIX_ABS/${RELEASE}_upgrade_reference --use-ntvfs --host-ip=127.0.0.1 --host-ip6=::1 --function-level=2003 --base-schema=2008_R2_old
 }
 
 ldapcmp() {
     if [ x$RELEASE != x"alpha13" ]; then
-         $PYTHON $BINDIR/samba-tool ldapcmp tdb://$PREFIX_ABS/${RELEASE}_upgrade_reference/private/sam.ldb tdb://$PREFIX_ABS/${RELEASE}_upgrade/private/sam.ldb --two --skip-missing-dn --filter=dnsRecord
+         $PYTHON $BINDIR/samba-tool ldapcmp tdb://$PREFIX_ABS/${RELEASE}_upgrade_reference/private/sam.ldb tdb://$PREFIX_ABS/${RELEASE}_upgrade/private/sam.ldb --two --skip-missing-dn --filter=dnsRecord,displayName
     fi
 }
 

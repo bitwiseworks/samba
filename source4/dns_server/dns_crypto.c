@@ -100,7 +100,6 @@ WERROR dns_verify_tsig(struct dns_server *dns,
 	WERROR werror;
 	NTSTATUS status;
 	enum ndr_err_code ndr_err;
-	bool found_tsig = false;
 	uint16_t i, arcount = 0;
 	DATA_BLOB tsig_blob, fake_tsig_blob, sig;
 	uint8_t *buffer = NULL;
@@ -113,17 +112,17 @@ WERROR dns_verify_tsig(struct dns_server *dns,
 	/* Find the first TSIG record in the additional records */
 	for (i=0; i < packet->arcount; i++) {
 		if (packet->additional[i].rr_type == DNS_QTYPE_TSIG) {
-			found_tsig = true;
 			break;
 		}
 	}
 
-	if (!found_tsig) {
+	if (i == packet->arcount) {
+		/* no TSIG around */
 		return WERR_OK;
 	}
 
 	/* The TSIG record needs to be the last additional record */
-	if (found_tsig && i + 1 != packet->arcount) {
+	if (i + 1 != packet->arcount) {
 		DEBUG(1, ("TSIG record not the last additional record!\n"));
 		return DNS_ERR(FORMAT_ERROR);
 	}

@@ -63,7 +63,7 @@ static bool test_session_reauth1(struct torture_context *tctx,
 	ZERO_STRUCT(io);
 	io.in.sesskey         = cli->transport->negotiate.sesskey;
 	io.in.capabilities    = cli->transport->negotiate.capabilities;
-	io.in.credentials     = cmdline_credentials;
+	io.in.credentials     = popt_get_cmdline_credentials();
 	io.in.workgroup       = lpcfg_workgroup(tctx->lp_ctx);
 	io.in.gensec_settings = lpcfg_gensec_settings(tctx, tctx->lp_ctx);
 	status = smb_composite_sesssetup(cli->session, &io);
@@ -205,7 +205,7 @@ static bool test_session_reauth2(struct torture_context *tctx,
 	ZERO_STRUCT(io_sesssetup);
 	io_sesssetup.in.sesskey      = cli->transport->negotiate.sesskey;
 	io_sesssetup.in.capabilities = cli->transport->negotiate.capabilities;
-	io_sesssetup.in.credentials  = cmdline_credentials;
+	io_sesssetup.in.credentials  = popt_get_cmdline_credentials();
 	io_sesssetup.in.workgroup    = lpcfg_workgroup(tctx->lp_ctx);
 	io_sesssetup.in.gensec_settings = lpcfg_gensec_settings(
 		tctx, tctx->lp_ctx);
@@ -234,7 +234,6 @@ static bool test_session_expire1(struct torture_context *tctx)
 	struct smbcli_session_options session_options;
 	const char *host = torture_setting_string(tctx, "host", NULL);
 	const char *share = torture_setting_string(tctx, "share", NULL);
-	struct cli_credentials *credentials = cmdline_credentials;
 	struct smbcli_state *cli = NULL;
 	enum credentials_use_kerberos use_kerberos;
 	char fname[256];
@@ -244,7 +243,8 @@ static bool test_session_expire1(struct torture_context *tctx)
 	struct smb_composite_sesssetup io_sesssetup;
 	size_t i;
 
-	use_kerberos = cli_credentials_get_kerberos_state(credentials);
+	use_kerberos = cli_credentials_get_kerberos_state(
+				popt_get_cmdline_credentials());
 	if (use_kerberos != CRED_MUST_USE_KERBEROS) {
 		torture_warning(tctx, "smb2.session.expire1 requires -k yes!");
 		torture_skip(tctx, "smb2.session.expire1 requires -k yes!");
@@ -264,7 +264,7 @@ static bool test_session_expire1(struct torture_context *tctx)
 					lpcfg_smb_ports(tctx->lp_ctx),
 					share, NULL,
 					lpcfg_socket_options(tctx->lp_ctx),
-					credentials,
+					popt_get_cmdline_credentials(),
 					lpcfg_resolve_context(tctx->lp_ctx),
 					tctx->ev, &options, &session_options,
 					lpcfg_gensec_settings(tctx, tctx->lp_ctx));
@@ -304,15 +304,16 @@ static bool test_session_expire1(struct torture_context *tctx)
 		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 						"raw_fileinfo failed");
 
-		torture_comment(tctx, "sleep 5 seconds\n");
-		smb_msleep(5*1000);
+		torture_comment(tctx, "sleep 10 seconds\n");
+		smb_msleep(10*1000);
 	}
 
 	/*
 	 * the krb5 library may not handle expired creds
 	 * well, lets start with an empty ccache.
 	 */
-	cli_credentials_invalidate_ccache(credentials, CRED_SPECIFIED);
+	cli_credentials_invalidate_ccache(popt_get_cmdline_credentials(),
+				CRED_SPECIFIED);
 
 	/*
 	 * now with CAP_DYNAMIC_REAUTH
@@ -323,7 +324,7 @@ static bool test_session_expire1(struct torture_context *tctx)
 	io_sesssetup.in.sesskey      = cli->transport->negotiate.sesskey;
 	io_sesssetup.in.capabilities = cli->transport->negotiate.capabilities;
 	io_sesssetup.in.capabilities |= CAP_DYNAMIC_REAUTH;
-	io_sesssetup.in.credentials  = credentials;
+	io_sesssetup.in.credentials  = popt_get_cmdline_credentials();
 	io_sesssetup.in.workgroup    = lpcfg_workgroup(tctx->lp_ctx);
 	io_sesssetup.in.gensec_settings = lpcfg_gensec_settings(tctx,
 							tctx->lp_ctx);
@@ -343,8 +344,8 @@ static bool test_session_expire1(struct torture_context *tctx)
 		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 						"raw_fileinfo failed");
 
-		torture_comment(tctx, "sleep 5 seconds\n");
-		smb_msleep(5*1000);
+		torture_comment(tctx, "sleep 10 seconds\n");
+		smb_msleep(10*1000);
 
 		torture_comment(tctx, "query info => EXPIRED\n");
 		ZERO_STRUCT(qfinfo.access_information.out);
@@ -357,7 +358,8 @@ static bool test_session_expire1(struct torture_context *tctx)
 		 * the krb5 library may not handle expired creds
 		 * well, lets start with an empty ccache.
 		 */
-		cli_credentials_invalidate_ccache(credentials, CRED_SPECIFIED);
+		cli_credentials_invalidate_ccache(
+			popt_get_cmdline_credentials(), CRED_SPECIFIED);
 
 		torture_comment(tctx, "reauth with CAP_DYNAMIC_REAUTH => OK\n");
 		ZERO_STRUCT(io_sesssetup.out);
@@ -378,7 +380,8 @@ static bool test_session_expire1(struct torture_context *tctx)
 	 * the krb5 library may not handle expired creds
 	 * well, lets start with an empty ccache.
 	 */
-	cli_credentials_invalidate_ccache(credentials, CRED_SPECIFIED);
+	cli_credentials_invalidate_ccache(popt_get_cmdline_credentials(),
+				CRED_SPECIFIED);
 
 	/*
 	 * now without CAP_DYNAMIC_REAUTH

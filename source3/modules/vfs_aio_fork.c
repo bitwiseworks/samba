@@ -41,13 +41,16 @@
 #define MAP_FILE 0
 #endif
 
+struct aio_child_list;
+
 struct aio_fork_config {
 	bool erratic_testing_mode;
+	struct aio_child_list *children;
 };
 
 struct mmap_area {
 	size_t size;
-	volatile void *ptr;
+	void *ptr;
 };
 
 static int mmap_area_destructor(struct mmap_area *area)
@@ -148,11 +151,6 @@ struct aio_child_list {
 	struct aio_child *children;
 	struct tevent_timer *cleanup_event;
 };
-
-static void free_aio_children(void **p)
-{
-	TALLOC_FREE(*p);
-}
 
 static ssize_t read_fd(int fd, void *ptr, size_t nbytes, int *recvfd)
 {
@@ -267,19 +265,19 @@ static void aio_child_cleanup(struct tevent_context *event_ctx,
 
 static struct aio_child_list *init_aio_children(struct vfs_handle_struct *handle)
 {
-	struct aio_child_list *data = NULL;
+	struct aio_fork_config *config;
+	struct aio_child_list *children;
 
-	if (SMB_VFS_HANDLE_TEST_DATA(handle)) {
-		SMB_VFS_HANDLE_GET_DATA(handle, data, struct aio_child_list,
-					return NULL);
-	}
+	SMB_VFS_HANDLE_GET_DATA(handle, config, struct aio_fork_config,
+				return NULL);
 
-	if (data == NULL) {
-		data = talloc_zero(NULL, struct aio_child_list);
-		if (data == NULL) {
+	if (config->children == NULL) {
+		config->children = talloc_zero(config, struct aio_child_list);
+		if (config->children == NULL) {
 			return NULL;
 		}
 	}
+	children = config->children;
 
 	/*
 	 * Regardless of whether the child_list had been around or not, make
@@ -287,22 +285,18 @@ static struct aio_child_list *init_aio_children(struct vfs_handle_struct *handle
 	 * delete itself when it finds that no children are around anymore.
 	 */
 
-	if (data->cleanup_event == NULL) {
-		data->cleanup_event = tevent_add_timer(server_event_context(), data,
-						      timeval_current_ofs(30, 0),
-						      aio_child_cleanup, data);
-		if (data->cleanup_event == NULL) {
-			TALLOC_FREE(data);
+	if (children->cleanup_event == NULL) {
+		children->cleanup_event =
+			tevent_add_timer(server_event_context(), children,
+					 timeval_current_ofs(30, 0),
+					 aio_child_cleanup, children);
+		if (children->cleanup_event == NULL) {
+			TALLOC_FREE(config->children);
 			return NULL;
 		}
 	}
 
-	if (!SMB_VFS_HANDLE_TEST_DATA(handle)) {
-		SMB_VFS_HANDLE_SET_DATA(handle, data, free_aio_children,
-					struct aio_child_list, return False);
-	}
-
-	return data;
+	return children;
 }
 
 static void aio_child_loop(int sockfd, struct mmap_area *map)
@@ -337,7 +331,7 @@ static void aio_child_loop(int sockfd, struct mmap_area *map)
 			 * common parent state
 			 */
 			generate_random_buffer(&randval, sizeof(randval));
-			msecs = randval + 20;
+			msecs = (randval%20)+1;
 			DEBUG(10, ("delaying for %u msecs\n", msecs));
 			smb_msleep(msecs);
 		}
@@ -540,6 +534,8 @@ static int get_idle_child(struct vfs_handle_struct *handle,
 
 struct aio_fork_pread_state {
 	struct aio_child *child;
+	size_t n;
+	void *data;
 	ssize_t ret;
 	struct vfs_aio_state vfs_aio_state;
 };
@@ -568,6 +564,8 @@ static struct tevent_req *aio_fork_pread_send(struct vfs_handle_struct *handle,
 	if (req == NULL) {
 		return NULL;
 	}
+	state->n = n;
+	state->data = data;
 
 	if (n > 128*1024) {
 		/* TODO: support variable buffers */
@@ -635,12 +633,20 @@ static void aio_fork_pread_done(struct tevent_req *subreq)
 		return;
 	}
 
-	state->child->busy = false;
-
 	retbuf = (struct rw_ret *)buf;
 	state->ret = retbuf->size;
 	state->vfs_aio_state.error = retbuf->ret_errno;
 	state->vfs_aio_state.duration = retbuf->duration;
+
+	if ((size_t)state->ret > state->n) {
+		tevent_req_error(req, EIO);
+		state->child->busy = false;
+		return;
+	}
+	memcpy(state->data, state->child->map->ptr, state->ret);
+
+	state->child->busy = false;
+
 	tevent_req_done(req);
 }
 
@@ -696,6 +702,8 @@ static struct tevent_req *aio_fork_pwrite_send(
 		tevent_req_error(req, err);
 		return tevent_req_post(req, ev);
 	}
+
+	memcpy(state->child->map->ptr, data, n);
 
 	ZERO_STRUCT(cmd);
 	cmd.n = n;
@@ -919,8 +927,8 @@ static struct vfs_fn_pointers vfs_aio_fork_fns = {
 	.fsync_recv_fn = aio_fork_fsync_recv,
 };
 
-NTSTATUS vfs_aio_fork_init(void);
-NTSTATUS vfs_aio_fork_init(void)
+static_decl_vfs;
+NTSTATUS vfs_aio_fork_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION,
 				"aio_fork", &vfs_aio_fork_fns);

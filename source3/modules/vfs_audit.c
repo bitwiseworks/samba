@@ -33,16 +33,87 @@
 static int audit_syslog_facility(vfs_handle_struct *handle)
 {
 	static const struct enum_list enum_log_facilities[] = {
-		{ LOG_USER, "USER" },
-		{ LOG_LOCAL0, "LOCAL0" },
-		{ LOG_LOCAL1, "LOCAL1" },
-		{ LOG_LOCAL2, "LOCAL2" },
-		{ LOG_LOCAL3, "LOCAL3" },
-		{ LOG_LOCAL4, "LOCAL4" },
-		{ LOG_LOCAL5, "LOCAL5" },
-		{ LOG_LOCAL6, "LOCAL6" },
-		{ LOG_LOCAL7, "LOCAL7" },
-		{ -1, NULL}
+#ifdef LOG_AUTH
+		{ LOG_AUTH,		"AUTH" },
+#endif
+#ifdef LOG_AUTHPRIV
+		{ LOG_AUTHPRIV,		"AUTHPRIV" },
+#endif
+#ifdef LOG_AUDIT
+		{ LOG_AUDIT,		"AUDIT" },
+#endif
+#ifdef LOG_CONSOLE
+		{ LOG_CONSOLE,		"CONSOLE" },
+#endif
+#ifdef LOG_CRON
+		{ LOG_CRON,		"CRON" },
+#endif
+#ifdef LOG_DAEMON
+		{ LOG_DAEMON,		"DAEMON" },
+#endif
+#ifdef LOG_FTP
+		{ LOG_FTP,		"FTP" },
+#endif
+#ifdef LOG_INSTALL
+		{ LOG_INSTALL,		"INSTALL" },
+#endif
+#ifdef LOG_KERN
+		{ LOG_KERN,		"KERN" },
+#endif
+#ifdef LOG_LAUNCHD
+		{ LOG_LAUNCHD,		"LAUNCHD" },
+#endif
+#ifdef LOG_LFMT
+		{ LOG_LFMT,		"LFMT" },
+#endif
+#ifdef LOG_LPR
+		{ LOG_LPR,		"LPR" },
+#endif
+#ifdef LOG_MAIL
+		{ LOG_MAIL,		"MAIL" },
+#endif
+#ifdef LOG_MEGASAFE
+		{ LOG_MEGASAFE,		"MEGASAFE" },
+#endif
+#ifdef LOG_NETINFO
+		{ LOG_NETINFO,		"NETINFO" },
+#endif
+#ifdef LOG_NEWS
+		{ LOG_NEWS,		"NEWS" },
+#endif
+#ifdef LOG_NFACILITIES
+		{ LOG_NFACILITIES,	"NFACILITIES" },
+#endif
+#ifdef LOG_NTP
+		{ LOG_NTP,		"NTP" },
+#endif
+#ifdef LOG_RAS
+		{ LOG_RAS,		"RAS" },
+#endif
+#ifdef LOG_REMOTEAUTH
+		{ LOG_REMOTEAUTH,	"REMOTEAUTH" },
+#endif
+#ifdef LOG_SECURITY
+		{ LOG_SECURITY,		"SECURITY" },
+#endif
+#ifdef LOG_SYSLOG
+		{ LOG_SYSLOG,		"SYSLOG" },
+#endif
+#ifdef LOG_USER
+		{ LOG_USER,		"USER" },
+#endif
+#ifdef LOG_UUCP
+		{ LOG_UUCP,		"UUCP" },
+#endif
+		{ LOG_LOCAL0,		"LOCAL0" },
+		{ LOG_LOCAL1,		"LOCAL1" },
+		{ LOG_LOCAL2,		"LOCAL2" },
+		{ LOG_LOCAL3,		"LOCAL3" },
+		{ LOG_LOCAL4,		"LOCAL4" },
+		{ LOG_LOCAL5,		"LOCAL5" },
+		{ LOG_LOCAL6,		"LOCAL6" },
+		{ LOG_LOCAL7,		"LOCAL7" },
+		{ -1,			NULL }
 	};
 
 	int facility;
@@ -64,7 +135,7 @@ static int audit_syslog_priority(vfs_handle_struct *handle)
 		{ LOG_NOTICE, "NOTICE" },
 		{ LOG_INFO, "INFO" },
 		{ LOG_DEBUG, "DEBUG" },
-		{ -1, NULL}
+		{ -1, NULL }
 	};
 
 	int priority;
@@ -233,22 +304,6 @@ static int audit_chmod(vfs_handle_struct *handle,
 	return result;
 }
 
-static int audit_chmod_acl(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			mode_t mode)
-{
-	int result;
-
-	result = SMB_VFS_NEXT_CHMOD_ACL(handle, smb_fname, mode);
-
-	syslog(audit_syslog_priority(handle), "chmod_acl %s mode 0x%x %s%s\n",
-	       smb_fname->base_name, mode,
-	       (result < 0) ? "failed: " : "",
-	       (result < 0) ? strerror(errno) : "");
-
-	return result;
-}
-
 static int audit_fchmod(vfs_handle_struct *handle, files_struct *fsp, mode_t mode)
 {
 	int result;
@@ -256,20 +311,6 @@ static int audit_fchmod(vfs_handle_struct *handle, files_struct *fsp, mode_t mod
 	result = SMB_VFS_NEXT_FCHMOD(handle, fsp, mode);
 
 	syslog(audit_syslog_priority(handle), "fchmod %s mode 0x%x %s%s\n",
-	       fsp->fsp_name->base_name, mode,
-	       (result < 0) ? "failed: " : "",
-	       (result < 0) ? strerror(errno) : "");
-
-	return result;
-}
-
-static int audit_fchmod_acl(vfs_handle_struct *handle, files_struct *fsp, mode_t mode)
-{
-	int result;
-
-	result = SMB_VFS_NEXT_FCHMOD_ACL(handle, fsp, mode);
-
-	syslog(audit_syslog_priority(handle), "fchmod_acl %s mode 0x%x %s%s\n",
 	       fsp->fsp_name->base_name, mode,
 	       (result < 0) ? "failed: " : "",
 	       (result < 0) ? strerror(errno) : "");
@@ -289,12 +330,10 @@ static struct vfs_fn_pointers vfs_audit_fns = {
 	.unlink_fn = audit_unlink,
 	.chmod_fn = audit_chmod,
 	.fchmod_fn = audit_fchmod,
-	.chmod_acl_fn = audit_chmod_acl,
-	.fchmod_acl_fn = audit_fchmod_acl
 };
 
 static_decl_vfs;
-NTSTATUS vfs_audit_init(void)
+NTSTATUS vfs_audit_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "audit",
 				&vfs_audit_fns);

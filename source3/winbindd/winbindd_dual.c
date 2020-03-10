@@ -40,13 +40,63 @@
 #include "lib/param/loadparm.h"
 #include "lib/util/sys_rw.h"
 #include "lib/util/sys_rw_data.h"
+#include "passdb.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_WINBIND
 
 extern bool override_logfile;
 
-static struct winbindd_child *winbindd_children = NULL;
+static void forall_domain_children(bool (*fn)(struct winbindd_child *c,
+					      void *private_data),
+				   void *private_data)
+{
+	struct winbindd_domain *d;
+
+	for (d = domain_list(); d != NULL; d = d->next) {
+		int i;
+
+		for (i = 0; i < lp_winbind_max_domain_connections(); i++) {
+			struct winbindd_child *c = &d->children[i];
+			bool ok;
+
+			if (c->pid == 0) {
+				continue;
+			}
+
+			ok = fn(c, private_data);
+			if (!ok) {
+				return;
+			}
+		}
+	}
+}
+
+static void forall_children(bool (*fn)(struct winbindd_child *c,
+				       void *private_data),
+			    void *private_data)
+{
+	struct winbindd_child *c;
+	bool ok;
+
+	c = idmap_child();
+	if (c->pid != 0) {
+		ok = fn(c, private_data);
+		if (!ok) {
+			return;
+		}
+	}
+
+	c = locator_child();
+	if (c->pid != 0) {
+		ok = fn(c, private_data);
+		if (!ok) {
+			return;
+		}
+	}
+
+	forall_domain_children(fn, private_data);
+}
 
 /* Read some data from a client connection */
 
@@ -119,6 +169,7 @@ static NTSTATUS child_write_response(int sock, struct winbindd_response *wrsp)
 
 struct wb_child_request_state {
 	struct tevent_context *ev;
+	struct tevent_req *queue_subreq;
 	struct tevent_req *subreq;
 	struct winbindd_child *child;
 	struct winbindd_request *request;
@@ -127,9 +178,9 @@ struct wb_child_request_state {
 
 static bool fork_domain_child(struct winbindd_child *child);
 
-static void wb_child_request_trigger(struct tevent_req *req,
-					    void *private_data);
+static void wb_child_request_waited(struct tevent_req *subreq);
 static void wb_child_request_done(struct tevent_req *subreq);
+static void wb_child_request_orphaned(struct tevent_req *subreq);
 
 static void wb_child_request_cleanup(struct tevent_req *req,
 				     enum tevent_req_state req_state);
@@ -141,6 +192,7 @@ struct tevent_req *wb_child_request_send(TALLOC_CTX *mem_ctx,
 {
 	struct tevent_req *req;
 	struct wb_child_request_state *state;
+	struct tevent_req *subreq;
 
 	req = tevent_req_create(mem_ctx, &state,
 				struct wb_child_request_state);
@@ -152,28 +204,43 @@ struct tevent_req *wb_child_request_send(TALLOC_CTX *mem_ctx,
 	state->child = child;
 	state->request = request;
 
-	if (!tevent_queue_add(child->queue, ev, req,
-			      wb_child_request_trigger, NULL)) {
-		tevent_req_oom(req);
+	subreq = tevent_queue_wait_send(state, ev, child->queue);
+	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
+	tevent_req_set_callback(subreq, wb_child_request_waited, req);
+	state->queue_subreq = subreq;
 
 	tevent_req_set_cleanup_fn(req, wb_child_request_cleanup);
 
 	return req;
 }
 
-static void wb_child_request_trigger(struct tevent_req *req,
-				     void *private_data)
+static void wb_child_request_waited(struct tevent_req *subreq)
 {
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
 	struct wb_child_request_state *state = tevent_req_data(
 		req, struct wb_child_request_state);
-	struct tevent_req *subreq;
+	bool ok;
+
+	ok = tevent_queue_wait_recv(subreq);
+	if (!ok) {
+		tevent_req_oom(req);
+		return;
+	}
+	/*
+	 * We need to keep state->queue_subreq
+	 * in order to block the queue.
+	 */
+	subreq = NULL;
 
 	if ((state->child->sock == -1) && (!fork_domain_child(state->child))) {
 		tevent_req_error(req, errno);
 		return;
 	}
+
+	tevent_fd_set_flags(state->child->monitor_fde, 0);
 
 	subreq = wb_simple_trans_send(state, server_event_context(), NULL,
 				      state->child->sock, state->request);
@@ -206,6 +273,25 @@ static void wb_child_request_done(struct tevent_req *subreq)
 	tevent_req_done(req);
 }
 
+static void wb_child_request_orphaned(struct tevent_req *subreq)
+{
+	struct winbindd_child *child =
+		(struct winbindd_child *)tevent_req_callback_data_void(subreq);
+
+	DBG_WARNING("cleanup orphaned subreq[%p]\n", subreq);
+	TALLOC_FREE(subreq);
+
+	if (child->domain != NULL) {
+		/*
+		 * If the child is attached to a domain,
+		 * we need to make sure the domain queue
+		 * can move forward, after the orphaned
+		 * request is done.
+		 */
+		tevent_queue_start(child->domain->queue);
+	}
+}
+
 int wb_child_request_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
 			  struct winbindd_response **presponse, int *err)
 {
@@ -230,7 +316,42 @@ static void wb_child_request_cleanup(struct tevent_req *req,
 		return;
 	}
 
+	if (req_state == TEVENT_REQ_RECEIVED) {
+		struct tevent_req *subreq = NULL;
+
+		/*
+		 * Our caller gave up, but we need to keep
+		 * the low level request (wb_simple_trans)
+		 * in order to maintain the parent child protocol.
+		 *
+		 * We also need to keep the child queue blocked
+		 * until we got the response from the child.
+		 */
+
+		subreq = talloc_move(state->child->queue, &state->subreq);
+		talloc_move(subreq, &state->queue_subreq);
+		tevent_req_set_callback(subreq,
+					wb_child_request_orphaned,
+					state->child);
+
+		DBG_WARNING("keep orphaned subreq[%p]\n", subreq);
+		return;
+	}
+
 	TALLOC_FREE(state->subreq);
+	TALLOC_FREE(state->queue_subreq);
+
+	tevent_fd_set_flags(state->child->monitor_fde, TEVENT_FD_READ);
+
+	if (state->child->domain != NULL) {
+		/*
+		 * If the child is attached to a domain,
+		 * we need to make sure the domain queue
+		 * can move forward, after the request
+		 * is done.
+		 */
+		tevent_queue_start(state->child->domain->queue);
+	}
 
 	if (req_state == TEVENT_REQ_DONE) {
 		/* transmitted request and got response */
@@ -243,57 +364,99 @@ static void wb_child_request_cleanup(struct tevent_req *req,
 	 * The basic parent/child communication broke, close
 	 * our socket
 	 */
+	TALLOC_FREE(state->child->monitor_fde);
 	close(state->child->sock);
 	state->child->sock = -1;
-	DLIST_REMOVE(winbindd_children, state->child);
 }
 
-static bool winbindd_child_busy(struct winbindd_child *child)
+static void child_socket_readable(struct tevent_context *ev,
+				  struct tevent_fd *fde,
+				  uint16_t flags,
+				  void *private_data)
 {
-	return tevent_queue_length(child->queue) > 0;
+	struct winbindd_child *child = private_data;
+
+	if ((flags & TEVENT_FD_READ) == 0) {
+		return;
+	}
+
+	TALLOC_FREE(child->monitor_fde);
+
+	/*
+	 * We're only active when there is no outstanding child
+	 * request. Arriving here means the child closed its socket,
+	 * it died. Do the same here.
+	 */
+
+	SMB_ASSERT(child->sock != -1);
+
+	close(child->sock);
+	child->sock = -1;
 }
 
-static struct winbindd_child *find_idle_child(struct winbindd_domain *domain)
+static struct winbindd_child *choose_domain_child(struct winbindd_domain *domain)
 {
+	struct winbindd_child *shortest = &domain->children[0];
+	struct winbindd_child *current;
 	int i;
 
 	for (i=0; i<lp_winbind_max_domain_connections(); i++) {
-		if (!winbindd_child_busy(&domain->children[i])) {
-			return &domain->children[i];
+		size_t shortest_len, current_len;
+
+		current = &domain->children[i];
+		current_len = tevent_queue_length(current->queue);
+
+		if (current_len == 0) {
+			/* idle child */
+			return current;
+		}
+
+		shortest_len = tevent_queue_length(shortest->queue);
+
+		if (current_len < shortest_len) {
+			shortest = current;
 		}
 	}
 
-	return NULL;
-}
-
-struct winbindd_child *choose_domain_child(struct winbindd_domain *domain)
-{
-	struct winbindd_child *result;
-
-	result = find_idle_child(domain);
-	if (result != NULL) {
-		return result;
-	}
-	return &domain->children[rand() % lp_winbind_max_domain_connections()];
+	return shortest;
 }
 
 struct dcerpc_binding_handle *dom_child_handle(struct winbindd_domain *domain)
 {
-	struct winbindd_child *child;
-
-	child = choose_domain_child(domain);
-	return child->binding_handle;
+	return domain->binding_handle;
 }
 
 struct wb_domain_request_state {
 	struct tevent_context *ev;
+	struct tevent_queue_entry *queue_entry;
 	struct winbindd_domain *domain;
 	struct winbindd_child *child;
 	struct winbindd_request *request;
 	struct winbindd_request *init_req;
 	struct winbindd_response *response;
+	struct tevent_req *pending_subreq;
 };
 
+static void wb_domain_request_cleanup(struct tevent_req *req,
+				      enum tevent_req_state req_state)
+{
+	struct wb_domain_request_state *state = tevent_req_data(
+		req, struct wb_domain_request_state);
+
+	/*
+	 * If we're completely done or got a failure.
+	 * we should remove ourself from the domain queue,
+	 * after removing the child subreq from the child queue
+	 * and give the next one in the queue the chance
+	 * to check for an idle child.
+	 */
+	TALLOC_FREE(state->pending_subreq);
+	TALLOC_FREE(state->queue_entry);
+	tevent_queue_start(state->domain->queue);
+}
+
+static void wb_domain_request_trigger(struct tevent_req *req,
+				      void *private_data);
 static void wb_domain_request_gotdc(struct tevent_req *subreq);
 static void wb_domain_request_initialized(struct tevent_req *subreq);
 static void wb_domain_request_done(struct tevent_req *subreq);
@@ -303,7 +466,7 @@ struct tevent_req *wb_domain_request_send(TALLOC_CTX *mem_ctx,
 					  struct winbindd_domain *domain,
 					  struct winbindd_request *request)
 {
-	struct tevent_req *req, *subreq;
+	struct tevent_req *req;
 	struct wb_domain_request_state *state;
 
 	req = tevent_req_create(mem_ctx, &state,
@@ -312,25 +475,70 @@ struct tevent_req *wb_domain_request_send(TALLOC_CTX *mem_ctx,
 		return NULL;
 	}
 
-	state->child = choose_domain_child(domain);
-
-	if (domain->initialized) {
-		subreq = wb_child_request_send(state, ev, state->child,
-					       request);
-		if (tevent_req_nomem(subreq, req)) {
-			return tevent_req_post(req, ev);
-		}
-		tevent_req_set_callback(subreq, wb_domain_request_done, req);
-		return req;
-	}
-
 	state->domain = domain;
 	state->ev = ev;
 	state->request = request;
 
+	tevent_req_set_cleanup_fn(req, wb_domain_request_cleanup);
+
+	state->queue_entry = tevent_queue_add_entry(
+			domain->queue, state->ev, req,
+			wb_domain_request_trigger, NULL);
+	if (tevent_req_nomem(state->queue_entry, req)) {
+		return tevent_req_post(req, ev);
+	}
+
+	return req;
+}
+
+static void wb_domain_request_trigger(struct tevent_req *req,
+				      void *private_data)
+{
+	struct wb_domain_request_state *state = tevent_req_data(
+		req, struct wb_domain_request_state);
+	struct winbindd_domain *domain = state->domain;
+	struct tevent_req *subreq = NULL;
+	size_t shortest_queue_length;
+
+	state->child = choose_domain_child(domain);
+	shortest_queue_length = tevent_queue_length(state->child->queue);
+	if (shortest_queue_length > 0) {
+		/*
+		 * All children are busy, we need to stop
+		 * the queue and untrigger our own queue
+		 * entry. Once a pending request
+		 * is done it calls tevent_queue_start
+		 * and we get retriggered.
+		 */
+		state->child = NULL;
+		tevent_queue_stop(state->domain->queue);
+		tevent_queue_entry_untrigger(state->queue_entry);
+		return;
+	}
+
+	if (domain->initialized) {
+		subreq = wb_child_request_send(state, state->ev, state->child,
+					       state->request);
+		if (tevent_req_nomem(subreq, req)) {
+			return;
+		}
+		tevent_req_set_callback(subreq, wb_domain_request_done, req);
+		state->pending_subreq = subreq;
+
+		/*
+		 * Once the domain is initialized and
+		 * once we placed our real request into the child queue,
+		 * we can remove ourself from the domain queue
+		 * and give the next one in the queue the chance
+		 * to check for an idle child.
+		 */
+		TALLOC_FREE(state->queue_entry);
+		return;
+	}
+
 	state->init_req = talloc_zero(state, struct winbindd_request);
 	if (tevent_req_nomem(state->init_req, req)) {
-		return tevent_req_post(req, ev);
+		return;
 	}
 
 	if (IS_DC || domain->primary || domain->internal) {
@@ -340,33 +548,36 @@ struct tevent_req *wb_domain_request_send(TALLOC_CTX *mem_ctx,
 		state->init_req->data.init_conn.is_primary = domain->primary;
 		fstrcpy(state->init_req->data.init_conn.dcname, "");
 
-		subreq = wb_child_request_send(state, ev, state->child,
+		subreq = wb_child_request_send(state, state->ev, state->child,
 					       state->init_req);
 		if (tevent_req_nomem(subreq, req)) {
-			return tevent_req_post(req, ev);
+			return;
 		}
 		tevent_req_set_callback(subreq, wb_domain_request_initialized,
 					req);
-		return req;
+		state->pending_subreq = subreq;
+		return;
 	}
 
 	/*
-	 * Ask our DC for a DC name
+	 * This is *not* the primary domain,
+	 * let's ask our DC about a DC name.
+	 *
+	 * We prefer getting a dns name in dc_unc,
+	 * which is indicated by DS_RETURN_DNS_NAME.
+	 * For NT4 domains we still get the netbios name.
 	 */
-	domain = find_our_domain();
-
-	/* This is *not* the primary domain, let's ask our DC about a DC
-	 * name */
-
-	state->init_req->cmd = WINBINDD_GETDCNAME;
-	fstrcpy(state->init_req->domain_name, domain->name);
-
-	subreq = wb_child_request_send(state, ev, state->child, request);
+	subreq = wb_dsgetdcname_send(state, state->ev,
+				     state->domain->name,
+				     NULL, /* domain_guid */
+				     NULL, /* site_name */
+				     DS_RETURN_DNS_NAME); /* flags */
 	if (tevent_req_nomem(subreq, req)) {
-		return tevent_req_post(req, ev);
+		return;
 	}
 	tevent_req_set_callback(subreq, wb_domain_request_gotdc, req);
-	return req;
+	state->pending_subreq = subreq;
+	return;
 }
 
 static void wb_domain_request_gotdc(struct tevent_req *subreq)
@@ -375,22 +586,28 @@ static void wb_domain_request_gotdc(struct tevent_req *subreq)
 		subreq, struct tevent_req);
 	struct wb_domain_request_state *state = tevent_req_data(
 		req, struct wb_domain_request_state);
-	struct winbindd_response *response;
-	int ret, err;
+	struct netr_DsRGetDCNameInfo *dcinfo = NULL;
+	NTSTATUS status;
+	const char *dcname = NULL;
 
-	ret = wb_child_request_recv(subreq, talloc_tos(), &response, &err);
+	state->pending_subreq = NULL;
+
+	status = wb_dsgetdcname_recv(subreq, state, &dcinfo);
 	TALLOC_FREE(subreq);
-	if (ret == -1) {
-		tevent_req_error(req, err);
+	if (tevent_req_nterror(req, status)) {
 		return;
+	}
+	dcname = dcinfo->dc_unc;
+	while (dcname != NULL && *dcname == '\\') {
+		dcname++;
 	}
 	state->init_req->cmd = WINBINDD_INIT_CONNECTION;
 	fstrcpy(state->init_req->domain_name, state->domain->name);
 	state->init_req->data.init_conn.is_primary = False;
 	fstrcpy(state->init_req->data.init_conn.dcname,
-		response->data.dc_name);
+		dcname);
 
-	TALLOC_FREE(response);
+	TALLOC_FREE(dcinfo);
 
 	subreq = wb_child_request_send(state, state->ev, state->child,
 				       state->init_req);
@@ -398,6 +615,7 @@ static void wb_domain_request_gotdc(struct tevent_req *subreq)
 		return;
 	}
 	tevent_req_set_callback(subreq, wb_domain_request_initialized, req);
+	state->pending_subreq = subreq;
 }
 
 static void wb_domain_request_initialized(struct tevent_req *subreq)
@@ -408,6 +626,8 @@ static void wb_domain_request_initialized(struct tevent_req *subreq)
 		req, struct wb_domain_request_state);
 	struct winbindd_response *response;
 	int ret, err;
+
+	state->pending_subreq = NULL;
 
 	ret = wb_child_request_recv(subreq, talloc_tos(), &response, &err);
 	TALLOC_FREE(subreq);
@@ -456,6 +676,16 @@ static void wb_domain_request_initialized(struct tevent_req *subreq)
 		return;
 	}
 	tevent_req_set_callback(subreq, wb_domain_request_done, req);
+	state->pending_subreq = subreq;
+
+	/*
+	 * Once the domain is initialized and
+	 * once we placed our real request into the child queue,
+	 * we can remove ourself from the domain queue
+	 * and give the next one in the queue the chance
+	 * to check for an idle child.
+	 */
+	TALLOC_FREE(state->queue_entry);
 }
 
 static void wb_domain_request_done(struct tevent_req *subreq)
@@ -465,6 +695,8 @@ static void wb_domain_request_done(struct tevent_req *subreq)
 	struct wb_domain_request_state *state = tevent_req_data(
 		req, struct wb_domain_request_state);
 	int ret, err;
+
+	state->pending_subreq = NULL;
 
 	ret = wb_child_request_recv(subreq, talloc_tos(), &state->response,
 				    &err);
@@ -556,39 +788,47 @@ void setup_child(struct winbindd_domain *domain, struct winbindd_child *child,
 			  "logname == NULL");
 	}
 
+	child->pid = 0;
 	child->sock = -1;
 	child->domain = domain;
 	child->table = table;
 	child->queue = tevent_queue_create(NULL, "winbind_child");
 	SMB_ASSERT(child->queue != NULL);
-	child->binding_handle = wbint_binding_handle(NULL, domain, child);
-	SMB_ASSERT(child->binding_handle != NULL);
+	if (domain == NULL) {
+		child->binding_handle = wbint_binding_handle(NULL, NULL, child);
+		SMB_ASSERT(child->binding_handle != NULL);
+	}
+}
+
+struct winbind_child_died_state {
+	pid_t pid;
+	struct winbindd_child *child;
+};
+
+static bool winbind_child_died_fn(struct winbindd_child *child,
+				  void *private_data)
+{
+	struct winbind_child_died_state *state = private_data;
+
+	if (child->pid == state->pid) {
+		state->child = child;
+		return false;
+	}
+	return true;
 }
 
 void winbind_child_died(pid_t pid)
 {
-	struct winbindd_child *child;
+	struct winbind_child_died_state state = { .pid = pid };
 
-	for (child = winbindd_children; child != NULL; child = child->next) {
-		if (child->pid == pid) {
-			break;
-		}
-	}
+	forall_children(winbind_child_died_fn, &state);
 
-	if (child == NULL) {
+	if (state.child == NULL) {
 		DEBUG(5, ("Already reaped child %u died\n", (unsigned int)pid));
 		return;
 	}
 
-	/* This will be re-added in fork_domain_child() */
-
-	DLIST_REMOVE(winbindd_children, child);
-	child->pid = 0;
-
-	if (child->sock != -1) {
-		close(child->sock);
-		child->sock = -1;
-	}
+	state.child->pid = 0;
 }
 
 /* Ensure any negative cache entries with the netbios or realm names are removed. */
@@ -607,31 +847,89 @@ void winbindd_flush_negative_conn_cache(struct winbindd_domain *domain)
  * level to that of parents.
  */
 
+struct winbind_msg_relay_state {
+	struct messaging_context *msg_ctx;
+	uint32_t msg_type;
+	DATA_BLOB *data;
+};
+
+static bool winbind_msg_relay_fn(struct winbindd_child *child,
+				 void *private_data)
+{
+	struct winbind_msg_relay_state *state = private_data;
+
+	DBG_DEBUG("sending message to pid %u.\n",
+		  (unsigned int)child->pid);
+
+	messaging_send(state->msg_ctx, pid_to_procid(child->pid),
+		       state->msg_type, state->data);
+	return true;
+}
+
 void winbind_msg_debug(struct messaging_context *msg_ctx,
  			 void *private_data,
 			 uint32_t msg_type,
 			 struct server_id server_id,
 			 DATA_BLOB *data)
 {
-	struct winbindd_child *child;
+	struct winbind_msg_relay_state state = {
+		.msg_ctx = msg_ctx, .msg_type = msg_type, .data = data
+	};
 
 	DEBUG(10,("winbind_msg_debug: got debug message.\n"));
 
 	debug_message(msg_ctx, private_data, MSG_DEBUG, server_id, data);
 
-	for (child = winbindd_children; child != NULL; child = child->next) {
+	forall_children(winbind_msg_relay_fn, &state);
+}
 
-		DEBUG(10,("winbind_msg_debug: sending message to pid %u.\n",
-			(unsigned int)child->pid));
+void winbind_disconnect_dc_parent(struct messaging_context *msg_ctx,
+				  void *private_data,
+				  uint32_t msg_type,
+				  struct server_id server_id,
+				  DATA_BLOB *data)
+{
+	struct winbind_msg_relay_state state = {
+		.msg_ctx = msg_ctx, .msg_type = msg_type, .data = data
+	};
 
-		messaging_send_buf(msg_ctx, pid_to_procid(child->pid),
-			   MSG_DEBUG,
-			   data->data,
-			   strlen((char *) data->data) + 1);
-	}
+	DBG_DEBUG("Got disconnect_dc message\n");
+
+	forall_children(winbind_msg_relay_fn, &state);
 }
 
 /* Set our domains as offline and forward the offline message to our children. */
+
+struct winbind_msg_on_offline_state {
+	struct messaging_context *msg_ctx;
+	uint32_t msg_type;
+};
+
+static bool winbind_msg_on_offline_fn(struct winbindd_child *child,
+				      void *private_data)
+{
+	struct winbind_msg_on_offline_state *state = private_data;
+
+	if (child->domain->internal) {
+		return true;
+	}
+
+	/*
+	 * Each winbindd child should only process requests for one
+	 * domain - make sure we only set it online / offline for that
+	 * domain.
+	 */
+	DBG_DEBUG("sending message to pid %u for domain %s.\n",
+		  (unsigned int)child->pid, child->domain->name);
+
+	messaging_send_buf(state->msg_ctx,
+			   pid_to_procid(child->pid),
+			   state->msg_type,
+			   (const uint8_t *)child->domain->name,
+			   strlen(child->domain->name)+1);
+
+	return true;
+}
 
 void winbind_msg_offline(struct messaging_context *msg_ctx,
 			 void *private_data,
@@ -639,7 +937,10 @@ void winbind_msg_offline(struct messaging_context *msg_ctx,
 			 struct server_id server_id,
 			 DATA_BLOB *data)
 {
-	struct winbindd_child *child;
+	struct winbind_msg_on_offline_state state = {
+		.msg_ctx = msg_ctx,
+		.msg_type = MSG_WINBIND_OFFLINE,
+	};
 	struct winbindd_domain *domain;
 
 	DEBUG(10,("winbind_msg_offline: got offline message.\n"));
@@ -664,29 +965,7 @@ void winbind_msg_offline(struct messaging_context *msg_ctx,
 		set_domain_offline(domain);
 	}
 
-	for (child = winbindd_children; child != NULL; child = child->next) {
-		/* Don't send message to internal children.  We've already
-		   done so above. */
-		if (!child->domain || winbindd_internal_child(child)) {
-			continue;
-		}
-
-		/* Or internal domains (this should not be possible....) */
-		if (child->domain->internal) {
-			continue;
-		}
-
-		/* Each winbindd child should only process requests for one domain - make sure
-		   we only set it online / offline for that domain. */
-
-		DEBUG(10,("winbind_msg_offline: sending message to pid %u for domain %s.\n",
-			(unsigned int)child->pid, child->domain->name ));
-
-		messaging_send_buf(msg_ctx, pid_to_procid(child->pid),
-				   MSG_WINBIND_OFFLINE,
-				   (const uint8_t *)child->domain->name,
-				   strlen(child->domain->name)+1);
-	}
+	forall_domain_children(winbind_msg_on_offline_fn, &state);
 }
 
 /* Set our domains as online and forward the online message to our children. */
@@ -697,7 +976,10 @@ void winbind_msg_online(struct messaging_context *msg_ctx,
 			struct server_id server_id,
 			DATA_BLOB *data)
 {
-	struct winbindd_child *child;
+	struct winbind_msg_on_offline_state state = {
+		.msg_ctx = msg_ctx,
+		.msg_type = MSG_WINBIND_ONLINE,
+	};
 	struct winbindd_domain *domain;
 
 	DEBUG(10,("winbind_msg_online: got online message.\n"));
@@ -739,28 +1021,7 @@ void winbind_msg_online(struct messaging_context *msg_ctx,
 		}
 	}
 
-	for (child = winbindd_children; child != NULL; child = child->next) {
-		/* Don't send message to internal childs. */
-		if (!child->domain || winbindd_internal_child(child)) {
-			continue;
-		}
-
-		/* Or internal domains (this should not be possible....) */
-		if (child->domain->internal) {
-			continue;
-		}
-
-		/* Each winbindd child should only process requests for one domain - make sure
-		   we only set it online / offline for that domain. */
-
-		DEBUG(10,("winbind_msg_online: sending message to pid %u for domain %s.\n",
-			(unsigned int)child->pid, child->domain->name ));
-
-		messaging_send_buf(msg_ctx, pid_to_procid(child->pid),
-				   MSG_WINBIND_ONLINE,
-				   (const uint8_t *)child->domain->name,
-				   strlen(child->domain->name)+1);
-	}
+	forall_domain_children(winbind_msg_on_offline_fn, &state);
 }
 
 static const char *collect_onlinestatus(TALLOC_CTX *mem_ctx)
@@ -798,15 +1059,8 @@ void winbind_msg_onlinestatus(struct messaging_context *msg_ctx,
 {
 	TALLOC_CTX *mem_ctx;
 	const char *message;
-	struct server_id *sender;
 
 	DEBUG(5,("winbind_msg_onlinestatus received.\n"));
-
-	if (!data->data) {
-		return;
-	}
-
-	sender = (struct server_id *)data->data;
 
 	mem_ctx = talloc_init("winbind_msg_onlinestatus");
 	if (mem_ctx == NULL) {
@@ -819,34 +1073,10 @@ void winbind_msg_onlinestatus(struct messaging_context *msg_ctx,
 		return;
 	}
 
-	messaging_send_buf(msg_ctx, *sender, MSG_WINBIND_ONLINESTATUS, 
+	messaging_send_buf(msg_ctx, server_id, MSG_WINBIND_ONLINESTATUS,
 			   (const uint8_t *)message, strlen(message) + 1);
 
 	talloc_destroy(mem_ctx);
-}
-
-void winbind_msg_dump_event_list(struct messaging_context *msg_ctx,
-				 void *private_data,
-				 uint32_t msg_type,
-				 struct server_id server_id,
-				 DATA_BLOB *data)
-{
-	struct winbindd_child *child;
-
-	DEBUG(10,("winbind_msg_dump_event_list received\n"));
-
-	DBG_WARNING("dump event list no longer implemented\n");
-
-	for (child = winbindd_children; child != NULL; child = child->next) {
-
-		DEBUG(10,("winbind_msg_dump_event_list: sending message to pid %u\n",
-			(unsigned int)child->pid));
-
-		messaging_send_buf(msg_ctx, pid_to_procid(child->pid),
-				   MSG_DUMP_EVENT_LIST,
-				   NULL, 0);
-	}
-
 }
 
 void winbind_msg_dump_domain_list(struct messaging_context *msg_ctx,
@@ -857,7 +1087,6 @@ void winbind_msg_dump_domain_list(struct messaging_context *msg_ctx,
 {
 	TALLOC_CTX *mem_ctx;
 	const char *message = NULL;
-	struct server_id *sender = NULL;
 	const char *domain = NULL;
 	char *s = NULL;
 	NTSTATUS status;
@@ -865,22 +1094,13 @@ void winbind_msg_dump_domain_list(struct messaging_context *msg_ctx,
 
 	DEBUG(5,("winbind_msg_dump_domain_list received.\n"));
 
-	if (!data || !data->data) {
-		return;
-	}
-
-	if (data->length < sizeof(struct server_id)) {
-		return;
-	}
-
 	mem_ctx = talloc_init("winbind_msg_dump_domain_list");
 	if (!mem_ctx) {
 		return;
 	}
 
-	sender = (struct server_id *)data->data;
-	if (data->length > sizeof(struct server_id)) {
-		domain = (const char *)data->data+sizeof(struct server_id);
+	if (data->length > 0) {
+		domain = (const char *)data->data;
 	}
 
 	if (domain) {
@@ -895,7 +1115,7 @@ void winbind_msg_dump_domain_list(struct messaging_context *msg_ctx,
 			return;
 		}
 
-		messaging_send_buf(msg_ctx, *sender,
+		messaging_send_buf(msg_ctx, server_id,
 				   MSG_WINBIND_DUMP_DOMAIN_LIST,
 				   (const uint8_t *)message, strlen(message) + 1);
 
@@ -920,7 +1140,7 @@ void winbind_msg_dump_domain_list(struct messaging_context *msg_ctx,
 		}
 	}
 
-	status = messaging_send_buf(msg_ctx, *sender,
+	status = messaging_send_buf(msg_ctx, server_id,
 				    MSG_WINBIND_DUMP_DOMAIN_LIST,
 				    (uint8_t *)s, strlen(s) + 1);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -1055,6 +1275,7 @@ static void machine_password_change_handler(struct tevent_context *ctx,
 	struct winbindd_child *child =
 		(struct winbindd_child *)private_data;
 	struct rpc_pipe_client *netlogon_pipe = NULL;
+	struct netlogon_creds_cli_context *netlogon_creds_ctx = NULL;
 	NTSTATUS result;
 	struct timeval next_change;
 
@@ -1083,7 +1304,9 @@ static void machine_password_change_handler(struct tevent_context *ctx,
 		return;
 	}
 
-	result = cm_connect_netlogon(child->domain, &netlogon_pipe);
+	result = cm_connect_netlogon_secure(child->domain,
+					    &netlogon_pipe,
+					    &netlogon_creds_ctx);
 	if (!NT_STATUS_IS_OK(result)) {
 		DEBUG(10,("machine_password_change_handler: "
 			"failed to connect netlogon pipe: %s\n",
@@ -1091,7 +1314,7 @@ static void machine_password_change_handler(struct tevent_context *ctx,
 		return;
 	}
 
-	result = trust_pw_change(child->domain->conn.netlogon_creds,
+	result = trust_pw_change(netlogon_creds_ctx,
 				 msg_ctx,
 				 netlogon_pipe->binding_handle,
 				 child->domain->name,
@@ -1232,21 +1455,45 @@ static void child_msg_online(struct messaging_context *msg,
 	}
 }
 
-static void child_msg_dump_event_list(struct messaging_context *msg,
-				      void *private_data,
-				      uint32_t msg_type,
-				      struct server_id server_id,
-				      DATA_BLOB *data)
+struct winbindd_reinit_after_fork_state {
+	const struct winbindd_child *myself;
+};
+
+static bool winbindd_reinit_after_fork_fn(struct winbindd_child *child,
+					  void *private_data)
 {
-	DEBUG(5,("child_msg_dump_event_list received\n"));
-	DBG_WARNING("dump_event_list no longer implemented\n");
+	struct winbindd_reinit_after_fork_state *state = private_data;
+
+	if (child == state->myself) {
+		return true;
+	}
+
+	/* Destroy all possible events in child list. */
+	TALLOC_FREE(child->lockout_policy_event);
+	TALLOC_FREE(child->machine_password_change_event);
+
+	/*
+	 * Children should never be able to send each other messages,
+	 * all messages must go through the parent.
+	 */
+	child->pid = (pid_t)0;
+
+	/*
+	 * Close service sockets to all other children
+	 */
+	if (child->sock != -1) {
+		close(child->sock);
+		child->sock = -1;
+	}
+
+	return true;
 }
 
 NTSTATUS winbindd_reinit_after_fork(const struct winbindd_child *myself,
 				    const char *logfilename)
 {
+	struct winbindd_reinit_after_fork_state state = { .myself = myself };
 	struct winbindd_domain *domain;
-	struct winbindd_child *cl;
 	NTSTATUS status;
 
 	status = reinit_after_fork(
@@ -1257,6 +1504,7 @@ NTSTATUS winbindd_reinit_after_fork(const struct winbindd_child *myself,
 		DEBUG(0,("reinit_after_fork() failed\n"));
 		return status;
 	}
+	initialize_password_db(true, server_event_context());
 
 	close_conns_after_fork();
 
@@ -1286,8 +1534,6 @@ NTSTATUS winbindd_reinit_after_fork(const struct winbindd_child *myself,
 	messaging_deregister(server_messaging_context(),
 			     MSG_WINBIND_ONLINESTATUS, NULL);
 	messaging_deregister(server_messaging_context(),
-			     MSG_DUMP_EVENT_LIST, NULL);
-	messaging_deregister(server_messaging_context(),
 			     MSG_WINBIND_DUMP_DOMAIN_LIST, NULL);
 	messaging_deregister(server_messaging_context(),
 			     MSG_DEBUG, NULL);
@@ -1312,43 +1558,7 @@ NTSTATUS winbindd_reinit_after_fork(const struct winbindd_child *myself,
 
 	ccache_remove_all_after_fork();
 
-	/* Destroy all possible events in child list. */
-	for (cl = winbindd_children; cl != NULL; cl = cl->next) {
-		TALLOC_FREE(cl->lockout_policy_event);
-		TALLOC_FREE(cl->machine_password_change_event);
-
-		/* Children should never be able to send
-		 * each other messages, all messages must
-		 * go through the parent.
-		 */
-		cl->pid = (pid_t)0;
-
-		/*
-		 * Close service sockets to all other children
-		 */
-		if ((cl != myself) && (cl->sock != -1)) {
-			close(cl->sock);
-			cl->sock = -1;
-		}
-        }
-	/*
-	 * This is a little tricky, children must not
-	 * send an MSG_WINBIND_ONLINE message to idmap_child().
-	 * If we are in a child of our primary domain or
-	 * in the process created by fork_child_dc_connect(),
-	 * and the primary domain cannot go online,
-	 * fork_child_dc_connection() sends MSG_WINBIND_ONLINE
-	 * periodically to idmap_child().
-	 *
-	 * The sequence is, fork_child_dc_connect() ---> getdcs() --->
-	 * get_dc_name_via_netlogon() ---> cm_connect_netlogon()
-	 * ---> init_dc_connection() ---> cm_open_connection --->
-	 * set_domain_online(), sends MSG_WINBIND_ONLINE to
-	 * idmap_child(). Disallow children sending messages
-	 * to each other, all messages must go through the parent.
-	 */
-	cl = idmap_child();
-	cl->pid = (pid_t)0;
+	forall_children(winbindd_reinit_after_fork_fn, &state);
 
 	return NT_STATUS_OK;
 }
@@ -1462,8 +1672,18 @@ static bool fork_domain_child(struct winbindd_child *child)
 			return false;
 		}
 
-		child->next = child->prev = NULL;
-		DLIST_ADD(winbindd_children, child);
+		child->monitor_fde = tevent_add_fd(server_event_context(),
+						   server_event_context(),
+						   fdpair[1],
+						   TEVENT_FD_READ,
+						   child_socket_readable,
+						   child);
+		if (child->monitor_fde == NULL) {
+			DBG_WARNING("tevent_add_fd failed\n");
+			close(fdpair[1]);
+			return false;
+		}
+
 		child->sock = fdpair[1];
 		return True;
 	}
@@ -1491,19 +1711,25 @@ static bool fork_domain_child(struct winbindd_child *child)
 		_exit(0);
 	}
 
+	if (child_domain != NULL) {
+		setproctitle("domain child [%s]", child_domain->name);
+	} else if (child == idmap_child()) {
+		setproctitle("idmap child");
+	}
+
 	/* Handle online/offline messages. */
 	messaging_register(server_messaging_context(), NULL,
 			   MSG_WINBIND_OFFLINE, child_msg_offline);
 	messaging_register(server_messaging_context(), NULL,
 			   MSG_WINBIND_ONLINE, child_msg_online);
 	messaging_register(server_messaging_context(), NULL,
-			   MSG_DUMP_EVENT_LIST, child_msg_dump_event_list);
-	messaging_register(server_messaging_context(), NULL,
 			   MSG_DEBUG, debug_message);
 	messaging_register(server_messaging_context(), NULL,
 			   MSG_WINBIND_IP_DROPPED,
 			   winbind_msg_ip_dropped);
-
+	messaging_register(server_messaging_context(), NULL,
+			   MSG_WINBIND_DISCONNECT_DC,
+			   winbind_msg_disconnect_dc);
 
 	primary_domain = find_our_domain();
 
@@ -1613,14 +1839,14 @@ void winbind_msg_ip_dropped_parent(struct messaging_context *msg_ctx,
 				   struct server_id server_id,
 				   DATA_BLOB *data)
 {
-	struct winbindd_child *child;
+	struct winbind_msg_relay_state state = {
+		.msg_ctx = msg_ctx,
+		.msg_type = msg_type,
+		.data = data,
+	};
 
 	winbind_msg_ip_dropped(msg_ctx, private_data, msg_type,
 			       server_id, data);
 
-
-	for (child = winbindd_children; child != NULL; child = child->next) {
-		messaging_send_buf(msg_ctx, pid_to_procid(child->pid),
-				   msg_type, data->data, data->length);
-	}
+	forall_children(winbind_msg_relay_fn, &state);
 }

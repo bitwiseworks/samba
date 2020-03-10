@@ -260,7 +260,7 @@ static NTSTATUS idmap_autorid_id_to_sid(struct autorid_global_config *cfg,
 		    }
 		    /* If we end up here, something weird is in the record. */
 
-		    /* FALL THROUGH */
+		    FALL_THROUGH;
 	    default:
 		    DBG_DEBUG("SID/domain range: %s\n",
 			      (const char *)data.dptr);
@@ -844,8 +844,7 @@ static NTSTATUS idmap_autorid_initialize(struct idmap_domain *dom)
 	commonconfig->private_data = config;
 
 	config->minvalue = dom->low_id;
-	config->rangesize = lp_parm_int(-1, "idmap config *",
-					"rangesize", 100000);
+	config->rangesize = idmap_config_int("*", "rangesize", 100000);
 
 	config->maxranges = (dom->high_id - dom->low_id + 1) /
 	    config->rangesize;
@@ -869,8 +868,7 @@ static NTSTATUS idmap_autorid_initialize(struct idmap_domain *dom)
 	DEBUG(5, ("%d domain ranges with a size of %d are available\n",
 		  config->maxranges, config->rangesize));
 
-	ignore_builtin = lp_parm_bool(-1, "idmap config *",
-				      "ignore builtin", false);
+	ignore_builtin = idmap_config_bool("*", "ignore builtin", false);
 
 	/* fill the TDB common configuration */
 
@@ -915,9 +913,6 @@ done:
 	return status;
 }
 
-/*
-  Close the idmap tdb instance
-*/
 static struct idmap_methods autorid_methods = {
 	.init = idmap_autorid_initialize,
 	.unixids_to_sids = idmap_autorid_unixids_to_sids,
@@ -926,7 +921,7 @@ static struct idmap_methods autorid_methods = {
 };
 
 static_decl_idmap;
-NTSTATUS idmap_autorid_init(void)
+NTSTATUS idmap_autorid_init(TALLOC_CTX *ctx)
 {
 	return smb_register_idmap(SMB_IDMAP_INTERFACE_VERSION,
 				  "autorid", &autorid_methods);

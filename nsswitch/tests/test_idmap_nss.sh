@@ -13,8 +13,8 @@ failed=0
 
 . `dirname $0`/../../testprogs/blackbox/subunit.sh
 
-testit "wbinfo returns domain SID" $wbinfo -n "@$DOMAIN" || exit 1
-DOMAIN_SID=$($wbinfo -n "@$DOMAIN" | cut -f 1 -d " ")
+testit "wbinfo returns domain SID" $wbinfo -n "$DOMAIN/" || exit 1
+DOMAIN_SID=$($wbinfo -n "$DOMAIN/" | cut -f 1 -d " ")
 echo "Domain $DOMAIN has SID $DOMAIN_SID"
 
 # Find an unused uid and SID
@@ -22,7 +22,7 @@ RID=66666
 while true ; do
     id $RID
     if [ $? -ne 0 ] ; then
-	$wbinfo -s $DOMAIN_SID\\$RID
+	$wbinfo -s $DOMAIN_SID-$RID
 	if [ $? -ne 0 ] ; then
 	    break
 	fi

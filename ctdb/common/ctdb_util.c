@@ -29,6 +29,8 @@
 
 #include "ctdb_private.h"
 
+#include "protocol/protocol_util.h"
+
 #include "common/reqid.h"
 #include "common/system.h"
 #include "common/common.h"
@@ -134,36 +136,6 @@ bool ctdb_set_helper(const char *type, char *helper, size_t size,
 	return true;
 }
 
-/* Invoke an external program to do some sort of tracing on the CTDB
- * process.  This might block for a little while.  The external
- * program is specified by the environment variable
- * CTDB_EXTERNAL_TRACE.  This program should take one argument: the
- * pid of the process to trace.  Commonly, the program would be a
- * wrapper script around gcore.
- */
-void ctdb_external_trace(void)
-{
-	int ret;
-	static char external_trace[PATH_MAX+1] = "";
-	char * cmd;
-
-	if (!ctdb_set_helper("external trace handler",
-			     external_trace, sizeof(external_trace),
-			     "CTDB_EXTERNAL_TRACE", NULL, NULL)) {
-		return;
-	}
-
-	cmd = talloc_asprintf(NULL, "%s %lu", external_trace, (unsigned long) getpid());
-	DEBUG(DEBUG_WARNING,("begin external trace: %s\n", cmd));
-	ret = system(cmd);
-	if (ret == -1) {
-		DEBUG(DEBUG_ERR,
-		      ("external trace command \"%s\" failed\n", cmd));
-	}
-	DEBUG(DEBUG_WARNING,("end external trace: %s\n", cmd));
-	talloc_free(cmd);
-}
-
 /*
   parse a IP:port pair
 */
@@ -172,6 +144,7 @@ int ctdb_parse_address(TALLOC_CTX *mem_ctx, const char *str,
 {
 	struct servent *se;
 	int port;
+	int ret;
 
 	setservent(0);
 	se = getservbyname("ctdb", "tcp");
@@ -183,9 +156,11 @@ int ctdb_parse_address(TALLOC_CTX *mem_ctx, const char *str,
 		port = ntohs(se->s_port);
 	}
 
-	if (! parse_ip(str, NULL, port, address)) {
+	ret = ctdb_sock_addr_from_string(str, address, false);
+	if (ret != 0) {
 		return -1;
 	}
+	ctdb_sock_addr_set_port(address, port);
 
 	return 0;
 }
@@ -368,19 +343,45 @@ struct ctdb_rec_data_old *ctdb_marshall_loop_next(
 */
 void ctdb_canonicalize_ip(const ctdb_sock_addr *ip, ctdb_sock_addr *cip)
 {
-	char prefix[12] = { 0,0,0,0,0,0,0,0,0,0,0xff,0xff };
+	ZERO_STRUCTP(cip);
 
-	memcpy(cip, ip, sizeof (*cip));
-
-	if ( (ip->sa.sa_family == AF_INET6)
-	&& !memcmp(&ip->ip6.sin6_addr, prefix, 12)) {
-		memset(cip, 0, sizeof(*cip));
+	if (ip->sa.sa_family == AF_INET6) {
+		const char prefix[12] = { 0,0,0,0,0,0,0,0,0,0,0xff,0xff };
+		if (memcmp(&ip->ip6.sin6_addr, prefix, sizeof(prefix)) == 0) {
+			/* Copy IPv4-mapped IPv6 addresses as IPv4 */
+			cip->ip.sin_family = AF_INET;
 #ifdef HAVE_SOCK_SIN_LEN
-		cip->ip.sin_len = sizeof(*cip);
+			cip->ip.sin_len = sizeof(ctdb_sock_addr);
 #endif
+			cip->ip.sin_port   = ip->ip6.sin6_port;
+			memcpy(&cip->ip.sin_addr,
+			       &ip->ip6.sin6_addr.s6_addr[12],
+			       sizeof(cip->ip.sin_addr));
+		} else {
+			cip->ip6.sin6_family = AF_INET6;
+#ifdef HAVE_SOCK_SIN6_LEN
+			cip->ip6.sin6_len = sizeof(ctdb_sock_addr);
+#endif
+			cip->ip6.sin6_port   = ip->ip6.sin6_port;
+			memcpy(&cip->ip6.sin6_addr,
+			       &ip->ip6.sin6_addr,
+			       sizeof(cip->ip6.sin6_addr));
+		}
+
+		return;
+	}
+
+	if (ip->sa.sa_family == AF_INET) {
 		cip->ip.sin_family = AF_INET;
-		cip->ip.sin_port   = ip->ip6.sin6_port;
-		memcpy(&cip->ip.sin_addr, &ip->ip6.sin6_addr.s6_addr[12], 4);
+#ifdef HAVE_SOCK_SIN_LEN
+		cip->ip.sin_len = sizeof(ctdb_sock_addr);
+#endif
+		cip->ip.sin_port = ip->ip.sin_port;
+		memcpy(&cip->ip.sin_addr,
+		       &ip->ip.sin_addr,
+		       sizeof(ip->ip.sin_addr));
+
+		return;
 	}
 }
 
@@ -431,7 +432,6 @@ char *ctdb_addr_to_str(ctdb_sock_addr *addr)
 		break;
 	default:
 		DEBUG(DEBUG_ERR, (__location__ " ERROR, unknown family %u\n", addr->sa.sa_family));
-		ctdb_external_trace();
 	}
 
 	return cip;

@@ -2,7 +2,7 @@
  *  Unix SMB/CIFS implementation.
  *  RPC Pipe client / server routines
  *  Copyright (C) Andrew Tridgell              1992-2006,
- *  Copyright (C) Jean François Micouleau      1998-2001.
+ *  Copyright (C) Jean FranÃ§ois Micouleau      1998-2001.
  *  Copyright (C) Volker Lendecke              2006.
  *  Copyright (C) Gerald Carter                2006.
  *  
@@ -1049,7 +1049,7 @@ static int convert_ldb_record(TDB_CONTEXT *ltdb, TDB_DATA key,
 	}
 
 	if (remaining != 0) {
-		DEBUG(0, ("Errror: %d bytes unread in ltdb_unpack_data\n",
+		DEBUG(0, ("Error: %d bytes unread in ltdb_unpack_data\n",
 			  remaining));
 	}
 

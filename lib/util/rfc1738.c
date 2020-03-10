@@ -1,18 +1,13 @@
 /*
- * NOTE:  
+ * Functions for RFC 3986 percent-encoding.
  *
- * This file imported from the Squid project.  The licence below is
- * reproduced intact, but refers to files in Squid's repository, not
- * in Samba.  See COPYING for the GPLv3 notice (being the later
- * version mentioned below).
+ * NOTE:
  *
- * This file has also been modified, in particular to use talloc to
- * allocate in rfc1738_escape()
- *
- * - Andrew Bartlett Oct-2009
- *
+ * This file was originally imported from the Squid project but has been
+ * significantly altered. The licence below is reproduced intact, but refers
+ * to files in Squid's repository, not in Samba. See COPYING for the GPLv3
+ * notice (being the later version mentioned below).
  */
-
 
 /*
  * $Id$
@@ -48,178 +43,156 @@
  *
  */
 
-#include "includes.h"
-
+#include "replace.h"
+#include <talloc.h>
 #include "lib/util/samba_util.h"
+#include "lib/util/util_str_hex.h"
+
+#define RFC1738_ENCODE 1
+#define RFC1738_RESERVED 2
 
 /*
- *  RFC 1738 defines that these characters should be escaped, as well
- *  any non-US-ASCII character or anything between 0x00 - 0x1F.
- */
-static char rfc1738_unsafe_chars[] = {
-    (char) 0x3C,		/* < */
-    (char) 0x3E,		/* > */
-    (char) 0x22,		/* " */
-    (char) 0x23,		/* # */
-#if 0				/* done in code */
-    (char) 0x25,		/* % */
-#endif
-    (char) 0x7B,		/* { */
-    (char) 0x7D,		/* } */
-    (char) 0x7C,		/* | */
-    (char) 0x5C,		/* \ */
-    (char) 0x5E,		/* ^ */
-    (char) 0x7E,		/* ~ */
-    (char) 0x5B,		/* [ */
-    (char) 0x5D,		/* ] */
-    (char) 0x60,		/* ` */
-    (char) 0x27,		/* ' */
-    (char) 0x20			/* space */
-};
-
-static char rfc1738_reserved_chars[] = {
-    (char) 0x3b,		/* ; */
-    (char) 0x2f,		/* / */
-    (char) 0x3f,		/* ? */
-    (char) 0x3a,		/* : */
-    (char) 0x40,		/* @ */
-    (char) 0x3d,		/* = */
-    (char) 0x26			/* & */
-};
-
-/*
- *  rfc1738_escape - Returns a static buffer contains the RFC 1738
- *  compliant, escaped version of the given url.
+ * According to RFC 1738, "$-_.+!*'()," are not reserved or unsafe, but as
+ * that has been obsolete since 2004, we sm instead for RFC 3986, where:
  *
+ *  reserved =    : / ? # [ ] @ ! $ & ' ( ) * + , ; =
+ *  unreserved = ALPHA DIGIT - . _ ~
+ *
+ * and whatever is not in either of those are what RFC 1738 called "unsafe",
+ * meaning that they should are canonically but not mandatorily escaped.
+ *
+ * Characters below 0x20 or above 0x7E are always enocded.
+ */
+
+static const unsigned char escapees[127] = {
+	[' '] = RFC1738_ENCODE,
+	['"'] = RFC1738_ENCODE,
+	['%'] = RFC1738_ENCODE,
+	['<'] = RFC1738_ENCODE,
+	['>'] = RFC1738_ENCODE,
+	['\\'] = RFC1738_ENCODE,
+	['^'] = RFC1738_ENCODE,
+	['`'] = RFC1738_ENCODE,
+	['{'] = RFC1738_ENCODE,
+	['|'] = RFC1738_ENCODE,
+	['}'] = RFC1738_ENCODE,
+	/* reserved : / ? # [ ] @ ! $ & ' ( ) * + , ; = */
+	[':'] = RFC1738_RESERVED,
+	['/'] = RFC1738_RESERVED,
+	['?'] = RFC1738_RESERVED,
+	['#'] = RFC1738_RESERVED,
+	['['] = RFC1738_RESERVED,
+	[']'] = RFC1738_RESERVED,
+	['@'] = RFC1738_RESERVED,
+	['!'] = RFC1738_RESERVED,
+	['$'] = RFC1738_RESERVED,
+	['&'] = RFC1738_RESERVED,
+	['\''] = RFC1738_RESERVED,
+	['('] = RFC1738_RESERVED,
+	[')'] = RFC1738_RESERVED,
+	['*'] = RFC1738_RESERVED,
+	['+'] = RFC1738_RESERVED,
+	[','] = RFC1738_RESERVED,
+	[';'] = RFC1738_RESERVED,
+	['='] = RFC1738_RESERVED,
+};
+
+/*
+ *  rfc1738_do_escape - fills a preallocated buffer with an escaped version of
+ *  the given string.
+ *
+ *  For canonical escaping, mask should be RFC1738_ENCODE | RFC1738_RESERVED.
+ *  For mandatory escaping, mask should be RFC1738_RESERVED.
  */
 static char *
-rfc1738_do_escape(TALLOC_CTX *mem_ctx, const char *url, int encode_reserved)
+rfc1738_do_escape(char *buf, size_t bufsize,
+		  const char *url, size_t len, unsigned char mask)
 {
-    size_t bufsize = 0;
-    const char *p;
-    char *buf;
-    char *q;
-    unsigned int i, do_escape;
-
-    bufsize = strlen(url) * 3 + 1;
-    buf = talloc_array(mem_ctx, char, bufsize);
-    if (!buf) {
-	    return NULL;
-    }
-
-    talloc_set_name_const(buf, buf);
-    buf[0] = '\0';
-
-    for (p = url, q = buf; *p != '\0' && q < (buf + bufsize - 1); p++, q++) {
-        do_escape = 0;
-
-        /* RFC 1738 defines these chars as unsafe */
-        for (i = 0; i < sizeof(rfc1738_unsafe_chars); i++) {
-            if (*p == rfc1738_unsafe_chars[i]) {
-                do_escape = 1;
-                break;
-            }
-        }
-        /* Handle % separately */
-        if (encode_reserved >= 0 && *p == '%')
-            do_escape = 1;
-        /* RFC 1738 defines these chars as reserved */
-        for (i = 0; i < sizeof(rfc1738_reserved_chars) && encode_reserved > 0; i++) {
-            if (*p == rfc1738_reserved_chars[i]) {
-                do_escape = 1;
-                break;
-            }
-        }
-        /* RFC 1738 says any control chars (0x00-0x1F) are encoded */
-        if ((unsigned char) *p <= (unsigned char) 0x1F) {
-            do_escape = 1;
-        }
-        /* RFC 1738 says 0x7f is encoded */
-        if (*p == (char) 0x7F) {
-            do_escape = 1;
-        }
-        /* RFC 1738 says any non-US-ASCII are encoded */
-        if (((unsigned char) *p >= (unsigned char) 0x80)) {
-            do_escape = 1;
-        }
-        /* Do the triplet encoding, or just copy the char */
-        /* note: while we do not need snprintf here as q is appropriately
-         * allocated, Samba does to avoid our macro banning it -- abartlet */
-
-        if (do_escape == 1) {
-		(void) snprintf(q, 4, "%%%02X", (unsigned char) *p);
-            q += sizeof(char) * 2;
-        } else {
-            *q = *p;
-        }
-    }
-    *q = '\0';
-    return (buf);
+	size_t i;
+	size_t j = 0;
+	for (i = 0; i < len; i++) {
+		unsigned int c = (unsigned char) url[i];
+		if (c > 126 || c < 32 || (escapees[c] & mask)) {
+			if (j + 3 >= bufsize) {
+				return NULL;
+			}
+			(void) snprintf(&buf[j], 4, "%%%02X", c);
+			j += 3;
+		} else {
+			if (j + 1 >= bufsize) {
+				return NULL;
+			}
+			buf[j] = c;
+			j++;
+		}
+	}
+	buf[j] = '\0';
+	return buf;
 }
 
 /*
- * rfc1738_escape - Returns a buffer that contains the RFC
- * 1738 compliant, escaped version of the given url. (escapes unsafe and % characters)
- */
-char *
-rfc1738_escape(TALLOC_CTX *mem_ctx, const char *url)
-{
-	return rfc1738_do_escape(mem_ctx, url, 0);
-}
-
-/*
- * rfc1738_escape_unescaped - Returns a buffer that contains
- * the RFC 1738 compliant, escaped version of the given url (escapes unsafe chars only)
- */
-char *
-rfc1738_escape_unescaped(TALLOC_CTX *mem_ctx, const char *url)
-{
-	return rfc1738_do_escape(mem_ctx, url, -1);
-}
-
-/*
- * rfc1738_escape_part - Returns a buffer that contains the RFC
- * 1738 compliant, escaped version of the given url segment. (escapes
- * unsafe, reserved and % chars) It would mangle the :// in http://,
- * and mangle paths (because of /).
+ * rfc1738_escape_part - Returns a talloced buffer that contains the RFC 3986
+ * compliant, escaped version of the given url segment.
  */
 char *
 rfc1738_escape_part(TALLOC_CTX *mem_ctx, const char *url)
 {
-	return rfc1738_do_escape(mem_ctx, url, 1);
+	size_t bufsize = 0;
+	char *buf = NULL;
+
+	size_t len = strlen(url);
+	if (len >= SIZE_MAX / 3) {
+		return NULL;
+	}
+
+	bufsize = len * 3 + 1;
+	buf = talloc_array(mem_ctx, char, bufsize);
+	if (buf == NULL) {
+		return NULL;
+	}
+
+	talloc_set_name_const(buf, buf);
+
+	return rfc1738_do_escape(buf, bufsize, url, len,
+				 RFC1738_ENCODE | RFC1738_RESERVED);
 }
 
 /*
- *  rfc1738_unescape() - Converts escaped characters (%xy numbers) in
- *  given the string.  %% is a %. %ab is the 8-bit hexadecimal number "ab"
+ * rfc1738_unescape() - Converts url-escaped characters in the string.
+ *
+ * The two characters following a '%' in a string should be hex digits that
+ * describe an encoded byte. For example, "%25" is hex 0x25 or '%' in ASCII;
+ * this is the only way to include a % in the unescaped string. Any character
+ * can be escaped, including plain letters (e.g. "%61" for "a"). Anything
+ * other than 2 hex characters following the % is an error.
+ *
+ * The conversion is done in-place, which is always safe as unescapes can only
+ * shorten the string.
+ *
+ * Returns a pointer to the end of the string (that is, the '\0' byte), or
+ * NULL on error, at which point s is in an undefined state.
+ *
+ * Note that after `char *e = rfc_unescape(s)`, `strlen(s)` will not equal
+ * `e - s` if s originally contained "%00". You might want to check for this.
  */
-_PUBLIC_ void
-rfc1738_unescape(char *s)
+
+_PUBLIC_ char *rfc1738_unescape(char *s)
 {
-    char hexnum[3];
-    int i, j;			/* i is write, j is read */
-    unsigned int x;
-    for (i = j = 0; s[j]; i++, j++) {
-        s[i] = s[j];
-        if (s[i] != '%')
-            continue;
-        if (s[j + 1] == '%') {	/* %% case */
-            j++;
-            continue;
-        }
-        if (s[j + 1] && s[j + 2]) {
-            if (s[j + 1] == '0' && s[j + 2] == '0') {	/* %00 case */
-                j += 2;
-                continue;
-            }
-            hexnum[0] = s[j + 1];
-            hexnum[1] = s[j + 2];
-            hexnum[2] = '\0';
-            if (1 == sscanf(hexnum, "%x", &x)) {
-                s[i] = (char) (0x0ff & x);
-                j += 2;
-            }
-        }
-    }
-    s[i] = '\0';
+	size_t i, j;	    /* i is write, j is read */
+	uint64_t x;
+	NTSTATUS status;
+	for (i = 0, j = 0; s[j] != '\0'; i++, j++) {
+		if (s[j] == '%') {
+			status = read_hex_bytes(&s[j + 1], 2, &x);
+			if (! NT_STATUS_IS_OK(status)) {
+				return NULL;
+			}
+			j += 2; /* OK; read_hex_bytes() has checked ahead */
+			s[i] = (unsigned char)x;
+		} else {
+			s[i] = s[j];
+		}
+	}
+	s[i] = '\0';
+	return s + i;
 }

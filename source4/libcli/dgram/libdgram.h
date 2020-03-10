@@ -127,13 +127,11 @@ NTSTATUS dgram_mailslot_netlogon_reply(struct nbt_dgram_socket *dgmsock,
 				       const char *my_netbios_name,
 				       const char *mailslot_name,
 				       struct nbt_netlogon_response *reply);
-NTSTATUS dgram_mailslot_netlogon_parse_request(struct dgram_mailslot_handler *dgmslot,
-					       TALLOC_CTX *mem_ctx,
+NTSTATUS dgram_mailslot_netlogon_parse_request(TALLOC_CTX *mem_ctx,
 					       struct nbt_dgram_packet *dgram,
 					       struct nbt_netlogon_packet *netlogon);
 
-NTSTATUS dgram_mailslot_netlogon_parse_response(struct dgram_mailslot_handler *dgmslot,
-						TALLOC_CTX *mem_ctx,
+NTSTATUS dgram_mailslot_netlogon_parse_response(TALLOC_CTX *mem_ctx,
 						struct nbt_dgram_packet *dgram,
 						struct nbt_netlogon_response *netlogon);
 

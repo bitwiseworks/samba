@@ -50,7 +50,6 @@ struct dns_server {
 	struct dns_server_zone *zones;
 	struct dns_server_tkey_store *tkeys;
 	struct cli_credentials *server_credentials;
-	uint16_t max_payload;
 };
 
 struct dns_request_state {
@@ -61,6 +60,8 @@ struct dns_request_state {
 	char *key_name;
 	struct dns_res_rec *tsig;
 	uint16_t tsig_error;
+	const struct tsocket_address *local_address;
+	const struct tsocket_address *remote_address;
 };
 
 struct tevent_req *dns_server_process_query_send(
@@ -81,7 +82,6 @@ WERROR dns_server_process_update(struct dns_server *dns,
 				 struct dns_res_rec **updates,    uint16_t *update_count,
 				 struct dns_res_rec **additional, uint16_t *arcount);
 
-bool dns_name_equal(const char *name1, const char *name2);
 bool dns_records_match(struct dnsp_DnssrvRpcRecord *rec1,
 		       struct dnsp_DnssrvRpcRecord *rec2);
 bool dns_authoritative_for_zone(struct dns_server *dns,
@@ -89,6 +89,11 @@ bool dns_authoritative_for_zone(struct dns_server *dns,
 const char *dns_get_authoritative_zone(struct dns_server *dns,
 				       const char *name);
 WERROR dns_lookup_records(struct dns_server *dns,
+			  TALLOC_CTX *mem_ctx,
+			  struct ldb_dn *dn,
+			  struct dnsp_DnssrvRpcRecord **records,
+			  uint16_t *rec_count);
+WERROR dns_lookup_records_wildcard(struct dns_server *dns,
 			  TALLOC_CTX *mem_ctx,
 			  struct ldb_dn *dn,
 			  struct dnsp_DnssrvRpcRecord **records,
@@ -103,9 +108,6 @@ WERROR dns_name2dn(struct dns_server *dns,
 		   TALLOC_CTX *mem_ctx,
 		   const char *name,
 		   struct ldb_dn **_dn);
-WERROR dns_generate_options(struct dns_server *dns,
-			    TALLOC_CTX *mem_ctx,
-			    struct dns_res_rec **options);
 struct dns_server_tkey *dns_find_tkey(struct dns_server_tkey_store *store,
 				      const char *name);
 WERROR dns_verify_tsig(struct dns_server *dns,

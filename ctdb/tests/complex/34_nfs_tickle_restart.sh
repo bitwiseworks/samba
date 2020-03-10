@@ -53,7 +53,7 @@ test_port=2049
 
 echo "Connecting to node ${test_node} on IP ${test_ip}:${test_port} with netcat..."
 
-nc -d -w 600 $test_ip $test_port &
+sleep 600 | nc $test_ip $test_port &
 nc_pid=$!
 ctdb_test_exit_hook_add "kill $nc_pid >/dev/null 2>&1"
 
@@ -71,7 +71,7 @@ rn=$(awk -F'|' -v test_node=$test_node \
     '$2 != test_node { print $2 ; exit }' <<<"$listnodes_output")
 
 echo "Restarting CTDB on node ${rn}"
-try_command_on_node $rn $CTDB_TEST_WRAPPER restart_ctdb_1
+restart_ctdb_1 $rn
 
 # In some theoretical world this is racy.  In practice, the node will
 # take quite a while to become healthy, so this will beat any

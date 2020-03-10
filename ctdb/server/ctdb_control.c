@@ -267,10 +267,34 @@ static int32_t ctdb_control_dispatch(struct ctdb_context *ctdb,
 	}
 
 	case CTDB_CONTROL_DB_ATTACH:
-	  return ctdb_control_db_attach(ctdb, indata, outdata, srvid, false, client_id, c, async_reply);
+	  return ctdb_control_db_attach(ctdb,
+					indata,
+					outdata,
+					0,
+					srcnode,
+					client_id,
+					c,
+					async_reply);
 
 	case CTDB_CONTROL_DB_ATTACH_PERSISTENT:
-	  return ctdb_control_db_attach(ctdb, indata, outdata, srvid, true, client_id, c, async_reply);
+	  return ctdb_control_db_attach(ctdb,
+					indata,
+					outdata,
+					CTDB_DB_FLAGS_PERSISTENT,
+					srcnode,
+					client_id,
+					c,
+					async_reply);
+
+	case CTDB_CONTROL_DB_ATTACH_REPLICATED:
+	  return ctdb_control_db_attach(ctdb,
+					indata,
+					outdata,
+					CTDB_DB_FLAGS_REPLICATED,
+					srcnode,
+					client_id,
+					c,
+					async_reply);
 
 	case CTDB_CONTROL_SET_CALL:
 		return control_not_implemented("SET_CALL", NULL);
@@ -303,7 +327,7 @@ static int32_t ctdb_control_dispatch(struct ctdb_context *ctdb,
 		return daemon_deregister_message_handler(ctdb, client_id, srvid);
 
 	case CTDB_CONTROL_CHECK_SRVIDS:
-		return daemon_check_srvids(ctdb, indata, outdata);
+		return control_not_implemented("CHECK_SRVIDS", NULL);
 
 	case CTDB_CONTROL_ENABLE_SEQNUM:
 		CHECK_CONTROL_DATA_SIZE(sizeof(uint32_t));
@@ -324,22 +348,17 @@ static int32_t ctdb_control_dispatch(struct ctdb_context *ctdb,
 		CHECK_CONTROL_DATA_SIZE(sizeof(uint32_t));		
 		return ctdb_control_set_recmode(ctdb, c, indata, async_reply, errormsg);
 
-	case CTDB_CONTROL_GET_MONMODE: 
-		CHECK_CONTROL_DATA_SIZE(0);
-		return ctdb_monitoring_mode(ctdb);
-		
-	case CTDB_CONTROL_ENABLE_MONITOR: 
-		CHECK_CONTROL_DATA_SIZE(0);
-		ctdb_enable_monitoring(ctdb);
-		return 0;
+	case CTDB_CONTROL_GET_MONMODE:
+		return control_not_implemented("GET_MONMODE", NULL);
+
+	case CTDB_CONTROL_ENABLE_MONITOR:
+		return control_not_implemented("ENABLE_MONITOR", NULL);
 
 	case CTDB_CONTROL_RUN_EVENTSCRIPTS:
 		return control_not_implemented("RUN_EVENTSCRIPTS", NULL);
 
-	case CTDB_CONTROL_DISABLE_MONITOR: 
-		CHECK_CONTROL_DATA_SIZE(0);
-		ctdb_disable_monitoring(ctdb);
-		return 0;
+	case CTDB_CONTROL_DISABLE_MONITOR:
+		return control_not_implemented("DISABLE_MONITOR", NULL);
 
 	case CTDB_CONTROL_SHUTDOWN:
 		DEBUG(DEBUG_NOTICE,("Received SHUTDOWN command.\n"));
@@ -669,6 +688,40 @@ static int32_t ctdb_control_dispatch(struct ctdb_context *ctdb,
 		CHECK_CONTROL_DATA_SIZE(sizeof(uint32_t));
 		return ctdb_control_db_push_confirm(ctdb, indata, outdata);
 
+	case CTDB_CONTROL_DB_OPEN_FLAGS: {
+		uint32_t db_id;
+		struct ctdb_db_context *ctdb_db;
+		int tdb_flags;
+
+		CHECK_CONTROL_DATA_SIZE(sizeof(db_id));
+		db_id = *(uint32_t *)indata.dptr;
+		ctdb_db = find_ctdb_db(ctdb, db_id);
+		if (ctdb_db == NULL) {
+			return -1;
+		}
+
+		tdb_flags = tdb_get_flags(ctdb_db->ltdb->tdb);
+
+		outdata->dptr = talloc_size(outdata, sizeof(tdb_flags));
+		if (outdata->dptr == NULL) {
+			return -1;
+		}
+
+		outdata->dsize = sizeof(tdb_flags);
+		memcpy(outdata->dptr, &tdb_flags, outdata->dsize);
+		return 0;
+	}
+
+	case CTDB_CONTROL_CHECK_PID_SRVID:
+		CHECK_CONTROL_DATA_SIZE((sizeof(pid_t) + sizeof(uint64_t)));
+		return ctdb_control_check_pid_srvid(ctdb, indata);
+
+	case CTDB_CONTROL_TUNNEL_REGISTER:
+		return ctdb_control_tunnel_register(ctdb, client_id, srvid);
+
+	case CTDB_CONTROL_TUNNEL_DEREGISTER:
+		return ctdb_control_tunnel_deregister(ctdb, client_id, srvid);
+
 	default:
 		DEBUG(DEBUG_CRIT,(__location__ " Unknown CTDB control opcode %u\n", opcode));
 		return -1;
@@ -823,7 +876,7 @@ int ctdb_daemon_send_control(struct ctdb_context *ctdb, uint32_t destnode,
 		return -1;
 	}
 
-	if (((destnode == CTDB_BROADCAST_VNNMAP) || 
+	if (((destnode == CTDB_BROADCAST_ACTIVE) ||
 	     (destnode == CTDB_BROADCAST_ALL) ||
 	     (destnode == CTDB_BROADCAST_CONNECTED)) && 
 	    !(flags & CTDB_CTRL_FLAG_NOREPLY)) {
@@ -831,7 +884,7 @@ int ctdb_daemon_send_control(struct ctdb_context *ctdb, uint32_t destnode,
 		return -1;
 	}
 
-	if (destnode != CTDB_BROADCAST_VNNMAP && 
+	if (destnode != CTDB_BROADCAST_ACTIVE &&
 	    destnode != CTDB_BROADCAST_ALL && 
 	    destnode != CTDB_BROADCAST_CONNECTED && 
 	    (!ctdb_validate_pnn(ctdb, destnode) || 

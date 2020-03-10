@@ -11,6 +11,10 @@ interface copychunk
 		uint8 context[4];
 	} req_resume_key_rsp;
 
+	const uint32 COPYCHUNK_MAX_CHUNKS = 256; /* 2k8r2 & win8 = 256 */
+	const uint32 COPYCHUNK_MAX_CHUNK_LEN = 1048576; /* 2k8r2 & win8 = 1048576 */
+	const uint32 COPYCHUNK_MAX_TOTAL_LEN = 16777216; /* 2k8r2 & win8 = 16777216 */
+
 	typedef struct {
 		hyper source_off;
 		hyper target_off;
@@ -45,8 +49,8 @@ interface copychunk
 		uint8 reserved[2];
 	} device_copy_offload_descriptor;
 
-	/* XXX: 0x00000001 is unconfirmed */
-	const uint32 STORAGE_OFFLOAD_TOKEN_TYPE_ZERO_DATA = 0x00000001;
+	const uint32 STORAGE_OFFLOAD_TOKEN_TYPE_ZERO_DATA = 0xffff0001;
+
 	typedef [public] struct {
 		uint32 token_type;
 		uint8 reserved[2];
@@ -63,23 +67,26 @@ interface copychunk
 		hyper length;
 	} fsctl_offload_read_input;
 
-	const uint32 OFFLOAD_READ_FLAG_FILE_TOO_SMALL = 0x00000001;
-	const uint32 OFFLOAD_READ_FLAG_ALL_ZERO_BEYOND_RANGE = 0x00000002;
-	const uint32 OFFLOAD_READ_FLAG_CANNOT_OFFLOAD_BEYOND_RANGE = 0x00000004;
+	typedef [public,bitmap32bit] bitmap {
+		OFFLOAD_READ_FLAG_FILE_TOO_SMALL = 0x01,
+		OFFLOAD_READ_FLAG_ALL_ZERO_BEYOND_RANGE = 0x02,
+		OFFLOAD_READ_FLAG_CANNOT_OFFLOAD_BEYOND_RANGE = 0x04
+	} offload_flags;
+
 	typedef [public] struct {
 		uint32 size;
-		uint32 flags;
+		offload_flags flags;
 		hyper xfer_length;
-		uint8 token[512];
+		storage_offload_token token;
 	} fsctl_offload_read_output;
 
 	typedef [public] struct {
 		uint32 size;
-		uint32 flags;
+		offload_flags flags;
 		hyper file_offset;
 		hyper copy_length;
 		hyper xfer_offset;
-		uint8 token[512];
+		storage_offload_token token;
 	} fsctl_offload_write_input;
 
 	typedef [public] struct {

@@ -63,7 +63,7 @@ struct smbpasswd_privates
 	unsigned char smbpwd[16];
 	unsigned char smbntpwd[16];
 
-	/* retrive-once info */
+	/* retrieve-once info */
 	const char *smbpasswd_file;
 };
 
@@ -741,7 +741,7 @@ static bool mod_smbfilepwd_entry(struct smbpasswd_privates *smbpasswd_state, con
 	char linebuf[LINEBUF_SIZE + 1];
 	char readbuf[1024];
 	int c;
-	fstring ascii_p16;
+	char ascii_p16[FSTRING_LEN + 20];
 	fstring encode_bits;
 	unsigned char *p = NULL;
 	size_t linebuf_len = 0;
@@ -1345,7 +1345,7 @@ static NTSTATUS smbpasswd_getsampwsid(struct pdb_methods *my_methods, struct sam
 	if (rid == DOMAIN_RID_GUEST) {
 		const char *guest_account = lp_guest_account();
 		if (!(guest_account && *guest_account)) {
-			DEBUG(1, ("Guest account not specfied!\n"));
+			DEBUG(1, ("Guest account not specified!\n"));
 			return nt_status;
 		}
 		return smbpasswd_getsampwnam(my_methods, sam_acct, guest_account);
@@ -1720,7 +1720,7 @@ static NTSTATUS pdb_init_smbpasswd( struct pdb_methods **pdb_method, const char 
 	return NT_STATUS_OK;
 }
 
-NTSTATUS pdb_smbpasswd_init(void) 
+NTSTATUS pdb_smbpasswd_init(TALLOC_CTX *ctx) 
 {
 	return smb_register_passdb(PASSDB_INTERFACE_VERSION, "smbpasswd", pdb_init_smbpasswd);
 }

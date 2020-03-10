@@ -401,6 +401,10 @@ static int winbind_open_pipe_sock(struct winbindd_context *ctx,
 		return -1;
 	}
 
+	if (need_priv == 0) {
+		return ctx->winbindd_fd;
+	}
+
 	/* try and get priv pipe */
 
 	request.wb_flags = WBFLAG_RECURSE;
@@ -420,13 +424,13 @@ static int winbind_open_pipe_sock(struct winbindd_context *ctx,
 			ctx->winbindd_fd = fd;
 			ctx->is_privileged = 1;
 		}
+
+		SAFE_FREE(response.extra_data.data);
 	}
 
-	if ((need_priv != 0) && (ctx->is_privileged == 0)) {
+	if (ctx->is_privileged == 0) {
 		return -1;
 	}
-
-	SAFE_FREE(response.extra_data.data);
 
 	return ctx->winbindd_fd;
 #else
@@ -719,16 +723,15 @@ NSS_STATUS winbindd_request_response(struct winbindd_context *ctx,
 				     struct winbindd_response *response)
 {
 	NSS_STATUS status = NSS_STATUS_UNAVAIL;
-	struct winbindd_context *wb_ctx = ctx;
 
 	if (ctx == NULL) {
-		wb_ctx = &wb_global_ctx;
+		ctx = &wb_global_ctx;
 	}
 
-	status = winbindd_send_request(wb_ctx, req_type, 0, request);
+	status = winbindd_send_request(ctx, req_type, 0, request);
 	if (status != NSS_STATUS_SUCCESS)
 		return (status);
-	status = winbindd_get_response(wb_ctx, response);
+	status = winbindd_get_response(ctx, response);
 
 	return status;
 }
@@ -739,16 +742,15 @@ NSS_STATUS winbindd_priv_request_response(struct winbindd_context *ctx,
 					  struct winbindd_response *response)
 {
 	NSS_STATUS status = NSS_STATUS_UNAVAIL;
-	struct winbindd_context *wb_ctx = ctx;
 
 	if (ctx == NULL) {
-		wb_ctx = &wb_global_ctx;
+		ctx = &wb_global_ctx;
 	}
 
-	status = winbindd_send_request(wb_ctx, req_type, 1, request);
+	status = winbindd_send_request(ctx, req_type, 1, request);
 	if (status != NSS_STATUS_SUCCESS)
 		return (status);
-	status = winbindd_get_response(wb_ctx, response);
+	status = winbindd_get_response(ctx, response);
 
 	return status;
 }

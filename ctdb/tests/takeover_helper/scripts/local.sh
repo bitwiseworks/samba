@@ -14,6 +14,7 @@ PATH="$PATH:$CTDB_SCRIPTS_TOOLS_HELPER_DIR"
 
 ctdbd_socket="${TEST_VAR_DIR}/ctdbd.socket.$$"
 ctdbd_pidfile="${TEST_VAR_DIR}/ctdbd.pid.$$"
+ctdbd_dbdir="${TEST_VAR_DIR}/ctdbd.db.$$"
 
 define_test ()
 {
@@ -42,17 +43,21 @@ cleanup_ctdbd ()
 		rm -f "$ctdbd_pidfile"
 	fi
 	rm -f "$ctdbd_socket"
+	rm -rf "$ctdbd_dbdir"
 }
 
 setup_ctdbd ()
 {
 	debug "Setting up fake ctdbd"
 
+	mkdir -p "$ctdbd_dbdir"
 	$VALGRIND fake_ctdbd -d "$FAKE_CTDBD_DEBUGLEVEL" \
-		  -s "$ctdbd_socket" -p "$ctdbd_pidfile"
+		  -s "$ctdbd_socket" -p "$ctdbd_pidfile" \
+		  -D "$ctdbd_dbdir"
+	export CTDB_SOCKET="$ctdbd_socket"
 	# This current translates to a 6 second timeout for the
 	# important controls
-	ctdb --socket $ctdbd_socket setvar TakeoverTimeout 2
+	ctdb setvar TakeoverTimeout 2
 	test_cleanup cleanup_ctdbd
 }
 
@@ -70,21 +75,20 @@ result_filter ()
 
 ctdb_cmd ()
 {
-	echo Running: ctdb -d "$CTDB_DEBUGLEVEL" --socket $ctdbd_socket "$@"
-	ctdb -d "$CTDB_DEBUGLEVEL" --socket $ctdbd_socket "$@"
+	echo Running: ctdb -d "$CTDB_DEBUGLEVEL" "$@"
+	ctdb -d "$CTDB_DEBUGLEVEL" "$@"
 }
 
 test_ctdb_ip_all ()
 {
-	unit_test ctdb -d "$CTDB_DEBUGLEVEL" \
-		  --socket $ctdbd_socket ip all || exit $?
+	unit_test ctdb -d "$CTDB_DEBUGLEVEL" ip all || exit $?
 }
 
 takeover_helper_out="${TEST_VAR_DIR}/takover_helper.out"
 
 takeover_helper_format_outfd ()
 {
-	od -A n -t d4 "$takeover_helper_out" | sed -e 's|^[[:space:]]*||'
+	od -A n -t d4 "$takeover_helper_out" | sed -e 's|[[:space:]]*||g'
 }
 
 test_takeover_helper ()
@@ -105,5 +109,5 @@ test_takeover_helper ()
 	unit_test_notrace takeover_helper_format_outfd
 	_ret=$?
 	rm "$takeover_helper_out"
-	[ $? -eq 0 ] || exit $?
+	[ $_ret -eq 0 ] || exit $_ret
 }

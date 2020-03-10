@@ -30,13 +30,18 @@ struct extra_auth_info {
 
 struct auth_serversupplied_info {
 	bool guest;
-	bool system;
 
 	struct security_unix_token utok;
 
-	/* NT group information taken from the info3 structure */
-
-	struct security_token *security_token;
+	/*
+	 * A complete auth_session_info
+	 *
+	 * This is not normally filled in, during the typical
+	 * authentication process.  If filled in, it has already been
+	 * finalised by a nasty hack to support a cached guest/system
+	 * session_info
+	 */
+	const struct auth_session_info *cached_session_info;
 
 	/* These are the intermediate session keys, as provided by a
 	 * NETLOGON server and used by NTLMSSP to negotiate key
@@ -78,6 +83,9 @@ typedef NTSTATUS (*make_auth4_context_fn)(const struct auth_context *auth_contex
 
 struct auth_context {
 	DATA_BLOB challenge; 
+
+	/* What time did this start */
+	struct timeval start_time;
 
 	/* Who set this up in the first place? */ 
 	const char *challenge_set_by; 
@@ -133,7 +141,8 @@ enum session_key_use_intent {
 /* Changed from 1 -> 2 to add the logon_parameters field. */
 /* Changed from 2 -> 3 when we reworked many auth structures to use IDL or be in common with Samba4 */
 /* Changed from 3 -> 4 when we reworked added the flags */
-#define AUTH_INTERFACE_VERSION 4
+/* Changed from 4 -> 5 as module init functions now take a TALLOC_CTX * */
+#define AUTH_INTERFACE_VERSION 5
 
 #include "auth/proto.h"
 

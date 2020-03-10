@@ -27,9 +27,11 @@
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_VFS
 
-static int dfq_get_quota(struct vfs_handle_struct *handle, const char *path,
-			 enum SMB_QUOTA_TYPE qtype, unid_t id,
-			 SMB_DISK_QUOTA *qt);
+static int dfq_get_quota(struct vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			enum SMB_QUOTA_TYPE qtype,
+			unid_t id,
+			SMB_DISK_QUOTA *qt);
 
 static uint64_t dfq_load_param(int snum, const char *path, const char *section,
 			       const char *param, uint64_t def_val)
@@ -50,30 +52,36 @@ static uint64_t dfq_load_param(int snum, const char *path, const char *section,
 	return ret;
 }
 
-static uint64_t dfq_disk_free(vfs_handle_struct *handle, const char *path,
-			      uint64_t *bsize, uint64_t *dfree, uint64_t *dsize)
+static uint64_t dfq_disk_free(vfs_handle_struct *handle,
+				const struct smb_filename *smb_fname,
+				uint64_t *bsize,
+				uint64_t *dfree,
+				uint64_t *dsize)
 {
 	uint64_t free_1k;
 	int snum = SNUM(handle->conn);
 	uint64_t dfq_bsize = 0;
-	char *rpath = NULL;
+	struct smb_filename *rpath_fname = NULL;
 
 	/* look up the params based on real path to be resilient
 	 * to refactoring of path<->realpath
 	 */
-	rpath = SMB_VFS_NEXT_REALPATH(handle, path);
-	if (rpath != NULL) {
-		dfq_bsize = dfq_load_param(snum, rpath, "df", "block size", 0);
+	rpath_fname = SMB_VFS_NEXT_REALPATH(handle, talloc_tos(), smb_fname);
+	if (rpath_fname != NULL) {
+		dfq_bsize = dfq_load_param(snum, rpath_fname->base_name,
+				"df", "block size", 0);
 	}
 	if (dfq_bsize == 0) {
-		SAFE_FREE(rpath);
-		return SMB_VFS_NEXT_DISK_FREE(handle, path, bsize, dfree,
+		TALLOC_FREE(rpath_fname);
+		return SMB_VFS_NEXT_DISK_FREE(handle, smb_fname, bsize, dfree,
 					      dsize);
 	}
 
 	*bsize = dfq_bsize;
-	*dfree = dfq_load_param(snum, rpath, "df", "disk free", 0);
-	*dsize = dfq_load_param(snum, rpath, "df", "disk size", 0);
+	*dfree = dfq_load_param(snum, rpath_fname->base_name,
+				"df", "disk free", 0);
+	*dsize = dfq_load_param(snum, rpath_fname->base_name,
+				"df", "disk size", 0);
 
 	if ((*bsize) < 1024) {
 		free_1k = (*dfree) / (1024 / (*bsize));
@@ -81,23 +89,25 @@ static uint64_t dfq_disk_free(vfs_handle_struct *handle, const char *path,
 		free_1k = ((*bsize) / 1024) * (*dfree);
 	}
 
-	SAFE_FREE(rpath);
+	TALLOC_FREE(rpath_fname);
 	return free_1k;
 }
 
-static int dfq_get_quota(struct vfs_handle_struct *handle, const char *path,
-			 enum SMB_QUOTA_TYPE qtype, unid_t id,
-			 SMB_DISK_QUOTA *qt)
+static int dfq_get_quota(struct vfs_handle_struct *handle,
+			const struct smb_filename *smb_fname,
+			enum SMB_QUOTA_TYPE qtype,
+			unid_t id,
+			SMB_DISK_QUOTA *qt)
 {
 	int rc = 0;
 	int save_errno;
 	char *section = NULL;
 	int snum = SNUM(handle->conn);
 	uint64_t bsize = 0;
-	char *rpath = NULL;
+	struct smb_filename *rpath_fname = NULL;
 
-	rpath = SMB_VFS_NEXT_REALPATH(handle, path);
-	if (rpath == NULL) {
+	rpath_fname = SMB_VFS_NEXT_REALPATH(handle, talloc_tos(), smb_fname);
+	if (rpath_fname == NULL) {
 		goto dflt;
 	}
 
@@ -124,18 +134,21 @@ static int dfq_get_quota(struct vfs_handle_struct *handle, const char *path,
 		goto dflt;
 	}
 
-	bsize = dfq_load_param(snum, rpath, section, "block size", 4096);
+	bsize = dfq_load_param(snum, rpath_fname->base_name,
+				section, "block size", 4096);
 	if (bsize == 0) {
 		goto dflt;
 	}
 
-	if (dfq_load_param(snum, rpath, section, "err", 0) != 0) {
+	if (dfq_load_param(snum, rpath_fname->base_name,
+				section, "err", 0) != 0) {
 		errno = ENOTSUP;
 		rc = -1;
 		goto out;
 	}
 
-	if (dfq_load_param(snum, rpath, section, "nosys", 0) != 0) {
+	if (dfq_load_param(snum, rpath_fname->base_name,
+				section, "nosys", 0) != 0) {
 		errno = ENOSYS;
 		rc = -1;
 		goto out;
@@ -144,25 +157,32 @@ static int dfq_get_quota(struct vfs_handle_struct *handle, const char *path,
 	ZERO_STRUCTP(qt);
 
 	qt->bsize = bsize;
-	qt->hardlimit = dfq_load_param(snum, rpath, section, "hard limit", 0);
-	qt->softlimit = dfq_load_param(snum, rpath, section, "soft limit", 0);
-	qt->curblocks = dfq_load_param(snum, rpath, section, "cur blocks", 0);
+	qt->hardlimit = dfq_load_param(snum, rpath_fname->base_name,
+				section, "hard limit", 0);
+	qt->softlimit = dfq_load_param(snum, rpath_fname->base_name,
+				section, "soft limit", 0);
+	qt->curblocks = dfq_load_param(snum, rpath_fname->base_name,
+				section, "cur blocks", 0);
 	qt->ihardlimit =
-	    dfq_load_param(snum, rpath, section, "inode hard limit", 0);
+	    dfq_load_param(snum, rpath_fname->base_name,
+				section, "inode hard limit", 0);
 	qt->isoftlimit =
-	    dfq_load_param(snum, rpath, section, "inode soft limit", 0);
-	qt->curinodes = dfq_load_param(snum, rpath, section, "cur inodes", 0);
-	qt->qflags = dfq_load_param(snum, rpath, section, "qflags", QUOTAS_DENY_DISK);
+	    dfq_load_param(snum, rpath_fname->base_name,
+				section, "inode soft limit", 0);
+	qt->curinodes = dfq_load_param(snum, rpath_fname->base_name,
+				section, "cur inodes", 0);
+	qt->qflags = dfq_load_param(snum, rpath_fname->base_name,
+				section, "qflags", QUOTAS_DENY_DISK);
 
 	goto out;
 
 dflt:
-	rc = SMB_VFS_NEXT_GET_QUOTA(handle, path, qtype, id, qt);
+	rc = SMB_VFS_NEXT_GET_QUOTA(handle, smb_fname, qtype, id, qt);
 
 out:
 	save_errno = errno;
 	TALLOC_FREE(section);
-	SAFE_FREE(rpath);
+	TALLOC_FREE(rpath_fname);
 	errno = save_errno;
 	return rc;
 }
@@ -175,7 +195,7 @@ struct vfs_fn_pointers vfs_fake_dfq_fns = {
 };
 
 static_decl_vfs;
-NTSTATUS vfs_fake_dfq_init(void)
+NTSTATUS vfs_fake_dfq_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "fake_dfq",
 				&vfs_fake_dfq_fns);

@@ -184,10 +184,13 @@ def get_spanning_tree_edges(graph, my_site, label=None, verify=False,
                                vertices=graph_nodes, label=label)
 
             if verify:
-                verify_graph('spanning tree edge set %s' % edgeType,
-                             graph_edges, vertices=graph_nodes,
-                             properties=('complete', 'connected'),
-                             debug=DEBUG)
+                errors = verify_graph(graph_edges, vertices=graph_nodes,
+                                      properties=('complete', 'connected'))
+                if errors:
+                    DEBUG('spanning tree edge set %s FAILED' % edgeType)
+                    for p, e, doc in errors:
+                        DEBUG("%18s: %s" % (p, e))
+                    raise KCCError("spanning tree failed")
 
         # Run dijkstra's algorithm with just the red vertices as seeds
         # Seed from the full replicas
@@ -290,7 +293,7 @@ def create_edge(con_type, site_link, guid_to_vertex):
     e = MultiEdge()
     e.site_link = site_link
     e.vertices = []
-    for site_guid in site_link.site_list:
+    for site_guid, site_dn in site_link.site_list:
         if str(site_guid) in guid_to_vertex:
             e.vertices.extend(guid_to_vertex.get(str(site_guid)))
     e.repl_info.cost = site_link.cost
@@ -804,6 +807,11 @@ class InternalEdge(object):
         self.repl_info = repl
         self.e_type = eType
         self.site_link = site_link
+
+    def __hash__(self):
+        return hash((
+            self.v1, self.v2, self.red_red, self.repl_info, self.e_type,
+            self.site_link))
 
     def __eq__(self, other):
         return not self < other and not other < self

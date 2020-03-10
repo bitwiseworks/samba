@@ -49,7 +49,8 @@ static bool reg_match_one(struct smbcli_state *cli, const char *pattern, const c
 
 	if (ISDOTDOT(file)) file = ".";
 
-	return ms_fnmatch_protocol(pattern, file, cli->transport->negotiate.protocol)==0;
+	return ms_fnmatch_protocol(
+		pattern, file, cli->transport->negotiate.protocol, false)==0;
 }
 
 static char *reg_test(struct smbcli_state *cli, TALLOC_CTX *mem_ctx, const char *pattern, const char *long_name, const char *short_name)
@@ -89,14 +90,16 @@ static struct smbcli_state *connect_one(struct resolve_context *resolve_ctx,
 	*share = 0;
 	share++;
 
-	cli_credentials_set_workstation(cmdline_credentials, "masktest", CRED_SPECIFIED);
+	cli_credentials_set_workstation(popt_get_cmdline_credentials(),
+			"masktest", CRED_SPECIFIED);
 
 	status = smbcli_full_connection(NULL, &c,
 					server, 
 					ports,
 					share, NULL,
 					socket_options,
-					cmdline_credentials, resolve_ctx, ev,
+					popt_get_cmdline_credentials(),
+					resolve_ctx, ev,
 					options, session_options,
 					gensec_settings);
 
@@ -267,7 +270,6 @@ static void test_mask(int argc, char *argv[],
 
  finished:
 	smbcli_rmdir(cli->tree, "\\masktest");
-	talloc_free(mem_ctx);
 }
 
 
@@ -299,7 +301,7 @@ int main(int argc, const char *argv[])
 	poptContext pc;
 	int argc_new, i;
 	char **argv_new;
-	TALLOC_CTX *mem_ctx;
+	TALLOC_CTX *mem_ctx = NULL;
 	enum {OPT_UNCLIST=1000};
 	struct poptOption long_options[] = {
 		POPT_AUTOHELP
@@ -320,6 +322,11 @@ int main(int argc, const char *argv[])
 
 	setlinebuf(stdout);
 	seed = time(NULL);
+
+	mem_ctx = talloc_named_const(NULL, 0, "masktest_ctx");
+	if (mem_ctx == NULL) {
+		exit(1);
+	}
 
 	pc = poptGetContext("locktest", argc, argv, long_options,
 			    POPT_CONTEXT_KEEP_FIRST);
@@ -345,6 +352,7 @@ int main(int argc, const char *argv[])
 
 	if (!(argc_new >= 2)) {
 		usage(pc);
+		talloc_free(mem_ctx);
 		exit(1);
 	}
 
@@ -355,8 +363,6 @@ int main(int argc, const char *argv[])
 	all_string_sub(share,"/","\\",0);
 
 	lp_ctx = cmdline_lp_ctx;
-
-	mem_ctx = talloc_autofree_context();
 
 	ev = s4_event_context_init(mem_ctx);
 
@@ -371,6 +377,7 @@ int main(int argc, const char *argv[])
 			  lpcfg_gensec_settings(mem_ctx, lp_ctx));
 	if (!cli) {
 		DEBUG(0,("Failed to connect to %s\n", share));
+		talloc_free(mem_ctx);
 		exit(1);
 	}
 
@@ -380,5 +387,6 @@ int main(int argc, const char *argv[])
 
 	test_mask(argc_new-1, argv_new+1, mem_ctx, cli);
 
+	talloc_free(mem_ctx);
 	return(0);
 }

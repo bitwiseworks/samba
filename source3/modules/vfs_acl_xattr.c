@@ -21,17 +21,15 @@
 #include "includes.h"
 #include "smbd/smbd.h"
 #include "librpc/gen_ndr/xattr.h"
-#include "librpc/gen_ndr/ndr_xattr.h"
 #include "../lib/crypto/sha256.h"
 #include "auth.h"
-
-#undef DBGC_CLASS
-#define DBGC_CLASS DBGC_VFS
+#include "vfs_acl_common.h"
 
 /* Pull in the common functions. */
 #define ACL_MODULE_NAME "acl_xattr"
 
-#include "modules/vfs_acl_common.c"
+#undef DBGC_CLASS
+#define DBGC_CLASS DBGC_VFS
 
 /*******************************************************************
  Pull a security descriptor into a DATA_BLOB from a xattr.
@@ -51,7 +49,7 @@ static ssize_t getxattr_do(vfs_handle_struct *handle,
 	if (fsp && fsp->fh->fd != -1) {
 		sizeret = SMB_VFS_FGETXATTR(fsp, xattr_name, val, size);
 	} else {
-		sizeret = SMB_VFS_GETXATTR(handle->conn, smb_fname->base_name,
+		sizeret = SMB_VFS_GETXATTR(handle->conn, smb_fname,
 					   XATTR_NTACL_NAME, val, size);
 	}
 	if (sizeret == -1) {
@@ -144,7 +142,7 @@ static NTSTATUS store_acl_blob_fsp(vfs_handle_struct *handle,
 		ret = SMB_VFS_FSETXATTR(fsp, XATTR_NTACL_NAME,
 			pblob->data, pblob->length, 0);
 	} else {
-		ret = SMB_VFS_SETXATTR(fsp->conn, fsp->fsp_name->base_name,
+		ret = SMB_VFS_SETXATTR(fsp->conn, fsp->fsp_name,
 				XATTR_NTACL_NAME,
 				pblob->data, pblob->length, 0);
 	}
@@ -168,12 +166,12 @@ static NTSTATUS store_acl_blob_fsp(vfs_handle_struct *handle,
 *********************************************************************/
 
 static int sys_acl_set_file_xattr(vfs_handle_struct *handle,
-                              const char *name,
-                              SMB_ACL_TYPE_T type,
-                              SMB_ACL_T theacl)
+				const struct smb_filename *smb_fname,
+				SMB_ACL_TYPE_T type,
+				SMB_ACL_T theacl)
 {
 	int ret = SMB_VFS_NEXT_SYS_ACL_SET_FILE(handle,
-						name,
+						smb_fname,
 						type,
 						theacl);
 	if (ret == -1) {
@@ -181,7 +179,8 @@ static int sys_acl_set_file_xattr(vfs_handle_struct *handle,
 	}
 
 	become_root();
-	SMB_VFS_REMOVEXATTR(handle->conn, name, XATTR_NTACL_NAME);
+	SMB_VFS_REMOVEXATTR(handle->conn, smb_fname,
+			XATTR_NTACL_NAME);
 	unbecome_root();
 
 	return ret;
@@ -221,7 +220,7 @@ static int connect_acl_xattr(struct vfs_handle_struct *handle,
 		return ret;
 	}
 
-	ok = init_acl_common_config(handle);
+	ok = init_acl_common_config(handle, ACL_MODULE_NAME);
 	if (!ok) {
 		DBG_ERR("init_acl_common_config failed\n");
 		return -1;
@@ -279,23 +278,57 @@ static int connect_acl_xattr(struct vfs_handle_struct *handle,
 	return 0;
 }
 
+static NTSTATUS acl_xattr_fget_nt_acl(vfs_handle_struct *handle,
+				      files_struct *fsp,
+				      uint32_t security_info,
+				      TALLOC_CTX *mem_ctx,
+				      struct security_descriptor **ppdesc)
+{
+	NTSTATUS status;
+	status = get_nt_acl_common(get_acl_blob, handle, fsp, NULL,
+				   security_info, mem_ctx, ppdesc);
+	return status;
+}
+
+static NTSTATUS acl_xattr_get_nt_acl(vfs_handle_struct *handle,
+				     const struct smb_filename *smb_fname,
+				     uint32_t security_info,
+				     TALLOC_CTX *mem_ctx,
+				     struct security_descriptor **ppdesc)
+{
+	NTSTATUS status;
+	status = get_nt_acl_common(get_acl_blob, handle, NULL, smb_fname,
+				   security_info, mem_ctx, ppdesc);
+	return status;
+}
+
+static NTSTATUS acl_xattr_fset_nt_acl(vfs_handle_struct *handle,
+				      files_struct *fsp,
+				      uint32_t security_info_sent,
+				      const struct security_descriptor *psd)
+{
+	NTSTATUS status;
+	status = fset_nt_acl_common(get_acl_blob, store_acl_blob_fsp,
+				    ACL_MODULE_NAME,
+				    handle, fsp, security_info_sent, psd);
+	return status;
+}
+
 static struct vfs_fn_pointers vfs_acl_xattr_fns = {
 	.connect_fn = connect_acl_xattr,
 	.rmdir_fn = rmdir_acl_common,
 	.unlink_fn = unlink_acl_common,
 	.chmod_fn = chmod_acl_module_common,
 	.fchmod_fn = fchmod_acl_module_common,
-	.fget_nt_acl_fn = fget_nt_acl_common,
-	.get_nt_acl_fn = get_nt_acl_common,
-	.fset_nt_acl_fn = fset_nt_acl_common,
-	.chmod_acl_fn = chmod_acl_acl_module_common,
-	.fchmod_acl_fn = fchmod_acl_acl_module_common,
+	.fget_nt_acl_fn = acl_xattr_fget_nt_acl,
+	.get_nt_acl_fn = acl_xattr_get_nt_acl,
+	.fset_nt_acl_fn = acl_xattr_fset_nt_acl,
 	.sys_acl_set_file_fn = sys_acl_set_file_xattr,
 	.sys_acl_set_fd_fn = sys_acl_set_fd_xattr
 };
 
 static_decl_vfs;
-NTSTATUS vfs_acl_xattr_init(void)
+NTSTATUS vfs_acl_xattr_init(TALLOC_CTX *ctx)
 {
 	return smb_register_vfs(SMB_VFS_INTERFACE_VERSION, "acl_xattr",
 				&vfs_acl_xattr_fns);

@@ -26,7 +26,7 @@
 #include "librpc/gen_ndr/ndr_nfs4acl.h"
 #include "libcli/security/security.h"
 
-NTSTATUS pvfs_acl_nfs4_init(void);
+NTSTATUS pvfs_acl_nfs4_init(TALLOC_CTX *);
 
 #define ACE4_IDENTIFIER_GROUP 0x40
 
@@ -47,7 +47,7 @@ static NTSTATUS pvfs_acl_load_nfs4(struct pvfs_state *pvfs, struct pvfs_filename
 	NT_STATUS_HAVE_NO_MEMORY(acl);
 
 	status = pvfs_xattr_ndr_load(pvfs, mem_ctx, name->full_name, fd, 
-				     NFS4ACL_XATTR_NAME,
+				     NFS4ACL_NDR_XATTR_NAME,
 				     acl, (void *) ndr_pull_nfs4acl);
 	if (!NT_STATUS_IS_OK(status)) {
 		talloc_free(acl);
@@ -176,7 +176,7 @@ static NTSTATUS pvfs_acl_save_nfs4(struct pvfs_state *pvfs, struct pvfs_filename
 
 	privs = root_privileges();
 	status = pvfs_xattr_ndr_save(pvfs, name->full_name, fd, 
-				     NFS4ACL_XATTR_NAME, 
+				     NFS4ACL_NDR_XATTR_NAME,
 				     &acl, (void *) ndr_push_nfs4acl);
 	talloc_free(privs);
 
@@ -188,12 +188,12 @@ static NTSTATUS pvfs_acl_save_nfs4(struct pvfs_state *pvfs, struct pvfs_filename
 /*
   initialise pvfs acl NFS4 backend
 */
-NTSTATUS pvfs_acl_nfs4_init(void)
+NTSTATUS pvfs_acl_nfs4_init(TALLOC_CTX *ctx)
 {
 	struct pvfs_acl_ops ops = {
 		.name = "nfs4acl",
 		.acl_load = pvfs_acl_load_nfs4,
 		.acl_save = pvfs_acl_save_nfs4
 	};
-	return pvfs_acl_register(&ops);
+	return pvfs_acl_register(ctx, &ops);
 }
