@@ -658,6 +658,7 @@ int ldb_kv_search(struct ldb_kv_context *ctx)
 					       "No such Base DN: %s",
 					       ldb_dn_get_linearized(req->op.search.base));
 		}
+
 	} else if (ldb_dn_validate(req->op.search.base) == false) {
 
 		/* We don't want invalid base DNs here */

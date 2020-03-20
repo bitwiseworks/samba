@@ -826,9 +826,6 @@ plantestsuite("samba3.blackbox.smbd_no_krb5", "ad_member:local",
 plantestsuite("samba3.blackbox.durable_v2_delay", "simpleserver:local",
               [os.path.join(samba3srcdir, "script/tests/test_durable_handle_reconnect.sh")])
 
-plantestsuite("samba3.blackbox.durable_v2_delay", "simpleserver:local",
-              [os.path.join(samba3srcdir, "script/tests/test_durable_handle_reconnect.sh")])
-
 plantestsuite("samba3.blackbox.net_cache_samlogon", "ad_member:local",
               [os.path.join(samba3srcdir, "script/tests/test_net_cache_samlogon.sh"),
                '$SERVER', 'tmp', '$DC_USERNAME', '$DC_PASSWORD'])

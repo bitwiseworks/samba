@@ -117,130 +117,6 @@ def get_users():
 
 
 def smbcquota_output_to_userinfo(output):
-<<<<<<< HEAD
-	infos = []
-	for line in output:
-		if len(line) > 1:
-			username = line.strip(':').split()[0]
-			quota_info = line.split(':')[1].split('/')
-			if len(quota_info) > 2:
-				info = user_info()
-				info.username = username.strip()
-				info.softlim = int(quota_info[1].strip()) / BLOCK_SIZE
-				info.hardlim = int(quota_info[2].strip()) / BLOCK_SIZE
-				infos.append(info)
-	return infos
-
-def check_quota_limits(infos, softlim, hardlim):
-	if len(infos) < 1:
-		logging.debug("no users info to check :-(\n")
-		return False
-	for info in infos:
-		if int(info.softlim) != softlim:
-			logging.debug("expected softlimit %s got ->%s<-\n"%(softlim, info.softlim))
-			return False
-		if int(info.hardlim) != hardlim:
-			logging.debug("expected hardlimit limit %s got %s\n"%(hardlim,info.hardlim))
-			return False
-	return True
-
-class test_base:
-	def __init__(self, env):
-		self.env = env
-	def run(self, protocol):
-		pass
-
-class listtest(test_base):
-	def run(self, protocol):
-		init_quota_db(self.env.users, self.env.quota_db)
-		quotas = load_quotas(self.env.quota_db)
-		args = [self.env.smbcquotas];
-		remaining_args = ['-U' + self.env.username + "%" + self.env.password, '-L', '//' + self.env.server + '/quotadir']
-		if protocol == 'smb2':
-			args.append('-m smb2')
-		args.extend(remaining_args)
-		output = subprocess.Popen([self.env.smbcquotas, '-U' + self.env.username + "%" + self.env.password, '-L', '//' + self.env.server + '/quotadir'], stdout=subprocess.PIPE).communicate()[0].decode("utf-8").split('\n')
-		infos = smbcquota_output_to_userinfo(output)
-		return check_quota_limits(infos, DEFAULT_SOFTLIM, DEFAULT_HARDLIM)
-def get_uid(name, users):
-	for user in users:
-		if user.username == name:
-			return user.uid
-	return None
-
-class gettest(test_base):
-	def run(self, protocol):
-		init_quota_db(self.env.users, self.env.quota_db)
-		quotas = load_quotas(self.env.quota_db)
-		uid = get_uid(self.env.username, self.env.users)
-		output = subprocess.Popen([self.env.smbcquotas, '-U' + self.env.username + "%" + self.env.password, '-u' + self.env.username, '//' + self.env.server + '/quotadir'], stdout=subprocess.PIPE).communicate()[0].decode("utf-8").split('\n')
-		user_infos = smbcquota_output_to_userinfo(output)
-		db_user_info = get_quotas(uid, quotas)
-		# double check, we compare the results from the db file
-		# the quota script the server uses compared to what
-		# smbcquota is telling us
-		return check_quota_limits(user_infos, int(db_user_info.softlimit), int(db_user_info.hardlimit))
-
-class settest(test_base):
-	def run(self, protocol):
-		init_quota_db(self.env.users, self.env.quota_db)
-		quotas = load_quotas(self.env.quota_db)
-		uid = get_uid(self.env.username, self.env.users)
-		old_db_user_info = get_quotas(uid, quotas)
-
-		#increase limits by 2 blocks
-		new_soft_limit = (int(old_db_user_info.softlimit) + 2) * BLOCK_SIZE
-		new_hard_limit = (int(old_db_user_info.hardlimit) + 2) * BLOCK_SIZE
-
-		new_limits = "UQLIM:%s:%d/%d"%(self.env.username, new_soft_limit, new_hard_limit)
-		logging.debug("setting new limits %s"%new_limits)
-
-		output = subprocess.Popen([self.env.smbcquotas, '-U' + self.env.username + "%" + self.env.password, '//' + self.env.server + '/quotadir', '-S', new_limits], stdout=subprocess.PIPE).communicate()[0].decode("utf-8").split('\n')
-		logging.debug("output from smbcquota is %s"%output)
-		user_infos = smbcquota_output_to_userinfo(output)
-		return check_quota_limits(user_infos, new_soft_limit / BLOCK_SIZE, new_hard_limit / BLOCK_SIZE)
-
-# map of tests
-subtest_descriptions = {
-	"list test" : listtest,
-	"get test" : gettest,
-	"set test" : settest
-}
-
-def main():
-	logging.basicConfig(format='%(asctime)s %(message)s', level=logging.DEBUG)
-
-	logging.debug("got args %s\n"%str(sys.argv))
-
-	if len(sys.argv) < 7:
-		logging.debug ("Usage: test_smbcquota.py server domain username password envdir smbcquotas\n")
-		sys.exit(1)
-	env = test_env()
-	env.server = sys.argv[1]
-	env.domain = sys.argv[2]
-	env.username = sys.argv[3]
-	env.password = sys.argv[4]
-	env.envdir = sys.argv[5]
-	env.smbcquotas = sys.argv[6]
-	quota_script = os.path.join(os.path.dirname(sys.argv[0]),
-				"getset_quota.py")
-	#copy the quota script to the evironment
-	shutil.copy2(quota_script, env.envdir)
-
-	env.quota_db = os.path.join(env.envdir, "quotas.db")
-	env.users = get_users()
-	for protocol in ['smb1', 'smb2']:
-		for key in subtest_descriptions.keys():
-			test = subtest_descriptions[key](env)
-			logging.debug("running subtest '%s' using protocol '%s'\n"%(key,protocol))
-			result = test.run(protocol)
-			if result == False:
-				logging.debug("subtest '%s' for '%s' failed\n"%(key,protocol))
-				sys.exit(1)
-			else:
-				logging.debug("subtest '%s' for '%s' passed\n"%(key,protocol))
-	sys.exit(0)
-=======
     infos = []
     for line in output:
         if len(line) > 1:
@@ -363,7 +239,6 @@ def main():
             else:
                 logging.debug("subtest '%s' for '%s' passed\n"%(key,protocol))
     sys.exit(0)
->>>>>>> samba-4.12.0
 
 if __name__ == '__main__':
     main()

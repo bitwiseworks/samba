@@ -35,10 +35,6 @@
 
 #define MESSAGING_DGM_FRAGMENT_LENGTH 1024
 
-#ifndef MSG_NOSIGNAL
-#define MSG_NOSIGNAL 0
-#endif
-
 struct sun_path_buf {
 	/*
 	 * This will carry enough for a socket path

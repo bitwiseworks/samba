@@ -98,8 +98,6 @@ IPs = opts.current_ip or samba.interface_ips(lp, bool(all_interfaces)) or []
 nsupdate_cmd = lp.get('nsupdate command')
 dns_zone_scavenging = lp.get("dns zone scavenging")
 
-dns_zone_scavenging = lp.get("dns zone scavenging")
-
 if len(IPs) == 0:
     print("No IP interfaces - skipping DNS updates\n")
     parser.print_usage()
