@@ -927,8 +927,10 @@ static int ltdb_fetch(struct database *db, TDB_DATA key,
 	data->dptr = talloc_memdup(mem_ctx,
 				   rec.dptr + ctdb_ltdb_header_len(header),
 				   data->dsize);
+
+	free(rec.dptr);
+
 	if (data->dptr == NULL) {
-		free(rec.dptr);
 		return ENOMEM;
 	}
 
@@ -1300,7 +1302,7 @@ fail:
 static bool ctdbd_verify(struct ctdbd_context *ctdb)
 {
 	struct node *node;
-	int i;
+	unsigned int i;
 
 	if (ctdb->node_map->num_nodes == 0) {
 		return true;
@@ -1370,7 +1372,7 @@ static int recover_check(struct tevent_req *req)
 	struct ctdbd_context *ctdb = state->ctdb;
 	struct tevent_req *subreq;
 	bool recovery_disabled;
-	int i;
+	unsigned int i;
 
 	recovery_disabled = false;
 	for (i=0; i<ctdb->node_map->num_nodes; i++) {
@@ -1833,7 +1835,7 @@ static void control_get_dbmap(TALLOC_CTX *mem_ctx,
 	struct ctdb_reply_control reply;
 	struct ctdb_dbid_map *dbmap;
 	struct database *db;
-	int i;
+	unsigned int i;
 
 	reply.rdata.opcode = request->opcode;
 
@@ -2377,7 +2379,7 @@ static void control_reload_nodes_file(TALLOC_CTX *mem_ctx,
 	struct ctdb_reply_control reply;
 	struct ctdb_node_map *nodemap;
 	struct node_map *node_map = ctdb->node_map;
-	int i;
+	unsigned int i;
 
 	reply.rdata.opcode = request->opcode;
 
@@ -2493,7 +2495,7 @@ static void control_release_ip(TALLOC_CTX *mem_ctx,
 	struct ctdb_reply_control reply;
 	struct ctdb_public_ip_list *ips = NULL;
 	struct ctdb_public_ip *t = NULL;
-	int i;
+	unsigned int i;
 
 	reply.rdata.opcode = request->opcode;
 
@@ -2559,7 +2561,7 @@ static void control_takeover_ip(TALLOC_CTX *mem_ctx,
 	struct ctdb_reply_control reply;
 	struct ctdb_public_ip_list *ips = NULL;
 	struct ctdb_public_ip *t = NULL;
-	int i;
+	unsigned int i;
 
 	reply.rdata.opcode = request->opcode;
 
@@ -2663,7 +2665,7 @@ static void control_get_nodemap(TALLOC_CTX *mem_ctx,
 	struct ctdb_reply_control reply;
 	struct ctdb_node_map *nodemap;
 	struct node *node;
-	int i;
+	unsigned int i;
 
 	reply.rdata.opcode = request->opcode;
 
@@ -2954,7 +2956,7 @@ static struct ctdb_iface_list *get_ctdb_iface_list(TALLOC_CTX *mem_ctx,
 {
 	struct ctdb_iface_list *iface_list;
 	struct interface *iface;
-	int i;
+	unsigned int i;
 
 	iface_list = talloc_zero(mem_ctx, struct ctdb_iface_list);
 	if (iface_list == NULL) {
@@ -3745,7 +3747,8 @@ static void client_read_handler(uint8_t *buf, size_t buflen,
 	struct ctdbd_context *ctdb = state->ctdb;
 	struct ctdb_req_header header;
 	size_t np;
-	int ret, i;
+	unsigned int i;
+	int ret;
 
 	ret = ctdb_req_header_pull(buf, buflen, &header, &np);
 	if (ret != 0) {

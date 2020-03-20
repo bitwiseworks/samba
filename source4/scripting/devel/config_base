@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # this is useful for running samba tools with a different prefix
 
@@ -26,15 +26,14 @@ config_dir  = prefix + "/etc"
 config_file = config_dir + "/smb.conf"
 
 if not os.path.isdir(config_dir):
-    os.makedirs(config_dir, mode=0755)
+    os.makedirs(config_dir, mode=0o755)
 if not os.path.isfile(config_file):
     open(config_file, mode='w').close()
 
-options = " --configfile=${PREFIX}/etc/smb.conf"
+options = (
+          " --configfile=${PREFIX}/etc/smb.conf"
+          "".join(" --option=%s=%s" % (v.replace(" ",""), vars[v]) for v in vars)
+	  ).replace("${PREFIX}", prefix)
 
-for v in vars:
-    options += " --option=%s=%s" % (v.replace(" ",""), vars[v])
 
-options = options.replace("${PREFIX}", prefix)
-
-print options
+print(options)

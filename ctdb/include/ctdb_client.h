@@ -243,7 +243,6 @@ int ctdb_ctrl_get_all_tunables(struct ctdb_context *ctdb,
 */
 void ctdb_set_flags(struct ctdb_context *ctdb, unsigned flags);
 
-int ctdb_set_socketname(struct ctdb_context *ctdb, const char *socketname);
 const char *ctdb_get_socketname(struct ctdb_context *ctdb);
 
 /* return pnn of this node */
@@ -279,9 +278,6 @@ uint32_t *list_of_vnnmap_nodes(struct ctdb_context *ctdb,
 			       struct ctdb_vnn_map *vnn_map,
 			       TALLOC_CTX *mem_ctx, bool include_self);
 
-uint32_t *list_of_nodes(struct ctdb_context *ctdb,
-			struct ctdb_node_map_old *node_map,
-			TALLOC_CTX *mem_ctx, uint32_t mask, int exclude_pnn);
 uint32_t *list_of_active_nodes(struct ctdb_context *ctdb,
 			       struct ctdb_node_map_old *node_map,
 			       TALLOC_CTX *mem_ctx, bool include_self);

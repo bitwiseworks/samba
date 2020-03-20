@@ -30,6 +30,7 @@
 #include "registry/reg_util_token.h"
 #include "registry/reg_backend_db.h"
 #include "../libcli/registry/util_reg.h"
+#include "cmdline_contexts.h"
 
 extern int optind;
 extern char *optarg;

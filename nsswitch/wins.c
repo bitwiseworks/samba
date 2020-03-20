@@ -27,11 +27,11 @@
 #include <ns_daemon.h>
 #endif
 
-#if HAVE_PTHREAD_H
+#ifdef HAVE_PTHREAD_H
 #include <pthread.h>
 #endif
 
-#if HAVE_PTHREAD
+#ifdef HAVE_PTHREAD
 static pthread_mutex_t wins_nss_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
@@ -69,6 +69,7 @@ static char *lookup_byname_backend(const char *name)
 		return NULL;
 	}
 
+	wbcSetClientProcessName("nss_wins");
 	result = wbcResolveWinsByName(name, &ip);
 	if (result != WBC_ERR_SUCCESS) {
 		return NULL;
@@ -89,6 +90,7 @@ static char *lookup_byaddr_backend(const char *ip)
 	wbcErr result;
 	char *name = NULL;
 
+	wbcSetClientProcessName("nss_wins");
 	result = wbcResolveWinsByIP(ip, &name);
 	if (result != WBC_ERR_SUCCESS) {
 		return NULL;
@@ -249,7 +251,7 @@ _nss_wins_gethostbyname_r(const char *hostname,
 	size_t namelen;
 	int rc;
 
-#if HAVE_PTHREAD
+#ifdef HAVE_PTHREAD
 	pthread_mutex_lock(&wins_nss_mutex);
 #endif
 
@@ -351,7 +353,7 @@ _nss_wins_gethostbyname_r(const char *hostname,
 
   out:
 
-#if HAVE_PTHREAD
+#ifdef HAVE_PTHREAD
 	pthread_mutex_unlock(&wins_nss_mutex);
 #endif
 	return nss_status;

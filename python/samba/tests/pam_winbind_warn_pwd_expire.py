@@ -20,19 +20,26 @@ import samba.tests
 import pypamtest
 import os
 
+
 class PasswordExpirePamTests(samba.tests.TestCase):
     def test_auth_expire_warning(self):
         domain = os.environ["DOMAIN"]
         username = os.environ["USERNAME"]
         password = os.environ["PASSWORD"]
         warn_pwd_expire = int(os.environ["WARN_PWD_EXPIRE"])
-        unix_username = "%s/%s" % (domain, username)
-        expected_rc = 0 # PAM_SUCCESS
+        if domain != "":
+            unix_username = "%s/%s" % (domain, username)
+        else:
+            unix_username = "%s" % username
+        expected_rc = 0  # PAM_SUCCESS
 
         tc = pypamtest.TestCase(pypamtest.PAMTEST_AUTHENTICATE, expected_rc)
-        res = pypamtest.run_pamtest(unix_username, "samba", [tc], [password])
+        try:
+            res = pypamtest.run_pamtest(unix_username, "samba", [tc], [password])
+        except pypamtest.PamTestError as e:
+            raise AssertionError(str(e))
 
-        self.assertTrue(res != None)
+        self.assertTrue(res is not None)
         if warn_pwd_expire == 0:
             self.assertTrue(res.info == ())
         elif warn_pwd_expire == 50:

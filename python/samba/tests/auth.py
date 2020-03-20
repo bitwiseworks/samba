@@ -24,6 +24,7 @@ the functionality, that's already done in other tests.
 from samba import auth
 import samba.tests
 
+
 class AuthSystemSessionTests(samba.tests.TestCase):
 
     def setUp(self):
@@ -57,6 +58,7 @@ class AuthSystemSessionTests(samba.tests.TestCase):
         self.assertTrue(self.system_session.security_token.is_system())
         self.assertFalse(self.system_session.security_token.is_anonymous())
 
+
 class AuthAdminSessionTests(samba.tests.TestCase):
 
     def setUp(self):
@@ -89,7 +91,7 @@ class AuthAdminSessionTests(samba.tests.TestCase):
         self.assertTrue(self.admin_session.security_token.has_builtin_administrators())
 
     def test_session_info_unix_details(self):
-        samba.auth.session_info_fill_unix(session_info = self.admin_session,
+        samba.auth.session_info_fill_unix(session_info=self.admin_session,
                                           lp_ctx=self.lp,
                                           user_name="Administrator")
         self.assertEqual(self.admin_session.unix_info.sanitized_username,

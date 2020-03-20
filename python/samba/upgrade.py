@@ -60,17 +60,17 @@ def import_sam_policy(samdb, policy, logger):
 
     if 'min password length' in policy:
         m['a01'] = ldb.MessageElement(str(policy['min password length']),
-            ldb.FLAG_MOD_REPLACE, 'minPwdLength')
+                                      ldb.FLAG_MOD_REPLACE, 'minPwdLength')
 
     if 'password history' in policy:
         m['a02'] = ldb.MessageElement(str(policy['password history']),
-            ldb.FLAG_MOD_REPLACE, 'pwdHistoryLength')
+                                      ldb.FLAG_MOD_REPLACE, 'pwdHistoryLength')
 
     if 'minimum password age' in policy:
         min_pw_age_unix = policy['minimum password age']
         min_pw_age_nt = int(-min_pw_age_unix * (1e7))
         m['a03'] = ldb.MessageElement(str(min_pw_age_nt), ldb.FLAG_MOD_REPLACE,
-            'minPwdAge')
+                                      'minPwdAge')
 
     if 'maximum password age' in policy:
         max_pw_age_unix = policy['maximum password age']
@@ -87,7 +87,7 @@ def import_sam_policy(samdb, policy, logger):
         lockout_duration_nt = unix2nttime(lockout_duration_mins * 60)
 
         m['a05'] = ldb.MessageElement(str(lockout_duration_nt),
-            ldb.FLAG_MOD_REPLACE, 'lockoutDuration')
+                                      ldb.FLAG_MOD_REPLACE, 'lockoutDuration')
 
     try:
         samdb.modify(m)
@@ -96,7 +96,7 @@ def import_sam_policy(samdb, policy, logger):
 
 
 def add_posix_attrs(logger, samdb, sid, name, nisdomain, xid_type, home=None,
-        shell=None, pgid=None):
+                    shell=None, pgid=None):
     """Add posix attributes for the user/group
 
     :param samdb: Samba4 sam.ldb database
@@ -128,6 +128,7 @@ def add_posix_attrs(logger, samdb, sid, name, nisdomain, xid_type, home=None,
         logger.warn(
             'Could not add posix attrs for AD entry for sid=%s, (%s)',
             str(sid), str(e))
+
 
 def add_ad_posix_idmap_entry(samdb, sid, xid, xid_type, logger):
     """Create idmap entry
@@ -192,11 +193,11 @@ def add_idmap_entry(idmapdb, sid, xid, xid_type, logger):
     else:
         try:
             idmapdb.add({"dn": "CN=%s" % str(sid),
-                        "cn": str(sid),
-                        "objectClass": "sidMap",
-                        "objectSid": ndr_pack(sid),
-                        "type": xid_type,
-                        "xidNumber": str(xid)})
+                         "cn": str(sid),
+                         "objectClass": "sidMap",
+                         "objectSid": ndr_pack(sid),
+                         "type": xid_type,
+                         "xidNumber": str(xid)})
         except ldb.LdbError as e:
             logger.warn(
                 'Could not add idmap entry for sid=%s, id=%s, type=%s (%s)',
@@ -264,7 +265,7 @@ def add_group_from_mapping_entry(samdb, groupmap, logger):
 
     if found:
         logger.warn('Group already exists sid=%s, groupname=%s existing_groupname=%s, Ignoring.',
-                            str(groupmap.sid), groupmap.nt_name, msg[0]['sAMAccountName'][0])
+                    str(groupmap.sid), groupmap.nt_name, msg[0]['sAMAccountName'][0])
     else:
         if groupmap.sid_name_use == lsa.SID_NAME_WKN_GRP:
             # In a lot of Samba3 databases, aliases are marked as well known groups
@@ -279,18 +280,18 @@ def add_group_from_mapping_entry(samdb, groupmap, logger):
         m.dn.add_base(samdb.get_default_basedn())
         m['objectClass'] = ldb.MessageElement('group', ldb.FLAG_MOD_ADD, 'objectClass')
         m['objectSid'] = ldb.MessageElement(ndr_pack(groupmap.sid), ldb.FLAG_MOD_ADD,
-            'objectSid')
+                                            'objectSid')
         m['sAMAccountName'] = ldb.MessageElement(groupmap.nt_name, ldb.FLAG_MOD_ADD,
-            'sAMAccountName')
+                                                 'sAMAccountName')
 
         if groupmap.comment:
             m['description'] = ldb.MessageElement(groupmap.comment, ldb.FLAG_MOD_ADD,
-                'description')
+                                                  'description')
 
         # Fix up incorrect 'well known' groups that are actually builtin (per test above) to be aliases
         if groupmap.sid_name_use == lsa.SID_NAME_ALIAS or groupmap.sid_name_use == lsa.SID_NAME_WKN_GRP:
             m['groupType'] = ldb.MessageElement(str(dsdb.GTYPE_SECURITY_DOMAIN_LOCAL_GROUP),
-                ldb.FLAG_MOD_ADD, 'groupType')
+                                                ldb.FLAG_MOD_ADD, 'groupType')
 
         try:
             samdb.add(m, controls=["relax:0"])
@@ -351,9 +352,9 @@ def import_wins(samba4_winsdb, samba3_winsdb):
                 rType = 0x0
 
         if ttl > time.time():
-            rState = 0x0 # active
+            rState = 0x0  # active
         else:
-            rState = 0x1 # released
+            rState = 0x1  # released
 
         nType = ((nb_flags & 0x60) >> 5)
 
@@ -399,6 +400,7 @@ def import_registry(samba4_registry, samba3_regdb):
         for (value_name, (value_type, value_data)) in samba3_regdb.values(key).items():
             key_handle.set_value(value_name, value_type, value_data)
 
+
 def get_posix_attr_from_ldap_backend(logger, ldb_object, base_dn, user, attr):
     """Get posix attributes from a samba3 ldap backend
     :param ldbs: a list of ldb connection objects
@@ -408,8 +410,8 @@ def get_posix_attr_from_ldap_backend(logger, ldb_object, base_dn, user, attr):
     """
     try:
         msg = ldb_object.search(base_dn, scope=ldb.SCOPE_SUBTREE,
-                        expression=("(&(objectClass=posixAccount)(uid=%s))"
-                        % (user)), attrs=[attr])
+                                expression=("(&(objectClass=posixAccount)(uid=%s))"
+                                            % (user)), attrs=[attr])
     except ldb.LdbError as e:
         raise ProvisioningError("Failed to retrieve attribute %s for user %s, the error is: %s" % (attr, user, e))
     else:
@@ -422,7 +424,7 @@ def get_posix_attr_from_ldap_backend(logger, ldb_object, base_dn, user, attr):
 
 
 def upgrade_from_samba3(samba3, logger, targetdir, session_info=None,
-        useeadb=False, dns_backend=None, use_ntvfs=False):
+                        useeadb=False, dns_backend=None, use_ntvfs=False):
     """Upgrade from samba3 database to samba4 AD database
 
     :param samba3: samba3 object
@@ -448,7 +450,7 @@ def upgrade_from_samba3(samba3, logger, targetdir, session_info=None,
     if not domainname:
         domainname = secrets_db.domains()[0]
         logger.warning("No workgroup specified in smb.conf file, assuming '%s'",
-                domainname)
+                       domainname)
 
     if not realm:
         if serverrole == "ROLE_DOMAIN_BDC" or serverrole == "ROLE_DOMAIN_PDC":
@@ -456,7 +458,7 @@ def upgrade_from_samba3(samba3, logger, targetdir, session_info=None,
         else:
             realm = domainname.upper()
             logger.warning("No realm specified in smb.conf file, assuming '%s'",
-                    realm)
+                           realm)
 
     # Find machine account and password
     next_rid = 1000
@@ -467,12 +469,12 @@ def upgrade_from_samba3(samba3, logger, targetdir, session_info=None,
         machinepass = None
 
     if samba3.lp.get("passdb backend").split(":")[0].strip() == "ldapsam":
-        base_dn =  samba3.lp.get("ldap suffix")
+        base_dn = samba3.lp.get("ldap suffix")
         ldapuser = samba3.lp.get("ldap admin dn")
         ldappass = secrets_db.get_ldap_bind_pw(ldapuser)
         if ldappass is None:
             raise ProvisioningError("ldapsam passdb backend detected but no LDAP Bind PW found in secrets.tdb for user %s.  Please point this tool at the secrets.tdb that was used by the previous installation.")
-        ldappass = ldappass.strip('\x00')
+        ldappass = ldappass.decode('utf-8').strip('\x00')
         ldap = True
     else:
         ldapuser = None
@@ -568,7 +570,10 @@ def upgrade_from_samba3(samba3, logger, targetdir, session_info=None,
             next_rid = entry['rid'] + 1
 
         user = s3db.getsampwnam(username)
-        acct_type = (user.acct_ctrl & (samr.ACB_NORMAL|samr.ACB_WSTRUST|samr.ACB_SVRTRUST|samr.ACB_DOMTRUST))
+        acct_type = (user.acct_ctrl & (samr.ACB_NORMAL |
+                                       samr.ACB_WSTRUST |
+                                       samr.ACB_SVRTRUST |
+                                       samr.ACB_DOMTRUST))
         if acct_type == samr.ACB_SVRTRUST:
             logger.warn("  Demoting BDC account trust for %s, this DC must be elevated to an AD DC using 'samba-tool domain dcpromo'" % username[:-1])
             user.acct_ctrl = (user.acct_ctrl & ~samr.ACB_SVRTRUST) | samr.ACB_WSTRUST
@@ -581,11 +586,11 @@ def upgrade_from_samba3(samba3, logger, targetdir, session_info=None,
             logger.warn("  Skipping account %s that has ACB_WSTRUST (W) set but does not end in $.  This account can not have worked, and is probably left over from a misconfiguration." % username)
             continue
 
-        elif acct_type == (samr.ACB_NORMAL|samr.ACB_WSTRUST) and username[-1] == '$':
+        elif acct_type == (samr.ACB_NORMAL | samr.ACB_WSTRUST) and username[-1] == '$':
             logger.warn("  Fixing account %s which had both ACB_NORMAL (U) and ACB_WSTRUST (W) set.  Account will be marked as ACB_WSTRUST (W), i.e. as a domain member" % username)
             user.acct_ctrl = (user.acct_ctrl & ~samr.ACB_NORMAL)
 
-        elif acct_type == (samr.ACB_NORMAL|samr.ACB_SVRTRUST) and username[-1] == '$':
+        elif acct_type == (samr.ACB_NORMAL | samr.ACB_SVRTRUST) and username[-1] == '$':
             logger.warn("  Fixing account %s which had both ACB_NORMAL (U) and ACB_SVRTRUST (S) set.  Account will be marked as ACB_WSTRUST (S), i.e. as a domain member" % username)
             user.acct_ctrl = (user.acct_ctrl & ~samr.ACB_NORMAL)
 
@@ -619,13 +624,13 @@ Please fix this account before attempting to upgrade again
             admin_user = username
 
         try:
-            group_memberships = s3db.enum_group_memberships(user);
+            group_memberships = s3db.enum_group_memberships(user)
             for group in group_memberships:
                 if str(group) in groupmembers:
                     if user.user_sid not in groupmembers[str(group)]:
                         groupmembers[str(group)].append(user.user_sid)
                 else:
-                    groupmembers[str(group)] = [user.user_sid];
+                    groupmembers[str(group)] = [user.user_sid]
         except passdb.error as e:
             logger.warn("Ignoring group memberships of '%s' %s: %s",
                         username, user.user_sid, e)
@@ -665,7 +670,7 @@ Please fix this account before attempting to upgrade again
         creds.guess(samba3.lp)
         creds.set_bind_dn(ldapuser)
         creds.set_password(ldappass)
-        urls = samba3.lp.get("passdb backend").split(":",1)[1].strip('"')
+        urls = samba3.lp.get("passdb backend").split(":", 1)[1].strip('"')
         for url in urls.split():
             try:
                 ldb_object = Ldb(url, credentials=creds)
@@ -730,7 +735,7 @@ Please fix this account before attempting to upgrade again
     result = provision(logger, session_info,
                        targetdir=targetdir, realm=realm, domain=domainname,
                        domainsid=domainsid, next_rid=next_rid,
-                       dc_rid=machinerid, adminpass = adminpass,
+                       dc_rid=machinerid, adminpass=adminpass,
                        dom_for_fun_level=dsdb.DS_DOMAIN_FUNCTION_2003,
                        hostname=netbiosname.lower(), machinepass=machinepass,
                        serverrole=serverrole, samdb_fill=FILL_FULL,
@@ -807,7 +812,6 @@ Please fix this account before attempting to upgrade again
                (username in pgids) and (pgids[username] is not None):
                 add_posix_attrs(samdb=result.samdb, sid=userdata[username].user_sid, name=username, nisdomain=domainname.lower(), xid_type="ID_TYPE_UID", home=homes[username], shell=shells[username], pgid=pgids[username], logger=logger)
 
-
     logger.info("Adding users to groups")
     # Start a new transaction (should speed this up a little, due to index churn)
     result.samdb.transaction_start()
@@ -840,9 +844,9 @@ Please fix this account before attempting to upgrade again
 
     if result.server_role == "active directory domain controller":
         setsysvolacl(result.samdb, result.paths.netlogon, result.paths.sysvol,
-                result.paths.root_uid, result.paths.root_gid,
-                security.dom_sid(result.domainsid), result.names.dnsdomain,
-                result.names.domaindn, result.lp, use_ntvfs)
+                     result.paths.root_uid, result.paths.root_gid,
+                     security.dom_sid(result.domainsid), result.names.dnsdomain,
+                     result.names.domaindn, result.lp, use_ntvfs)
 
     # FIXME: import_registry(registry.Registry(), samba3.get_registry())
     # FIXME: shares

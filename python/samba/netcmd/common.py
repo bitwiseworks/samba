@@ -20,7 +20,7 @@
 import re
 from samba.dcerpc import nbt
 from samba.net import Net
-
+import ldb
 
 def _get_user_realm_domain(user):
     r""" get the realm or the domain and the base user
@@ -58,14 +58,57 @@ def netcmd_finddc(lp, creds, realm=None):
     if realm is None:
         realm = lp.get('realm')
     cldap_ret = net.finddc(domain=realm,
-                flags=nbt.NBT_SERVER_LDAP | nbt.NBT_SERVER_DS | nbt.NBT_SERVER_WRITABLE)
+                           flags=nbt.NBT_SERVER_LDAP | nbt.NBT_SERVER_DS | nbt.NBT_SERVER_WRITABLE)
     return cldap_ret.pdc_dns_name
 
 
 def netcmd_get_domain_infos_via_cldap(lp, creds, address=None):
-    '''Return domain informations (CLDAP record) of the ldap-capable
+    '''Return domain information (CLDAP record) of the ldap-capable
        DC with the specified address'''
     net = Net(creds=creds, lp=lp)
     cldap_ret = net.finddc(address=address,
-                flags=nbt.NBT_SERVER_LDAP | nbt.NBT_SERVER_DS)
+                           flags=nbt.NBT_SERVER_LDAP | nbt.NBT_SERVER_DS)
     return cldap_ret
+
+def is_printable_attr_val(val):
+    import unicodedata
+
+    # The value must be convertable to a string value.
+    try:
+        str_val = str(val)
+    except:
+        return False
+
+    # Characters of the Unicode Character Category "C" ("Other") are
+    # supposed to be not printable. The category "C" includes control
+    # characters, format specifier and others.
+    for c in str_val:
+        if unicodedata.category(c)[0] == 'C':
+            return False
+
+    return True
+
+def get_ldif_for_editor(samdb, msg):
+
+    # Copy the given message, because we do not
+    # want to modify the original message.
+    m = ldb.Message()
+    m.dn = msg.dn
+
+    for k in msg.keys():
+        if k == "dn":
+            continue
+        vals = msg[k]
+        m[k] = vals
+        need_base64 = False
+        for v in vals:
+            if is_printable_attr_val(v):
+                continue
+            need_base64 = True
+            break
+        if not need_base64:
+            m[k].set_flags(ldb.FLAG_FORCE_NO_BASE64_LDIF)
+
+    result_ldif = samdb.write_ldif(m, ldb.CHANGETYPE_NONE)
+
+    return result_ldif

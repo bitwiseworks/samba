@@ -27,6 +27,7 @@ import gc
 
 import _tevent
 
+
 class BackendListTests(TestCase):
 
     def test_backend_list(self):
@@ -77,6 +78,7 @@ class ContextTests(TestCase):
     def test_timer_deallocate_timer(self):
         """Test timer is scheduled even if reference to it isn't held"""
         collecting_list = []
+
         def callback(t):
             collecting_list.append(True)
         timer = self.ctx.add_timer(0, lambda t: collecting_list.append(True))
@@ -88,6 +90,7 @@ class ContextTests(TestCase):
     def test_timer_deallocate_context(self):
         """Test timer is unscheduled when context is freed"""
         collecting_list = []
+
         def callback(t):
             collecting_list.append(True)
         timer = self.ctx.add_timer(0, lambda t: collecting_list.append(True))
@@ -107,6 +110,7 @@ class ContextTests(TestCase):
         self.assertEqual(collecting_list, [1])
         self.ctx.loop_once()
         self.assertEqual(collecting_list, [1, 2])
+
 
 if __name__ == '__main__':
     TestProgram()

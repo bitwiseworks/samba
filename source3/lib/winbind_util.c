@@ -23,9 +23,9 @@
 #include "../lib/util/util_pw.h"
 #include "nsswitch/libwbclient/wbclient.h"
 
-#if defined(WITH_WINBIND)
-
 #include "lib/winbind_util.h"
+
+#if defined(WITH_WINBIND)
 
 struct passwd * winbind_getpwnam(const char * name)
 {
@@ -94,6 +94,7 @@ bool winbind_lookup_sid(TALLOC_CTX *mem_ctx, const struct dom_sid *sid,
 	enum wbcSidType type;
 	char *domain_name = NULL;
 	char *account_name = NULL;
+	struct dom_sid_buf buf;
 
 	memcpy(&dom_sid, sid, sizeof(dom_sid));
 
@@ -112,7 +113,7 @@ bool winbind_lookup_sid(TALLOC_CTX *mem_ctx, const struct dom_sid *sid,
 	*name_type = (enum lsa_SidType)type;
 
 	DEBUG(10, ("winbind_lookup_sid: SUCCESS: SID %s -> %s %s\n",
-		   sid_string_dbg(sid), domain_name, account_name));
+		   dom_sid_str_buf(sid, &buf), domain_name, account_name));
 
 	wbcFreeMemory(domain_name);
 	wbcFreeMemory(account_name);
@@ -149,23 +150,6 @@ bool winbind_sid_to_uid(uid_t *puid, const struct dom_sid *sid)
 	return (result == WBC_ERR_SUCCESS);
 }
 
-/* Call winbindd to convert uid to sid */
-
-bool winbind_uid_to_sid(struct dom_sid *sid, uid_t uid)
-{
-	struct wbcDomainSid dom_sid;
-	wbcErr result;
-
-	result = wbcUidToSid(uid, &dom_sid);
-	if (result == WBC_ERR_SUCCESS) {
-		memcpy(sid, &dom_sid, sizeof(struct dom_sid));
-	} else {
-		sid_copy(sid, &global_sid_NULL);
-	}
-
-	return (result == WBC_ERR_SUCCESS);
-}
-
 /* Call winbindd to convert SID to gid */
 
 bool winbind_sid_to_gid(gid_t *pgid, const struct dom_sid *sid)
@@ -180,21 +164,34 @@ bool winbind_sid_to_gid(gid_t *pgid, const struct dom_sid *sid)
 	return (result == WBC_ERR_SUCCESS);
 }
 
-/* Call winbindd to convert gid to sid */
-
-bool winbind_gid_to_sid(struct dom_sid *sid, gid_t gid)
+bool winbind_xid_to_sid(struct dom_sid *sid, const struct unixid *xid)
 {
+	struct wbcUnixId wbc_xid;
 	struct wbcDomainSid dom_sid;
 	wbcErr result;
 
-	result = wbcGidToSid(gid, &dom_sid);
-	if (result == WBC_ERR_SUCCESS) {
-		memcpy(sid, &dom_sid, sizeof(struct dom_sid));
-	} else {
-		sid_copy(sid, &global_sid_NULL);
+	switch (xid->type) {
+	case ID_TYPE_UID:
+		wbc_xid = (struct wbcUnixId) {
+			.type = WBC_ID_TYPE_UID, .id.uid = xid->id
+		};
+		break;
+	case ID_TYPE_GID:
+		wbc_xid = (struct wbcUnixId) {
+			.type = WBC_ID_TYPE_GID, .id.gid = xid->id
+		};
+		break;
+	default:
+		return false;
 	}
 
-	return (result == WBC_ERR_SUCCESS);
+	result = wbcUnixIdsToSids(&wbc_xid, 1, &dom_sid);
+	if (result != WBC_ERR_SUCCESS) {
+		return false;
+	}
+
+	memcpy(sid, &dom_sid, sizeof(struct dom_sid));
+	return true;
 }
 
 /* Check for a trusted domain */
@@ -349,13 +346,6 @@ bool winbind_sid_to_uid(uid_t *puid, const struct dom_sid *sid)
 	return false;
 }
 
-/* Call winbindd to convert uid to sid */
-
-bool winbind_uid_to_sid(struct dom_sid *sid, uid_t uid)
-{
-	return false;
-}
-
 /* Call winbindd to convert SID to gid */
 
 bool winbind_sid_to_gid(gid_t *pgid, const struct dom_sid *sid)
@@ -363,9 +353,9 @@ bool winbind_sid_to_gid(gid_t *pgid, const struct dom_sid *sid)
 	return false;
 }
 
-/* Call winbindd to convert gid to sid */
+/* Call winbindd to convert uid or gid to SID */
 
-bool winbind_gid_to_sid(struct dom_sid *sid, gid_t gid)
+bool winbind_xid_to_sid(struct dom_sid *sid, const struct unixid *xid)
 {
 	return false;
 }

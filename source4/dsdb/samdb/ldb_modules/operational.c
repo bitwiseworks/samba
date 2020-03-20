@@ -994,6 +994,7 @@ static int get_pso_count(struct ldb_module *module, TALLOC_CTX *mem_ctx,
 	struct ldb_result *res = NULL;
 	struct ldb_context *ldb = ldb_module_get_ctx(module);
 
+	*pso_count = 0;
 	domain_dn = ldb_get_default_basedn(ldb);
 	psc_dn = ldb_dn_new_fmt(mem_ctx, ldb,
 			        "CN=Password Settings Container,CN=System,%s",
@@ -1007,6 +1008,17 @@ static int get_pso_count(struct ldb_module *module, TALLOC_CTX *mem_ctx,
 				 LDB_SCOPE_ONELEVEL, attrs,
 				 DSDB_FLAG_NEXT_MODULE, parent,
 				 "(objectClass=msDS-PasswordSettings)");
+
+	/*
+	 * Just ignore PSOs if the container doesn't exist. This is a weird
+	 * corner-case where the AD DB was created from a pre-2008 base schema,
+	 * and then the FL was manually upgraded.
+	 */
+	if (ret == LDB_ERR_NO_SUCH_OBJECT) {
+		DBG_NOTICE("No Password Settings Container exists\n");
+		return LDB_SUCCESS;
+	}
+
 	if (ret != LDB_SUCCESS) {
 		return ret;
 	}
@@ -1023,8 +1035,7 @@ static int get_pso_count(struct ldb_module *module, TALLOC_CTX *mem_ctx,
  * The PSO with the lowest precedence is better, otherwise (if the precedence
  * is equal) the PSO with the lower GUID wins.
  */
-static int pso_compare(struct ldb_message **m1, struct ldb_message **m2,
-		       TALLOC_CTX *mem_ctx)
+static int pso_compare(struct ldb_message **m1, struct ldb_message **m2)
 {
 	uint32_t prec1;
 	uint32_t prec2;
@@ -1071,13 +1082,12 @@ static int pso_search_by_sids(struct ldb_module *module, TALLOC_CTX *mem_ctx,
 	sid_filter = talloc_strdup(mem_ctx, "");
 
 	for (i = 0; sid_filter && i < num_sids; i++) {
-		char sid_buf[DOM_SID_STR_BUFLEN] = {0,};
+		struct dom_sid_buf sid_buf;
 
-		dom_sid_string_buf(&sid_array[i], sid_buf, sizeof(sid_buf));
-
-		sid_filter = talloc_asprintf_append(sid_filter,
-						    "(msDS-PSOAppliesTo=<SID=%s>)",
-						    sid_buf);
+		sid_filter = talloc_asprintf_append(
+			sid_filter,
+			"(msDS-PSOAppliesTo=<SID=%s>)",
+			dom_sid_str_buf(&sid_array[i], &sid_buf));
 	}
 
 	if (sid_filter == NULL) {
@@ -1123,7 +1133,7 @@ static int pso_find_best(struct ldb_module *module, TALLOC_CTX *mem_ctx,
 	}
 
 	/* sort the list so that the best PSO is first */
-	LDB_TYPESAFE_QSORT(res->msgs, res->count, mem_ctx, pso_compare);
+	TYPESAFE_QSORT(res->msgs, res->count, pso_compare);
 
 	if (res->count > 0) {
 		*best_pso = res->msgs[0];

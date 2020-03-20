@@ -31,19 +31,43 @@
 bool reopen_logs(void)
 {
 	if (lp_loaded()) {
-		struct debug_settings settings;
-		debug_set_logfile(lp_logfile(talloc_tos()));
+		struct debug_settings settings = {
+			.max_log_size = lp_max_log_size(),
+			.timestamp_logs = lp_timestamp_logs(),
+			.debug_prefix_timestamp = lp_debug_prefix_timestamp(),
+			.debug_hires_timestamp = lp_debug_hires_timestamp(),
+			.debug_pid = lp_debug_pid(),
+			.debug_uid = lp_debug_uid(),
+			.debug_class = lp_debug_class(),
+		};
+		const struct loadparm_substitution *lp_sub =
+			loadparm_s3_global_substitution();
 
-		ZERO_STRUCT(settings);
-		settings.max_log_size = lp_max_log_size();
-		settings.timestamp_logs = lp_timestamp_logs();
-		settings.debug_prefix_timestamp = lp_debug_prefix_timestamp();
-		settings.debug_hires_timestamp = lp_debug_hires_timestamp();
-		settings.debug_pid = lp_debug_pid();
-		settings.debug_uid = lp_debug_uid();
-		settings.debug_class = lp_debug_class();
-		debug_set_settings(&settings, lp_logging(talloc_tos()),
-				   lp_syslog(), lp_syslog_only());
+		debug_set_logfile(lp_logfile(talloc_tos(), lp_sub));
+		debug_parse_levels(lp_log_level(talloc_tos(), lp_sub));
+		debug_set_settings(&settings,
+				   lp_logging(talloc_tos(), lp_sub),
+				   lp_syslog(),
+				   lp_syslog_only());
+	} else {
+		/*
+		 * Parameters are not yet loaded - configure debugging with
+		 * reasonable defaults to enable logging for early
+		 * startup failures.
+		 */
+		struct debug_settings settings = {
+			.max_log_size = 5000,
+			.timestamp_logs = true,
+			.debug_prefix_timestamp = false,
+			.debug_hires_timestamp = true,
+			.debug_pid = false,
+			.debug_uid = false,
+			.debug_class = false,
+		};
+		debug_set_settings(&settings,
+				   "file",
+				   1,
+				   false);
 	}
 	return reopen_logs_internal();
 }

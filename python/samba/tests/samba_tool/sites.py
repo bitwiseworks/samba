@@ -77,12 +77,12 @@ class SitesSubnetCmdTestCase(BaseSitesCmdTestCase):
     def test_site_subnet_create(self):
         cidrs = (("10.9.8.0/24", self.sitename),
                  ("50.60.0.0/16", self.sitename2),
-                 ("50.61.0.0/16", self.sitename2), # second subnet on the site
-                 ("50.0.0.0/8", self.sitename), # overlapping subnet, other site
-                 ("50.62.1.2/32", self.sitename), # single IP
+                 ("50.61.0.0/16", self.sitename2),  # second subnet on the site
+                 ("50.0.0.0/8", self.sitename),  # overlapping subnet, other site
+                 ("50.62.1.2/32", self.sitename),  # single IP
                  ("aaaa:bbbb:cccc:dddd:eeee:ffff:2222:1100/120",
                   self.sitename2),
-             )
+                 )
 
         for cidr, sitename in cidrs:
             result, out, err = self.runsubcmd("sites", "subnet", "create",
@@ -114,11 +114,11 @@ class SitesSubnetCmdTestCase(BaseSitesCmdTestCase):
     def test_site_subnet_create_should_fail(self):
         cidrs = (("10.9.8.0/33", self.sitename),    # mask too big
                  ("50.60.0.0/8", self.sitename2),   # insufficient zeros
-                 ("50.261.0.0/16", self.sitename2), # bad octet
+                 ("50.261.0.0/16", self.sitename2),  # bad octet
                  ("7.0.0.0.0/0", self.sitename),    # insufficient zeros
                  ("aaaa:bbbb:cccc:dddd:eeee:ffff:2222:1100/119",
                   self.sitename),                   # insufficient zeros
-             )
+                 )
 
         for cidr, sitename in cidrs:
             result, out, err = self.runsubcmd("sites", "subnet", "create",

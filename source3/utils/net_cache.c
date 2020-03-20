@@ -24,6 +24,7 @@
 #include "../librpc/gen_ndr/ndr_netlogon.h"
 #include "libcli/security/dom_sid.h"
 #include "lib/util/strv.h"
+#include "lib/gencache.h"
 
 /**
  * @file net_cache.c
@@ -346,24 +347,6 @@ static int net_cache_flush(struct net_context *c, int argc, const char **argv)
 	return 0;
 }
 
-static int net_cache_stabilize(struct net_context *c, int argc,
-			       const char **argv)
-{
-	if (c->display_usage) {
-		d_printf(  "%s\n"
-			   "net cache stabilize\n"
-			   "    %s\n",
-			 _("Usage:"),
-			 _("Move transient cache content to stable storage"));
-		return 0;
-	}
-
-	if (!gencache_stabilize()) {
-		return -1;
-	}
-	return 0;
-}
-
 static int netsamlog_cache_for_all_cb(const char *sid_str,
 				      time_t when_cached,
 				      struct netr_SamInfo3 *info3,
@@ -462,9 +445,10 @@ static int net_cache_samlogon_show(struct net_context *c,
 	}
 
 	for (i = 0; i < num_user_sids; i++) {
-		char buf[DOM_SID_STR_BUFLEN];
-		dom_sid_string_buf(&user_sids[i], buf, sizeof(buf));
-		d_printf("SID %2" PRIu32 ": %s\n", i, buf);
+		struct dom_sid_buf buf;
+		d_printf("SID %2" PRIu32 ": %s\n",
+			 i,
+			 dom_sid_str_buf(&user_sids[i], &buf));
 	}
 
 	TALLOC_FREE(user_sids);
@@ -652,14 +636,6 @@ int net_cache(struct net_context *c, int argc, const char **argv)
 			N_("Delete all cache entries"),
 			N_("net cache flush\n"
 			   "  Delete all cache entries")
-		},
-		{
-			"stabilize",
-			net_cache_stabilize,
-			NET_TRANSPORT_LOCAL,
-			N_("Move transient cache content to stable storage"),
-			N_("net cache stabilize\n"
-			   "  Move transient cache content to stable storage")
 		},
 		{
 			"samlogon",

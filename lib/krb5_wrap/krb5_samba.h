@@ -105,7 +105,7 @@ typedef struct {
 
 #ifdef HAVE_KRB5_KEYTAB_ENTRY_KEY               /* MIT */
 #define KRB5_KT_KEY(k)		(&(k)->key)
-#elif HAVE_KRB5_KEYTAB_ENTRY_KEYBLOCK          /* Heimdal */
+#elif defined(HAVE_KRB5_KEYTAB_ENTRY_KEYBLOCK)  /* Heimdal */
 #define KRB5_KT_KEY(k)		(&(k)->keyblock)
 #else
 #error krb5_keytab_entry has no key or keyblock member
@@ -142,6 +142,8 @@ krb5_error_code smb_krb5_unparse_name(TALLOC_CTX *mem_ctx,
 				      krb5_context context,
 				      krb5_const_principal principal,
 				      char **unix_name);
+
+krb5_error_code smb_krb5_init_context_common(krb5_context *_krb5_context);
 
 krb5_error_code krb5_set_default_tgs_ktypes(krb5_context ctx, const krb5_enctype *enc);
 
@@ -188,9 +190,6 @@ krb5_error_code smb_krb5_renew_ticket(const char *ccache_string, const char *cli
 krb5_error_code smb_krb5_gen_netbios_krb5_address(smb_krb5_addresses **kerb_addr,
 						  const char *netbios_name);
 krb5_error_code smb_krb5_free_addresses(krb5_context context, smb_krb5_addresses *addr);
-NTSTATUS krb5_to_nt_status(krb5_error_code kerberos_error);
-krb5_error_code nt_status_to_krb5(NTSTATUS nt_status);
-
 krb5_enctype smb_krb5_kt_get_enctype_from_entry(krb5_keytab_entry *kt_entry);
 
 krb5_error_code smb_krb5_enctype_to_string(krb5_context context,
@@ -301,7 +300,8 @@ krb5_error_code smb_krb5_make_pac_checksum(TALLOC_CTX *mem_ctx,
 					   uint32_t *sig_type,
 					   DATA_BLOB *sig_blob);
 
-char *smb_krb5_principal_get_realm(krb5_context context,
+char *smb_krb5_principal_get_realm(TALLOC_CTX *mem_ctx,
+				   krb5_context context,
 				   krb5_const_principal principal);
 
 void smb_krb5_principal_set_type(krb5_context context,
@@ -367,8 +367,6 @@ int smb_krb5_create_key_from_string(krb5_context context,
 				    krb5_data *password,
 				    krb5_enctype enctype,
 				    krb5_keyblock *key);
-
-krb5_boolean smb_krb5_get_allowed_weak_crypto(krb5_context context);
 
 #ifndef krb5_princ_size
 #if defined(HAVE_KRB5_PRINCIPAL_GET_NUM_COMP)

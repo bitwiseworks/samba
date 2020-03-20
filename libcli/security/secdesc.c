@@ -384,18 +384,6 @@ struct sec_desc_buf *make_sec_desc_buf(TALLOC_CTX *ctx, size_t len, struct secur
 	return dst;
 }
 
-/*******************************************************************
- Duplicates a struct sec_desc_buf structure.
-********************************************************************/
-
-struct sec_desc_buf *dup_sec_desc_buf(TALLOC_CTX *ctx, struct sec_desc_buf *src)
-{
-	if(src == NULL)
-		return NULL;
-
-	return make_sec_desc_buf( ctx, src->sd_size, src->sd);
-}
-
 /*
  * Determine if an struct security_ace is inheritable
  */
@@ -492,6 +480,7 @@ NTSTATUS se_create_child_secdesc(TALLOC_CTX *ctx,
 		const struct dom_sid *ptrustee = &ace->trustee;
 		const struct dom_sid *creator = NULL;
 		uint8_t new_flags = ace->flags;
+		struct dom_sid_buf sidbuf1, sidbuf2;
 
 		if (!is_inheritable_ace(ace, container)) {
 			continue;
@@ -540,9 +529,9 @@ NTSTATUS se_create_child_secdesc(TALLOC_CTX *ctx,
 
 			DEBUG(5,("se_create_child_secdesc(): %s:%d/0x%02x/0x%08x"
 				 " inherited as %s:%d/0x%02x/0x%08x\n",
-				 dom_sid_string(frame, &ace->trustee),
+				 dom_sid_str_buf(&ace->trustee, &sidbuf1),
 				 ace->type, ace->flags, ace->access_mask,
-				 dom_sid_string(frame, &new_ace->trustee),
+				 dom_sid_str_buf(&new_ace->trustee, &sidbuf2),
 				 new_ace->type, new_ace->flags,
 				 new_ace->access_mask));
 
@@ -565,9 +554,9 @@ NTSTATUS se_create_child_secdesc(TALLOC_CTX *ctx,
 
 		DEBUG(5, ("se_create_child_secdesc(): %s:%d/0x%02x/0x%08x "
 			  " inherited as %s:%d/0x%02x/0x%08x\n",
-			  dom_sid_string(frame, &ace->trustee),
+			  dom_sid_str_buf(&ace->trustee, &sidbuf1),
 			  ace->type, ace->flags, ace->access_mask,
-			  dom_sid_string(frame, &new_ace->trustee),
+			  dom_sid_str_buf(&new_ace->trustee, &sidbuf2),
 			  new_ace->type, new_ace->flags,
 			  new_ace->access_mask));
 

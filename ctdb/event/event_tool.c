@@ -308,6 +308,7 @@ static int event_command_script_list(TALLOC_CTX *mem_ctx,
 	char *subdir = NULL;
 	char *data_dir = NULL;
 	char *etc_dir = NULL;
+	char *t = NULL;
 	struct event_script_list *data_list = NULL;
 	struct event_script_list *etc_list = NULL;
 	unsigned int i, j, matched;
@@ -326,6 +327,20 @@ static int event_command_script_list(TALLOC_CTX *mem_ctx,
 	data_dir = path_datadir_append(mem_ctx, subdir);
 	if (data_dir == NULL) {
 		return ENOMEM;
+	}
+
+	t = talloc_size(mem_ctx, PATH_MAX);
+	if (t == NULL) {
+		return ENOMEM;
+	}
+
+	data_dir = realpath(data_dir, t);
+	if (data_dir == NULL) {
+		if (errno != ENOENT) {
+			return errno;
+		}
+		D_ERR("Command script list finished with result=%d\n", ENOENT);
+		return ENOENT;
 	}
 
 	etc_dir = path_etcdir_append(mem_ctx, subdir);
@@ -393,7 +408,7 @@ static int event_command_script_list(TALLOC_CTX *mem_ctx,
 			}
 
 			len = readlink(e->path, buf, sizeof(buf));
-			if (len == -1 || len >= sizeof(buf)) {
+			if (len == -1 || (size_t)len >= sizeof(buf)) {
 				/*
 				 * Not a link?  Disappeared?  Invalid
 				 * link target?  Something else?
@@ -515,7 +530,7 @@ static int event_command_script_enable(TALLOC_CTX *mem_ctx,
 	struct event_tool_context *ctx = talloc_get_type_abort(
 		private_data, struct event_tool_context);
 	struct stat statbuf;
-	char *script, *etc_script, *data_script;
+	char *script, *etc_script;
 	int ret;
 
 	if (argc != 2) {
@@ -530,11 +545,6 @@ static int event_command_script_enable(TALLOC_CTX *mem_ctx,
 
 	etc_script = path_etcdir_append(mem_ctx, script);
 	if (etc_script == NULL) {
-		return ENOMEM;
-	}
-
-	data_script = path_datadir_append(mem_ctx, script);
-	if (data_script == NULL) {
 		return ENOMEM;
 	}
 
@@ -555,6 +565,30 @@ static int event_command_script_enable(TALLOC_CTX *mem_ctx,
 		return EINVAL;
 	} else {
 		if (errno == ENOENT) {
+			char *t;
+			char *data_script;
+
+			data_script = path_datadir_append(mem_ctx, script);
+			if (data_script == NULL) {
+				return ENOMEM;
+			}
+
+			t = talloc_size(mem_ctx, PATH_MAX);
+			if (t == NULL) {
+				return ENOMEM;
+			}
+
+			data_script = realpath(data_script, t);
+			if (data_script == NULL) {
+				if (errno != ENOENT) {
+					return errno;
+				}
+				printf("Script %s does not exist in %s\n",
+				       argv[1],
+				       argv[0]);
+				return ENOENT;
+			}
+
 			ret = stat(data_script, &statbuf);
 			if (ret != 0) {
 				printf("Script %s does not exist in %s\n",
@@ -665,6 +699,7 @@ int event_tool_init(TALLOC_CTX *mem_ctx,
 	ret = cmdline_init(mem_ctx,
 			   prog,
 			   options,
+			   NULL,
 			   event_commands,
 			   &ctx->cmdline);
 	if (ret != 0) {
@@ -717,6 +752,7 @@ int main(int argc, const char **argv)
 	TALLOC_CTX *mem_ctx;
 	struct event_tool_context *ctx;
 	int ret, result = 0;
+	int level;
 	bool ok;
 
 	mem_ctx = talloc_new(NULL);
@@ -738,10 +774,11 @@ int main(int argc, const char **argv)
 	}
 
 	setup_logging("ctdb-event", DEBUG_STDERR);
-	ok = debug_level_parse(event_data.debug, &DEBUGLEVEL);
+	ok = debug_level_parse(event_data.debug, &level);
 	if (!ok) {
-		DEBUGLEVEL = DEBUG_ERR;
+		level = DEBUG_ERR;
 	}
+	debuglevel_set(level);
 
 	ret = event_tool_run(ctx, &result);
 	if (ret != 0) {

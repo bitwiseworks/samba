@@ -22,6 +22,7 @@
 #include <Python.h>
 #include "python/py3compat.h"
 #include "includes.h"
+#include "python/modules.h"
 #include <pyldb.h>
 #include <pytalloc.h>
 #include "dns_server/dnsserver_common.h"
@@ -43,7 +44,7 @@
 		PyErr_SetString(PyExc_TypeError, "ldb Dn object required"); \
 		return NULL; \
 	} \
-	dn = pyldb_Dn_AsDn(py_ldb_dn);
+	dn = pyldb_Dn_AS_DN(py_ldb_dn);
 
 static PyObject *py_dnsp_DnssrvRpcRecord_get_list(struct dnsp_DnssrvRpcRecord *records,
 						  uint16_t num_records)
@@ -100,6 +101,7 @@ static PyObject *py_dsdb_dns_lookup(PyObject *self,
 	struct ldb_context *samdb;
 	PyObject *py_ldb, *ret, *pydn;
 	PyObject *py_dns_partition = NULL;
+	PyObject *result = NULL;
 	char *dns_name;
 	TALLOC_CTX *frame;
 	NTSTATUS status;
@@ -156,7 +158,10 @@ static PyObject *py_dsdb_dns_lookup(PyObject *self,
 	ret = py_dnsp_DnssrvRpcRecord_get_list(records, num_records);
 	pydn = pyldb_Dn_FromDn(dn);
 	talloc_free(frame);
-	return Py_BuildValue("(OO)", pydn, ret);
+	result = Py_BuildValue("(OO)", pydn, ret);
+	Py_CLEAR(ret);
+	Py_CLEAR(pydn);
+	return result;
 }
 
 static PyObject *py_dsdb_dns_extract(PyObject *self, PyObject *args)
@@ -322,7 +327,7 @@ static PyObject *py_dsdb_dns_replace_by_dn(PyObject *self, PyObject *args)
 
 static PyMethodDef py_dsdb_dns_methods[] = {
 
-	{ "lookup", (PyCFunction)py_dsdb_dns_lookup,
+	{ "lookup", PY_DISCARD_FUNC_SIG(PyCFunction, py_dsdb_dns_lookup),
 	        METH_VARARGS|METH_KEYWORDS,
 	        "Get the DNS database entries for a DNS name"},
 	{ "replace", (PyCFunction)py_dsdb_dns_replace,

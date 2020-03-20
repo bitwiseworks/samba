@@ -108,15 +108,6 @@ static bool is_internal_domain(const struct dom_sid *sid)
 	return (sid_check_is_our_sam(sid) || sid_check_is_builtin(sid));
 }
 
-static bool is_in_internal_domain(const struct dom_sid *sid)
-{
-	if (sid == NULL)
-		return False;
-
-	return (sid_check_is_in_our_sam(sid) || sid_check_is_in_builtin(sid));
-}
-
-
 /* Add a trusted domain to our list of domains.
    If the domain already exists in the list,
    return it and don't re-initialize.  */
@@ -135,6 +126,7 @@ static NTSTATUS add_trusted_domain(const char *domain_name,
 	const char **ignored_domains = NULL;
 	const char **dom = NULL;
 	int role = lp_server_role();
+	struct dom_sid_buf buf;
 
 	if (is_null_sid(sid)) {
 		DBG_ERR("Got null SID for domain [%s]\n", domain_name);
@@ -178,7 +170,8 @@ static NTSTATUS add_trusted_domain(const char *domain_name,
 		if (check_domain != NULL) {
 			DBG_ERR("SID [%s] already used by domain [%s], "
 				"expected [%s]\n",
-				sid_string_dbg(sid), check_domain->name,
+				dom_sid_str_buf(sid, &buf),
+				check_domain->name,
 				domain->name);
 			return NT_STATUS_INVALID_PARAMETER;
 		}
@@ -301,7 +294,7 @@ static NTSTATUS add_trusted_domain(const char *domain_name,
 
 	DBG_NOTICE("Added domain [%s] [%s] [%s]\n",
 		   domain->name, domain->alt_name,
-		   sid_string_dbg(&domain->sid));
+		   dom_sid_str_buf(&domain->sid, &buf));
 
 	*_d = domain;
 	return NT_STATUS_OK;
@@ -409,7 +402,7 @@ static void add_trusted_domains( struct winbindd_domain *domain )
 	state->request.length = sizeof(state->request);
 	state->request.cmd = WINBINDD_LIST_TRUSTDOM;
 
-	req = wb_domain_request_send(state, server_event_context(),
+	req = wb_domain_request_send(state, global_event_context(),
 				     domain, &state->request);
 	if (req == NULL) {
 		DEBUG(1, ("wb_domain_request_send failed\n"));
@@ -468,6 +461,7 @@ static void trustdom_list_done(struct tevent_req *req)
 		uint32_t trust_type;
 		uint32_t trust_attribs;
 		uint32_t trust_flags;
+		int error = 0;
 
 		DBG_DEBUG("parsing response line '%s'\n", p);
 
@@ -513,7 +507,15 @@ static void trustdom_list_done(struct tevent_req *req)
 			break;
 		}
 
-		trust_flags = (uint32_t)strtoul(q, NULL, 10);
+		trust_flags = (uint32_t)smb_strtoul(q,
+						    NULL,
+						    10,
+						    &error,
+						    SMB_STR_STANDARD);
+		if (error != 0) {
+			DBG_ERR("Failed to convert trust_flags\n");
+			break;
+		}
 
 		q = strtok(NULL, "\\");
 		if (q == NULL) {
@@ -521,7 +523,15 @@ static void trustdom_list_done(struct tevent_req *req)
 			break;
 		}
 
-		trust_type = (uint32_t)strtoul(q, NULL, 10);
+		trust_type = (uint32_t)smb_strtoul(q,
+						   NULL,
+						   10,
+						   &error,
+						   SMB_STR_STANDARD);
+		if (error != 0) {
+			DBG_ERR("Failed to convert trust_type\n");
+			break;
+		}
 
 		q = strtok(NULL, "\n");
 		if (q == NULL) {
@@ -529,7 +539,15 @@ static void trustdom_list_done(struct tevent_req *req)
 			break;
 		}
 
-		trust_attribs = (uint32_t)strtoul(q, NULL, 10);
+		trust_attribs = (uint32_t)smb_strtoul(q,
+						      NULL,
+						      10,
+						      &error,
+						      SMB_STR_STANDARD);
+		if (error != 0) {
+			DBG_ERR("Failed to convert trust_attribs\n");
+			break;
+		}
 
 		if (!within_forest) {
 			trust_flags &= ~NETR_TRUST_FLAG_IN_FOREST;
@@ -705,7 +723,7 @@ static void rescan_forest_trusts( void )
 
 		if ( (flags & NETR_TRUST_FLAG_INBOUND) &&
 		     (type == LSA_TRUST_TYPE_UPLEVEL) &&
-		     (attribs == LSA_TRUST_ATTRIBUTE_FOREST_TRANSITIVE) )
+		     (attribs & LSA_TRUST_ATTRIBUTE_FOREST_TRANSITIVE) )
 		{
 			/* add the trusted domain if we don't know
 			   about it */
@@ -831,9 +849,16 @@ static void wb_imsg_new_trusted_domain(struct imessaging_context *msg,
 				       void *private_data,
 				       uint32_t msg_type,
 				       struct server_id server_id,
+				       size_t num_fds,
+				       int *fds,
 				       DATA_BLOB *data)
 {
 	bool ok;
+
+	if (num_fds != 0) {
+		DBG_WARNING("Received %zu fds, ignoring message\n", num_fds);
+		return;
+	}
 
 	DBG_NOTICE("Rescanning trusted domains\n");
 
@@ -922,7 +947,7 @@ static bool add_trusted_domains_dc(void)
 
 			/* Even in the parent winbindd we'll need to
 			   talk to the DC, so try and see if we can
-			   contact it. Theoretically this isn't neccessary
+			   contact it. Theoretically this isn't necessary
 			   as the init_dc_connection() in init_child_recv()
 			   will do this, but we can start detecting the DC
 			   early here. */
@@ -996,7 +1021,7 @@ static bool add_trusted_domains_dc(void)
 		if (sec_chan_type != SEC_CHAN_NULL) {
 			/* Even in the parent winbindd we'll need to
 			   talk to the DC, so try and see if we can
-			   contact it. Theoretically this isn't neccessary
+			   contact it. Theoretically this isn't necessary
 			   as the init_dc_connection() in init_child_recv()
 			   will do this, but we can start detecting the DC
 			   early here. */
@@ -1288,7 +1313,7 @@ bool init_domain_list(void)
 		}
 		/* Even in the parent winbindd we'll need to
 		   talk to the DC, so try and see if we can
-		   contact it. Theoretically this isn't neccessary
+		   contact it. Theoretically this isn't necessary
 		   as the init_dc_connection() in init_child_recv()
 		   will do this, but we can start detecting the DC
 		   early here. */
@@ -1464,7 +1489,9 @@ struct winbindd_domain *find_default_route_domain(void)
 
 struct winbindd_domain *find_lookup_domain_from_sid(const struct dom_sid *sid)
 {
-	DBG_DEBUG("SID [%s]\n", sid_string_dbg(sid));
+	struct dom_sid_buf buf;
+
+	DBG_DEBUG("SID [%s]\n", dom_sid_str_buf(sid, &buf));
 
 	/*
 	 * SIDs in the S-1-22-{1,2} domain and well-known SIDs should be handled
@@ -1475,20 +1502,18 @@ struct winbindd_domain *find_lookup_domain_from_sid(const struct dom_sid *sid)
 	     sid_check_is_unix_groups(sid) ||
 	     sid_check_is_in_unix_users(sid) ||
 	     sid_check_is_unix_users(sid) ||
-	     sid_check_is_wellknown_domain(sid, NULL) ||
-	     sid_check_is_in_wellknown_domain(sid) )
+	     sid_check_is_our_sam(sid) ||
+             sid_check_is_in_our_sam(sid) )
 	{
 		return find_domain_from_sid(get_global_sam_sid());
 	}
 
-	/*
-	 * On member servers the internal domains are different: These are part
-	 * of the local SAM.
-	 */
-
-	if (is_internal_domain(sid) || is_in_internal_domain(sid)) {
-		DEBUG(10, ("calling find_domain_from_sid\n"));
-		return find_domain_from_sid(sid);
+	if ( sid_check_is_builtin(sid) ||
+	     sid_check_is_in_builtin(sid) ||
+	     sid_check_is_wellknown_domain(sid, NULL) ||
+	     sid_check_is_in_wellknown_domain(sid) )
+	{
+		return find_domain_from_sid(&global_sid_Builtin);
 	}
 
 	if (IS_DC) {
@@ -1515,6 +1540,8 @@ struct winbindd_domain *find_lookup_domain_from_sid(const struct dom_sid *sid)
 
 struct winbindd_domain *find_lookup_domain_from_name(const char *domain_name)
 {
+	bool predefined;
+
 	if ( strequal(domain_name, unix_users_domain_name() ) ||
 	     strequal(domain_name, unix_groups_domain_name() ) )
 	{
@@ -1526,8 +1553,14 @@ struct winbindd_domain *find_lookup_domain_from_name(const char *domain_name)
 	}
 
 	if (strequal(domain_name, "BUILTIN") ||
-	    strequal(domain_name, get_global_sam_name()))
+	    strequal(domain_name, get_global_sam_name())) {
 		return find_domain_from_name_noinit(domain_name);
+	}
+
+	predefined = dom_sid_lookup_is_predefined_domain(domain_name);
+	if (predefined) {
+		return find_domain_from_name_noinit(builtin_domain_name());
+	}
 
 	if (IS_DC) {
 		struct winbindd_domain *domain = NULL;
@@ -1665,6 +1698,10 @@ char *fill_domain_username_talloc(TALLOC_CTX *mem_ctx,
 
 	if (lp_server_role() == ROLE_ACTIVE_DIRECTORY_DC) {
 		can_assume = false;
+	}
+
+	if (user == NULL) {
+		return NULL;
 	}
 
 	tmp_user = talloc_strdup(mem_ctx, user);
@@ -2141,6 +2178,7 @@ bool parse_xidlist(TALLOC_CTX *mem_ctx, const char *xidstr,
 		struct unixid xid;
 		unsigned long long id;
 		char *endp;
+		int error = 0;
 
 		switch (p[0]) {
 		case 'U':
@@ -2155,8 +2193,8 @@ bool parse_xidlist(TALLOC_CTX *mem_ctx, const char *xidstr,
 
 		p += 1;
 
-		id = strtoull(p, &endp, 10);
-		if ((id == ULLONG_MAX) && (errno == ERANGE)) {
+		id = smb_strtoull(p, &endp, 10, &error, SMB_STR_STANDARD);
+		if (error != 0) {
 			goto fail;
 		}
 		if (*endp != '\n') {

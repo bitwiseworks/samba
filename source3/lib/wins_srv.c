@@ -20,6 +20,7 @@
 */
 
 #include "includes.h"
+#include "lib/gencache.h"
 
 /*
   This is pretty much a complete rewrite of the earlier code. The main
@@ -207,7 +208,7 @@ static void parse_ip(struct tagged_ip *ip, const char *str)
 char **wins_srv_tags(void)
 {
 	char **ret = NULL;
-	int count=0, i, j;
+	unsigned int count=0, i, j;
 	const char **list;
 
 	if (lp_we_are_a_wins_server()) {

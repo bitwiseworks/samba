@@ -28,9 +28,10 @@ from samba.dcerpc import security
 from samba.ms_schema import read_ms_schema
 from samba.ndr import ndr_pack
 from samba.samdb import SamDB
+from samba.compat import get_string
 from samba import dsdb
 from ldb import SCOPE_SUBTREE, SCOPE_ONELEVEL
-import os
+
 
 def get_schema_descriptor(domain_sid, name_map={}):
     sddl = "O:SAG:SAD:AI(OA;;CR;e12b56b6-0a95-11d1-adbb-00c04fd8d5cd;;SA)" \
@@ -64,18 +65,18 @@ class Schema(object):
 
     # the schema files (and corresponding object version) that we know about
     base_schemas = {
-       "2008_R2_old" : ("MS-AD_Schema_2K8_R2_Attributes.txt",
+        "2008_R2_old": ("MS-AD_Schema_2K8_R2_Attributes.txt",
                         "MS-AD_Schema_2K8_R2_Classes.txt",
                         47),
-       "2008_R2" : ("Attributes_for_AD_DS__Windows_Server_2008_R2.ldf",
-                    "Classes_for_AD_DS__Windows_Server_2008_R2.ldf",
-                    47),
-       "2012"    : ("AD_DS_Attributes__Windows_Server_2012.ldf",
-                    "AD_DS_Classes__Windows_Server_2012.ldf",
-                    56),
-       "2012_R2" : ("AD_DS_Attributes__Windows_Server_2012_R2.ldf",
-                    "AD_DS_Classes__Windows_Server_2012_R2.ldf",
-                    69),
+       "2008_R2": ("Attributes_for_AD_DS__Windows_Server_2008_R2.ldf",
+                   "Classes_for_AD_DS__Windows_Server_2008_R2.ldf",
+                   47),
+       "2012": ("AD_DS_Attributes__Windows_Server_2012.ldf",
+                "AD_DS_Classes__Windows_Server_2012.ldf",
+                56),
+       "2012_R2": ("AD_DS_Attributes__Windows_Server_2012_R2.ldf",
+                   "AD_DS_Classes__Windows_Server_2012_R2.ldf",
+                   69),
     }
 
     def __init__(self, domain_sid, invocationid=None, schemadn=None,
@@ -110,17 +111,16 @@ class Schema(object):
             setup_path('ad-schema/%s' % Schema.base_schemas[base_schema][1]))
 
         if files is not None:
-            for file in files:
-                self.schema_data += open(file, 'r').read()
+            self.schema_data = "".join(get_string(open(file, 'rb').read()) for file in files)
 
         self.schema_data = substitute_var(self.schema_data,
-            {"SCHEMADN": schemadn})
+                                          {"SCHEMADN": schemadn})
         check_all_substituted(self.schema_data)
 
         schema_version = str(Schema.get_version(base_schema))
         self.schema_dn_modify = read_and_sub_file(
             setup_path("provision_schema_basedn_modify.ldif"),
-            {"SCHEMADN": schemadn, "OBJVERSION" : schema_version})
+            {"SCHEMADN": schemadn, "OBJVERSION": schema_version})
 
         descr = b64encode(get_schema_descriptor(domain_sid)).decode('utf8')
         self.schema_dn_add = read_and_sub_file(
@@ -130,11 +130,10 @@ class Schema(object):
         if override_prefixmap is not None:
             self.prefixmap_data = override_prefixmap
         else:
-            self.prefixmap_data = open(setup_path("prefixMap.txt"), 'r').read()
+            self.prefixmap_data = open(setup_path("prefixMap.txt"), 'rb').read()
 
         if additional_prefixmap is not None:
-            for map in additional_prefixmap:
-                self.prefixmap_data += "%s\n" % map
+            self.prefixmap_data += "".join("%s\n" % map for map in additional_prefixmap)
 
         self.prefixmap_data = b64encode(self.prefixmap_data).decode('utf8')
 
@@ -145,7 +144,7 @@ class Schema(object):
     @staticmethod
     def default_base_schema():
         """Returns the default base schema to use"""
-        return "2008_R2"
+        return "2012_R2"
 
     @staticmethod
     def get_version(base_schema):
@@ -171,7 +170,7 @@ dn: @INDEXLIST
 """)
 
             schema_dn_add = self.schema_dn_add \
-                            + "objectGUID: 24e2ca70-b093-4ae8-84c0-2d7ac652a1b8\n"
+                + "objectGUID: 24e2ca70-b093-4ae8-84c0-2d7ac652a1b8\n"
 
             # These bits of LDIF are supplied when the Schema object is created
             self.ldb.add_ldif(schema_dn_add)
@@ -208,18 +207,18 @@ def get_linked_attributes(schemadn, schemaldb):
     for i in range(0, len(res)):
         expression = ("(&(objectclass=attributeSchema)(linkID=%d)"
                       "(attributeSyntax=2.5.5.1))" %
-                      (int(res[i]["linkID"][0])+1))
+                      (int(res[i]["linkID"][0]) + 1))
         target = schemaldb.searchone(basedn=schemadn,
                                      expression=expression,
                                      attribute="lDAPDisplayName",
                                      scope=SCOPE_SUBTREE)
         if target is not None:
-            attributes[str(res[i]["lDAPDisplayName"])]=str(target)
+            attributes[str(res[i]["lDAPDisplayName"])] = str(target)
 
     return attributes
 
 
-def get_dnsyntax_attributes(schemadn,schemaldb):
+def get_dnsyntax_attributes(schemadn, schemaldb):
     res = schemaldb.search(
         expression="(&(!(linkID=*))(objectclass=attributeSchema)(attributeSyntax=2.5.5.1))",
         base=schemadn, scope=SCOPE_ONELEVEL,
@@ -248,4 +247,4 @@ def ldb_with_schema(schemadn="cn=schema,cn=configuration,dc=example,dc=com",
     else:
         domainsid = security.dom_sid(domainsid)
     return Schema(domainsid, schemadn=schemadn,
-        override_prefixmap=override_prefixmap)
+                  override_prefixmap=override_prefixmap)

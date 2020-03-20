@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # Simple tests for the ldb python bindings.
 # Copyright (C) 2007 Jelmer Vernooij <jelmer@samba.org>
 
@@ -21,6 +21,7 @@ MDB_INDEX_OBJ = {
     "@IDXGUID": [b"objectUUID"],
     "@IDX_DN_GUID": [b"GUID"]
 }
+
 
 def tempdir():
     import tempfile
@@ -137,6 +138,25 @@ class SimpleLdb(LdbBaseTest):
         l = ldb.Ldb(self.url(), flags=self.flags())
         self.assertEqual(len(l.search(controls=["paged_results:0:5"])), 0)
 
+    def test_utf8_ldb_Dn(self):
+        l = ldb.Ldb(self.url(), flags=self.flags())
+        dn = ldb.Dn(l, (b'a=' + b'\xc4\x85\xc4\x87\xc4\x99\xc5\x82\xc5\x84\xc3\xb3\xc5\x9b\xc5\xba\xc5\xbc').decode('utf8'))
+
+    def test_utf8_encoded_ldb_Dn(self):
+        l = ldb.Ldb(self.url(), flags=self.flags())
+        dn_encoded_utf8 = b'a=' + b'\xc4\x85\xc4\x87\xc4\x99\xc5\x82\xc5\x84\xc3\xb3\xc5\x9b\xc5\xba\xc5\xbc'
+        try:
+            dn = ldb.Dn(l, dn_encoded_utf8)
+        except UnicodeDecodeError as e:
+                raise
+        except TypeError as te:
+            if PY3:
+               p3errors = ["argument 2 must be str, not bytes",
+                           "Can't convert 'bytes' object to str implicitly"]
+               self.assertIn(str(te), p3errors)
+            else:
+               raise
+
     def test_search_attrs(self):
         l = ldb.Ldb(self.url(), flags=self.flags())
         self.assertEqual(len(l.search(ldb.Dn(l, ""), ldb.SCOPE_SUBTREE, "(dc=*)", ["dc"])), 0)
@@ -159,12 +179,12 @@ class SimpleLdb(LdbBaseTest):
     def test_search_scope_base_empty_db(self):
         l = ldb.Ldb(self.url(), flags=self.flags())
         self.assertEqual(len(l.search(ldb.Dn(l, "dc=foo1"),
-                          ldb.SCOPE_BASE)), 0)
+                                      ldb.SCOPE_BASE)), 0)
 
     def test_search_scope_onelevel_empty_db(self):
         l = ldb.Ldb(self.url(), flags=self.flags())
         self.assertEqual(len(l.search(ldb.Dn(l, "dc=foo1"),
-                          ldb.SCOPE_ONELEVEL)), 0)
+                                      ldb.SCOPE_ONELEVEL)), 0)
 
     def test_delete(self):
         l = ldb.Ldb(self.url(), flags=self.flags())
@@ -346,7 +366,7 @@ class SimpleLdb(LdbBaseTest):
         m.dn = ldb.Dn(l, "dc=foo4")
         m["bla"] = b"bla"
         self.assertEqual(len(l.search()), 0)
-        self.assertRaises(ldb.LdbError, lambda: l.add(m,["search_options:1:2"]))
+        self.assertRaises(ldb.LdbError, lambda: l.add(m, ["search_options:1:2"]))
 
     def test_add_dict(self):
         l = ldb.Ldb(self.url(), flags=self.flags())
@@ -386,7 +406,7 @@ class SimpleLdb(LdbBaseTest):
     def test_add_dict_bytes_dn(self):
         l = ldb.Ldb(self.url(), flags=self.flags())
         m = {"dn": b"dc=foo6", "bla": b"bla",
-              "objectUUID": b"0123456789abcdef"}
+             "objectUUID": b"0123456789abcdef"}
         self.assertEqual(len(l.search()), 0)
         l.add(m)
         try:
@@ -670,30 +690,58 @@ class SimpleLdb(LdbBaseTest):
         """Testing we do not get trapped in the \0 byte in a property string."""
         l = ldb.Ldb(self.url(), flags=self.flags())
         l.add({
-            "dn" : b"dc=somedn",
-            "objectclass" : b"user",
-            "cN" : b"LDAPtestUSER",
-            "givenname" : b"ldap",
-            "displayname" : b"foo\0bar",
-            "objectUUID" : b"0123456789abcdef"
+            "dn": b"dc=somedn",
+            "objectclass": b"user",
+            "cN": b"LDAPtestUSER",
+            "givenname": b"ldap",
+            "displayname": b"foo\0bar",
+            "objectUUID": b"0123456789abcdef"
         })
         res = l.search(expression="(dn=dc=somedn)")
         self.assertEqual(b"foo\0bar", res[0]["displayname"][0])
 
     def test_no_crash_broken_expr(self):
         l = ldb.Ldb(self.url(), flags=self.flags())
-        self.assertRaises(ldb.LdbError,lambda: l.search("", ldb.SCOPE_SUBTREE, "&(dc=*)(dn=*)", ["dc"]))
+        self.assertRaises(ldb.LdbError, lambda: l.search("", ldb.SCOPE_SUBTREE, "&(dc=*)(dn=*)", ["dc"]))
 
 # Run the SimpleLdb tests against an lmdb backend
+
+
 class SimpleLdbLmdb(SimpleLdb):
 
     def setUp(self):
+        if os.environ.get('HAVE_LMDB', '1') == '0':
+            self.skipTest("No lmdb backend")
         self.prefix = MDB_PREFIX
         self.index = MDB_INDEX_OBJ
         super(SimpleLdbLmdb, self).setUp()
 
     def tearDown(self):
         super(SimpleLdbLmdb, self).tearDown()
+
+
+class SimpleLdbNoLmdb(LdbBaseTest):
+
+    def setUp(self):
+        if os.environ.get('HAVE_LMDB', '1') != '0':
+            self.skipTest("lmdb backend enabled")
+        self.prefix = MDB_PREFIX
+        self.index = MDB_INDEX_OBJ
+        super(SimpleLdbNoLmdb, self).setUp()
+
+    def tearDown(self):
+        super(SimpleLdbNoLmdb, self).tearDown()
+
+    def test_lmdb_disabled(self):
+        self.testdir = tempdir()
+        self.filename = os.path.join(self.testdir, "test.ldb")
+        try:
+            self.ldb = ldb.Ldb(self.url(), flags=self.flags())
+            self.fail("Should have failed on missing LMDB")
+        except ldb.LdbError as err:
+            enum = err.args[0]
+            self.assertEqual(enum, ldb.ERR_OTHER)
+
 
 class SearchTests(LdbBaseTest):
     def tearDown(self):
@@ -702,7 +750,6 @@ class SearchTests(LdbBaseTest):
 
         # Ensure the LDB is closed now, so we close the FD
         del(self.l)
-
 
     def setUp(self):
         super(SearchTests, self).setUp()
@@ -726,6 +773,60 @@ class SearchTests(LdbBaseTest):
         # want to stay clear of the objectGUID handler in LDB and
         # instead use just the 16 bytes raw, which we just keep
         # to printable chars here for ease of handling.
+
+        self.l.add({"dn": "DC=ORG",
+                    "name": b"org",
+                    "objectUUID": b"0000000000abcdef"})
+        self.l.add({"dn": "DC=EXAMPLE,DC=ORG",
+                    "name": b"org",
+                    "objectUUID": b"0000000001abcdef"})
+        self.l.add({"dn": "OU=OU1,DC=EXAMPLE,DC=ORG",
+                    "name": b"OU #1",
+                    "x": "y", "y": "a",
+                    "objectUUID": b"0023456789abcde3"})
+        self.l.add({"dn": "OU=OU2,DC=EXAMPLE,DC=ORG",
+                    "name": b"OU #2",
+                    "x": "y", "y": "a",
+                    "objectUUID": b"0023456789abcde4"})
+        self.l.add({"dn": "OU=OU3,DC=EXAMPLE,DC=ORG",
+                    "name": b"OU #3",
+                    "x": "y", "y": "a",
+                    "objectUUID": b"0023456789abcde5"})
+        self.l.add({"dn": "OU=OU4,DC=EXAMPLE,DC=ORG",
+                    "name": b"OU #4",
+                    "x": "z", "y": "b",
+                    "objectUUID": b"0023456789abcde6"})
+        self.l.add({"dn": "OU=OU5,DC=EXAMPLE,DC=ORG",
+                    "name": b"OU #5",
+                    "x": "y", "y": "a",
+                    "objectUUID": b"0023456789abcde7"})
+        self.l.add({"dn": "OU=OU6,DC=EXAMPLE,DC=ORG",
+                    "name": b"OU #6",
+                    "x": "y", "y": "a",
+                    "objectUUID": b"0023456789abcde8"})
+        self.l.add({"dn": "OU=OU7,DC=EXAMPLE,DC=ORG",
+                    "name": b"OU #7",
+                    "x": "y", "y": "c",
+                    "objectUUID": b"0023456789abcde9"})
+        self.l.add({"dn": "OU=OU8,DC=EXAMPLE,DC=ORG",
+                    "name": b"OU #8",
+                    "x": "y", "y": "b",
+                    "objectUUID": b"0023456789abcde0"})
+        self.l.add({"dn": "OU=OU9,DC=EXAMPLE,DC=ORG",
+                    "name": b"OU #9",
+                    "x": "y", "y": "a",
+                    "objectUUID": b"0023456789abcdea"})
+
+        self.l.add({"dn": "DC=EXAMPLE,DC=COM",
+                    "name": b"org",
+                    "objectUUID": b"0000000011abcdef"})
+
+        self.l.add({"dn": "DC=EXAMPLE,DC=NET",
+                    "name": b"org",
+                    "objectUUID": b"0000000021abcdef"})
+
+        self.l.add({"dn": "OU=UNIQUE,DC=EXAMPLE,DC=NET",
+                    "objectUUID": b"0000000022abcdef"})
 
         self.l.add({"dn": "DC=SAMBA,DC=ORG",
                     "name": b"samba.org",
@@ -910,6 +1011,38 @@ class SearchTests(LdbBaseTest):
             enum = err.args[0]
             self.assertEqual(enum, ldb.ERR_NO_SUCH_OBJECT)
 
+    def test_subtree(self):
+        """Testing a search"""
+
+        try:
+            res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                                  scope=ldb.SCOPE_SUBTREE)
+            if hasattr(self, 'IDXCHECK'):
+                self.fail()
+        except ldb.LdbError as err:
+            enum = err.args[0]
+            estr = err.args[1]
+            self.assertEqual(enum, ldb.ERR_INAPPROPRIATE_MATCHING)
+            self.assertIn(estr, "ldb FULL SEARCH disabled")
+        else:
+            self.assertEqual(len(res11), 25)
+
+    def test_subtree2(self):
+        """Testing a search"""
+
+        try:
+            res11 = self.l.search(base="DC=ORG",
+                                  scope=ldb.SCOPE_SUBTREE)
+            if hasattr(self, 'IDXCHECK'):
+                self.fail()
+        except ldb.LdbError as err:
+            enum = err.args[0]
+            estr = err.args[1]
+            self.assertEqual(enum, ldb.ERR_INAPPROPRIATE_MATCHING)
+            self.assertIn(estr, "ldb FULL SEARCH disabled")
+        else:
+            self.assertEqual(len(res11), 36)
+
     def test_subtree_and(self):
         """Testing a search"""
 
@@ -1038,7 +1171,6 @@ class SearchTests(LdbBaseTest):
             self.assertEqual(enum, ldb.ERR_INAPPROPRIATE_MATCHING)
             self.assertIn(estr, "ldb FULL SEARCH disabled")
 
-
     def test_subtree_and_or(self):
         """Testing a search"""
 
@@ -1095,6 +1227,86 @@ class SearchTests(LdbBaseTest):
                               expression="(&(ou=ou10)(y=a))")
         self.assertEqual(len(res11), 1)
 
+    def test_subtree_unique(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_SUBTREE,
+                              expression="(ou=ou10)")
+        self.assertEqual(len(res11), 1)
+
+    def test_subtree_unique_elsewhere(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_SUBTREE,
+                              expression="(ou=ou10)")
+        self.assertEqual(len(res11), 0)
+
+    def test_subtree_unique_elsewhere2(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=COM",
+                              scope=ldb.SCOPE_SUBTREE,
+                              expression="(ou=ou10)")
+        self.assertEqual(len(res11), 0)
+
+    def test_subtree_unique_elsewhere2(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=NET",
+                              scope=ldb.SCOPE_SUBTREE,
+                              expression="(ou=unique)")
+        self.assertEqual(len(res11), 1)
+
+    def test_subtree_unique_elsewhere3(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_SUBTREE,
+                              expression="(ou=unique)")
+        self.assertEqual(len(res11), 0)
+
+    def test_subtree_unique_elsewhere4(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_SUBTREE,
+                              expression="(ou=unique)")
+        self.assertEqual(len(res11), 0)
+
+    def test_subtree_unique_elsewhere5(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=COM",
+                              scope=ldb.SCOPE_SUBTREE,
+                              expression="(ou=unique)")
+        self.assertEqual(len(res11), 0)
+
+    def test_subtree_unique_elsewhere6(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_SUBTREE,
+                              expression="(ou=unique)")
+        self.assertEqual(len(res11), 0)
+
+    def test_subtree_unique_here(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="OU=UNIQUE,DC=EXAMPLE,DC=NET",
+                              scope=ldb.SCOPE_SUBTREE,
+                              expression="(ou=unique)")
+        self.assertEqual(len(res11), 1)
+
+    def test_subtree_unique(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_SUBTREE,
+                              expression="(ou=ou10)")
+        self.assertEqual(len(res11), 1)
+
     def test_subtree_and_none(self):
         """Testing a search"""
 
@@ -1119,6 +1331,185 @@ class SearchTests(LdbBaseTest):
                               expression="(@IDXONE=DC=SAMBA,DC=ORG)")
         self.assertEqual(len(res11), 0)
 
+    def test_onelevel(self):
+        """Testing a search"""
+
+        try:
+            res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                                  scope=ldb.SCOPE_ONELEVEL)
+            if hasattr(self, 'IDXCHECK') \
+               and not hasattr(self, 'IDXONE'):
+                self.fail()
+        except ldb.LdbError as err:
+            enum = err.args[0]
+            estr = err.args[1]
+            self.assertEqual(enum, ldb.ERR_INAPPROPRIATE_MATCHING)
+            self.assertIn(estr, "ldb FULL SEARCH disabled")
+        else:
+            self.assertEqual(len(res11), 24)
+
+    def test_onelevel2(self):
+        """Testing a search"""
+
+        try:
+            res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                                  scope=ldb.SCOPE_ONELEVEL)
+            if hasattr(self, 'IDXCHECK') \
+               and not hasattr(self, 'IDXONE'):
+                self.fail()
+                self.fail()
+        except ldb.LdbError as err:
+            enum = err.args[0]
+            estr = err.args[1]
+            self.assertEqual(enum, ldb.ERR_INAPPROPRIATE_MATCHING)
+            self.assertIn(estr, "ldb FULL SEARCH disabled")
+        else:
+            self.assertEqual(len(res11), 9)
+
+    def test_onelevel_and_or(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(|(x=z)(y=b))(x=x)(y=c))")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_and_or2(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(x=x)(y=c)(|(x=z)(y=b)))")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_and_or3(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(|(ou=ou11)(ou=ou10))(|(x=y)(y=b)(y=c)))")
+        self.assertEqual(len(res11), 2)
+
+    def test_onelevel_and_or4(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(|(x=y)(y=b)(y=c))(|(ou=ou11)(ou=ou10)))")
+        self.assertEqual(len(res11), 2)
+
+    def test_onelevel_and_or5(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(|(x=y)(y=b)(y=c))(ou=ou11))")
+        self.assertEqual(len(res11), 1)
+
+    def test_onelevel_or_and(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(|(x=x)(y=c)(&(x=z)(y=b)))")
+        self.assertEqual(len(res11), 10)
+
+    def test_onelevel_large_and_unique(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(ou=ou10)(y=a))")
+        self.assertEqual(len(res11), 1)
+
+    def test_onelevel_unique(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(ou=ou10)")
+        self.assertEqual(len(res11), 1)
+
+    def test_onelevel_unique_elsewhere(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(ou=ou10)")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_unique_elsewhere2(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=COM",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(ou=ou10)")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_unique_elsewhere2(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=NET",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(ou=unique)")
+        self.assertEqual(len(res11), 1)
+
+    def test_onelevel_unique_elsewhere3(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(ou=unique)")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_unique_elsewhere4(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(ou=unique)")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_unique_elsewhere5(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=COM",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(ou=unique)")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_unique_here(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="OU=UNIQUE,DC=EXAMPLE,DC=NET",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(ou=unique)")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_and_none(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(ou=ouX)(y=a))")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_and_idx_record(self):
+        """Testing a search against the index record"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(@IDXDN=DC=SAMBA,DC=ORG)")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_and_idxone_record(self):
+        """Testing a search against the index record"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(@IDXONE=DC=SAMBA,DC=ORG)")
+        self.assertEqual(len(res11), 0)
+
     def test_subtree_unindexable(self):
         """Testing a search"""
 
@@ -1137,6 +1528,158 @@ class SearchTests(LdbBaseTest):
             estr = err.args[1]
             self.assertEqual(enum, ldb.ERR_INAPPROPRIATE_MATCHING)
             self.assertIn(estr, "ldb FULL SEARCH disabled")
+
+    def test_onelevel_only_and_or(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(|(x=z)(y=b))(x=x)(y=c))")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_only_and_or2(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(x=x)(y=c)(|(x=z)(y=b)))")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_only_and_or3(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(|(ou=ou11)(ou=ou10))(|(x=y)(y=b)(y=c)))")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_only_and_or4(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(|(x=y)(y=b)(y=c))(|(ou=ou11)(ou=ou10)))")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_only_and_or5(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(|(x=y)(y=b)(y=c))(ou=ou11))")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_only_or_and(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(|(x=x)(y=c)(&(x=z)(y=b)))")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_only_large_and_unique(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(ou=ou10)(y=a))")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_only_unique(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(ou=ou10)")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_only_unique2(self):
+        """Testing a search"""
+
+        res11 = self.l.search(base="DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(ou=unique)")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_only_and_none(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(ou=ouX)(y=a))")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_small_and_or(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(|(x=z)(y=b))(x=x)(y=c))")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_small_and_or2(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(x=x)(y=c)(|(x=z)(y=b)))")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_small_and_or3(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(|(ou=ou1)(ou=ou2))(|(x=y)(y=b)(y=c)))")
+        self.assertEqual(len(res11), 2)
+
+    def test_onelevel_small_and_or4(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(|(x=y)(y=b)(y=c))(|(ou=ou1)(ou=ou2)))")
+        self.assertEqual(len(res11), 2)
+
+    def test_onelevel_small_and_or5(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(|(x=y)(y=b)(y=c))(ou=ou1))")
+        self.assertEqual(len(res11), 1)
+
+    def test_onelevel_small_or_and(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(|(x=x)(y=c)(&(x=z)(y=b)))")
+        self.assertEqual(len(res11), 2)
+
+    def test_onelevel_small_large_and_unique(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(ou=ou9)(y=a))")
+        self.assertEqual(len(res11), 1)
+
+    def test_onelevel_small_unique_elsewhere(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(ou=ou10)")
+        self.assertEqual(len(res11), 0)
+
+    def test_onelevel_small_and_none(self):
+        """Testing a search (showing that onelevel is not subtree)"""
+
+        res11 = self.l.search(base="DC=EXAMPLE,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(&(ou=ouX)(y=a))")
+        self.assertEqual(len(res11), 0)
 
     def test_subtree_unindexable_presence(self):
         """Testing a search"""
@@ -1157,7 +1700,6 @@ class SearchTests(LdbBaseTest):
             self.assertEqual(enum, ldb.ERR_INAPPROPRIATE_MATCHING)
             self.assertIn(estr, "ldb FULL SEARCH disabled")
 
-
     def test_dn_filter_one(self):
         """Testing that a dn= filter succeeds
         (or fails with disallowDNFilter
@@ -1174,7 +1716,7 @@ class SearchTests(LdbBaseTest):
                               expression="(dn=OU=OU1,DC=SAMBA,DC=ORG)")
         if hasattr(self, 'disallowDNFilter') and \
            hasattr(self, 'IDX') and \
-           (hasattr(self, 'IDXGUID') or \
+           (hasattr(self, 'IDXGUID') or
             ((hasattr(self, 'IDXONE') == False and hasattr(self, 'IDX')))):
             self.assertEqual(len(res11), 0)
         else:
@@ -1309,11 +1851,152 @@ class SearchTests(LdbBaseTest):
                               expression="(distinguishedName=OU=OU1,DC=SAMBA,DCXXXX)")
         self.assertEqual(len(res11), 0)
 
+    def test_bad_dn_search_base(self):
+        """Testing with a bad base DN (SCOPE_BASE)"""
+
+        try:
+            res11 = self.l.search(base="OU=OU1,DC=SAMBA,DCXXX",
+                                  scope=ldb.SCOPE_BASE)
+            self.fail("Should have failed with ERR_INVALID_DN_SYNTAX")
+        except ldb.LdbError as err:
+            enum = err.args[0]
+            self.assertEqual(enum, ldb.ERR_INVALID_DN_SYNTAX)
+
+
+    def test_bad_dn_search_one(self):
+        """Testing with a bad base DN (SCOPE_ONELEVEL)"""
+
+        try:
+            res11 = self.l.search(base="DC=SAMBA,DCXXXX",
+                                  scope=ldb.SCOPE_ONELEVEL)
+            self.fail("Should have failed with ERR_INVALID_DN_SYNTAX")
+        except ldb.LdbError as err:
+            enum = err.args[0]
+            self.assertEqual(enum, ldb.ERR_INVALID_DN_SYNTAX)
+
+    def test_bad_dn_search_subtree(self):
+        """Testing with a bad base DN (SCOPE_SUBTREE)"""
+
+        try:
+            res11 = self.l.search(base="DC=SAMBA,DCXXXX",
+                                  scope=ldb.SCOPE_SUBTREE)
+            self.fail("Should have failed with ERR_INVALID_DN_SYNTAX")
+        except ldb.LdbError as err:
+            enum = err.args[0]
+            self.assertEqual(enum, ldb.ERR_INVALID_DN_SYNTAX)
+
+
+    def test_distinguishedName_filter_one(self):
+        """Testing that a distinguishedName= filter succeeds
+        when the scope is SCOPE_ONELEVEL.
+
+        This should be made more consistent, but for now lock in
+        the behaviour
+
+        """
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(distinguishedName=OU=OU1,DC=SAMBA,DC=ORG)")
+        self.assertEqual(len(res11), 1)
+
+    def test_distinguishedName_filter_subtree(self):
+        """Testing that a distinguishedName= filter succeeds
+        when the scope is SCOPE_SUBTREE"""
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_SUBTREE,
+                              expression="(distinguishedName=OU=OU1,DC=SAMBA,DC=ORG)")
+        self.assertEqual(len(res11), 1)
+
+    def test_distinguishedName_filter_base(self):
+        """Testing that (incorrectly) a distinguishedName= filter works
+        when the scope is SCOPE_BASE"""
+
+        res11 = self.l.search(base="OU=OU1,DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_BASE,
+                              expression="(distinguishedName=OU=OU1,DC=SAMBA,DC=ORG)")
+
+        # At some point we should fix this, but it isn't trivial
+        self.assertEqual(len(res11), 1)
+
+    def test_bad_dn_filter_base(self):
+        """Testing that a dn= filter on an invalid DN works
+        when the scope is SCOPE_BASE but
+        returns zero results"""
+
+        res11 = self.l.search(base="OU=OU1,DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_BASE,
+                              expression="(dn=OU=OU1,DC=SAMBA,DCXXXX)")
+
+        # At some point we should fix this, but it isn't trivial
+        self.assertEqual(len(res11), 0)
+
+
+    def test_bad_dn_filter_one(self):
+        """Testing that a dn= filter succeeds but returns zero
+        results when the DN is not valid on a SCOPE_ONELEVEL search
+
+        """
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(dn=OU=OU1,DC=SAMBA,DCXXXX)")
+        self.assertEqual(len(res11), 0)
+
+    def test_bad_dn_filter_subtree(self):
+        """Testing that a dn= filter succeeds but returns zero
+        results when the DN is not valid on a SCOPE_SUBTREE search
+
+        """
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_SUBTREE,
+                              expression="(dn=OU=OU1,DC=SAMBA,DCXXXX)")
+        self.assertEqual(len(res11), 0)
+
+    def test_bad_distinguishedName_filter_base(self):
+        """Testing that a distinguishedName= filter on an invalid DN works
+        when the scope is SCOPE_BASE but
+        returns zero results"""
+
+        res11 = self.l.search(base="OU=OU1,DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_BASE,
+                              expression="(distinguishedName=OU=OU1,DC=SAMBA,DCXXXX)")
+
+        # At some point we should fix this, but it isn't trivial
+        self.assertEqual(len(res11), 0)
+
+
+    def test_bad_distinguishedName_filter_one(self):
+        """Testing that a distinguishedName= filter succeeds but returns zero
+        results when the DN is not valid on a SCOPE_ONELEVEL search
+
+        """
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_ONELEVEL,
+                              expression="(distinguishedName=OU=OU1,DC=SAMBA,DCXXXX)")
+        self.assertEqual(len(res11), 0)
+
+    def test_bad_distinguishedName_filter_subtree(self):
+        """Testing that a distinguishedName= filter succeeds but returns zero
+        results when the DN is not valid on a SCOPE_SUBTREE search
+
+        """
+
+        res11 = self.l.search(base="DC=SAMBA,DC=ORG",
+                              scope=ldb.SCOPE_SUBTREE,
+                              expression="(distinguishedName=OU=OU1,DC=SAMBA,DCXXXX)")
+        self.assertEqual(len(res11), 0)
+
 
 # Run the search tests against an lmdb backend
 class SearchTestsLmdb(SearchTests):
 
     def setUp(self):
+        if os.environ.get('HAVE_LMDB', '1') == '0':
+            self.skipTest("No lmdb backend")
         self.prefix = MDB_PREFIX
         self.index = MDB_INDEX_OBJ
         super(SearchTestsLmdb, self).setUp()
@@ -1325,22 +2008,27 @@ class SearchTestsLmdb(SearchTests):
 class IndexedSearchTests(SearchTests):
     """Test searches using the index, to ensure the index doesn't
        break things"""
+
     def setUp(self):
         super(IndexedSearchTests, self).setUp()
         self.l.add({"dn": "@INDEXLIST",
                     "@IDXATTR": [b"x", b"y", b"ou"]})
         self.IDX = True
 
+
 class IndexedCheckSearchTests(IndexedSearchTests):
     """Test searches using the index, to ensure the index doesn't
        break things (full scan disabled)"""
+
     def setUp(self):
         self.IDXCHECK = True
         super(IndexedCheckSearchTests, self).setUp()
 
+
 class IndexedSearchDnFilterTests(SearchTests):
     """Test searches using the index, to ensure the index doesn't
        break things"""
+
     def setUp(self):
         super(IndexedSearchDnFilterTests, self).setUp()
         self.l.add({"dn": "@OPTIONS",
@@ -1351,9 +2039,11 @@ class IndexedSearchDnFilterTests(SearchTests):
                     "@IDXATTR": [b"x", b"y", b"ou"]})
         self.IDX = True
 
+
 class IndexedAndOneLevelSearchTests(SearchTests):
     """Test searches using the index including @IDXONE, to ensure
        the index doesn't break things"""
+
     def setUp(self):
         super(IndexedAndOneLevelSearchTests, self).setUp()
         self.l.add({"dn": "@INDEXLIST",
@@ -1362,21 +2052,27 @@ class IndexedAndOneLevelSearchTests(SearchTests):
         self.IDX = True
         self.IDXONE = True
 
+
 class IndexedCheckedAndOneLevelSearchTests(IndexedAndOneLevelSearchTests):
     """Test searches using the index including @IDXONE, to ensure
        the index doesn't break things (full scan disabled)"""
+
     def setUp(self):
         self.IDXCHECK = True
         super(IndexedCheckedAndOneLevelSearchTests, self).setUp()
 
+
 class IndexedAndOneLevelDNFilterSearchTests(SearchTests):
     """Test searches using the index including @IDXONE, to ensure
        the index doesn't break things"""
+
     def setUp(self):
         super(IndexedAndOneLevelDNFilterSearchTests, self).setUp()
         self.l.add({"dn": "@OPTIONS",
-                    "disallowDNFilter": "TRUE"})
+                    "disallowDNFilter": "TRUE",
+                    "checkBaseOnSearch": "TRUE"})
         self.disallowDNFilter = True
+        self.checkBaseOnSearch = True
 
         self.l.add({"dn": "@INDEXLIST",
                     "@IDXATTR": [b"x", b"y", b"ou"],
@@ -1384,9 +2080,11 @@ class IndexedAndOneLevelDNFilterSearchTests(SearchTests):
         self.IDX = True
         self.IDXONE = True
 
+
 class GUIDIndexedSearchTests(SearchTests):
     """Test searches using the index, to ensure the index doesn't
        break things"""
+
     def setUp(self):
         self.index = {"dn": "@INDEXLIST",
                       "@IDXATTR": [b"x", b"y", b"ou"],
@@ -1395,12 +2093,12 @@ class GUIDIndexedSearchTests(SearchTests):
         super(GUIDIndexedSearchTests, self).setUp()
 
         self.IDXGUID = True
-        self.IDXONE = True
 
 
 class GUIDIndexedDNFilterSearchTests(SearchTests):
     """Test searches using the index, to ensure the index doesn't
        break things"""
+
     def setUp(self):
         self.index = {"dn": "@INDEXLIST",
                       "@IDXATTR": [b"x", b"y", b"ou"],
@@ -1408,30 +2106,40 @@ class GUIDIndexedDNFilterSearchTests(SearchTests):
                       "@IDX_DN_GUID": [b"GUID"]}
         super(GUIDIndexedDNFilterSearchTests, self).setUp()
         self.l.add({"dn": "@OPTIONS",
-                    "disallowDNFilter": "TRUE"})
+                    "disallowDNFilter": "TRUE",
+                    "checkBaseOnSearch": "TRUE"})
         self.disallowDNFilter = True
+        self.checkBaseOnSearch = True
         self.IDX = True
         self.IDXGUID = True
+
 
 class GUIDAndOneLevelIndexedSearchTests(SearchTests):
     """Test searches using the index including @IDXONE, to ensure
        the index doesn't break things"""
+
     def setUp(self):
         self.index = {"dn": "@INDEXLIST",
                       "@IDXATTR": [b"x", b"y", b"ou"],
+                      "@IDXONE": [b"1"],
                       "@IDXGUID": [b"objectUUID"],
                       "@IDX_DN_GUID": [b"GUID"]}
         super(GUIDAndOneLevelIndexedSearchTests, self).setUp()
         self.l.add({"dn": "@OPTIONS",
-                    "disallowDNFilter": "TRUE"})
+                    "disallowDNFilter": "TRUE",
+                    "checkBaseOnSearch": "TRUE"})
         self.disallowDNFilter = True
+        self.checkBaseOnSearch = True
         self.IDX = True
         self.IDXGUID = True
         self.IDXONE = True
 
+
 class GUIDIndexedSearchTestsLmdb(GUIDIndexedSearchTests):
 
     def setUp(self):
+        if os.environ.get('HAVE_LMDB', '1') == '0':
+            self.skipTest("No lmdb backend")
         self.prefix = MDB_PREFIX
         super(GUIDIndexedSearchTestsLmdb, self).setUp()
 
@@ -1442,6 +2150,8 @@ class GUIDIndexedSearchTestsLmdb(GUIDIndexedSearchTests):
 class GUIDIndexedDNFilterSearchTestsLmdb(GUIDIndexedDNFilterSearchTests):
 
     def setUp(self):
+        if os.environ.get('HAVE_LMDB', '1') == '0':
+            self.skipTest("No lmdb backend")
         self.prefix = MDB_PREFIX
         super(GUIDIndexedDNFilterSearchTestsLmdb, self).setUp()
 
@@ -1452,6 +2162,8 @@ class GUIDIndexedDNFilterSearchTestsLmdb(GUIDIndexedDNFilterSearchTests):
 class GUIDAndOneLevelIndexedSearchTestsLmdb(GUIDAndOneLevelIndexedSearchTests):
 
     def setUp(self):
+        if os.environ.get('HAVE_LMDB', '1') == '0':
+            self.skipTest("No lmdb backend")
         self.prefix = MDB_PREFIX
         super(GUIDAndOneLevelIndexedSearchTestsLmdb, self).setUp()
 
@@ -1662,6 +2374,8 @@ class AddModifyTests(LdbBaseTest):
 class AddModifyTestsLmdb(AddModifyTests):
 
     def setUp(self):
+        if os.environ.get('HAVE_LMDB', '1') == '0':
+            self.skipTest("No lmdb backend")
         self.prefix = MDB_PREFIX
         self.index = MDB_INDEX_OBJ
         super(AddModifyTestsLmdb, self).setUp()
@@ -1669,13 +2383,15 @@ class AddModifyTestsLmdb(AddModifyTests):
     def tearDown(self):
         super(AddModifyTestsLmdb, self).tearDown()
 
+
 class IndexedAddModifyTests(AddModifyTests):
     """Test searches using the index, to ensure the index doesn't
        break things"""
+
     def setUp(self):
         if not hasattr(self, 'index'):
             self.index = {"dn": "@INDEXLIST",
-                          "@IDXATTR": [b"x", b"y", b"ou", b"objectUUID"],
+                          "@IDXATTR": [b"x", b"y", b"ou", b"objectUUID", b"z"],
                           "@IDXONE": [b"1"]}
         super(IndexedAddModifyTests, self).setUp()
 
@@ -1747,9 +2463,21 @@ class IndexedAddModifyTests(AddModifyTests):
                     "x": "z", "y": "a",
                     "objectUUID": b"0123456789abcde2"})
 
+    def test_duplicate_index_values(self):
+        self.l.add({"dn": "OU=DIV1,DC=SAMBA,DC=ORG",
+                    "name": b"Admins",
+                    "z": "1",
+                    "objectUUID": b"0123456789abcdff"})
+        self.l.add({"dn": "OU=DIV2,DC=SAMBA,DC=ORG",
+                    "name": b"Admins",
+                    "z": "1",
+                    "objectUUID": b"0123456789abcdfd"})
+
+
 class GUIDIndexedAddModifyTests(IndexedAddModifyTests):
     """Test searches using the index, to ensure the index doesn't
        break things"""
+
     def setUp(self):
         self.index = {"dn": "@INDEXLIST",
                       "@IDXATTR": [b"x", b"y", b"ou"],
@@ -1761,6 +2489,7 @@ class GUIDIndexedAddModifyTests(IndexedAddModifyTests):
 
 class GUIDTransIndexedAddModifyTests(GUIDIndexedAddModifyTests):
     """Test GUID index behaviour insdie the transaction"""
+
     def setUp(self):
         super(GUIDTransIndexedAddModifyTests, self).setUp()
         self.l.transaction_start()
@@ -1769,8 +2498,10 @@ class GUIDTransIndexedAddModifyTests(GUIDIndexedAddModifyTests):
         self.l.transaction_commit()
         super(GUIDTransIndexedAddModifyTests, self).tearDown()
 
+
 class TransIndexedAddModifyTests(IndexedAddModifyTests):
     """Test index behaviour insdie the transaction"""
+
     def setUp(self):
         super(TransIndexedAddModifyTests, self).setUp()
         self.l.transaction_start()
@@ -1779,23 +2510,30 @@ class TransIndexedAddModifyTests(IndexedAddModifyTests):
         self.l.transaction_commit()
         super(TransIndexedAddModifyTests, self).tearDown()
 
+
 class GuidIndexedAddModifyTestsLmdb(GUIDIndexedAddModifyTests):
 
     def setUp(self):
+        if os.environ.get('HAVE_LMDB', '1') == '0':
+            self.skipTest("No lmdb backend")
         self.prefix = MDB_PREFIX
         super(GuidIndexedAddModifyTestsLmdb, self).setUp()
 
     def tearDown(self):
         super(GuidIndexedAddModifyTestsLmdb, self).tearDown()
 
+
 class GuidTransIndexedAddModifyTestsLmdb(GUIDTransIndexedAddModifyTests):
 
     def setUp(self):
+        if os.environ.get('HAVE_LMDB', '1') == '0':
+            self.skipTest("No lmdb backend")
         self.prefix = MDB_PREFIX
         super(GuidTransIndexedAddModifyTestsLmdb, self).setUp()
 
     def tearDown(self):
         super(GuidTransIndexedAddModifyTestsLmdb, self).tearDown()
+
 
 class BadIndexTests(LdbBaseTest):
     def setUp(self):
@@ -1827,12 +2565,12 @@ class BadIndexTests(LdbBaseTest):
 
         res = self.ldb.search(expression="(y=1)",
                               base="dc=samba,dc=org")
-        self.assertEquals(len(res), 3)
+        self.assertEqual(len(res), 3)
 
         # Now set this to unique index, but forget to check the result
         try:
             self.ldb.add({"dn": "@ATTRIBUTES",
-                        "y": "UNIQUE_INDEX"})
+                          "y": "UNIQUE_INDEX"})
             self.fail()
         except ldb.LdbError:
             pass
@@ -1840,7 +2578,7 @@ class BadIndexTests(LdbBaseTest):
         # We must still have a working index
         res = self.ldb.search(expression="(y=1)",
                               base="dc=samba,dc=org")
-        self.assertEquals(len(res), 3)
+        self.assertEqual(len(res), 3)
 
     def test_unique_transaction(self):
         self.ldb.add({"dn": "x=x,dc=samba,dc=org",
@@ -1855,14 +2593,14 @@ class BadIndexTests(LdbBaseTest):
 
         res = self.ldb.search(expression="(y=1)",
                               base="dc=samba,dc=org")
-        self.assertEquals(len(res), 3)
+        self.assertEqual(len(res), 3)
 
         self.ldb.transaction_start()
 
         # Now set this to unique index, but forget to check the result
         try:
             self.ldb.add({"dn": "@ATTRIBUTES",
-                        "y": "UNIQUE_INDEX"})
+                          "y": "UNIQUE_INDEX"})
         except ldb.LdbError:
             pass
 
@@ -1878,7 +2616,7 @@ class BadIndexTests(LdbBaseTest):
         res = self.ldb.search(expression="(y=1)",
                               base="dc=samba,dc=org")
 
-        self.assertEquals(len(res), 3)
+        self.assertEqual(len(res), 3)
 
     def test_casefold(self):
         self.ldb.add({"dn": "x=x,dc=samba,dc=org",
@@ -1893,7 +2631,7 @@ class BadIndexTests(LdbBaseTest):
 
         res = self.ldb.search(expression="(y=a)",
                               base="dc=samba,dc=org")
-        self.assertEquals(len(res), 2)
+        self.assertEqual(len(res), 2)
 
         self.ldb.add({"dn": "@ATTRIBUTES",
                       "y": "CASE_INSENSITIVE"})
@@ -1903,12 +2641,12 @@ class BadIndexTests(LdbBaseTest):
                               base="dc=samba,dc=org")
 
         if hasattr(self, 'IDXGUID'):
-            self.assertEquals(len(res), 3)
+            self.assertEqual(len(res), 3)
         else:
             # We should not return this entry twice, but sadly
             # we have not yet fixed
             # https://bugzilla.samba.org/show_bug.cgi?id=13361
-            self.assertEquals(len(res), 4)
+            self.assertEqual(len(res), 4)
 
     def test_casefold_transaction(self):
         self.ldb.add({"dn": "x=x,dc=samba,dc=org",
@@ -1923,7 +2661,7 @@ class BadIndexTests(LdbBaseTest):
 
         res = self.ldb.search(expression="(y=a)",
                               base="dc=samba,dc=org")
-        self.assertEquals(len(res), 2)
+        self.assertEqual(len(res), 2)
 
         self.ldb.transaction_start()
 
@@ -1937,13 +2675,68 @@ class BadIndexTests(LdbBaseTest):
                               base="dc=samba,dc=org")
 
         if hasattr(self, 'IDXGUID'):
-            self.assertEquals(len(res), 3)
+            self.assertEqual(len(res), 3)
         else:
             # We should not return this entry twice, but sadly
             # we have not yet fixed
             # https://bugzilla.samba.org/show_bug.cgi?id=13361
-            self.assertEquals(len(res), 4)
+            self.assertEqual(len(res), 4)
 
+    def test_modify_transaction(self):
+        self.ldb.add({"dn": "x=y,dc=samba,dc=org",
+                      "objectUUID": b"0123456789abcde1",
+                      "y": "2",
+                      "z": "2"})
+
+        res = self.ldb.search(expression="(y=2)",
+                              base="dc=samba,dc=org")
+        self.assertEqual(len(res), 1)
+
+        self.ldb.add({"dn": "@ATTRIBUTES",
+                      "y": "UNIQUE_INDEX"})
+
+        self.ldb.transaction_start()
+
+        m = ldb.Message()
+        m.dn = ldb.Dn(self.ldb, "x=y,dc=samba,dc=org")
+        m["0"] = ldb.MessageElement([], ldb.FLAG_MOD_DELETE, "y")
+        m["1"] = ldb.MessageElement([], ldb.FLAG_MOD_DELETE, "not-here")
+
+        try:
+            self.ldb.modify(m)
+            self.fail()
+
+        except ldb.LdbError as err:
+            enum = err.args[0]
+            self.assertEqual(enum, ldb.ERR_NO_SUCH_ATTRIBUTE)
+
+        try:
+            self.ldb.transaction_commit()
+            # We should fail here, but we want to be sure
+            # we fail below
+
+        except ldb.LdbError as err:
+            enum = err.args[0]
+            self.assertEqual(enum, ldb.ERR_OPERATIONS_ERROR)
+
+        # The index should still be pointing to x=y
+        res = self.ldb.search(expression="(y=2)",
+                              base="dc=samba,dc=org")
+        self.assertEqual(len(res), 1)
+
+        try:
+            self.ldb.add({"dn": "x=y2,dc=samba,dc=org",
+                        "objectUUID": b"0123456789abcde2",
+                        "y": "2"})
+            self.fail("Added unique attribute twice")
+        except ldb.LdbError as err:
+            enum = err.args[0]
+            self.assertEqual(enum, ldb.ERR_CONSTRAINT_VIOLATION)
+
+        res = self.ldb.search(expression="(y=2)",
+                              base="dc=samba,dc=org")
+        self.assertEqual(len(res), 1)
+        self.assertEqual(str(res[0].dn), "x=y,dc=samba,dc=org")
 
     def tearDown(self):
         super(BadIndexTests, self).tearDown()
@@ -1951,10 +2744,83 @@ class BadIndexTests(LdbBaseTest):
 
 class GUIDBadIndexTests(BadIndexTests):
     """Test Bad index things with GUID index mode"""
+
     def setUp(self):
         self.IDXGUID = True
 
         super(GUIDBadIndexTests, self).setUp()
+
+
+class GUIDBadIndexTestsLmdb(BadIndexTests):
+
+    def setUp(self):
+        if os.environ.get('HAVE_LMDB', '1') == '0':
+            self.skipTest("No lmdb backend")
+        self.prefix = MDB_PREFIX
+        self.index = MDB_INDEX_OBJ
+        self.IDXGUID = True
+        super(GUIDBadIndexTestsLmdb, self).setUp()
+
+    def tearDown(self):
+        super(GUIDBadIndexTestsLmdb, self).tearDown()
+
+
+class BatchModeTests(LdbBaseTest):
+
+    def setUp(self):
+        super(BatchModeTests, self).setUp()
+        self.testdir = tempdir()
+        self.filename = os.path.join(self.testdir, "test.ldb")
+        self.ldb = ldb.Ldb(self.url(),
+                           flags=self.flags(),
+                           options=["batch_mode:1"])
+        if hasattr(self, 'IDXGUID'):
+            self.ldb.add({"dn": "@INDEXLIST",
+                          "@IDXATTR": [b"x", b"y", b"ou"],
+                          "@IDXGUID": [b"objectUUID"],
+                          "@IDX_DN_GUID": [b"GUID"]})
+        else:
+            self.ldb.add({"dn": "@INDEXLIST",
+                          "@IDXATTR": [b"x", b"y", b"ou"]})
+
+    def test_modify_transaction(self):
+        self.ldb.add({"dn": "x=y,dc=samba,dc=org",
+                      "objectUUID": b"0123456789abcde1",
+                      "y": "2",
+                      "z": "2"})
+
+        res = self.ldb.search(expression="(y=2)",
+                              base="dc=samba,dc=org")
+        self.assertEqual(len(res), 1)
+
+        self.ldb.add({"dn": "@ATTRIBUTES",
+                      "y": "UNIQUE_INDEX"})
+
+        self.ldb.transaction_start()
+
+        m = ldb.Message()
+        m.dn = ldb.Dn(self.ldb, "x=y,dc=samba,dc=org")
+        m["0"] = ldb.MessageElement([], ldb.FLAG_MOD_DELETE, "y")
+        m["1"] = ldb.MessageElement([], ldb.FLAG_MOD_DELETE, "not-here")
+
+        try:
+            self.ldb.modify(m)
+            self.fail()
+
+        except ldb.LdbError as err:
+            enum = err.args[0]
+            self.assertEqual(enum, ldb.ERR_NO_SUCH_ATTRIBUTE)
+
+        try:
+            self.ldb.transaction_commit()
+            self.fail("Commit should have failed as we were in batch mode")
+        except ldb.LdbError as err:
+            enum = err.args[0]
+            self.assertEqual(enum, ldb.ERR_OPERATIONS_ERROR)
+
+    def tearDown(self):
+        super(BatchModeTests, self).tearDown()
+
 
 class DnTests(TestCase):
 
@@ -1968,6 +2834,7 @@ class DnTests(TestCase):
 
     def test_set_dn_invalid(self):
         x = ldb.Message()
+
         def assign():
             x.dn = "astring"
         self.assertRaises(TypeError, assign)
@@ -1987,7 +2854,7 @@ class DnTests(TestCase):
         x = ldb.Dn(self.ldb, "dc=foo13,bla=blie")
         self.assertEqual(x.__repr__(), "Dn('dc=foo13,bla=blie')")
 
-    def test_get_casefold(self):
+    def test_get_casefold_2(self):
         x = ldb.Dn(self.ldb, "dc=foo14,bar=bloe")
         self.assertEqual(x.get_casefold(), "DC=FOO14,BAR=bloe")
 
@@ -2056,7 +2923,7 @@ class DnTests(TestCase):
 
     def test_remove_base_components(self):
         x = ldb.Dn(self.ldb, "dc=foo24,dc=samba,dc=org")
-        x.remove_base_components(len(x)-1)
+        x.remove_base_components(len(x) - 1)
         self.assertEqual("dc=foo24", str(x))
 
     def test_parse_ldif(self):
@@ -2073,6 +2940,57 @@ class DnTests(TestCase):
         self.assertEqual("foo=bar", str(msg[1].dn))
         msg = next(msgs)
         self.assertEqual("bar=bar", str(msg[1].dn))
+
+    def test_print_ldif(self):
+        ldif = '''dn: dc=foo27
+foo: foo
+
+'''
+        self.msg = ldb.Message(ldb.Dn(self.ldb, "dc=foo27"))
+        self.msg["foo"] = [b"foo"]
+        self.assertEqual(ldif,
+                         self.ldb.write_ldif(self.msg,
+                                             ldb.CHANGETYPE_NONE))
+
+    def test_print_ldif_binary(self):
+        # this also confirms that ldb flags are set even without a URL)
+        self.ldb = ldb.Ldb(flags=ldb.FLG_SHOW_BINARY)
+        ldif = '''dn: dc=foo27
+foo: f
+öö
+
+'''
+        self.msg = ldb.Message(ldb.Dn(self.ldb, "dc=foo27"))
+        self.msg["foo"] = ["f\nöö"]
+        self.assertEqual(ldif,
+                         self.ldb.write_ldif(self.msg,
+                                             ldb.CHANGETYPE_NONE))
+
+
+    def test_print_ldif_no_base64_bad(self):
+        ldif = '''dn: dc=foo27
+foo: f
+öö
+
+'''
+        self.msg = ldb.Message(ldb.Dn(self.ldb, "dc=foo27"))
+        self.msg["foo"] = ["f\nöö"]
+        self.msg["foo"].set_flags(ldb.FLAG_FORCE_NO_BASE64_LDIF)
+        self.assertEqual(ldif,
+                         self.ldb.write_ldif(self.msg,
+                                             ldb.CHANGETYPE_NONE))
+
+    def test_print_ldif_no_base64_good(self):
+        ldif = '''dn: dc=foo27
+foo: föö
+
+'''
+        self.msg = ldb.Message(ldb.Dn(self.ldb, "dc=foo27"))
+        self.msg["foo"] = ["föö"]
+        self.msg["foo"].set_flags(ldb.FLAG_FORCE_NO_BASE64_LDIF)
+        self.assertEqual(ldif,
+                         self.ldb.write_ldif(self.msg,
+                                             ldb.CHANGETYPE_NONE))
 
     def test_canonical_string(self):
         x = ldb.Dn(self.ldb, "dc=foo25,bar=bloe")
@@ -2198,6 +3116,7 @@ class DnTests(TestCase):
         dn = ldb.Dn(self.ldb, '')
         self.assertTrue(dn.is_null())
 
+
 class LdbMsgTests(TestCase):
 
     def setUp(self):
@@ -2226,12 +3145,14 @@ class LdbMsgTests(TestCase):
                 "Message({'dc': MessageElement([b'foo']), 'dn': Dn('dc=foo29')}).text",
             ])
         else:
-            self.assertEqual(
-                repr(self.msg),
-                "Message({'dn': Dn('dc=foo29'), 'dc': MessageElement(['foo'])})")
-            self.assertEqual(
-                repr(self.msg.text),
-                "Message({'dn': Dn('dc=foo29'), 'dc': MessageElement(['foo'])}).text")
+            self.assertIn(repr(self.msg), [
+                "Message({'dn': Dn('dc=foo29'), 'dc': MessageElement(['foo'])})",
+                "Message({'dc': MessageElement(['foo']), 'dn': Dn('dc=foo29')})",
+            ])
+            self.assertIn(repr(self.msg.text), [
+                "Message({'dn': Dn('dc=foo29'), 'dc': MessageElement(['foo'])}).text",
+                "Message({'dc': MessageElement(['foo']), 'dn': Dn('dc=foo29')}).text",
+            ])
 
     def test_len(self):
         self.assertEqual(0, len(self.msg))
@@ -2546,6 +3467,7 @@ class ModuleTests(TestCase):
 
     def test_use_module(self):
         ops = []
+
         class ExampleModule:
             name = "bla"
 
@@ -2565,6 +3487,7 @@ class ModuleTests(TestCase):
         self.assertEqual([], ops)
         l = ldb.Ldb(self.filename)
         self.assertEqual(["init"], ops)
+
 
 class LdbResultTests(LdbBaseTest):
 
@@ -2680,8 +3603,8 @@ class LdbResultTests(LdbBaseTest):
                 found = True
         self.assertTrue(found)
 
-
     # Show that search results can't see into a transaction
+
     def test_search_against_trans(self):
         found11 = False
 
@@ -2714,7 +3637,7 @@ class LdbResultTests(LdbBaseTest):
             # and commit
             try:
                 child_ldb.transaction_commit()
-            except LdbError as err:
+            except ldb.LdbError as err:
                 # We print this here to see what went wrong in the child
                 print(err)
                 os._exit(1)
@@ -2726,7 +3649,7 @@ class LdbResultTests(LdbBaseTest):
 
         # This should not turn up until the transaction is concluded
         res11 = self.l.search(base="OU=OU11,DC=SAMBA,DC=ORG",
-                            scope=ldb.SCOPE_BASE)
+                              scope=ldb.SCOPE_BASE)
         self.assertEqual(len(res11), 0)
 
         os.write(w2, b"search")
@@ -2738,14 +3661,13 @@ class LdbResultTests(LdbBaseTest):
 
         # This should now turn up, as the transaction is over
         res11 = self.l.search(base="OU=OU11,DC=SAMBA,DC=ORG",
-                            scope=ldb.SCOPE_BASE)
+                              scope=ldb.SCOPE_BASE)
         self.assertEqual(len(res11), 1)
 
         self.assertFalse(found11)
 
         (got_pid, status) = os.waitpid(pid, 0)
         self.assertEqual(got_pid, pid)
-
 
     def test_search_iter_against_trans(self):
         found = False
@@ -2786,7 +3708,7 @@ class LdbResultTests(LdbBaseTest):
             # and commit
             try:
                 child_ldb.transaction_commit()
-            except LdbError as err:
+            except ldb.LdbError as err:
                 # We print this here to see what went wrong in the child
                 print(err)
                 os._exit(1)
@@ -2798,7 +3720,7 @@ class LdbResultTests(LdbBaseTest):
 
         # This should not turn up until the transaction is concluded
         res11 = self.l.search(base="OU=OU11,DC=SAMBA,DC=ORG",
-                            scope=ldb.SCOPE_BASE)
+                              scope=ldb.SCOPE_BASE)
         self.assertEqual(len(res11), 0)
 
         os.write(w2, b"search")
@@ -2810,7 +3732,7 @@ class LdbResultTests(LdbBaseTest):
         # removed the read lock, but for ldb_tdb that happened as soon
         # as we called the first res.next()
         res11 = self.l.search(base="OU=OU11,DC=SAMBA,DC=ORG",
-                            scope=ldb.SCOPE_BASE)
+                              scope=ldb.SCOPE_BASE)
         self.assertEqual(len(res11), 0)
 
         # These results are all collected at the first next(res) call
@@ -2826,7 +3748,7 @@ class LdbResultTests(LdbBaseTest):
         # This should now turn up, as the transaction is over and all
         # read locks are gone
         res11 = self.l.search(base="OU=OU11,DC=SAMBA,DC=ORG",
-                            scope=ldb.SCOPE_BASE)
+                              scope=ldb.SCOPE_BASE)
         self.assertEqual(len(res11), 1)
 
         self.assertTrue(found)
@@ -2839,6 +3761,8 @@ class LdbResultTests(LdbBaseTest):
 class LdbResultTestsLmdb(LdbResultTests):
 
     def setUp(self):
+        if os.environ.get('HAVE_LMDB', '1') == '0':
+            self.skipTest("No lmdb backend")
         self.prefix = MDB_PREFIX
         self.index = MDB_INDEX_OBJ
         super(LdbResultTestsLmdb, self).setUp()
@@ -2893,6 +3817,109 @@ class VersionTests(TestCase):
 
     def test_version(self):
         self.assertTrue(isinstance(ldb.__version__, str))
+
+class NestedTransactionTests(LdbBaseTest):
+    def setUp(self):
+        super(NestedTransactionTests, self).setUp()
+        self.testdir = tempdir()
+        self.filename = os.path.join(self.testdir, "test.ldb")
+        self.ldb = ldb.Ldb(self.url(), flags=self.flags())
+        self.ldb.add({"dn": "@INDEXLIST",
+                      "@IDXATTR": [b"x", b"y", b"ou"],
+                      "@IDXGUID": [b"objectUUID"],
+                      "@IDX_DN_GUID": [b"GUID"]})
+
+        super(NestedTransactionTests, self).setUp()
+
+    #
+    # This test documents that currently ldb does not support true nested
+    # transactions.
+    #
+    # Note: The test is written so that it treats failure as pass.
+    #       It is done this way as standalone ldb builds do not use the samba
+    #       known fail mechanism
+    #
+    def test_nested_transactions(self):
+
+        self.ldb.transaction_start()
+
+        self.ldb.add({"dn": "x=x1,dc=samba,dc=org",
+                      "objectUUID": b"0123456789abcde1"})
+        res = self.ldb.search(expression="(objectUUID=0123456789abcde1)",
+                              base="dc=samba,dc=org")
+        self.assertEqual(len(res), 1)
+
+        self.ldb.add({"dn": "x=x2,dc=samba,dc=org",
+                      "objectUUID": b"0123456789abcde2"})
+        res = self.ldb.search(expression="(objectUUID=0123456789abcde2)",
+                              base="dc=samba,dc=org")
+        self.assertEqual(len(res), 1)
+
+        self.ldb.transaction_start()
+        self.ldb.add({"dn": "x=x3,dc=samba,dc=org",
+                      "objectUUID": b"0123456789abcde3"})
+        res = self.ldb.search(expression="(objectUUID=0123456789abcde3)",
+                              base="dc=samba,dc=org")
+        self.assertEqual(len(res), 1)
+        self.ldb.transaction_cancel()
+        #
+        # Check that we can not see the record added by the cancelled
+        # transaction.
+        # Currently this fails as ldb does not support true nested
+        # transactions, and only the outer commits and cancels have an effect
+        #
+        res = self.ldb.search(expression="(objectUUID=0123456789abcde3)",
+                              base="dc=samba,dc=org")
+        #
+        # FIXME this test currently passes on a failure, i.e. if nested
+        #       transaction support worked correctly the correct test would
+        #       be.
+        #         self.assertEqual(len(res), 0)
+        #       as the add of objectUUID=0123456789abcde3 would reverted when
+        #       the sub transaction it was nested in was rolled back.
+        #
+        #       Currently this is not the case so the record is still present.
+        self.assertEqual(len(res), 1)
+
+
+        # Commit the outer transaction
+        #
+        self.ldb.transaction_commit()
+        #
+        # Now check we can still see the records added in the outer
+        # transaction.
+        #
+        res = self.ldb.search(expression="(objectUUID=0123456789abcde1)",
+                              base="dc=samba,dc=org")
+        self.assertEqual(len(res), 1)
+        res = self.ldb.search(expression="(objectUUID=0123456789abcde2)",
+                              base="dc=samba,dc=org")
+        self.assertEqual(len(res), 1)
+        #
+        # And that we can't see the records added by the nested transaction.
+        #
+        res = self.ldb.search(expression="(objectUUID=0123456789abcde3)",
+                              base="dc=samba,dc=org")
+        # FIXME again if nested transactions worked correctly we would not
+        #       see this record. The test should be.
+        #         self.assertEqual(len(res), 0)
+        self.assertEqual(len(res), 1)
+
+    def tearDown(self):
+        super(NestedTransactionTests, self).tearDown()
+
+
+class LmdbNestedTransactionTests(NestedTransactionTests):
+
+    def setUp(self):
+        if os.environ.get('HAVE_LMDB', '1') == '0':
+            self.skipTest("No lmdb backend")
+        self.prefix = MDB_PREFIX
+        self.index = MDB_INDEX_OBJ
+        super(LmdbNestedTransactionTests, self).setUp()
+
+    def tearDown(self):
+        super(LmdbNestedTransactionTests, self).tearDown()
 
 
 if __name__ == '__main__':

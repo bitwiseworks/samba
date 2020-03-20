@@ -66,15 +66,15 @@ class SecurityDescriptorTests(samba.tests.TestCase):
         self.assertEquals(desc.type, 0x8004)
 
     def test_from_sddl_invalidsddl(self):
-        self.assertRaises(TypeError,security.descriptor.from_sddl, "foo",security.dom_sid("S-2-0-0"))
+        self.assertRaises(TypeError, security.descriptor.from_sddl, "foo", security.dom_sid("S-2-0-0"))
 
     def test_from_sddl_invalidtype1(self):
-        self.assertRaises(TypeError, security.descriptor.from_sddl, security.dom_sid('S-2-0-0-512'),security.dom_sid("S-2-0-0"))
+        self.assertRaises(TypeError, security.descriptor.from_sddl, security.dom_sid('S-2-0-0-512'), security.dom_sid("S-2-0-0"))
 
     def test_from_sddl_invalidtype2(self):
         sddl = "O:AOG:DAD:(A;;RPWPCCDCLCSWRCWDWOGA;;;S-1-0-0)"
         self.assertRaises(TypeError, security.descriptor.from_sddl, sddl,
-                "S-2-0-0")
+                          "S-2-0-0")
 
     def test_as_sddl(self):
         text = "O:AOG:DAD:(A;;RPWPCCDCLCSWRCWDWOGA;;;S-1-0-0)"
@@ -90,8 +90,7 @@ class SecurityDescriptorTests(samba.tests.TestCase):
         text = "O:AOG:DAD:(A;;RPWPCCDCLCSWRCWDWOGA;;;S-1-0-0)"
         dom = security.dom_sid("S-2-0-0")
         desc1 = security.descriptor.from_sddl(text, dom)
-        self.assertRaises(TypeError, desc1.as_sddl,text)
-
+        self.assertRaises(TypeError, desc1.as_sddl, text)
 
     def test_as_sddl_no_domainsid(self):
         dom = security.dom_sid("S-2-0-0")
@@ -139,11 +138,11 @@ class PrivilegeTests(samba.tests.TestCase):
 
     def test_privilege_name(self):
         self.assertEquals("SeShutdownPrivilege",
-                security.privilege_name(security.SEC_PRIV_SHUTDOWN))
+                          security.privilege_name(security.SEC_PRIV_SHUTDOWN))
 
     def test_privilege_id(self):
         self.assertEquals(security.SEC_PRIV_SHUTDOWN,
-                security.privilege_id("SeShutdownPrivilege"))
+                          security.privilege_id("SeShutdownPrivilege"))
 
 
 class CheckAccessTests(samba.tests.TestCase):

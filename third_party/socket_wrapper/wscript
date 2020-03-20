@@ -2,42 +2,16 @@
 
 import os
 
-VERSION="1.1.9"
+VERSION="1.2.3"
 
 def configure(conf):
     if conf.CHECK_SOCKET_WRAPPER():
         conf.DEFINE('USING_SYSTEM_SOCKET_WRAPPER', 1)
         libsocket_wrapper_so_path = 'libsocket_wrapper.so'
     else:
-        # check HAVE_GCC_THREAD_LOCAL_STORAGE
-        conf.CHECK_CODE('''
-            __thread int tls;
 
-            int main(void) {
-                return 0;
-            }
-            ''',
-            'HAVE_GCC_THREAD_LOCAL_STORAGE',
-            addmain=False,
-            msg='Checking for thread local storage')
-
-        # check HAVE_DESTRUCTOR_ATTRIBUTE
-        conf.CHECK_CODE('''
-            void test_destructor_attribute(void) __attribute__ ((destructor));
-
-            void test_destructor_attribute(void)
-            {
-                return;
-            }
-
-            int main(void) {
-                return 0;
-            }
-            ''',
-            'HAVE_DESTRUCTOR_ATTRIBUTE',
-            addmain=False,
-            strict=True,
-            msg='Checking for library destructor support')
+        if conf.CONFIG_SET("HAVE___THREAD"):
+            conf.DEFINE("HAVE_GCC_THREAD_LOCAL_STORAGE", 1)
 
         # check HAVE_FUNCTION_ATTRIBUTE_FORMAT
         conf.CHECK_CODE('''
@@ -98,7 +72,7 @@ def configure(conf):
                                    define='HAVE_EVENTFD_UNSIGNED_INT', headers='sys/eventfd.h')
 
         # Create full path to socket_wrapper
-        blddir = os.path.realpath(conf.blddir)
+        blddir = os.path.realpath(conf.bldnode.abspath())
         libsocket_wrapper_so_path = blddir + '/default/third_party/socket_wrapper/libsocket-wrapper.so'
 
     conf.DEFINE('LIBSOCKET_WRAPPER_SO_PATH', libsocket_wrapper_so_path)

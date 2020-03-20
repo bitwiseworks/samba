@@ -25,6 +25,7 @@
 */
 
 #include "includes.h"
+#define TEVENT_DEPRECATED 1
 #include "tevent.h"
 #include "system/filesys.h"
 #include "system/select.h"
@@ -1723,7 +1724,7 @@ static bool test_multi_tevent_threaded_2(struct torture_context *test,
 	/*
 	 * tevent_re_initialise used to have a bug where it did not
 	 * re-initialise the thread support after taking it
-	 * down. Excercise that code path.
+	 * down. Exercise that code path.
 	 */
 	ret = tevent_re_initialise(ev);
 	torture_assert(test, ret == 0, "tevent_re_initialise failed");

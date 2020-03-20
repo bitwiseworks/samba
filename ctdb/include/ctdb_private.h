@@ -74,7 +74,7 @@ struct ctdb_node {
 	struct ctdb_context *ctdb;
 	ctdb_sock_addr address;
 	const char *name; /* for debug messages */
-	void *private_data; /* private to transport */
+	void *transport_data; /* private to transport */
 	uint32_t pnn;
 	uint32_t flags;
 
@@ -87,7 +87,7 @@ struct ctdb_node {
 	   if the node becomes disconnected */
 	struct daemon_control_state *pending_controls;
 
-	/* used by the recovery dameon to track when a node should be banned */
+	/* used by the recovery daemon to track when a node should be banned */
 	struct ctdb_banning_state *ban_state; 
 };
 
@@ -286,7 +286,7 @@ struct ctdb_context {
 	char *err_msg;
 	const struct ctdb_methods *methods; /* transport methods */
 	const struct ctdb_upcalls *upcalls; /* transport upcalls */
-	void *private_data; /* private to transport */
+	void *transport_data; /* private to transport */
 	struct ctdb_db_context *db_list;
 	struct srvid_context *srv;
 	struct srvid_context *tunnels;
@@ -318,7 +318,7 @@ struct ctdb_context {
 
 	TALLOC_CTX *banning_ctx;
 
-	struct ctdb_vacuum_child_context *vacuumers;
+	struct ctdb_vacuum_child_context *vacuumer;
 
 	/* mapping from pid to ctdb_client * */
 	struct ctdb_client_pid_list *client_pids;
@@ -359,6 +359,7 @@ struct ctdb_db_context {
 	struct revokechild_handle *revokechild_active;
 	struct ctdb_persistent_state *persistent_state;
 	struct trbt_tree *delete_queue;
+	struct trbt_tree *fetch_queue;
 	struct trbt_tree *sticky_records; 
 	int (*ctdb_ltdb_store_fn)(struct ctdb_db_context *ctdb_db,
 				  TDB_DATA key,
@@ -386,6 +387,7 @@ struct ctdb_db_context {
 	uint32_t freeze_transaction_id;
 	uint32_t generation;
 
+	bool invalid_records;
 	bool push_started;
 	void *push_state;
 
@@ -480,7 +482,6 @@ int ctdb_ibw_init(struct ctdb_context *ctdb);
 
 /* from ctdb_banning.c */
 
-void ctdb_local_node_got_banned(struct ctdb_context *ctdb);
 int32_t ctdb_control_set_ban_state(struct ctdb_context *ctdb, TDB_DATA indata);
 int32_t ctdb_control_get_ban_state(struct ctdb_context *ctdb, TDB_DATA *outdata);
 void ctdb_ban_self(struct ctdb_context *ctdb);
@@ -674,16 +675,6 @@ struct lock_request *ctdb_lock_db(TALLOC_CTX *mem_ctx,
 bool ctdb_logging_init(TALLOC_CTX *mem_ctx, const char *logging,
 		       const char *debug_level);
 
-struct ctdb_log_state *ctdb_vfork_with_logging(TALLOC_CTX *mem_ctx,
-					       struct ctdb_context *ctdb,
-					       const char *log_prefix,
-					       const char *helper,
-					       int helper_argc,
-					       const char **helper_argv,
-					       void (*logfn)(const char *,
-							     uint16_t, void *),
-					       void *logfn_private, pid_t *pid);
-
 int ctdb_set_child_logging(struct ctdb_context *ctdb);
 
 /* from ctdb_logging_file.c */
@@ -712,7 +703,7 @@ int ctdb_load_persistent_health(struct ctdb_context *ctdb,
 int ctdb_update_persistent_health(struct ctdb_context *ctdb,
 				  struct ctdb_db_context *ctdb_db,
 				  const char *reason,/* NULL means healthy */
-				  int num_healthy_nodes);
+				  unsigned int num_healthy_nodes);
 int ctdb_recheck_persistent_health(struct ctdb_context *ctdb);
 
 int32_t ctdb_control_db_set_healthy(struct ctdb_context *ctdb,
@@ -820,8 +811,6 @@ int32_t ctdb_control_start_recovery(struct ctdb_context *ctdb,
 
 int32_t ctdb_control_try_delete_records(struct ctdb_context *ctdb,
 					TDB_DATA indata, TDB_DATA *outdata);
-int32_t ctdb_control_receive_records(struct ctdb_context *ctdb,
-				     TDB_DATA indata, TDB_DATA *outdata);
 
 int32_t ctdb_control_get_capabilities(struct ctdb_context *ctdb,
 				      TDB_DATA *outdata);
@@ -829,6 +818,8 @@ int32_t ctdb_control_get_capabilities(struct ctdb_context *ctdb,
 int32_t ctdb_control_recd_ping(struct ctdb_context *ctdb);
 int32_t ctdb_control_set_recmaster(struct ctdb_context *ctdb,
 				   uint32_t opcode, TDB_DATA indata);
+
+void ctdb_node_become_inactive(struct ctdb_context *ctdb);
 
 int32_t ctdb_control_stop_node(struct ctdb_context *ctdb);
 int32_t ctdb_control_continue_node(struct ctdb_context *ctdb);
@@ -842,7 +833,10 @@ void ctdb_stop_recoverd(struct ctdb_context *ctdb);
 
 int ctdb_set_transport(struct ctdb_context *ctdb, const char *transport);
 
-int ctdb_ip_to_nodeid(struct ctdb_context *ctdb, const ctdb_sock_addr *nodeip);
+struct ctdb_node *ctdb_ip_to_node(struct ctdb_context *ctdb,
+				  const ctdb_sock_addr *nodeip);
+uint32_t ctdb_ip_to_pnn(struct ctdb_context *ctdb,
+			const ctdb_sock_addr *nodeip);
 
 void ctdb_load_nodes_file(struct ctdb_context *ctdb);
 
@@ -992,6 +986,11 @@ int32_t ctdb_control_uptime(struct ctdb_context *ctdb, TDB_DATA *outdata);
 
 /* from ctdb_vacuum.c */
 
+int32_t ctdb_control_db_vacuum(struct ctdb_context *ctdb,
+			       struct ctdb_req_control_old *c,
+			       TDB_DATA indata,
+			       bool *async_reply);
+
 void ctdb_stop_vacuuming(struct ctdb_context *ctdb);
 int ctdb_vacuum_init(struct ctdb_db_context *ctdb_db);
 
@@ -1004,6 +1003,8 @@ int32_t ctdb_local_schedule_for_deletion(struct ctdb_db_context *ctdb_db,
 void ctdb_local_remove_from_delete_queue(struct ctdb_db_context *ctdb_db,
 					 const struct ctdb_ltdb_header *hdr,
 					 const TDB_DATA key);
+
+int32_t ctdb_control_vacuum_fetch(struct ctdb_context *ctdb, TDB_DATA indata);
 
 /* from eventscript.c */
 

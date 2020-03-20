@@ -26,9 +26,10 @@ from samba.provision import (
     sanitize_server_role,
     setup_secretsdb,
     findnss,
-    )
+)
 import samba.tests
 from samba.tests import env_loadparm, TestCase
+
 
 def create_dummy_secretsdb(path, lp=None):
     """Create a dummy secrets database for use in tests.
@@ -66,12 +67,13 @@ class ProvisionTestCase(samba.tests.TestCaseInTempDir):
         ldb = setup_secretsdb(paths, None, None, lp=env_loadparm())
         try:
             self.assertEquals("LSA Secrets",
-                 ldb.searchone(basedn="CN=LSA Secrets", attribute="CN").decode('utf8'))
+                              ldb.searchone(basedn="CN=LSA Secrets", attribute="CN").decode('utf8'))
         finally:
             del ldb
             os.unlink(path)
             if os.path.exists(secrets_tdb_path):
                 os.unlink(secrets_tdb_path)
+
 
 class FindNssTests(TestCase):
     """Test findnss() function."""
@@ -123,9 +125,9 @@ class SanitizeServerRoleTests(TestCase):
 
     def test_same(self):
         self.assertEquals("standalone server",
-            sanitize_server_role("standalone server"))
+                          sanitize_server_role("standalone server"))
         self.assertEquals("member server",
-            sanitize_server_role("member server"))
+                          sanitize_server_role("member server"))
 
     def test_invalid(self):
         self.assertRaises(ValueError, sanitize_server_role, "foo")
@@ -187,7 +189,7 @@ class ProvisionResultTests(TestCase):
         result.adminpass = "geheim"
         entries = self.report_logger(result)
         self.assertEquals(entries[1],
-                ("INFO", 'Admin password:        geheim'))
+                          ("INFO", 'Admin password:        geheim'))
 
 
 class DetermineNetbiosNameTests(TestCase):

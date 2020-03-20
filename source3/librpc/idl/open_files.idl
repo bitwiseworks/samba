@@ -12,41 +12,12 @@ import "misc.idl";
 
 interface open_files
 {
-	typedef [public,flag(NDR_PAHEX)] struct {
-		GUID			client_guid;
-		smb2_lease_key		lease_key;
-		smb2_lease_state	current_state;
-		/*
-		 * 'breaking' indicates that we're waiting
-		 * for a lease break ack from the client
-		 * and breaking_to_requested and breaking_to_required
-		 * have a meaning.
-		 *
-		 * breaking_to_requested is the value already sent to
-		 * the client, the client needs to ack to this (or less).
-		 *
-		 * breaking_to_required is the internal value that needs to
-		 * be reached before we can reset breaking = false, this
-		 * may requires multiple roundtrips to the client, e.g.
-		 * when the lease broken to a more reduced value, while
-		 * the lease break is still in progress.
-		 *
-		 * The following can be assumed (if breaking == true):
-		 *
-		 * current_state > breaking_to_requested >= breaking_to_required
-		 */
-		boolean8		breaking;
-		smb2_lease_state	breaking_to_requested;
-		smb2_lease_state	breaking_to_required;
-		uint16			lease_version;
-		uint16			epoch;
-	} share_mode_lease;
-
 	typedef [public] struct {
 		server_id	pid;
 		hyper		op_mid;
 		uint16		op_type;
-		uint32		lease_idx;
+		GUID		client_guid;
+		smb2_lease_key  lease_key;
 		uint32		access_mask;
 		uint32		share_access;
 		uint32		private_options;
@@ -61,7 +32,6 @@ interface open_files
 		 * to store this share_mode_entry on disk.
 		 */
 		[skip] boolean8	stale;
-		[ignore] share_mode_lease *lease;
 	} share_mode_entry;
 
 	typedef [public] struct {
@@ -70,22 +40,31 @@ interface open_files
 		security_unix_token *delete_token;
 	} delete_token;
 
+	typedef [public,bitmap16bit] bitmap {
+		SHARE_MODE_SHARE_DELETE		= 0x100,
+		SHARE_MODE_SHARE_WRITE		= 0x080,
+		SHARE_MODE_SHARE_READ		= 0x040,
+		SHARE_MODE_ACCESS_DELETE	= 0x020,
+		SHARE_MODE_ACCESS_WRITE		= 0x010,
+		SHARE_MODE_ACCESS_READ		= 0x008,
+		SHARE_MODE_LEASE_HANDLE		= 0x004,
+		SHARE_MODE_LEASE_WRITE		= 0x002,
+		SHARE_MODE_LEASE_READ		= 0x001
+	} share_mode_flags;
+
 	typedef [public] struct {
 		hyper sequence_number;
+		share_mode_flags flags;
 		[string,charset(UTF8)] char *servicepath;
 		[string,charset(UTF8)] char *base_name;
 		[string,charset(UTF8)] char *stream_name;
-		uint32 num_share_modes;
-		[size_is(num_share_modes)] share_mode_entry share_modes[];
-		uint32 num_leases;
-		[size_is(num_leases)] share_mode_lease leases[];
 		uint32 num_delete_tokens;
 		[size_is(num_delete_tokens)] delete_token delete_tokens[];
-		timespec old_write_time;
-		timespec changed_write_time;
+		NTTIME old_write_time;
+		NTTIME changed_write_time;
 		[skip] boolean8 fresh;
 		[skip] boolean8 modified;
-		[ignore] db_record *record;
+		[skip] boolean8 have_share_modes;
 		[ignore] file_id id; /* In memory key used to lookup cache. */
 	} share_mode_data;
 
@@ -108,11 +87,10 @@ interface open_files
 		timespec	st_ex_mtime;
 		timespec	st_ex_ctime;
 		timespec	st_ex_btime;
-		boolean8	st_ex_calculated_birthtime;
 		hyper		st_ex_blksize;
 		hyper		st_ex_blocks;
 		uint32		st_ex_flags;
-		uint32		st_ex_mask;
+		uint32		st_ex_iflags;
 	} vfs_default_durable_stat;
 
 	typedef [public] struct {
@@ -127,7 +105,21 @@ interface open_files
 		boolean8 update_write_time_triggered;
 		boolean8 update_write_time_on_close;
 		boolean8 write_time_forced;
-		timespec close_write_time;
+		NTTIME close_write_time;
 		vfs_default_durable_stat stat_info;
 	} vfs_default_durable_cookie;
+
+	typedef [public] struct {
+		file_id id;
+		udlong share_file_id;
+		uint8 break_to;
+	} oplock_break_message;
+
+	typedef [public] struct {
+		file_id id;
+		udlong share_file_id;
+		[string,charset(UTF8)] char *servicepath;
+		[string,charset(UTF8)] char *base_name;
+		[string,charset(UTF8)] char *stream_name;
+	} file_rename_message;
 }

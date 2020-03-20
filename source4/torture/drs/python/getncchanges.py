@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Tests various schema replication scenarios
@@ -24,7 +24,8 @@
 #  export DC1=dc1_dns_name
 #  export DC2=dc2_dns_name
 #  export SUBUNITRUN=$samba4srcdir/scripting/bin/subunitrun
-#  PYTHONPATH="$PYTHONPATH:$samba4srcdir/torture/drs/python" $SUBUNITRUN getncchanges -U"$DOMAIN/$DC_USERNAME"%"$DC_PASSWORD"
+#  PYTHONPATH="$PYTHONPATH:$samba4srcdir/torture/drs/python" $SUBUNITRUN \
+#       getncchanges -U"$DOMAIN/$DC_USERNAME"%"$DC_PASSWORD"
 #
 
 from __future__ import print_function
@@ -35,6 +36,7 @@ from ldb import SCOPE_BASE
 import random
 
 from samba.dcerpc import drsuapi
+
 
 class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
     def setUp(self):
@@ -100,7 +102,8 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
     def start_new_repl_cycle(self):
         """Resets enough state info to start a new replication cycle"""
         # reset rxd_links, but leave rxd_guids and rxd_dn_list alone so we know
-        # whether a parent/target is unknown and needs GET_ANC/GET_TGT to resolve
+        # whether a parent/target is unknown and needs GET_ANC/GET_TGT to
+        # resolve
         self.rxd_links = []
 
         self.used_get_tgt = False
@@ -158,13 +161,16 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         # Note that with GET_ANC Windows can end up sending the same parent
         # object multiple times, so this might be noteworthy but doesn't
         # warrant failing the test
-        if (len(received_list) != len(expected_list)):
-            print("Note: received %d objects but expected %d" %(len(received_list),
-                                                                len(expected_list)))
+        num_received = len(received_list)
+        num_expected = len(expected_list)
+        if num_received != num_expected:
+            print("Note: received %d objects but expected %d" % (num_received,
+                                                                 num_expected))
 
         # Check that we received every object that we were expecting
         for dn in expected_list:
-            self.assertTrue(dn in received_list, "DN '%s' missing from replication." % dn)
+            self.assertTrue(dn in received_list,
+                            "DN '%s' missing from replication." % dn)
 
     def test_repl_integrity(self):
         """
@@ -175,8 +181,8 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         # The server behaviour differs between samba and Windows. Samba returns
         # the objects in the original order (up to the pre-modify HWM). Windows
         # incorporates the modified objects and returns them in the new order
-        # (i.e. modified objects last), up to the post-modify HWM. The Microsoft
-        # docs state the Windows behaviour is optional.
+        # (i.e. modified objects last), up to the post-modify HWM. The
+        # Microsoft docs state the Windows behaviour is optional.
 
         # Create a range of objects to replicate.
         expected_dn_list = self.create_object_range(0, 400)
@@ -187,11 +193,12 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         # so long as by the end we've received everything
         self.repl_get_next()
 
-        # Modify some of the second page of objects. This should bump the highwatermark
+        # Modify some of the second page of objects. This should bump the
+        # highwatermark
         for x in range(100, 200):
             self.modify_object(expected_dn_list[x], "displayName", "OU%d" % x)
 
-        (post_modify_hwm, unused) = self._get_highest_hwm_utdv(self.test_ldb_dc)
+        (post_modify_hwm, _) = self._get_highest_hwm_utdv(self.test_ldb_dc)
         self.assertTrue(post_modify_hwm.highest_usn > orig_hwm.highest_usn)
 
         # Get the remaining blocks of data
@@ -222,7 +229,9 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         return parent_dn == self.ou or parent_dn in known_dn_list
 
     def _repl_send_request(self, get_anc=False, get_tgt=False):
-        """Sends a GetNCChanges request for the next block of replication data."""
+        """
+        Sends a GetNCChanges request for the next block of replication data.
+        """
 
         # we're just trying to mimic regular client behaviour here, so just
         # use the highwatermark in the last response we received
@@ -239,7 +248,7 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         more_flags = 0
 
         if get_anc:
-            replica_flags = drsuapi.DRSUAPI_DRS_WRIT_REP | drsuapi.DRSUAPI_DRS_GET_ANC
+            replica_flags |= drsuapi.DRSUAPI_DRS_GET_ANC
             self.used_get_anc = True
 
         if get_tgt:
@@ -251,6 +260,7 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
                                      max_objects=self.max_objects,
                                      highwatermark=highwatermark,
                                      uptodateness_vector=uptodateness_vector,
+
                                      more_flags=more_flags)
 
     def repl_get_next(self, get_anc=False, get_tgt=False, assert_links=False):
@@ -297,11 +307,12 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
                 return self.repl_get_next(get_anc=True, get_tgt=get_tgt,
                                           assert_links=assert_links)
 
-        # check we know about references to any objects in the linked attritbutes
+        # check we know about references to any objects in the linked attrs
         received_links = self._get_ctr6_links(ctr6)
 
-        # This is so that older versions of Samba fail - we want the links to be
-        # sent roughly with the objects, rather than getting all links at the end
+        # This is so that older versions of Samba fail - we want the links to
+        # be sent roughly with the objects, rather than getting all links at
+        # the end
         if assert_links:
             self.assertTrue(len(received_links) > 0,
                             "Links were expected in the GetNCChanges response")
@@ -362,8 +373,8 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
 
     def test_repl_integrity_get_anc(self):
         """
-        Modify the parent objects being replicated while the replication is still
-        in progress (using GET_ANC) and check that no object loss occurs.
+        Modify the parent objects being replicated while the replication is
+        still in progress (using GET_ANC) and check that no object loss occurs.
         """
 
         # Note that GET_ANC behaviour varies between Windows and Samba.
@@ -438,7 +449,7 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
 
         self.assertTrue(len(received_links) == num_expected,
                         "Received %d links but expected %d"
-                        %(len(received_links), num_expected))
+                        % (len(received_links), num_expected))
 
         for dn in objects_with_links:
             self.assert_object_has_link(dn, link_attr, received_links)
@@ -452,17 +463,19 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         # Look up the link attribute in the DB
         # The extended_dn option will dump the GUID info for the link
         # attribute (as a hex blob)
-        res = self.test_ldb_dc.search(ldb.Dn(self.test_ldb_dc, dn), attrs=[link_attr],
-                                      controls=['extended_dn:1:0'], scope=ldb.SCOPE_BASE)
+        res = self.test_ldb_dc.search(ldb.Dn(self.test_ldb_dc, dn),
+                                      attrs=[link_attr],
+                                      controls=['extended_dn:1:0'],
+                                      scope=ldb.SCOPE_BASE)
 
         # We didn't find the expected link attribute in the DB for the object.
         # Something has gone wrong somewhere...
-        self.assertTrue(link_attr in res[0], "%s in DB doesn't have attribute %s"
-                        %(dn, link_attr))
+        self.assertTrue(link_attr in res[0],
+                        "%s in DB doesn't have attribute %s" % (dn, link_attr))
 
         # find the received link in the list and assert that the target and
         # source GUIDs match what's in the DB
-        for val in res[0][link_attr]:
+        for val in [str(val) for val in res[0][link_attr]]:
             # Work out the expected source and target GUIDs for the DB link
             target_dn = ldb.Dn(self.test_ldb_dc, val)
             targetGUID_blob = target_dn.get_extended_component("GUID")
@@ -477,10 +490,11 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
                     found = True
 
                     if self._debug:
-                        print("Link %s --> %s" %(dn[:25], link.targetDN[:25]))
+                        print("Link %s --> %s" % (dn[:25], link.targetDN[:25]))
                     break
 
-            self.assertTrue(found, "Did not receive expected link for DN %s" % dn)
+            self.assertTrue(found,
+                            "Did not receive expected link for DN %s" % dn)
 
     def test_repl_get_tgt(self):
         """
@@ -511,7 +525,8 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         # with GET_TGT
         while not self.replication_complete():
 
-            # get the next block of replication data (this sets GET_TGT if needed)
+            # get the next block of replication data (this sets GET_TGT
+            # if needed)
             self.repl_get_next(assert_links=links_expected)
             links_expected = len(self.rxd_links) < len(expected_links)
 
@@ -549,10 +564,12 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
             self.modify_object(objectsA[i], "managedBy", objectsB[i])
 
         for i in range(0, 100):
-            self.modify_object(objectsB[i], "managedBy", objectsC[(i + 1) % 100])
+            self.modify_object(objectsB[i], "managedBy",
+                               objectsC[(i + 1) % 100])
 
         for i in range(0, 100):
-            self.modify_object(objectsC[i], "managedBy", objectsB[(i + 1) % 100])
+            self.modify_object(objectsC[i], "managedBy",
+                               objectsB[(i + 1) % 100])
 
         all_objects = objectsA + objectsB + objectsC
         expected_links = all_objects
@@ -566,7 +583,8 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         # with GET_TGT
         while not self.replication_complete():
 
-            # get the next block of replication data (this sets GET_TGT if needed)
+            # get the next block of replication data (this sets GET_TGT
+            # if needed)
             self.repl_get_next(assert_links=links_expected)
             links_expected = len(self.rxd_links) < len(expected_links)
 
@@ -601,8 +619,8 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         self.repl_get_next(get_tgt=True)
 
         # create the target objects and add the links. These objects should be
-        # outside the scope of the Samba replication cycle, but the links should
-        # still get sent with the source object
+        # outside the scope of the Samba replication cycle, but the links
+        # should still get sent with the source object
         managers = self.create_object_range(0, 100, prefix="manager")
 
         for i in range(0, 100):
@@ -642,7 +660,8 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
 
         # Add links from the parents to the children
         for x in range(0, 100):
-            self.modify_object(parent_dn_list[x], "managedBy", expected_dn_list[x + 100])
+            self.modify_object(parent_dn_list[x], "managedBy",
+                               expected_dn_list[x + 100])
 
         # add some filler objects at the end. This allows us to easily see
         # which chunk the links get sent in
@@ -705,7 +724,8 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         # with GET_TGT and GET_ANC
         while not self.replication_complete():
 
-            # get the next block of replication data (this sets GET_TGT/GET_ANC)
+            # get the next block of replication data (this sets
+            # GET_TGT/GET_ANC)
             self.repl_get_next(assert_links=links_expected)
             links_expected = len(self.rxd_links) < len(expected_links)
 
@@ -841,25 +861,32 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
     def restore_deleted_object(self, guid, new_dn):
         """Re-animates a deleted object"""
 
-        res = self.test_ldb_dc.search(base="<GUID=%s>" % self._GUID_string(guid), attrs=["isDeleted"],
-                                  controls=['show_deleted:1'], scope=ldb.SCOPE_BASE)
+        guid_str = self._GUID_string(guid)
+        res = self.test_ldb_dc.search(base="<GUID=%s>" % guid_str,
+                                      attrs=["isDeleted"],
+                                      controls=['show_deleted:1'],
+                                      scope=ldb.SCOPE_BASE)
         if len(res) != 1:
             return
 
         msg = ldb.Message()
         msg.dn = res[0].dn
-        msg["isDeleted"] = ldb.MessageElement([], ldb.FLAG_MOD_DELETE, "isDeleted")
-        msg["distinguishedName"] = ldb.MessageElement([new_dn], ldb.FLAG_MOD_REPLACE, "distinguishedName")
+        msg["isDeleted"] = ldb.MessageElement([], ldb.FLAG_MOD_DELETE,
+                                              "isDeleted")
+        msg["distinguishedName"] = ldb.MessageElement([new_dn],
+                                                      ldb.FLAG_MOD_REPLACE,
+                                                      "distinguishedName")
         self.test_ldb_dc.modify(msg, ["show_deleted:1"])
 
     def sync_DCs(self, nc_dn=None):
         # make sure DC1 has all the changes we've made to DC2
-        self._net_drs_replicate(DC=self.dnsname_dc1, fromDC=self.dnsname_dc2, nc_dn=nc_dn)
+        self._net_drs_replicate(DC=self.dnsname_dc1, fromDC=self.dnsname_dc2,
+                                nc_dn=nc_dn)
 
     def get_object_guid(self, dn):
-        res = self.test_ldb_dc.search(base=dn, attrs=["objectGUID"], scope=ldb.SCOPE_BASE)
+        res = self.test_ldb_dc.search(base=dn, attrs=["objectGUID"],
+                                      scope=ldb.SCOPE_BASE)
         return res[0]['objectGUID'][0]
-
 
     def set_dc_connection(self, conn):
         """
@@ -913,7 +940,7 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         # This test is a little different in that we're particularly interested
         # in exercising the replmd client code on the second DC.
         # First, make sure the peer DC has the base OU, then connect to it (so
-        # we store its inital HWM)
+        # we store its initial HWM)
         self.sync_DCs()
         peer_conn = DcConnection(self, self.ldb_dc1, self.dnsname_dc1)
 
@@ -921,7 +948,8 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         la_sources = self.create_object_range(0, 100, prefix="la_src")
         la_targets = self.create_object_range(0, 100, prefix="la_tgt")
 
-        # store the target object's GUIDs (we need to know these to reanimate them)
+        # store the target object's GUIDs (we need to know these to
+        # reanimate them)
         target_guids = []
 
         for dn in la_targets:
@@ -966,7 +994,7 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         self.assert_DCs_replication_is_consistent(peer_conn, all_objects,
                                                   expected_links)
 
-    def test_repl_integrity_cross_partition_links(self):
+    def _test_repl_integrity_cross_partition_links(self, get_tgt=False):
         """
         Checks that a cross-partition link to an unknown target object does
         not result in missing links.
@@ -979,20 +1007,33 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
         # stop replication so the peer gets the following objects in one go
         self._disable_all_repl(self.dnsname_dc2)
 
+        # optionally force the client-side to use GET_TGT locally, by adding a
+        # one-way link to a missing/deleted target object
+        if get_tgt:
+            missing_target = "OU=missing_tgt,%s" % self.ou
+            self.add_object(missing_target)
+            get_tgt_source = "CN=get_tgt_src,%s" % self.ou
+            self.add_object(get_tgt_source,
+                            objectclass="msExchConfigurationContainer")
+            self.modify_object(get_tgt_source, "addressBookRoots2",
+                               missing_target)
+            self.test_ldb_dc.delete(missing_target)
+
         # create a link source object in the main NC
         la_source = "OU=cross_nc_src,%s" % self.ou
         self.add_object(la_source)
 
         # create the link target (a server object) in the config NC
+        sites_dn = "CN=Sites,%s" % self.config_dn
+        servers_dn = "CN=Servers,CN=Default-First-Site-Name,%s" % sites_dn
         rand = random.randint(1, 10000000)
-        la_target = "CN=getncchanges-%d,CN=Servers,CN=Default-First-Site-Name," \
-                    "CN=Sites,%s" %(rand, self.config_dn)
+        la_target = "CN=getncchanges-%d,%s" % (rand, servers_dn)
         self.add_object(la_target, objectclass="server")
 
         # add a cross-partition link between the two
         self.modify_object(la_source, "managedBy", la_target)
 
-        # First, sync across to the peer the NC containing the link source object
+        # First, sync to the peer the NC containing the link source object
         self.sync_DCs()
 
         # Now, before the peer has received the partition containing the target
@@ -1002,11 +1043,20 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
 
         while not self.replication_complete():
             # pretend we've received other link targets out of order and that's
-            # forced us to use GET_TGT. This checks the peer doesn't fail trying
-            # to fetch a cross-partition target object that doesn't exist
+            # forced us to use GET_TGT. This checks the peer doesn't fail
+            # trying to fetch a cross-partition target object that doesn't
+            # exist
             self.repl_get_next(get_tgt=True)
 
         self.set_dc_connection(self.default_conn)
+
+        # delete the GET_TGT test object. We're not interested in asserting its
+        # links - it was just there to make the client use GET_TGT (and it
+        # creates an inconsistency because one DC correctly ignores the link,
+        # because it points to a deleted object)
+        if get_tgt:
+            self.test_ldb_dc.delete(get_tgt_source)
+
         self.init_test_state()
 
         # Now sync across the partition containing the link target object
@@ -1029,20 +1079,20 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
                                       attrs=["managedBy"],
                                       controls=['extended_dn:1:0'],
                                       scope=ldb.SCOPE_BASE)
-        self.assertFalse("managedBy" in res[0], "%s in DB still has managedBy attribute"
-                         % la_source)
+        self.assertFalse("managedBy" in res[0],
+                         "%s in DB still has managedBy attribute" % la_source)
         res = self.test_ldb_dc.search(ldb.Dn(self.ldb_dc2, la_source),
                                       attrs=["managedBy"],
                                       controls=['extended_dn:1:0'],
                                       scope=ldb.SCOPE_BASE)
-        self.assertFalse("managedBy" in res[0], "%s in DB still has managedBy attribute"
-                         % la_source)
+        self.assertFalse("managedBy" in res[0],
+                         "%s in DB still has managedBy attribute" % la_source)
 
         # Check receiving a cross-partition link to a deleted target.
         # Delete the target and make sure the deletion is sync'd between DCs
         target_guid = self.get_object_guid(la_target)
         self.test_ldb_dc.delete(la_target)
-        self.sync_DCs(nc_dn=self.config_dn)        
+        self.sync_DCs(nc_dn=self.config_dn)
         self._disable_all_repl(self.dnsname_dc2)
 
         # re-animate the target
@@ -1056,12 +1106,18 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
                                       attrs=["managedBy"],
                                       controls=['extended_dn:1:0'],
                                       scope=ldb.SCOPE_BASE)
-        self.assertTrue("managedBy" in res[0], "%s in DB missing managedBy attribute"
-                        % la_source)
+        self.assertTrue("managedBy" in res[0],
+                        "%s in DB missing managedBy attribute" % la_source)
 
         # cleanup the server object we created in the Configuration partition
         self.test_ldb_dc.delete(la_target)
         self._enable_all_repl(self.dnsname_dc2)
+
+    def test_repl_integrity_cross_partition_links(self):
+        self._test_repl_integrity_cross_partition_links(get_tgt=False)
+
+    def test_repl_integrity_cross_partition_links_with_tgt(self):
+        self._test_repl_integrity_cross_partition_links(get_tgt=True)
 
     def test_repl_get_tgt_multivalued_links(self):
         """Tests replication with multi-valued link attributes."""
@@ -1094,7 +1150,8 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
 
         # check we received all the expected objects/links
         self.assert_expected_data(expected_objects)
-        self.assert_expected_links([la_source], link_attr="addressBookRoots2", num_expected=500)
+        self.assert_expected_links([la_source], link_attr="addressBookRoots2",
+                                   num_expected=500)
 
         # Do the replication again, forcing the use of GET_TGT this time
         self.init_test_state()
@@ -1113,7 +1170,8 @@ class DrsReplicaSyncIntegrityTestCase(drs_base.DrsBaseTestCase):
 
         # check we received all the expected objects/links
         self.assert_expected_data(expected_objects)
-        self.assert_expected_links([la_source], link_attr="addressBookRoots2", num_expected=500)
+        self.assert_expected_links([la_source], link_attr="addressBookRoots2",
+                                   num_expected=500)
 
 
 class DcConnection:
@@ -1122,6 +1180,5 @@ class DcConnection:
     def __init__(self, drs_base, ldb_dc, dnsname_dc):
         self.ldb_dc = ldb_dc
         (self.drs, self.drs_handle) = drs_base._ds_bind(dnsname_dc)
-        (self.default_hwm, self.default_utdv) = drs_base._get_highest_hwm_utdv(ldb_dc)
-
-
+        (self.default_hwm, utdv) = drs_base._get_highest_hwm_utdv(ldb_dc)
+        self.default_utdv = utdv

@@ -331,7 +331,7 @@ test_msdfs_link()
     tmpfile=$PREFIX/smbclient.in.$$
     prompt="  msdfs-target  "
 
-    cmd='$SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/msdfs-share -I $SERVER_IP $ADDARGS -m nt1 -c dir 2>&1'
+    cmd='$SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/msdfs-share -I $SERVER_IP $ADDARGS -m $PROTOCOL -c dir 2>&1'
     out=`eval $cmd`
     ret=$?
 
@@ -694,7 +694,9 @@ EOF
 test_bad_names()
 {
     # First with SMB1
-    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/badname-tmp -I $SERVER_IP $ADDARGS -mNT1 -c ls 2>&1'
+
+if [ $PROTOCOL = "NT1" ]; then
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/badname-tmp -I $SERVER_IP $ADDARGS -m$PROTOCOL -c ls 2>&1'
     eval echo "$cmd"
     out=`eval $cmd`
     ret=$?
@@ -752,9 +754,12 @@ test_bad_names()
 	echo "failed listing \\badname-tmp - grep (5) failed with $ret"
 	return 1
     fi
+fi
+
+if [ $PROTOCOL = "SMB3" ]; then
 
     # Now check again with -mSMB3
-    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/badname-tmp -I $SERVER_IP $ADDARGS -mSMB3 -c ls 2>&1'
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/badname-tmp -I $SERVER_IP $ADDARGS -m$PROTOCOL -c ls 2>&1'
     eval echo "$cmd"
     out=`eval $cmd`
     ret=$?
@@ -812,6 +817,7 @@ test_bad_names()
 	echo "failed listing \\badname-tmp - SMB3 grep (5) failed with $ret"
 	return 1
     fi
+fi
 }
 
 # Test accessing an share with a name that must be mangled - with acl_xattrs.
@@ -862,8 +868,9 @@ del smbclient
 del scopy_file
 quit
 EOF
+if [ $PROTOCOL = "SMB3" ]; then
     # First SMB3
-    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/tmp -I $SERVER_IP $ADDARGS -mSMB3 < $tmpfile 2>&1'
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/tmp -I $SERVER_IP $ADDARGS -m$PROTOOCL < $tmpfile 2>&1'
     eval echo "$cmd"
     out=`eval $cmd`
     ret=$?
@@ -883,12 +890,13 @@ EOF
 	echo "failed md5sum (1)"
 	return 1
     fi
-
+fi
 #
 # Now do again using SMB1
 # to force client-side fallback.
 #
 
+if [ $PROTOCOL = "NT1" ]; then
     cat > $tmpfile <<EOF
 put ${SMBCLIENT}
 scopy smbclient scopy_file
@@ -898,7 +906,7 @@ del smbclient
 del scopy_file
 quit
 EOF
-    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/tmp -I $SERVER_IP $ADDARGS -mNT1 < $tmpfile 2>&1'
+    cmd='CLI_FORCE_INTERACTIVE=yes $SMBCLIENT "$@" -U$USERNAME%$PASSWORD //$SERVER/tmp -I $SERVER_IP $ADDARGS -m$PROTOCOL < $tmpfile 2>&1'
     eval echo "$cmd"
     out=`eval $cmd`
     ret=$?
@@ -918,6 +926,7 @@ EOF
 	echo "failed md5sum (2)"
 	return 1
     fi
+fi
 }
 
 # Test creating a stream on the root of the share directory filname - :foobar
@@ -1327,6 +1336,32 @@ EOF
        false
        return
     fi
+}
+
+#
+# Regression test for CVE-2019-10197
+# we should always get ACCESS_DENIED
+#
+test_noperm_share_regression()
+{
+    cmd='$SMBCLIENT -U$USERNAME%$PASSWORD //$SERVER/noperm -I $SERVER_IP $LOCAL_ADDARGS -c "ls;ls"  2>&1'
+    eval echo "$cmd"
+    out=`eval $cmd`
+    ret=$?
+    if [ $ret -eq 0 ] ; then
+       echo "$out"
+       echo "failed accessing no perm share should not work"
+       return 1
+    fi
+
+    num=`echo "$out" | grep 'NT_STATUS_ACCESS_DENIED' | wc -l`
+    if [ "$num" -ne "2" ] ; then
+       echo "$out"
+       echo "failed num[$num] - two NT_STATUS_ACCESS_DENIED lines expected"
+       return 1
+    fi
+
+    return 0
 }
 
 # Test smbclient deltree command
@@ -1855,6 +1890,10 @@ testit "follow symlinks = no" \
 
 testit "follow local symlinks" \
     test_local_symlinks || \
+    failed=`expr $failed + 1`
+
+testit "noperm share regression" \
+    test_noperm_share_regression || \
     failed=`expr $failed + 1`
 
 testit "smbclient deltree command" \

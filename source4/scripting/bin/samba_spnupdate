@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # update our servicePrincipalName names from spn_update_list
 #
@@ -41,6 +41,7 @@ from samba import getopt as options
 from samba.auth import system_session
 from samba.samdb import SamDB
 from samba.credentials import Credentials, DONT_USE_KERBEROS
+from samba.compat import get_string
 
 parser = optparse.OptionParser("samba_spnupdate")
 sambaopts = options.SambaOptions(parser)
@@ -79,7 +80,7 @@ def get_subst_vars(samdb):
     vars['NTDSGUID']  = samdb.get_ntds_GUID()
     res = samdb.search(base=samdb.get_default_basedn(), scope=ldb.SCOPE_BASE, attrs=["objectGUID"])
     guid = samdb.schema_format_value("objectGUID", res[0]['objectGUID'][0])
-    vars['DOMAINGUID'] = guid
+    vars['DOMAINGUID'] = get_string(guid)
     return vars
 
 try:
@@ -106,7 +107,8 @@ try:
         credentials = None
 
     samdb = SamDB(url=lp.samdb_url(), session_info=system_session(), credentials=credentials, lp=lp)
-except ldb.LdbError, (num, msg):
+except ldb.LdbError as e:
+    (num, msg) = e.args
     print("Unable to open sam database %s : %s" % (lp.samdb_url(), msg))
     sys.exit(1)
 
@@ -163,7 +165,7 @@ machine_dn = res[0]["dn"]
 old_spns = []
 if "servicePrincipalName" in res[0]:
     for s in res[0]["servicePrincipalName"]:
-        old_spns.append(s)
+        old_spns.append(str(s))
 
 if opts.verbose:
     print("Existing SPNs: %s" % old_spns)
@@ -244,7 +246,7 @@ def call_rodc_update(d):
     req1.spn_names = spn_names
     (level, res) = drs.DsWriteAccountSpn(drs_handle, 1, req1)
     if (res.status != (0, 'WERR_OK')):
-        print "WriteAccountSpn has failed with error %s" % str(res.status)
+        print("WriteAccountSpn has failed with error %s" % str(res.status))
 
 if samdb.am_rodc():
     call_rodc_update(add_list)

@@ -29,35 +29,23 @@ from samba.ndr import ndr_unpack
 from samba.dcerpc import drsblobs
 from samba import dsdb
 import re
-import random
-import string
 
 USER_NAME = "CryptSHATestUser"
-# Create a random 32 character password, containing only letters and
-# digits to avoid issues when used on the command line.
-# Ensuring the password includes at least:
-#   1 upper case letter
-#   1 lower case letter
-#   1 digit.
-#
-USER_PASS = (''.join(random.choice(string.ascii_uppercase +
-                                   string.ascii_lowercase +
-                                   string.digits) for _ in range(29)) +
-             random.choice(string.ascii_uppercase) +
-             random.choice(string.ascii_lowercase) +
-             random.choice(string.digits))
 HASH_OPTION = "password hash userPassword schemes"
 
 # Get the value of an attribute from the output string
 # Note: Does not correctly handle values spanning multiple lines,
 #       which is acceptable for it's usage in these tests.
+
+
 def _get_attribute(out, name):
-    p = re.compile("^"+name+":\s+(\S+)")
+    p = re.compile("^" + name + ":\s+(\S+)")
     for line in out.split("\n"):
         m = p.match(line)
         if m:
             return m.group(1)
     return ""
+
 
 class UserCmdCryptShaTestCase(SambaToolCmdTest):
     """
@@ -70,7 +58,7 @@ class UserCmdCryptShaTestCase(SambaToolCmdTest):
     def setUp(self):
         super(UserCmdCryptShaTestCase, self).setUp()
 
-    def add_user(self, hashes = ""):
+    def add_user(self, hashes=""):
         self.lp = samba.tests.env_loadparm()
 
         # set the extra hashes to be calculated
@@ -83,16 +71,17 @@ class UserCmdCryptShaTestCase(SambaToolCmdTest):
             credentials=self.creds,
             lp=self.lp)
 
+        password = self.random_password()
         self.runsubcmd("user",
                        "create",
                        USER_NAME,
-                       USER_PASS)
+                       password)
 
     def tearDown(self):
         super(UserCmdCryptShaTestCase, self).tearDown()
         self.runsubcmd("user", "delete", USER_NAME)
 
-    def _get_password(self, attributes, decrypt = False):
+    def _get_password(self, attributes, decrypt=False):
         command = ["user",
                    "getpassword",
                    USER_NAME,
@@ -121,12 +110,12 @@ class UserCmdCryptShaTestCase(SambaToolCmdTest):
         msg = ldb.Message()
         msg.dn = res[0].dn
         msg["unicodePwd"] = ldb.MessageElement(b"ABCDEF1234567890",
-                                                ldb.FLAG_MOD_REPLACE,
-                                                "unicodePwd")
+                                               ldb.FLAG_MOD_REPLACE,
+                                               "unicodePwd")
         self.ldb.modify(
             msg,
             controls=["local_oid:%s:0" %
-                dsdb.DSDB_CONTROL_BYPASS_PASSWORD_HASH_OID])
+                      dsdb.DSDB_CONTROL_BYPASS_PASSWORD_HASH_OID])
 
     # gpg decryption not enabled.
     # both virtual attributes specified, no rounds option
@@ -478,7 +467,7 @@ class UserCmdCryptShaTestCase(SambaToolCmdTest):
                                  "virtualCryptSHA512;rounds=5129",
                                  True)
         self.assertFalse(sha256 == _get_attribute(out, "virtualCryptSHA256"))
-        self.assertFalse(sha512 ==_get_attribute(out, "virtualCryptSHA512"))
+        self.assertFalse(sha512 == _get_attribute(out, "virtualCryptSHA512"))
 
         # The returned hashes should specify the correct number of rounds
         self.assertTrue(sha256.startswith("{CRYPT}$5$rounds=2561"))

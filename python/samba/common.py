@@ -31,6 +31,8 @@ if PY3:
     def cmp(a, b):
         return (a > b) - (a < b)
 
+    raw_input = input
+
 
 def confirm(msg, forced=False, allow_all=False):
     """confirm an action with the user
@@ -48,7 +50,7 @@ def confirm(msg, forced=False, allow_all=False):
         '': False,
         'N': False,
         'NO': False,
-        }
+    }
 
     prompt = '[y/N]'
 
@@ -92,7 +94,7 @@ class dsdb_Dn(object):
                 raise RuntimeError("Invalid DN %s" % dnstring)
             prefix_len = 4 + len(colons[1]) + int(colons[1])
             self.prefix = dnstring[0:prefix_len]
-            self.binary = self.prefix[3+len(colons[1]):-1]
+            self.binary = self.prefix[3 + len(colons[1]):-1]
             self.dnstring = dnstring[prefix_len:]
         else:
             self.dnstring = dnstring
@@ -108,9 +110,7 @@ class dsdb_Dn(object):
         dn1 = self
         dn2 = other
         guid1 = dn1.dn.get_extended_component("GUID")
-        guid1b = ndr_pack(misc.GUID(guid1))
         guid2 = dn2.dn.get_extended_component("GUID")
-        guid2b = ndr_pack(misc.GUID(guid2))
 
         v = cmp(guid1, guid2)
         if v != 0:

@@ -27,6 +27,7 @@
 #include "passdb.h"
 #include "passdb/pdb_ldap_util.h"
 #include "passdb/pdb_ldap_schema.h"
+#include "libcli/security/dom_sid.h"
 
 /**********************************************************************
  Add the account-policies below the sambaDomain object to LDAP,
@@ -53,7 +54,7 @@ static NTSTATUS add_new_domain_account_policies(struct smbldap_state *ldap_state
 
 	if (asprintf(&dn, "%s=%s,%s",
 		get_attr_key2string(dominfo_attr_list, LDAP_ATTR_DOMAIN),
-		escape_domain_name, lp_ldap_suffix(talloc_tos())) < 0) {
+		escape_domain_name, lp_ldap_suffix()) < 0) {
 		SAFE_FREE(escape_domain_name);
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -118,7 +119,7 @@ static NTSTATUS add_new_domain_account_policies(struct smbldap_state *ldap_state
 static NTSTATUS add_new_domain_info(struct smbldap_state *ldap_state,
                                     const char *domain_name)
 {
-	fstring sid_string;
+	struct dom_sid_buf sid_string;
 	fstring algorithmic_rid_base_string;
 	char *filter = NULL;
 	char *dn = NULL;
@@ -175,7 +176,7 @@ static NTSTATUS add_new_domain_info(struct smbldap_state *ldap_state,
 
 	if (asprintf(&dn, "%s=%s,%s",
 		     get_attr_key2string(dominfo_attr_list, LDAP_ATTR_DOMAIN),
-		     escape_domain_name, lp_ldap_suffix(talloc_tos())) < 0) {
+		     escape_domain_name, lp_ldap_suffix()) < 0) {
 		SAFE_FREE(escape_domain_name);
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -196,11 +197,10 @@ static NTSTATUS add_new_domain_info(struct smbldap_state *ldap_state,
 	/* If we don't have an entry, then ask secrets.tdb for what it thinks.
 	   It may choose to make it up */
 
-	sid_to_fstring(sid_string, get_global_sam_sid());
 	smbldap_set_mod(&mods, LDAP_MOD_ADD,
 			get_attr_key2string(dominfo_attr_list,
 					    LDAP_ATTR_DOM_SID),
-			sid_string);
+			dom_sid_str_buf(get_global_sam_sid(), &sid_string));
 
 	slprintf(algorithmic_rid_base_string,
 		 sizeof(algorithmic_rid_base_string) - 1, "%i",
@@ -286,7 +286,7 @@ NTSTATUS smbldap_search_domain_info(struct smbldap_state *ldap_state,
 
 	if (rc != LDAP_SUCCESS) {
 		DEBUG(2,("smbldap_search_domain_info: Problem during LDAPsearch: %s\n", ldap_err2string (rc)));
-		DEBUG(2,("smbldap_search_domain_info: Query was: %s, %s\n", lp_ldap_suffix(talloc_tos()), filter));
+		DEBUG(2,("smbldap_search_domain_info: Query was: %s, %s\n", lp_ldap_suffix(), filter));
 		goto failed;
 	}
 

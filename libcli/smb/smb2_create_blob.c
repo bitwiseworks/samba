@@ -143,7 +143,6 @@ static NTSTATUS smb2_create_blob_push_one(TALLOC_CTX *mem_ctx, DATA_BLOB *buffer
 	memcpy(buffer->data+ofs+blob_offset, blob->data.data, blob->data.length);
 	if (next_pad > 0) {
 		memset(buffer->data+ofs+next_offset, 0, next_pad);
-		next_offset += next_pad;
 	}
 
 	return NT_STATUS_OK;
@@ -156,10 +155,10 @@ static NTSTATUS smb2_create_blob_push_one(TALLOC_CTX *mem_ctx, DATA_BLOB *buffer
 NTSTATUS smb2_create_blob_push(TALLOC_CTX *mem_ctx, DATA_BLOB *buffer,
 			       const struct smb2_create_blobs blobs)
 {
-	int i;
+	uint32_t i;
 	NTSTATUS status;
 
-	*buffer = data_blob(NULL, 0);
+	*buffer = (DATA_BLOB) { 0 };
 	for (i=0; i < blobs.num_blobs; i++) {
 		bool last = false;
 		const struct smb2_create_blob *c;

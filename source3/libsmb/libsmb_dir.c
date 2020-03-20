@@ -170,6 +170,7 @@ static int add_dirplus(SMBCFILE *dir, struct file_info *finfo)
 		return -1;
 	}
 	ZERO_STRUCTP(new_entry);
+	new_entry->ino = finfo->ino;
 
 	info = SMB_MALLOC_P(struct libsmb_file_info);
 	if (info == NULL) {
@@ -350,7 +351,7 @@ dir_list_fn(const char *mnt,
 	return NT_STATUS_OK;
 }
 
-static int
+static NTSTATUS
 net_share_enum_rpc(struct cli_state *cli,
                    void (*fn)(const char *name,
                               uint32_t type,
@@ -377,7 +378,7 @@ net_share_enum_rpc(struct cli_state *cli,
 					     &pipe_hnd);
         if (!NT_STATUS_IS_OK(nt_status)) {
                 DEBUG(1, ("net_share_enum_rpc pipe open fail!\n"));
-                return -1;
+		goto done;
         }
 
 	ZERO_STRUCT(info_ctr);
@@ -400,18 +401,18 @@ net_share_enum_rpc(struct cli_state *cli,
         /* Was it successful? */
 	if (!NT_STATUS_IS_OK(nt_status)) {
                 /*  Nope.  Go clean up. */
-		result = ntstatus_to_werror(nt_status);
 		goto done;
 	}
 
 	if (!W_ERROR_IS_OK(result)) {
                 /*  Nope.  Go clean up. */
+		nt_status = werror_to_ntstatus(result);
 		goto done;
         }
 
 	if (total_entries == 0) {
                 /*  Nope.  Go clean up. */
-		result = WERR_GEN_FAILURE;
+		nt_status = NT_STATUS_NOT_FOUND;
 		goto done;
 	}
 
@@ -436,7 +437,7 @@ done:
         TALLOC_FREE(pipe_hnd);
 
         /* Tell 'em if it worked */
-        return W_ERROR_IS_OK(result) ? 0 : -1;
+        return nt_status;
 }
 
 
@@ -474,7 +475,6 @@ SMBC_opendir_ctx(SMBCCTX *context,
 	char *workgroup = NULL;
 	char *path = NULL;
 	size_t path_len = 0;
-        uint16_t mode;
 	uint16_t port = 0;
 	SMBCSRV *srv  = NULL;
 	SMBCFILE *dir = NULL;
@@ -825,6 +825,7 @@ SMBC_opendir_ctx(SMBCCTX *context,
 				}
 			} else if (srv ||
                                    (resolve_name(server, &rem_ss, 0x20, false))) {
+				NTSTATUS status;
 
                                 /*
                                  * If we hadn't found the server, get one now
@@ -851,24 +852,40 @@ SMBC_opendir_ctx(SMBCCTX *context,
 
                                 /* List the shares ... */
 
-                                if (net_share_enum_rpc(
-                                            srv->cli,
-                                            list_fn,
-                                            (void *) dir) < 0 &&
-                                    cli_RNetShareEnum(
-                                            srv->cli,
-                                            list_fn,
-                                            (void *)dir) < 0) {
-
-                                        errno = cli_errno(srv->cli);
-                                        if (dir) {
-                                                SAFE_FREE(dir->fname);
-                                                SAFE_FREE(dir);
-                                        }
+				status = net_share_enum_rpc(srv->cli,
+							list_fn,
+							(void *)dir);
+				if (!NT_STATUS_IS_OK(status) &&
+				    smbXcli_conn_protocol(srv->cli->conn) <=
+						PROTOCOL_NT1) {
+					/*
+					 * Only call cli_RNetShareEnum()
+					 * on SMB1 connections, not SMB2+.
+					 */
+					int rc = cli_RNetShareEnum(srv->cli,
+							       list_fn,
+							       (void *)dir);
+					if (rc != 0) {
+						status = cli_nt_error(srv->cli);
+					} else {
+						status = NT_STATUS_OK;
+					}
+				}
+				if (!NT_STATUS_IS_OK(status)) {
+					/*
+					 * Set cli->raw_status so SMBC_errno()
+					 * will correctly return the error.
+					 */
+					srv->cli->raw_status = status;
+					if (dir != NULL) {
+						SAFE_FREE(dir->fname);
+						SAFE_FREE(dir);
+					}
 					TALLOC_FREE(frame);
-                                        return NULL;
-
-                                }
+					errno = map_errno_from_nt_status(
+								status);
+					return NULL;
+				}
                         } else {
                                 /* Neither the workgroup nor server exists */
                                 errno = ECONNREFUSED;
@@ -944,6 +961,7 @@ SMBC_opendir_ctx(SMBCCTX *context,
 				saved_errno = SMBC_errno(context, targetcli);
 
                                 if (saved_errno == EINVAL) {
+					struct stat sb = {0};
                                         /*
                                          * See if they asked to opendir
                                          * something other than a directory.
@@ -953,11 +971,11 @@ SMBC_opendir_ctx(SMBCCTX *context,
                                          */
                                         path[path_len] = '\0'; /* restore original path */
 
-                                        if (SMBC_getatr(context, srv, path,
-                                                        &mode, NULL,
-                                                        NULL, NULL, NULL, NULL,
-                                                        NULL) &&
-                                            ! IS_DOS_DIR(mode)) {
+                                        if (SMBC_getatr(context,
+							srv,
+							path,
+							&sb) &&
+                                            !S_ISDIR(sb.st_mode)) {
 
                                                 /* It is.  Correct the error value */
                                                 saved_errno = ENOTDIR;
@@ -1173,6 +1191,17 @@ SMBC_readdir_ctx(SMBCCTX *context,
 
         dir->dir_next = dir->dir_next->next;
 
+	/*
+	 * If we are returning file entries, we
+	 * have a duplicate list in dirplus.
+	 *
+	 * Update dirplus_next also so readdir and
+	 * readdirplus are kept in sync.
+	 */
+	if (dir->dirplus_list != NULL) {
+		dir->dirplus_next = dir->dirplus_next->next;
+	}
+
 	TALLOC_FREE(frame);
         return dirp;
 }
@@ -1218,6 +1247,142 @@ SMBC_readdirplus_ctx(SMBCCTX *context,
 		return NULL;
 	}
 	dir->dirplus_next = dir->dirplus_next->next;
+
+	/*
+	 * If we are returning file entries, we
+	 * have a duplicate list in dir_list
+	 *
+	 * Update dir_next also so readdir and
+	 * readdirplus are kept in sync.
+	 */
+	if (dir->dir_list) {
+		dir->dir_next = dir->dir_next->next;
+	}
+
+	TALLOC_FREE(frame);
+	return smb_finfo;
+}
+
+/*
+ * Routine to get a directory entry plus a filled in stat structure if
+ * requested.
+ */
+
+const struct libsmb_file_info *SMBC_readdirplus2_ctx(SMBCCTX *context,
+			SMBCFILE *dir,
+			struct stat *st)
+{
+	struct libsmb_file_info *smb_finfo = NULL;
+	struct smbc_dirplus_list *dp_list = NULL;
+	ino_t ino;
+	char *full_pathname = NULL;
+	char *workgroup = NULL;
+	char *server = NULL;
+	uint16_t port = 0;
+	char *share = NULL;
+	char *path = NULL;
+	char *user = NULL;
+	char *password = NULL;
+	char *options = NULL;
+	int rc;
+	TALLOC_CTX *frame = NULL;
+
+	/*
+	 * Allow caller to pass in NULL for stat pointer if
+	 * required. This makes this call identical to
+	 * smbc_readdirplus().
+	 */
+
+	if (st == NULL) {
+		return SMBC_readdirplus_ctx(context, dir);
+	}
+
+	frame = talloc_stackframe();
+
+	/* Check that all is ok first ... */
+	if (context == NULL || !context->internal->initialized) {
+		DBG_ERR("Invalid context in SMBC_readdirplus2_ctx()\n");
+		TALLOC_FREE(frame);
+		errno = EINVAL;
+		return NULL;
+	}
+
+	if (dir == NULL ||
+	    SMBC_dlist_contains(context->internal->files,
+					dir) == 0)
+	{
+		DBG_ERR("Invalid dir in SMBC_readdirplus2_ctx()\n");
+		TALLOC_FREE(frame);
+		errno = EBADF;
+		return NULL;
+	}
+
+	dp_list = dir->dirplus_next;
+	if (dp_list == NULL) {
+		TALLOC_FREE(frame);
+		return NULL;
+	}
+
+	ino = (ino_t)dp_list->ino;
+
+	smb_finfo = dp_list->smb_finfo;
+	if (smb_finfo == NULL) {
+		TALLOC_FREE(frame);
+		errno = ENOENT;
+		return NULL;
+	}
+
+	full_pathname = talloc_asprintf(frame,
+				"%s/%s",
+				dir->fname,
+				smb_finfo->name);
+	if (full_pathname == NULL) {
+		TALLOC_FREE(frame);
+		errno = ENOENT;
+		return NULL;
+	}
+
+	rc = SMBC_parse_path(frame,
+			     context,
+			     full_pathname,
+			     &workgroup,
+			     &server,
+			     &port,
+			     &share,
+			     &path,
+			     &user,
+			     &password,
+			     &options);
+	if (rc != 0) {
+		TALLOC_FREE(frame);
+		errno = ENOENT;
+		return NULL;
+	}
+
+	setup_stat(st,
+		path,
+		smb_finfo->size,
+		smb_finfo->attrs,
+		ino,
+		dir->srv->dev,
+		smb_finfo->atime_ts,
+		smb_finfo->ctime_ts,
+		smb_finfo->mtime_ts);
+
+	TALLOC_FREE(full_pathname);
+
+	dir->dirplus_next = dir->dirplus_next->next;
+
+	/*
+	 * If we are returning file entries, we
+	 * have a duplicate list in dir_list
+	 *
+	 * Update dir_next also so readdir and
+	 * readdirplus are kept in sync.
+	 */
+	if (dir->dir_list) {
+		dir->dir_next = dir->dir_next->next;
+	}
 
 	TALLOC_FREE(frame);
 	return smb_finfo;
@@ -1335,6 +1500,17 @@ SMBC_getdents_ctx(SMBCCTX *context,
 		}
 
 		dir->dir_next = dirlist = dirlist -> next;
+
+		/*
+		 * If we are returning file entries, we
+		 * have a duplicate list in dirplus.
+		 *
+		 * Update dirplus_next also so readdir and
+		 * readdirplus are kept in sync.
+		 */
+		if (dir->dirplus_list != NULL) {
+			dir->dirplus_next = dir->dirplus_next->next;
+		}
 	}
 
 	TALLOC_FREE(frame);
@@ -1638,34 +1814,42 @@ SMBC_telldir_ctx(SMBCCTX *context,
 
 /*
  * A routine to run down the list and see if the entry is OK
+ * Modifies the dir list and the dirplus list (if it exists)
+ * to point at the correct next entry on success.
  */
 
-static struct smbc_dir_list *
-check_dir_ent(struct smbc_dir_list *list,
-              struct smbc_dirent *dirent)
+static bool update_dir_ents(SMBCFILE *dir, struct smbc_dirent *dirent)
 {
+	struct smbc_dir_list *tmp_dir = dir->dir_list;
+	struct smbc_dirplus_list *tmp_dirplus = dir->dirplus_list;
 
-	/* Run down the list looking for what we want */
+	/*
+	 * Run down the list looking for what we want.
+	 * If we're enumerating files both dir_list
+	 * and dirplus_list contain the same entry
+	 * list, as they were seeded from the same
+	 * cli_list callback.
+	 *
+	 * If we're enumerating servers then
+	 * dirplus_list will be NULL, so don't
+	 * update in that case.
+	 */
 
-	if (dirent) {
-
-		struct smbc_dir_list *tmp = list;
-
-		while (tmp) {
-
-			if (tmp->dirent == dirent)
-				return tmp;
-
-			tmp = tmp->next;
-
+	while (tmp_dir != NULL) {
+		if (tmp_dir->dirent == dirent) {
+			dir->dir_next = tmp_dir;
+			if (tmp_dirplus != NULL) {
+				dir->dirplus_next = tmp_dirplus;
+			}
+			return true;
 		}
-
+		tmp_dir = tmp_dir->next;
+		if (tmp_dirplus != NULL) {
+			tmp_dirplus = tmp_dirplus->next;
+		}
 	}
-
-	return NULL;  /* Not found, or an error */
-
+	return false;
 }
-
 
 /*
  * Routine to seek on a directory
@@ -1678,8 +1862,8 @@ SMBC_lseekdir_ctx(SMBCCTX *context,
 {
 	long int l_offset = offset;  /* Handle problems of size */
 	struct smbc_dirent *dirent = (struct smbc_dirent *)l_offset;
-	struct smbc_dir_list *list_ent = (struct smbc_dir_list *)NULL;
 	TALLOC_CTX *frame = talloc_stackframe();
+	bool ok;
 
 	if (!context || !context->internal->initialized) {
 
@@ -1702,6 +1886,10 @@ SMBC_lseekdir_ctx(SMBCCTX *context,
 	if (dirent == NULL) {  /* Seek to the begining of the list */
 
 		dir->dir_next = dir->dir_list;
+
+		/* Do the same for dirplus. */
+		dir->dirplus_next = dir->dirplus_list;
+
 		TALLOC_FREE(frame);
 		return 0;
 
@@ -1709,20 +1897,25 @@ SMBC_lseekdir_ctx(SMBCCTX *context,
 
         if (offset == -1) {     /* Seek to the end of the list */
                 dir->dir_next = NULL;
+
+		/* Do the same for dirplus. */
+		dir->dirplus_next = NULL;
+
 		TALLOC_FREE(frame);
                 return 0;
         }
 
-	/* Now, run down the list and make sure that the entry is OK       */
-	/* This may need to be changed if we change the format of the list */
+        /*
+         * Run down the list and make sure that the entry is OK.
+         * Update the position of both dir and dirplus lists.
+         */
 
-	if ((list_ent = check_dir_ent(dir->dir_list, dirent)) == NULL) {
+	ok = update_dir_ents(dir, dirent);
+	if (!ok) {
 		errno = EINVAL;   /* Bad entry */
 		TALLOC_FREE(frame);
 		return -1;
 	}
-
-	dir->dir_next = list_ent;
 
 	TALLOC_FREE(frame);
 	return 0;
@@ -2031,20 +2224,11 @@ SMBC_unlink_ctx(SMBCCTX *context,
 		if (errno == EACCES) { /* Check if the file is a directory */
 
 			int saverr = errno;
-			off_t size = 0;
-			uint16_t mode = 0;
-			struct timespec write_time_ts;
-                        struct timespec access_time_ts;
-                        struct timespec change_time_ts;
-			SMB_INO_T ino = 0;
+			struct stat sb = {0};
+			bool ok;
 
-			if (!SMBC_getatr(context, srv, path, &mode, &size,
-					 NULL,
-                                         &access_time_ts,
-                                         &write_time_ts,
-                                         &change_time_ts,
-                                         &ino)) {
-
+			ok = SMBC_getatr(context, srv, path, &sb);
+			if (!ok) {
 				/* Hmmm, bad error ... What? */
 
 				errno = SMBC_errno(context, targetcli);
@@ -2054,7 +2238,7 @@ SMBC_unlink_ctx(SMBCCTX *context,
 			}
 			else {
 
-				if (IS_DOS_DIR(mode))
+				if (S_ISDIR(sb.st_mode))
 					errno = EISDIR;
 				else
 					errno = saverr;  /* Restore this */

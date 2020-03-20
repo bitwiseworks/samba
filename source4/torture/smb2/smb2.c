@@ -152,7 +152,10 @@ NTSTATUS torture_smb2_init(TALLOC_CTX *ctx)
 	torture_suite_add_simple_test(suite, "setinfo", torture_smb2_setinfo);
 	torture_suite_add_suite(suite, torture_smb2_lock_init(suite));
 	torture_suite_add_suite(suite, torture_smb2_read_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_aio_delay_init(suite));
 	torture_suite_add_suite(suite, torture_smb2_create_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_twrp_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_fileid_init(suite));
 	torture_suite_add_suite(suite, torture_smb2_acls_init(suite));
 	torture_suite_add_suite(suite, torture_smb2_notify_init(suite));
 	torture_suite_add_suite(suite, torture_smb2_notify_inotify_init(suite));
@@ -173,6 +176,10 @@ NTSTATUS torture_smb2_init(TALLOC_CTX *ctx)
 	torture_suite_add_suite(suite, torture_smb2_kernel_oplocks_init(suite));
 	torture_suite_add_suite(suite, torture_smb2_streams_init(suite));
 	torture_suite_add_suite(suite, torture_smb2_ioctl_init(suite));
+	torture_suite_add_simple_test(suite, "set-sparse-ioctl",
+				      test_ioctl_set_sparse);
+	torture_suite_add_simple_test(suite, "zero-data-ioctl",
+				      test_ioctl_zero_data);
 	torture_suite_add_suite(suite, torture_smb2_rename_init(suite));
 	torture_suite_add_1smb2_test(suite, "bench-oplock", test_smb2_bench_oplock);
 	torture_suite_add_suite(suite, torture_smb2_sharemode_init(suite));
@@ -188,6 +195,12 @@ NTSTATUS torture_smb2_init(TALLOC_CTX *ctx)
 	torture_suite_add_suite(suite, torture_smb2_crediting_init(suite));
 
 	torture_suite_add_suite(suite, torture_smb2_doc_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_multichannel_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_samba3misc_init(suite));
+	torture_suite_add_suite(suite, torture_smb2_timestamps_init(suite));
+	torture_suite_add_1smb2_test(suite, "openattr", torture_smb2_openattrtest);
+	torture_suite_add_1smb2_test(suite, "winattr", torture_smb2_winattrtest);
+	torture_suite_add_suite(suite, torture_smb2_readwrite_init(suite));
 
 	suite->description = talloc_strdup(suite, "SMB2-specific tests");
 

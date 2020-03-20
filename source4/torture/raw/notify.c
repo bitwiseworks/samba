@@ -24,6 +24,7 @@
 #include "system/filesys.h"
 #include "torture/util.h"
 #include "torture/raw/proto.h"
+#include "lib/events/events.h"
 
 #define BASEDIR "\\test_notify"
 
@@ -34,6 +35,8 @@ do { \
 		       !wire_bad_flags(&field, STR_UNICODE, cli->transport), \
 		       "wire_bad_flags"); \
 } while (0)
+
+#define BASEDIR_CN1_DIR BASEDIR "_CN1_DIR"
 
 /* 
    basic testing of change notify on directories
@@ -53,8 +56,8 @@ static bool test_notify_dir(struct torture_context *tctx,
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY ON DIRECTORIES\n");
 
-	torture_assert(tctx, torture_setup_dir(cli, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli, BASEDIR_CN1_DIR),
+		       "Failed to setup up test directory: " BASEDIR_CN1_DIR);
 
 	/*
 	  get a handle on the directory
@@ -70,7 +73,7 @@ static bool test_notify_dir(struct torture_context *tctx,
 	io.ntcreatex.in.open_disposition = NTCREATEX_DISP_OPEN;
 	io.ntcreatex.in.impersonation = NTCREATEX_IMPERSONATION_ANONYMOUS;
 	io.ntcreatex.in.security_flags = 0;
-	io.ntcreatex.in.fname = BASEDIR;
+	io.ntcreatex.in.fname = BASEDIR_CN1_DIR;
 
 	status = smb_raw_open(cli->tree, tctx, &io);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -102,7 +105,7 @@ static bool test_notify_dir(struct torture_context *tctx,
 	torture_comment(tctx, "Testing notify mkdir\n");
 
 	req = smb_raw_changenotify_send(cli->tree, &notify);
-	smbcli_mkdir(cli2->tree, BASEDIR "\\subdir-name");
+	smbcli_mkdir(cli2->tree, BASEDIR_CN1_DIR "\\subdir-name");
 
 	status = smb_raw_changenotify_recv(req, tctx, &notify);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -120,7 +123,7 @@ static bool test_notify_dir(struct torture_context *tctx,
 	torture_comment(tctx, "Testing notify rmdir\n");
 
 	req = smb_raw_changenotify_send(cli->tree, &notify);
-	smbcli_rmdir(cli2->tree, BASEDIR "\\subdir-name");
+	smbcli_rmdir(cli2->tree, BASEDIR_CN1_DIR "\\subdir-name");
 
 	status = smb_raw_changenotify_recv(req, tctx, &notify);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -136,10 +139,10 @@ static bool test_notify_dir(struct torture_context *tctx,
 
 	torture_comment(tctx, "Testing notify mkdir - rmdir - mkdir - rmdir\n");
 
-	smbcli_mkdir(cli2->tree, BASEDIR "\\subdir-name");
-	smbcli_rmdir(cli2->tree, BASEDIR "\\subdir-name");
-	smbcli_mkdir(cli2->tree, BASEDIR "\\subdir-name");
-	smbcli_rmdir(cli2->tree, BASEDIR "\\subdir-name");
+	smbcli_mkdir(cli2->tree, BASEDIR_CN1_DIR "\\subdir-name");
+	smbcli_rmdir(cli2->tree, BASEDIR_CN1_DIR "\\subdir-name");
+	smbcli_mkdir(cli2->tree, BASEDIR_CN1_DIR "\\subdir-name");
+	smbcli_rmdir(cli2->tree, BASEDIR_CN1_DIR "\\subdir-name");
 	smb_msleep(200);
 	req = smb_raw_changenotify_send(cli->tree, &notify);
 	status = smb_raw_changenotify_recv(req, tctx, &notify);
@@ -175,7 +178,9 @@ static bool test_notify_dir(struct torture_context *tctx,
 	count = torture_numops;
 	torture_comment(tctx, "Testing buffered notify on create of %d files\n", count);
 	for (i=0;i<count;i++) {
-		char *fname = talloc_asprintf(cli, BASEDIR "\\test%d.txt", i);
+		char *fname = talloc_asprintf(cli,
+				BASEDIR_CN1_DIR "\\test%d.txt",
+				i);
 		int fnum3 = smbcli_open(cli->tree, fname, O_CREAT|O_RDWR, DENY_NONE);
 		torture_assert_int_not_equal_goto(tctx, fnum3, -1, ret, done,
 			talloc_asprintf(tctx, "Failed to create %s - %s",
@@ -194,7 +199,7 @@ static bool test_notify_dir(struct torture_context *tctx,
 	notify.nttrans.in.file.fnum = fnum;
 	req = smb_raw_changenotify_send(cli->tree, &notify);
 
-	status = smbcli_unlink(cli->tree, BASEDIR "\\nonexistent.txt");
+	status = smbcli_unlink(cli->tree, BASEDIR_CN1_DIR "\\nonexistent.txt");
 	torture_assert_ntstatus_equal_goto(tctx, status,
 					   NT_STATUS_OBJECT_NAME_NOT_FOUND,
 					   ret, done,
@@ -204,7 +209,7 @@ static bool test_notify_dir(struct torture_context *tctx,
 	   this unlink is only seen by the 1st notify and 
 	   the 3rd notify (later) */
 	torture_comment(tctx, "Testing notify on unlink for the first file\n");
-	status = smbcli_unlink(cli2->tree, BASEDIR "\\test0.txt");
+	status = smbcli_unlink(cli2->tree, BASEDIR_CN1_DIR "\\test0.txt");
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 					"smbcli_unlink");
 
@@ -241,7 +246,7 @@ static bool test_notify_dir(struct torture_context *tctx,
 	torture_comment(tctx, "(3rd notify) this notify will only see the 1st unlink\n");
 	req = smb_raw_changenotify_send(cli->tree, &notify);
 
-	status = smbcli_unlink(cli->tree, BASEDIR "\\nonexistent.txt");
+	status = smbcli_unlink(cli->tree, BASEDIR_CN1_DIR "\\nonexistent.txt");
 	torture_assert_ntstatus_equal_goto(tctx, status,
 					   NT_STATUS_OBJECT_NAME_NOT_FOUND,
 					   ret, done,
@@ -249,7 +254,7 @@ static bool test_notify_dir(struct torture_context *tctx,
 
 	torture_comment(tctx, "Testing notify on wildcard unlink for %d files\n", count-1);
 	/* (2nd unlink) do a wildcard unlink */
-	status = smbcli_unlink(cli2->tree, BASEDIR "\\test*.txt");
+	status = smbcli_unlink(cli2->tree, BASEDIR_CN1_DIR "\\test*.txt");
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 					"smb_raw_changenotify_recv");
 
@@ -317,7 +322,7 @@ static bool test_notify_dir(struct torture_context *tctx,
 
 done:
 	smb_raw_exit(cli->session);
-	smbcli_deltree(cli->tree, BASEDIR);
+	smbcli_deltree(cli->tree, BASEDIR_CN1_DIR);
 	return ret;
 }
 
@@ -352,6 +357,9 @@ static bool check_rename_reply(struct torture_context *tctx,
 /* 
    testing of recursive change notify
 */
+
+#define BASEDIR_CN1_RECUR BASEDIR "_CN1_RECUR"
+
 static bool test_notify_recursive(struct torture_context *tctx,
 				  struct smbcli_state *cli,
 				  struct smbcli_state *cli2)
@@ -365,8 +373,8 @@ static bool test_notify_recursive(struct torture_context *tctx,
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY WITH RECURSION\n");
 
-	torture_assert(tctx, torture_setup_dir(cli, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli, BASEDIR_CN1_RECUR),
+		       "Failed to setup up test directory: " BASEDIR_CN1_RECUR);
 
 	/*
 	  get a handle on the directory
@@ -382,7 +390,7 @@ static bool test_notify_recursive(struct torture_context *tctx,
 	io.ntcreatex.in.open_disposition = NTCREATEX_DISP_OPEN;
 	io.ntcreatex.in.impersonation = NTCREATEX_IMPERSONATION_ANONYMOUS;
 	io.ntcreatex.in.security_flags = 0;
-	io.ntcreatex.in.fname = BASEDIR;
+	io.ntcreatex.in.fname = BASEDIR_CN1_RECUR;
 
 	status = smb_raw_open(cli->tree, tctx, &io);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -421,24 +429,28 @@ static bool test_notify_recursive(struct torture_context *tctx,
 	 * Make notifies a bit more interesting in a cluster by doing
 	 * the changes against different nodes with --unclist
 	 */
-	smbcli_mkdir(cli->tree, BASEDIR "\\subdir-name");
-	smbcli_mkdir(cli2->tree, BASEDIR "\\subdir-name\\subname1");
+	smbcli_mkdir(cli->tree, BASEDIR_CN1_RECUR "\\subdir-name");
+	smbcli_mkdir(cli2->tree, BASEDIR_CN1_RECUR "\\subdir-name\\subname1");
 	smbcli_close(cli->tree, 
-		     smbcli_open(cli->tree, BASEDIR "\\subdir-name\\subname2", O_CREAT, 0));
-	smbcli_rename(cli2->tree, BASEDIR "\\subdir-name\\subname1",
-		      BASEDIR "\\subdir-name\\subname1-r");
-	smbcli_rename(cli->tree, BASEDIR "\\subdir-name\\subname2", BASEDIR "\\subname2-r");
-	smbcli_rename(cli2->tree, BASEDIR "\\subname2-r",
-		      BASEDIR "\\subname3-r");
+		     smbcli_open(cli->tree,
+				BASEDIR_CN1_RECUR "\\subdir-name\\subname2",
+				O_CREAT, 0));
+	smbcli_rename(cli2->tree, BASEDIR_CN1_RECUR "\\subdir-name\\subname1",
+		      BASEDIR_CN1_RECUR "\\subdir-name\\subname1-r");
+	smbcli_rename(cli->tree,
+		BASEDIR_CN1_RECUR "\\subdir-name\\subname2",
+		BASEDIR_CN1_RECUR "\\subname2-r");
+	smbcli_rename(cli2->tree, BASEDIR_CN1_RECUR "\\subname2-r",
+		      BASEDIR_CN1_RECUR "\\subname3-r");
 
 	notify.nttrans.in.completion_filter = 0;
 	notify.nttrans.in.recursive = true;
 	smb_msleep(200);
 	req1 = smb_raw_changenotify_send(cli->tree, &notify);
 
-	smbcli_rmdir(cli->tree, BASEDIR "\\subdir-name\\subname1-r");
-	smbcli_rmdir(cli2->tree, BASEDIR "\\subdir-name");
-	smbcli_unlink(cli->tree, BASEDIR "\\subname3-r");
+	smbcli_rmdir(cli->tree, BASEDIR_CN1_RECUR "\\subdir-name\\subname1-r");
+	smbcli_rmdir(cli2->tree, BASEDIR_CN1_RECUR "\\subdir-name");
+	smbcli_unlink(cli->tree, BASEDIR_CN1_RECUR "\\subname3-r");
 
 	smb_msleep(200);
 	notify.nttrans.in.recursive = false;
@@ -532,13 +544,16 @@ static bool test_notify_recursive(struct torture_context *tctx,
 
 done:
 	smb_raw_exit(cli->session);
-	smbcli_deltree(cli->tree, BASEDIR);
+	smbcli_deltree(cli->tree, BASEDIR_CN1_RECUR);
 	return ret;
 }
 
 /* 
    testing of change notify mask change
 */
+
+#define BASEDIR_CN1_CNMC BASEDIR "_CN1_CNMC"
+
 static bool test_notify_mask_change(struct torture_context *tctx,
 				    struct smbcli_state *cli)
 {
@@ -551,8 +566,8 @@ static bool test_notify_mask_change(struct torture_context *tctx,
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY WITH MASK CHANGE\n");
 
-	torture_assert(tctx, torture_setup_dir(cli, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli, BASEDIR_CN1_CNMC),
+		       "Failed to setup up test directory: " BASEDIR_CN1_CNMC);
 
 	/*
 	  get a handle on the directory
@@ -568,7 +583,7 @@ static bool test_notify_mask_change(struct torture_context *tctx,
 	io.ntcreatex.in.open_disposition = NTCREATEX_DISP_OPEN;
 	io.ntcreatex.in.impersonation = NTCREATEX_IMPERSONATION_ANONYMOUS;
 	io.ntcreatex.in.security_flags = 0;
-	io.ntcreatex.in.fname = BASEDIR;
+	io.ntcreatex.in.fname = BASEDIR_CN1_CNMC;
 
 	status = smb_raw_open(cli->tree, tctx, &io);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -607,9 +622,11 @@ static bool test_notify_mask_change(struct torture_context *tctx,
 	req1 = smb_raw_changenotify_send(cli->tree, &notify);
 
 	/* Set to hidden then back again. */
-	smbcli_close(cli->tree, smbcli_open(cli->tree, BASEDIR "\\tname1", O_CREAT, 0));
-	smbcli_setatr(cli->tree, BASEDIR "\\tname1", FILE_ATTRIBUTE_HIDDEN, 0);
-	smbcli_unlink(cli->tree, BASEDIR "\\tname1");
+	smbcli_close(cli->tree,
+		smbcli_open(cli->tree,BASEDIR_CN1_CNMC "\\tname1", O_CREAT, 0));
+	smbcli_setatr(cli->tree, BASEDIR_CN1_CNMC "\\tname1",
+		FILE_ATTRIBUTE_HIDDEN, 0);
+	smbcli_unlink(cli->tree, BASEDIR_CN1_CNMC "\\tname1");
 
 	status = smb_raw_changenotify_recv(req1, tctx, &notify);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -635,17 +652,25 @@ static bool test_notify_mask_change(struct torture_context *tctx,
 	notify.nttrans.in.recursive = false;
 	req2 = smb_raw_changenotify_send(cli->tree, &notify);
 
-	smbcli_mkdir(cli->tree, BASEDIR "\\subdir-name");
-	smbcli_mkdir(cli->tree, BASEDIR "\\subdir-name\\subname1");
+	smbcli_mkdir(cli->tree, BASEDIR_CN1_CNMC "\\subdir-name");
+	smbcli_mkdir(cli->tree, BASEDIR_CN1_CNMC "\\subdir-name\\subname1");
 	smbcli_close(cli->tree, 
-		     smbcli_open(cli->tree, BASEDIR "\\subdir-name\\subname2", O_CREAT, 0));
-	smbcli_rename(cli->tree, BASEDIR "\\subdir-name\\subname1", BASEDIR "\\subdir-name\\subname1-r");
-	smbcli_rename(cli->tree, BASEDIR "\\subdir-name\\subname2", BASEDIR "\\subname2-r");
-	smbcli_rename(cli->tree, BASEDIR "\\subname2-r", BASEDIR "\\subname3-r");
+		     smbcli_open(cli->tree,
+			BASEDIR_CN1_CNMC "\\subdir-name\\subname2",
+			O_CREAT, 0));
+	smbcli_rename(cli->tree,
+			BASEDIR_CN1_CNMC "\\subdir-name\\subname1",
+			BASEDIR_CN1_CNMC "\\subdir-name\\subname1-r");
+	smbcli_rename(cli->tree,
+			BASEDIR_CN1_CNMC "\\subdir-name\\subname2",
+			BASEDIR_CN1_CNMC "\\subname2-r");
+	smbcli_rename(cli->tree,
+			BASEDIR_CN1_CNMC "\\subname2-r",
+			BASEDIR_CN1_CNMC "\\subname3-r");
 
-	smbcli_rmdir(cli->tree, BASEDIR "\\subdir-name\\subname1-r");
-	smbcli_rmdir(cli->tree, BASEDIR "\\subdir-name");
-	smbcli_unlink(cli->tree, BASEDIR "\\subname3-r");
+	smbcli_rmdir(cli->tree, BASEDIR_CN1_CNMC "\\subdir-name\\subname1-r");
+	smbcli_rmdir(cli->tree, BASEDIR_CN1_CNMC "\\subdir-name");
+	smbcli_unlink(cli->tree, BASEDIR_CN1_CNMC "\\subname3-r");
 
 	status = smb_raw_changenotify_recv(req1, tctx, &notify);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -675,7 +700,7 @@ static bool test_notify_mask_change(struct torture_context *tctx,
 
 done:
 	smb_raw_exit(cli->session);
-	smbcli_deltree(cli->tree, BASEDIR);
+	smbcli_deltree(cli->tree, BASEDIR_CN1_CNMC);
 	return ret;
 }
 
@@ -683,6 +708,9 @@ done:
 /* 
    testing of mask bits for change notify
 */
+
+#define BASEDIR_CN1_NOTM BASEDIR "_CN1_NOTM"
+
 static bool test_notify_mask(struct torture_context *tctx,
 			     struct smbcli_state *cli,
 			     struct smbcli_state *cli2)
@@ -701,8 +729,8 @@ static bool test_notify_mask(struct torture_context *tctx,
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY COMPLETION FILTERS\n");
 
-	torture_assert(tctx, torture_setup_dir(cli, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli, BASEDIR_CN1_NOTM),
+		       "Failed to setup up test directory: " BASEDIR_CN1_NOTM);
 
 	tv = timeval_current_ofs(1000, 0);
 	t = timeval_to_nttime(&tv);
@@ -721,7 +749,7 @@ static bool test_notify_mask(struct torture_context *tctx,
 	io.ntcreatex.in.open_disposition = NTCREATEX_DISP_OPEN;
 	io.ntcreatex.in.impersonation = NTCREATEX_IMPERSONATION_ANONYMOUS;
 	io.ntcreatex.in.security_flags = 0;
-	io.ntcreatex.in.fname = BASEDIR;
+	io.ntcreatex.in.fname = BASEDIR_CN1_NOTM;
 
 	notify.nttrans.level = RAW_NOTIFY_NTTRANS;
 	notify.nttrans.in.buffer_size = 1000;
@@ -740,7 +768,7 @@ static bool test_notify_mask(struct torture_context *tctx,
 		fnum = io.ntcreatex.out.file.fnum; \
 		setup \
 		notify.nttrans.in.file.fnum = fnum;	\
-		notify.nttrans.in.completion_filter = (1<<i); \
+		notify.nttrans.in.completion_filter = ((uint32_t)1<<i); \
 		req = smb_raw_changenotify_send(cli->tree, &notify); \
 		smb_raw_chkpath(cli->tree, &chkpath); \
 		op \
@@ -789,7 +817,7 @@ static bool test_notify_mask(struct torture_context *tctx,
 					notify.nttrans.in.completion_filter, \
 					notify.nttrans.out.changes[0].name.s));\
 		} \
-		mask |= (1<<i); \
+		mask |= ((uint32_t)1<<i); \
 	} \
 	if ((expected) != mask) { \
 		torture_assert_int_not_equal_goto(tctx, ((expected) & ~mask), \
@@ -801,71 +829,94 @@ static bool test_notify_mask(struct torture_context *tctx,
 
 	torture_comment(tctx, "Testing mkdir\n");
 	NOTIFY_MASK_TEST("Testing mkdir",;,
-			 smbcli_mkdir(cli->tree, BASEDIR "\\tname1");,
-			 smbcli_rmdir(cli2->tree, BASEDIR "\\tname1");,
+			 smbcli_mkdir(cli->tree, BASEDIR_CN1_NOTM "\\tname1");,
+			 smbcli_rmdir(cli2->tree, BASEDIR_CN1_NOTM "\\tname1");,
 			 NOTIFY_ACTION_ADDED,
 			 FILE_NOTIFY_CHANGE_DIR_NAME, 1);
 
 	torture_comment(tctx, "Testing create file\n");
 	NOTIFY_MASK_TEST("Testing create file",;,
-			 smbcli_close(cli->tree, smbcli_open(cli->tree, BASEDIR "\\tname1", O_CREAT, 0));,
-			 smbcli_unlink(cli2->tree, BASEDIR "\\tname1");,
+			 smbcli_close(cli->tree,
+				smbcli_open(cli->tree,
+					BASEDIR_CN1_NOTM "\\tname1",
+					O_CREAT, 0));,
+			 smbcli_unlink(cli2->tree,
+				BASEDIR_CN1_NOTM "\\tname1");,
 			 NOTIFY_ACTION_ADDED,
 			 FILE_NOTIFY_CHANGE_FILE_NAME, 1);
 
 	torture_comment(tctx, "Testing unlink\n");
 	NOTIFY_MASK_TEST("Testing unlink",
-			 smbcli_close(cli->tree, smbcli_open(cli->tree, BASEDIR "\\tname1", O_CREAT, 0));,
-			 smbcli_unlink(cli2->tree, BASEDIR "\\tname1");,
+			 smbcli_close(cli->tree,
+				smbcli_open(cli->tree,
+					BASEDIR_CN1_NOTM "\\tname1",
+					O_CREAT, 0));,
+			 smbcli_unlink(cli2->tree,
+				BASEDIR_CN1_NOTM "\\tname1");,
 			 ;,
 			 NOTIFY_ACTION_REMOVED,
 			 FILE_NOTIFY_CHANGE_FILE_NAME, 1);
 
 	torture_comment(tctx, "Testing rmdir\n");
 	NOTIFY_MASK_TEST("Testing rmdir",
-			 smbcli_mkdir(cli->tree, BASEDIR "\\tname1");,
-			 smbcli_rmdir(cli2->tree, BASEDIR "\\tname1");,
+			 smbcli_mkdir(cli->tree, BASEDIR_CN1_NOTM "\\tname1");,
+			 smbcli_rmdir(cli2->tree, BASEDIR_CN1_NOTM "\\tname1");,
 			 ;,
 			 NOTIFY_ACTION_REMOVED,
 			 FILE_NOTIFY_CHANGE_DIR_NAME, 1);
 
 	torture_comment(tctx, "Testing rename file\n");
 	NOTIFY_MASK_TEST("Testing rename file",
-			 smbcli_close(cli->tree, smbcli_open(cli->tree, BASEDIR "\\tname1", O_CREAT, 0));,
-			 smbcli_rename(cli2->tree, BASEDIR "\\tname1", BASEDIR "\\tname2");,
-			 smbcli_unlink(cli->tree, BASEDIR "\\tname2");,
+			 smbcli_close(cli->tree,
+				smbcli_open(cli->tree,
+					BASEDIR_CN1_NOTM "\\tname1",
+					O_CREAT, 0));,
+			 smbcli_rename(cli2->tree,
+				BASEDIR_CN1_NOTM "\\tname1",
+				BASEDIR_CN1_NOTM "\\tname2");,
+			 smbcli_unlink(cli->tree, BASEDIR_CN1_NOTM "\\tname2");,
 			 NOTIFY_ACTION_OLD_NAME,
 			 FILE_NOTIFY_CHANGE_FILE_NAME|FILE_NOTIFY_CHANGE_ATTRIBUTES|FILE_NOTIFY_CHANGE_CREATION, 2);
 
 	torture_comment(tctx, "Testing rename dir\n");
 	NOTIFY_MASK_TEST("Testing rename dir",
-		smbcli_mkdir(cli->tree, BASEDIR "\\tname1");,
-		smbcli_rename(cli2->tree, BASEDIR "\\tname1", BASEDIR "\\tname2");,
-		smbcli_rmdir(cli->tree, BASEDIR "\\tname2");,
+		smbcli_mkdir(cli->tree, BASEDIR_CN1_NOTM "\\tname1");,
+		smbcli_rename(cli2->tree,
+			BASEDIR_CN1_NOTM "\\tname1",
+			BASEDIR_CN1_NOTM "\\tname2");,
+		smbcli_rmdir(cli->tree, BASEDIR_CN1_NOTM "\\tname2");,
 		NOTIFY_ACTION_OLD_NAME,
 		FILE_NOTIFY_CHANGE_DIR_NAME, 2);
 
 	torture_comment(tctx, "Testing set path attribute\n");
 	NOTIFY_MASK_TEST("Testing set path attribute",
-		smbcli_close(cli->tree, smbcli_open(cli->tree, BASEDIR "\\tname1", O_CREAT, 0));,
-		smbcli_setatr(cli2->tree, BASEDIR "\\tname1", FILE_ATTRIBUTE_HIDDEN, 0);,
-		smbcli_unlink(cli->tree, BASEDIR "\\tname1");,
+		smbcli_close(cli->tree,
+			smbcli_open(cli->tree,
+				BASEDIR_CN1_NOTM "\\tname1", O_CREAT, 0));,
+		smbcli_setatr(cli2->tree,
+			BASEDIR_CN1_NOTM "\\tname1", FILE_ATTRIBUTE_HIDDEN, 0);,
+		smbcli_unlink(cli->tree, BASEDIR_CN1_NOTM "\\tname1");,
 		NOTIFY_ACTION_MODIFIED,
 		FILE_NOTIFY_CHANGE_ATTRIBUTES, 1);
 
 	torture_comment(tctx, "Testing set path write time\n");
 	NOTIFY_MASK_TEST("Testing set path write time",
-		smbcli_close(cli->tree, smbcli_open(cli->tree, BASEDIR "\\tname1", O_CREAT, 0));,
-		smbcli_setatr(cli2->tree, BASEDIR "\\tname1", FILE_ATTRIBUTE_NORMAL, 1000);,
-		smbcli_unlink(cli->tree, BASEDIR "\\tname1");,
+		smbcli_close(cli->tree, smbcli_open(cli->tree,
+			BASEDIR_CN1_NOTM "\\tname1", O_CREAT, 0));,
+		smbcli_setatr(cli2->tree,
+			BASEDIR_CN1_NOTM "\\tname1",
+			FILE_ATTRIBUTE_NORMAL, 1000);,
+		smbcli_unlink(cli->tree, BASEDIR_CN1_NOTM "\\tname1");,
 		NOTIFY_ACTION_MODIFIED,
 		FILE_NOTIFY_CHANGE_LAST_WRITE, 1);
 
 	torture_comment(tctx, "Testing set file attribute\n");
 	NOTIFY_MASK_TEST("Testing set file attribute",
-		fnum2 = create_complex_file(cli2, tctx, BASEDIR "\\tname1");,
+		fnum2 = create_complex_file(cli2, tctx,
+			BASEDIR_CN1_NOTM "\\tname1");,
 		smbcli_fsetatr(cli2->tree, fnum2, FILE_ATTRIBUTE_HIDDEN, 0, 0, 0, 0);,
-		(smbcli_close(cli2->tree, fnum2), smbcli_unlink(cli2->tree, BASEDIR "\\tname1"));,
+		(smbcli_close(cli2->tree, fnum2),
+		smbcli_unlink(cli2->tree, BASEDIR_CN1_NOTM "\\tname1"));,
 		NOTIFY_ACTION_MODIFIED,
 		FILE_NOTIFY_CHANGE_ATTRIBUTES, 1);
 
@@ -877,64 +928,78 @@ static bool test_notify_mask(struct torture_context *tctx,
 		torture_comment(tctx, "Testing set file create time\n");
 		NOTIFY_MASK_TEST("Testing set file create time",
 			fnum2 = create_complex_file(cli, tctx,
-						    BASEDIR "\\tname1");,
+					    BASEDIR_CN1_NOTM "\\tname1");,
 			smbcli_fsetatr(cli->tree, fnum2, 0, t, 0, 0, 0);,
 			(smbcli_close(cli->tree, fnum2),
-			 smbcli_unlink(cli->tree, BASEDIR "\\tname1"));,
+			 smbcli_unlink(cli->tree,
+					BASEDIR_CN1_NOTM "\\tname1"));,
 			NOTIFY_ACTION_MODIFIED,
 			FILE_NOTIFY_CHANGE_CREATION, 1);
 	}
 
 	torture_comment(tctx, "Testing set file access time\n");
 	NOTIFY_MASK_TEST("Testing set file access time",
-		fnum2 = create_complex_file(cli, tctx, BASEDIR "\\tname1");,
+		fnum2 = create_complex_file(cli, tctx,
+				BASEDIR_CN1_NOTM "\\tname1");,
 		smbcli_fsetatr(cli->tree, fnum2, 0, 0, t, 0, 0);,
-		(smbcli_close(cli->tree, fnum2), smbcli_unlink(cli->tree, BASEDIR "\\tname1"));,
+		(smbcli_close(cli->tree, fnum2),
+			smbcli_unlink(cli->tree, BASEDIR_CN1_NOTM "\\tname1"));,
 		NOTIFY_ACTION_MODIFIED,
 		FILE_NOTIFY_CHANGE_LAST_ACCESS, 1);
 
 	torture_comment(tctx, "Testing set file write time\n");
 	NOTIFY_MASK_TEST("Testing set file write time",
-		fnum2 = create_complex_file(cli, tctx, BASEDIR "\\tname1");,
+		fnum2 = create_complex_file(cli, tctx,
+			BASEDIR_CN1_NOTM "\\tname1");,
 		smbcli_fsetatr(cli->tree, fnum2, 0, 0, 0, t, 0);,
-		(smbcli_close(cli->tree, fnum2), smbcli_unlink(cli->tree, BASEDIR "\\tname1"));,
+		(smbcli_close(cli->tree, fnum2),
+		smbcli_unlink(cli->tree, BASEDIR_CN1_NOTM "\\tname1"));,
 		NOTIFY_ACTION_MODIFIED,
 		FILE_NOTIFY_CHANGE_LAST_WRITE, 1);
 
 	torture_comment(tctx, "Testing set file change time\n");
 	NOTIFY_MASK_TEST("Testing set file change time",
-		fnum2 = create_complex_file(cli, tctx, BASEDIR "\\tname1");,
+		fnum2 = create_complex_file(cli, tctx,
+			BASEDIR_CN1_NOTM "\\tname1");,
 		smbcli_fsetatr(cli->tree, fnum2, 0, 0, 0, 0, t);,
-		(smbcli_close(cli->tree, fnum2), smbcli_unlink(cli->tree, BASEDIR "\\tname1"));,
+		(smbcli_close(cli->tree, fnum2),
+		smbcli_unlink(cli->tree, BASEDIR_CN1_NOTM "\\tname1"));,
 		NOTIFY_ACTION_MODIFIED,
 		0, 1);
 
 
 	torture_comment(tctx, "Testing write\n");
 	NOTIFY_MASK_TEST("Testing write",
-		fnum2 = create_complex_file(cli2, tctx, BASEDIR "\\tname1");,
+		fnum2 = create_complex_file(cli2, tctx,
+			BASEDIR_CN1_NOTM "\\tname1");,
 		smbcli_write(cli2->tree, fnum2, 1, &c, 10000, 1);,
-		(smbcli_close(cli2->tree, fnum2), smbcli_unlink(cli->tree, BASEDIR "\\tname1"));,
+		(smbcli_close(cli2->tree, fnum2),
+			smbcli_unlink(cli->tree, BASEDIR_CN1_NOTM "\\tname1"));,
 		NOTIFY_ACTION_MODIFIED,
 		0, 1);
 
 	torture_comment(tctx, "Testing truncate\n");
 	NOTIFY_MASK_TEST("Testing truncate",
-		fnum2 = create_complex_file(cli2, tctx, BASEDIR "\\tname1");,
+		fnum2 = create_complex_file(cli2, tctx,
+			BASEDIR_CN1_NOTM "\\tname1");,
 		smbcli_ftruncate(cli2->tree, fnum2, 10000);,
-		(smbcli_close(cli2->tree, fnum2), smbcli_unlink(cli2->tree, BASEDIR "\\tname1"));,
+		(smbcli_close(cli2->tree, fnum2),
+		smbcli_unlink(cli2->tree, BASEDIR_CN1_NOTM "\\tname1"));,
 		NOTIFY_ACTION_MODIFIED,
 		FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_ATTRIBUTES, 1);
 
 done:
 	smb_raw_exit(cli->session);
-	smbcli_deltree(cli->tree, BASEDIR);
+	smbcli_deltree(cli->tree, BASEDIR_CN1_NOTM);
 	return ret;
 }
 
 /*
   basic testing of change notify on files
 */
+
+#define BASEDIR_CN1_FILE BASEDIR "_CN1_FILE"
+
 static bool test_notify_file(struct torture_context *tctx,
 			     struct smbcli_state *cli)
 {
@@ -945,12 +1010,12 @@ static bool test_notify_file(struct torture_context *tctx,
 	union smb_notify notify;
 	struct smbcli_request *req;
 	int fnum;
-	const char *fname = BASEDIR "\\file.txt";
+	const char *fname = BASEDIR_CN1_FILE "\\file.txt";
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY ON FILES\n");
 
-	torture_assert(tctx, torture_setup_dir(cli, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli, BASEDIR_CN1_FILE),
+		       "Failed to setup up test directory: " BASEDIR_CN1_FILE);
 
 	io.generic.level = RAW_OPEN_NTCREATEX;
 	io.ntcreatex.in.root_fid.fnum = 0;
@@ -999,13 +1064,15 @@ static bool test_notify_file(struct torture_context *tctx,
 
 done:
 	smb_raw_exit(cli->session);
-	smbcli_deltree(cli->tree, BASEDIR);
+	smbcli_deltree(cli->tree, BASEDIR_CN1_FILE);
 	return ret;
 }
 
 /*
   basic testing of change notifies followed by a tdis
 */
+#define BASEDIR_CN1_TDIS BASEDIR "_CN1_TDIS"
+
 static bool test_notify_tdis(struct torture_context *tctx,
 			     struct smbcli_state *cli1)
 {
@@ -1019,8 +1086,8 @@ static bool test_notify_tdis(struct torture_context *tctx,
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY FOLLOWED BY TDIS\n");
 
-	torture_assert(tctx, torture_setup_dir(cli1, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli1, BASEDIR_CN1_TDIS),
+		       "Failed to setup up test directory: " BASEDIR_CN1_TDIS);
 
 	torture_assert(tctx, torture_open_connection(&cli, tctx, 0),
 		       "Failed to open connection.");
@@ -1039,7 +1106,7 @@ static bool test_notify_tdis(struct torture_context *tctx,
 	io.ntcreatex.in.open_disposition = NTCREATEX_DISP_OPEN;
 	io.ntcreatex.in.impersonation = NTCREATEX_IMPERSONATION_ANONYMOUS;
 	io.ntcreatex.in.security_flags = 0;
-	io.ntcreatex.in.fname = BASEDIR;
+	io.ntcreatex.in.fname = BASEDIR_CN1_TDIS;
 
 	status = smb_raw_open(cli->tree, tctx, &io);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1069,13 +1136,16 @@ static bool test_notify_tdis(struct torture_context *tctx,
 
 done:
 	torture_close_connection(cli);
-	smbcli_deltree(cli1->tree, BASEDIR);
+	smbcli_deltree(cli1->tree, BASEDIR_CN1_TDIS);
 	return ret;
 }
 
 /*
   basic testing of change notifies followed by a exit
 */
+
+#define BASEDIR_CN1_EX BASEDIR "_CN1_EX"
+
 static bool test_notify_exit(struct torture_context *tctx,
 			     struct smbcli_state *cli1)
 {
@@ -1089,8 +1159,8 @@ static bool test_notify_exit(struct torture_context *tctx,
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY FOLLOWED BY EXIT\n");
 
-	torture_assert(tctx, torture_setup_dir(cli1, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli1, BASEDIR_CN1_EX),
+		       "Failed to setup up test directory: " BASEDIR_CN1_EX);
 
 	torture_assert(tctx, torture_open_connection(&cli, tctx, 0),
 		       "Failed to open connection.");
@@ -1109,7 +1179,7 @@ static bool test_notify_exit(struct torture_context *tctx,
 	io.ntcreatex.in.open_disposition = NTCREATEX_DISP_OPEN;
 	io.ntcreatex.in.impersonation = NTCREATEX_IMPERSONATION_ANONYMOUS;
 	io.ntcreatex.in.security_flags = 0;
-	io.ntcreatex.in.fname = BASEDIR;
+	io.ntcreatex.in.fname = BASEDIR_CN1_EX;
 
 	status = smb_raw_open(cli->tree, tctx, &io);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1138,13 +1208,16 @@ static bool test_notify_exit(struct torture_context *tctx,
 
 done:
 	torture_close_connection(cli);
-	smbcli_deltree(cli1->tree, BASEDIR);
+	smbcli_deltree(cli1->tree, BASEDIR_CN1_EX);
 	return ret;
 }
 
 /*
   basic testing of change notifies followed by a ulogoff
 */
+
+#define BASEDIR_CN1_UL BASEDIR "_CN1_UL"
+
 static bool test_notify_ulogoff(struct torture_context *tctx,
 				struct smbcli_state *cli1)
 {
@@ -1158,8 +1231,8 @@ static bool test_notify_ulogoff(struct torture_context *tctx,
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY FOLLOWED BY ULOGOFF\n");
 
-	torture_assert(tctx, torture_setup_dir(cli1, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli1, BASEDIR_CN1_UL),
+		       "Failed to setup up test directory: " BASEDIR_CN1_UL);
 
 	torture_assert(tctx, torture_open_connection(&cli, tctx, 0),
 		       "Failed to open connection.");
@@ -1178,7 +1251,7 @@ static bool test_notify_ulogoff(struct torture_context *tctx,
 	io.ntcreatex.in.open_disposition = NTCREATEX_DISP_OPEN;
 	io.ntcreatex.in.impersonation = NTCREATEX_IMPERSONATION_ANONYMOUS;
 	io.ntcreatex.in.security_flags = 0;
-	io.ntcreatex.in.fname = BASEDIR;
+	io.ntcreatex.in.fname = BASEDIR_CN1_UL;
 
 	status = smb_raw_open(cli->tree, tctx, &io);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1207,7 +1280,7 @@ static bool test_notify_ulogoff(struct torture_context *tctx,
 
 done:
 	torture_close_connection(cli);
-	smbcli_deltree(cli1->tree, BASEDIR);
+	smbcli_deltree(cli1->tree, BASEDIR_CN1_UL);
 	return ret;
 }
 
@@ -1221,6 +1294,9 @@ static void tcp_dis_handler(struct smbcli_transport *t, void *p)
 /*
   basic testing of change notifies followed by tcp disconnect
 */
+
+#define BASEDIR_CN1_TCPDIS BASEDIR "_CN1_TCPDIS"
+
 static bool test_notify_tcp_dis(struct torture_context *tctx,
 				struct smbcli_state *cli1)
 {
@@ -1234,8 +1310,9 @@ static bool test_notify_tcp_dis(struct torture_context *tctx,
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY FOLLOWED BY TCP DISCONNECT\n");
 
-	torture_assert(tctx, torture_setup_dir(cli1, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli1, BASEDIR_CN1_TCPDIS),
+		       "Failed to setup up test directory: "
+			BASEDIR_CN1_TCPDIS);
 
 	torture_assert(tctx, torture_open_connection(&cli, tctx, 0),
 		       "Failed to open connection.");
@@ -1254,7 +1331,7 @@ static bool test_notify_tcp_dis(struct torture_context *tctx,
 	io.ntcreatex.in.open_disposition = NTCREATEX_DISP_OPEN;
 	io.ntcreatex.in.impersonation = NTCREATEX_IMPERSONATION_ANONYMOUS;
 	io.ntcreatex.in.security_flags = 0;
-	io.ntcreatex.in.fname = BASEDIR;
+	io.ntcreatex.in.fname = BASEDIR_CN1_TCPDIS;
 
 	status = smb_raw_open(cli->tree, tctx, &io);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1271,7 +1348,7 @@ static bool test_notify_tcp_dis(struct torture_context *tctx,
 
 	req = smb_raw_changenotify_send(cli->tree, &notify);
 
-	smbcli_transport_idle_handler(cli->transport, tcp_dis_handler, 250, cli);
+	smbcli_transport_idle_handler(cli->transport, tcp_dis_handler, 250000, cli);
 
 	status = smb_raw_changenotify_recv(req, tctx, &notify);
 	torture_assert_ntstatus_equal_goto(tctx, status,
@@ -1281,13 +1358,16 @@ static bool test_notify_tcp_dis(struct torture_context *tctx,
 
 done:
 	torture_close_connection(cli);
-	smbcli_deltree(cli1->tree, BASEDIR);
+	smbcli_deltree(cli1->tree, BASEDIR_CN1_TCPDIS);
 	return ret;
 }
 
 /* 
    test setting up two change notify requests on one handle
 */
+
+#define BASEDIR_CN1_DBL BASEDIR "_CN1_DBL"
+
 static bool test_notify_double(struct torture_context *tctx,
 			       struct smbcli_state *cli)
 {
@@ -1300,8 +1380,8 @@ static bool test_notify_double(struct torture_context *tctx,
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY TWICE ON ONE DIRECTORY\n");
 
-	torture_assert(tctx, torture_setup_dir(cli, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli, BASEDIR_CN1_DBL),
+		       "Failed to setup up test directory: " BASEDIR_CN1_DBL);
 
 	/*
 	  get a handle on the directory
@@ -1317,7 +1397,7 @@ static bool test_notify_double(struct torture_context *tctx,
 	io.ntcreatex.in.open_disposition = NTCREATEX_DISP_OPEN;
 	io.ntcreatex.in.impersonation = NTCREATEX_IMPERSONATION_ANONYMOUS;
 	io.ntcreatex.in.security_flags = 0;
-	io.ntcreatex.in.fname = BASEDIR;
+	io.ntcreatex.in.fname = BASEDIR_CN1_DBL;
 
 	status = smb_raw_open(cli->tree, tctx, &io);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1335,7 +1415,7 @@ static bool test_notify_double(struct torture_context *tctx,
 	req1 = smb_raw_changenotify_send(cli->tree, &notify);
 	req2 = smb_raw_changenotify_send(cli->tree, &notify);
 
-	smbcli_mkdir(cli->tree, BASEDIR "\\subdir-name");
+	smbcli_mkdir(cli->tree, BASEDIR_CN1_DBL "\\subdir-name");
 
 	status = smb_raw_changenotify_recv(req1, tctx, &notify);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1345,7 +1425,7 @@ static bool test_notify_double(struct torture_context *tctx,
 	CHECK_WSTR(tctx, notify.nttrans.out.changes[0].name, "subdir-name",
 		   STR_UNICODE);
 
-	smbcli_mkdir(cli->tree, BASEDIR "\\subdir-name2");
+	smbcli_mkdir(cli->tree, BASEDIR_CN1_DBL "\\subdir-name2");
 
 	status = smb_raw_changenotify_recv(req2, tctx, &notify);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1357,7 +1437,7 @@ static bool test_notify_double(struct torture_context *tctx,
 
 done:
 	smb_raw_exit(cli->session);
-	smbcli_deltree(cli->tree, BASEDIR);
+	smbcli_deltree(cli->tree, BASEDIR_CN1_DBL);
 	return ret;
 }
 
@@ -1365,6 +1445,9 @@ done:
 /* 
    test multiple change notifies at different depths and with/without recursion
 */
+
+#define BASEDIR_CN1_TNT BASEDIR "_CN1_TNT"
+
 static bool test_notify_tree(struct torture_context *tctx,
 			     struct smbcli_state *cli,
 			     struct smbcli_state *cli2)
@@ -1382,26 +1465,126 @@ static bool test_notify_tree(struct torture_context *tctx,
 		int fnum;
 		int counted;
 	} dirs[] = {
-		{BASEDIR "\\abc",               true, FILE_NOTIFY_CHANGE_NAME, 30 },
-		{BASEDIR "\\zqy",               true, FILE_NOTIFY_CHANGE_NAME, 8 },
-		{BASEDIR "\\atsy",              true, FILE_NOTIFY_CHANGE_NAME, 4 },
-		{BASEDIR "\\abc\\foo",          true,  FILE_NOTIFY_CHANGE_NAME, 2 },
-		{BASEDIR "\\abc\\blah",         true,  FILE_NOTIFY_CHANGE_NAME, 13 },
-		{BASEDIR "\\abc\\blah",         false, FILE_NOTIFY_CHANGE_NAME, 7 },
-		{BASEDIR "\\abc\\blah\\a",      true, FILE_NOTIFY_CHANGE_NAME, 2 },
-		{BASEDIR "\\abc\\blah\\b",      true, FILE_NOTIFY_CHANGE_NAME, 2 },
-		{BASEDIR "\\abc\\blah\\c",      true, FILE_NOTIFY_CHANGE_NAME, 2 },
-		{BASEDIR "\\abc\\fooblah",      true, FILE_NOTIFY_CHANGE_NAME, 2 },
-		{BASEDIR "\\zqy\\xx",           true, FILE_NOTIFY_CHANGE_NAME, 2 },
-		{BASEDIR "\\zqy\\yyy",          true, FILE_NOTIFY_CHANGE_NAME, 2 },
-		{BASEDIR "\\zqy\\..",           true, FILE_NOTIFY_CHANGE_NAME, 40 },
-		{BASEDIR,                       true, FILE_NOTIFY_CHANGE_NAME, 40 },
-		{BASEDIR,                       false,FILE_NOTIFY_CHANGE_NAME, 6 },
-		{BASEDIR "\\atsy",              false,FILE_NOTIFY_CHANGE_NAME, 4 },
-		{BASEDIR "\\abc",               true, FILE_NOTIFY_CHANGE_NAME, 24 },
-		{BASEDIR "\\abc",               false,FILE_NOTIFY_CHANGE_FILE_NAME, 0 },
-		{BASEDIR "\\abc",               true, FILE_NOTIFY_CHANGE_FILE_NAME, 0 },
-		{BASEDIR "\\abc",               true, FILE_NOTIFY_CHANGE_NAME, 24 },
+		{
+			.path      = BASEDIR_CN1_TNT "\\abc",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 30,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\zqy",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 8,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\atsy",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 4,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\abc\\foo",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 2,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\abc\\blah",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 13,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\abc\\blah",
+			.recursive = false,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 7,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\abc\\blah\\a",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 2,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\abc\\blah\\b",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 2,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\abc\\blah\\c",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 2,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\abc\\fooblah",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 2,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\zqy\\xx",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 2,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\zqy\\yyy",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 2,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\zqy\\..",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 40,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT,
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 40,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT,
+			.recursive = false,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 6,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\atsy",
+			.recursive = false,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 4,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\abc",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 24,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\abc",
+			.recursive = false,
+			.filter    = FILE_NOTIFY_CHANGE_FILE_NAME,
+			.expected  = 0,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\abc",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_FILE_NAME,
+			.expected  = 0,
+		},
+		{
+			.path      = BASEDIR_CN1_TNT "\\abc",
+			.recursive = true,
+			.filter    = FILE_NOTIFY_CHANGE_NAME,
+			.expected  = 24,
+		},
 	};
 	int i;
 	NTSTATUS status;
@@ -1409,8 +1592,8 @@ static bool test_notify_tree(struct torture_context *tctx,
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY FOR DIFFERENT DEPTHS\n");
 
-	torture_assert(tctx, torture_setup_dir(cli, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli, BASEDIR_CN1_TNT),
+		       "Failed to setup up test directory: " BASEDIR_CN1_TNT);
 
 	io.generic.level = RAW_OPEN_NTCREATEX;
 	io.ntcreatex.in.root_fid.fnum = 0;
@@ -1505,7 +1688,7 @@ static bool test_notify_tree(struct torture_context *tctx,
 
 done:
 	smb_raw_exit(cli->session);
-	smbcli_deltree(cli->tree, BASEDIR);
+	smbcli_deltree(cli->tree, BASEDIR_CN1_TNT);
 	return ret;
 }
 
@@ -1513,6 +1696,9 @@ done:
    Test response when cached server events exceed single NT NOTFIY response
    packet size.
 */
+
+#define BASEDIR_CN1_NO BASEDIR "_CN1_NO"
+
 static bool test_notify_overflow(struct torture_context *tctx,
 				 struct smbcli_state *cli)
 {
@@ -1527,8 +1713,8 @@ static bool test_notify_overflow(struct torture_context *tctx,
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY EVENT OVERFLOW\n");
 
-	torture_assert(tctx, torture_setup_dir(cli, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli, BASEDIR_CN1_NO),
+		       "Failed to setup up test directory: " BASEDIR_CN1_NO);
 
 	/* get a handle on the directory */
 	io.generic.level = RAW_OPEN_NTCREATEX;
@@ -1543,7 +1729,7 @@ static bool test_notify_overflow(struct torture_context *tctx,
 	io.ntcreatex.in.open_disposition = NTCREATEX_DISP_OPEN;
 	io.ntcreatex.in.impersonation = NTCREATEX_IMPERSONATION_ANONYMOUS;
 	io.ntcreatex.in.security_flags = 0;
-	io.ntcreatex.in.fname = BASEDIR;
+	io.ntcreatex.in.fname = BASEDIR_CN1_NO;
 
 	status = smb_raw_open(cli->tree, tctx, &io);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1571,7 +1757,8 @@ static bool test_notify_overflow(struct torture_context *tctx,
 	torture_comment(tctx, "Testing overflowed buffer notify on create of %d files\n",
 	       count);
 	for (i=0;i<count;i++) {
-		char *fname = talloc_asprintf(cli, BASEDIR "\\test%d.txt", i);
+		char *fname = talloc_asprintf(cli,
+				BASEDIR_CN1_NO "\\test%d.txt", i);
 		int fnum2 = smbcli_open(cli->tree, fname, O_CREAT|O_RDWR,
 					DENY_NONE);
 		torture_assert_int_not_equal_goto(tctx, fnum2, -1, ret, done,
@@ -1591,7 +1778,7 @@ static bool test_notify_overflow(struct torture_context *tctx,
 
 done:
 	smb_raw_exit(cli->session);
-	smbcli_deltree(cli->tree, BASEDIR);
+	smbcli_deltree(cli->tree, BASEDIR_CN1_NO);
 	return ret;
 }
 
@@ -1599,6 +1786,9 @@ done:
    Test if notifications are returned for changes to the base directory.
    They shouldn't be.
 */
+
+#define BASEDIR_CN1_NBASE BASEDIR "_CN1_NBASE"
+
 static bool test_notify_basedir(struct torture_context *tctx,
 				struct smbcli_state *cli)
 {
@@ -1611,8 +1801,8 @@ static bool test_notify_basedir(struct torture_context *tctx,
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY BASEDIR EVENTS\n");
 
-	torture_assert(tctx, torture_setup_dir(cli, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli, BASEDIR_CN1_NBASE),
+		       "Failed to setup up test directory: " BASEDIR_CN1_NBASE);
 
 	/* get a handle on the directory */
 	io.generic.level = RAW_OPEN_NTCREATEX;
@@ -1627,7 +1817,7 @@ static bool test_notify_basedir(struct torture_context *tctx,
 	io.ntcreatex.in.open_disposition = NTCREATEX_DISP_OPEN;
 	io.ntcreatex.in.impersonation = NTCREATEX_IMPERSONATION_ANONYMOUS;
 	io.ntcreatex.in.security_flags = 0;
-	io.ntcreatex.in.fname = BASEDIR;
+	io.ntcreatex.in.fname = BASEDIR_CN1_NBASE;
 
 	status = smb_raw_open(cli->tree, tctx, &io);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1635,7 +1825,8 @@ static bool test_notify_basedir(struct torture_context *tctx,
 	fnum = io.ntcreatex.out.file.fnum;
 
 	/* create a test file that will also be modified */
-	smbcli_close(cli->tree, smbcli_open(cli->tree, BASEDIR "\\tname1",
+	smbcli_close(cli->tree, smbcli_open(cli->tree,
+				BASEDIR_CN1_NBASE "\\tname1",
 					    O_CREAT, 0));
 
 	/* ask for a change notify, on attribute changes. */
@@ -1648,10 +1839,11 @@ static bool test_notify_basedir(struct torture_context *tctx,
 	req1 = smb_raw_changenotify_send(cli->tree, &notify);
 
 	/* set attribute on the base dir */
-	smbcli_setatr(cli->tree, BASEDIR, FILE_ATTRIBUTE_HIDDEN, 0);
+	smbcli_setatr(cli->tree, BASEDIR_CN1_NBASE, FILE_ATTRIBUTE_HIDDEN, 0);
 
 	/* set attribute on a file to assure we receive a notification */
-	smbcli_setatr(cli->tree, BASEDIR "\\tname1", FILE_ATTRIBUTE_HIDDEN, 0);
+	smbcli_setatr(cli->tree, BASEDIR_CN1_NBASE "\\tname1",
+			FILE_ATTRIBUTE_HIDDEN, 0);
 	smb_msleep(200);
 
 	/* check how many responses were given, expect only 1 for the file */
@@ -1669,7 +1861,7 @@ static bool test_notify_basedir(struct torture_context *tctx,
 
 done:
 	smb_raw_exit(cli->session);
-	smbcli_deltree(cli->tree, BASEDIR);
+	smbcli_deltree(cli->tree, BASEDIR_CN1_NBASE);
 	return ret;
 }
 
@@ -1678,6 +1870,7 @@ done:
   create a secondary tree connect - used to test for a bug in Samba3 messaging
   with change notify
 */
+
 static struct smbcli_tree *secondary_tcon(struct smbcli_state *cli, 
 					  struct torture_context *tctx)
 {
@@ -1714,6 +1907,9 @@ static struct smbcli_tree *secondary_tcon(struct smbcli_state *cli,
 /* 
    very simple change notify test
 */
+
+#define BASEDIR_CN1_NTCON BASEDIR "_CN1_NTCON"
+
 static bool test_notify_tcon(struct torture_context *tctx,
 			     struct smbcli_state *cli)
 {
@@ -1728,8 +1924,8 @@ static bool test_notify_tcon(struct torture_context *tctx,
 		
 	torture_comment(tctx, "TESTING SIMPLE CHANGE NOTIFY\n");
 
-	torture_assert(tctx, torture_setup_dir(cli, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli, BASEDIR_CN1_NTCON),
+		       "Failed to setup up test directory: " BASEDIR_CN1_NTCON);
 
 	/*
 	  get a handle on the directory
@@ -1745,7 +1941,7 @@ static bool test_notify_tcon(struct torture_context *tctx,
 	io.ntcreatex.in.open_disposition = NTCREATEX_DISP_OPEN;
 	io.ntcreatex.in.impersonation = NTCREATEX_IMPERSONATION_ANONYMOUS;
 	io.ntcreatex.in.security_flags = 0;
-	io.ntcreatex.in.fname = BASEDIR;
+	io.ntcreatex.in.fname = BASEDIR_CN1_NTCON;
 
 	status = smb_raw_open(cli->tree, tctx, &io);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1766,7 +1962,7 @@ static bool test_notify_tcon(struct torture_context *tctx,
 
 	torture_comment(tctx, "Testing notify mkdir\n");
 	req = smb_raw_changenotify_send(cli->tree, &notify);
-	smbcli_mkdir(cli->tree, BASEDIR "\\subdir-name");
+	smbcli_mkdir(cli->tree, BASEDIR_CN1_NTCON "\\subdir-name");
 
 	status = smb_raw_changenotify_recv(req, tctx, &notify);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1783,7 +1979,7 @@ static bool test_notify_tcon(struct torture_context *tctx,
 
 	torture_comment(tctx, "Testing notify rmdir\n");
 	req = smb_raw_changenotify_send(cli->tree, &notify);
-	smbcli_rmdir(cli->tree, BASEDIR "\\subdir-name");
+	smbcli_rmdir(cli->tree, BASEDIR_CN1_NTCON "\\subdir-name");
 
 	status = smb_raw_changenotify_recv(req, tctx, &notify);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1806,7 +2002,7 @@ static bool test_notify_tcon(struct torture_context *tctx,
 
 	torture_comment(tctx, "Testing notify mkdir\n");
 	req = smb_raw_changenotify_send(cli->tree, &notify);
-	smbcli_mkdir(cli->tree, BASEDIR "\\subdir-name");
+	smbcli_mkdir(cli->tree, BASEDIR_CN1_NTCON "\\subdir-name");
 
 	status = smb_raw_changenotify_recv(req, tctx, &notify);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1823,7 +2019,7 @@ static bool test_notify_tcon(struct torture_context *tctx,
 
 	torture_comment(tctx, "Testing notify rmdir\n");
 	req = smb_raw_changenotify_send(cli->tree, &notify);
-	smbcli_rmdir(cli->tree, BASEDIR "\\subdir-name");
+	smbcli_rmdir(cli->tree, BASEDIR_CN1_NTCON "\\subdir-name");
 
 	status = smb_raw_changenotify_recv(req, tctx, &notify);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1847,7 +2043,7 @@ static bool test_notify_tcon(struct torture_context *tctx,
 
 	torture_comment(tctx, "Testing notify mkdir\n");
 	req = smb_raw_changenotify_send(cli->tree, &notify);
-	smbcli_mkdir(cli->tree, BASEDIR "\\subdir-name");
+	smbcli_mkdir(cli->tree, BASEDIR_CN1_NTCON "\\subdir-name");
 
 	status = smb_raw_changenotify_recv(req, tctx, &notify);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1864,7 +2060,7 @@ static bool test_notify_tcon(struct torture_context *tctx,
 
 	torture_comment(tctx, "Testing notify rmdir\n");
 	req = smb_raw_changenotify_send(cli->tree, &notify);
-	smbcli_rmdir(cli->tree, BASEDIR "\\subdir-name");
+	smbcli_rmdir(cli->tree, BASEDIR_CN1_NTCON "\\subdir-name");
 
 	status = smb_raw_changenotify_recv(req, tctx, &notify);
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
@@ -1881,34 +2077,57 @@ static bool test_notify_tcon(struct torture_context *tctx,
 	torture_comment(tctx, "CHANGE NOTIFY WITH TDIS OK\n");
 done:
 	smb_raw_exit(cli->session);
-	smbcli_deltree(cli->tree, BASEDIR);
+	smbcli_deltree(cli->tree, BASEDIR_CN1_NTCON);
 	return ret;
 }
 
+struct cb_data {
+	struct smbcli_request *req;
+	bool timed_out;
+};
+
+static void timeout_cb(struct tevent_context *ev,
+			struct tevent_timer *te,
+			struct timeval current_time,
+			void *private_data)
+{
+	struct cb_data *cbp = (struct cb_data *)private_data;
+	cbp->req->state = SMBCLI_REQUEST_ERROR;
+	cbp->timed_out = true;
+}
 
 /*
    testing alignment of multiple change notify infos
 */
+
+#define BASEDIR_CN1_NALIGN BASEDIR "_CN1_NALIGN"
+
 static bool test_notify_alignment(struct torture_context *tctx,
 				  struct smbcli_state *cli)
 {
 	NTSTATUS status;
 	union smb_notify notify;
 	union smb_open io;
-	int i, fnum, fnum2;
+	int fnum, fnum2;
 	struct smbcli_request *req;
-	const char *fname = BASEDIR "\\starter";
+	const char *fname = BASEDIR_CN1_NALIGN "\\starter";
 	const char *fnames[] = { "a",
 				 "ab",
 				 "abc",
 				 "abcd" };
-	int num_names = ARRAY_SIZE(fnames);
+	bool fnames_received[] = {false,
+				  false,
+				  false,
+				  false};
+	size_t total_names_received = 0;
+	size_t num_names = ARRAY_SIZE(fnames);
+	size_t i;
 	char *fpath = NULL;
 
 	torture_comment(tctx, "TESTING CHANGE NOTIFY REPLY ALIGNMENT\n");
 
-	torture_assert(tctx, torture_setup_dir(cli, BASEDIR),
-		       "Failed to setup up test directory: " BASEDIR);
+	torture_assert(tctx, torture_setup_dir(cli, BASEDIR_CN1_NALIGN),
+		"Failed to setup up test directory: " BASEDIR_CN1_NALIGN);
 
 	/* get a handle on the directory */
 	io.generic.level = RAW_OPEN_NTCREATEX;
@@ -1923,7 +2142,7 @@ static bool test_notify_alignment(struct torture_context *tctx,
 	io.ntcreatex.in.open_disposition = NTCREATEX_DISP_OPEN;
 	io.ntcreatex.in.impersonation = NTCREATEX_IMPERSONATION_ANONYMOUS;
 	io.ntcreatex.in.security_flags = 0;
-	io.ntcreatex.in.fname = BASEDIR;
+	io.ntcreatex.in.fname = BASEDIR_CN1_NALIGN;
 
 	status = smb_raw_open(cli->tree, tctx, &io);
 	torture_assert_ntstatus_ok(tctx, status, "smb_raw_open");
@@ -1952,7 +2171,8 @@ static bool test_notify_alignment(struct torture_context *tctx,
 	 * 4-byte aligned. */
 
 	for (i = 0; i < num_names; i++) {
-		fpath = talloc_asprintf(tctx, "%s\\%s", BASEDIR, fnames[i]);
+		fpath = talloc_asprintf(tctx, "%s\\%s",
+				BASEDIR_CN1_NALIGN, fnames[i]);
 		fnum2 = smbcli_open(cli->tree, fpath,
 		    O_CREAT|O_RDWR, DENY_NONE);
 		torture_assert(tctx, fnum2 != -1, smbcli_errstr(cli->tree));
@@ -1960,23 +2180,95 @@ static bool test_notify_alignment(struct torture_context *tctx,
 		talloc_free(fpath);
 	}
 
-	/* We send a notify packet, and let smb_raw_changenotify_recv() do
-	 * the alignment checking for us. */
-	req = smb_raw_changenotify_send(cli->tree, &notify);
-	status = smb_raw_changenotify_recv(req, tctx, &notify);
-	torture_assert_ntstatus_ok(tctx, status, "smb_raw_changenotify_recv");
+	/*
+	 * Slow cloud filesystems mean we might
+	 * not get everything in one go. Keep going
+	 * until we get them all.
+	 */
+	while (total_names_received < num_names) {
+		struct tevent_timer *te = NULL;
+		struct cb_data to_data = {0};
 
-	/* Do basic checking for correctness. */
-	torture_assert(tctx, notify.nttrans.out.num_changes == num_names, "");
-	for (i = 0; i < num_names; i++) {
-		torture_assert(tctx, notify.nttrans.out.changes[i].action ==
-		    NOTIFY_ACTION_ADDED, "");
-		CHECK_WSTR(tctx, notify.nttrans.out.changes[i].name, fnames[i],
-		    STR_UNICODE);
+		/*
+		 * We send a notify packet, and let
+		 * smb_raw_changenotify_recv() do
+		 * the alignment checking for us.
+		 */
+		req = smb_raw_changenotify_send(cli->tree, &notify);
+		torture_assert(tctx,
+			req != NULL,
+			"smb_raw_changenotify_send failed\n");
+
+		/* Ensure we don't wait more than 30 seconds. */
+		to_data.req = req;
+		to_data.timed_out = false;
+
+		te = tevent_add_timer(tctx->ev,
+				req,
+				tevent_timeval_current_ofs(30, 0),
+				timeout_cb,
+				&to_data);
+		if (te == NULL) {
+			torture_fail(tctx, "tevent_add_timer fail\n");
+		}
+
+		status = smb_raw_changenotify_recv(req, tctx, &notify);
+		if (!NT_STATUS_IS_OK(status)) {
+			if (to_data.timed_out == true) {
+				torture_fail(tctx, "smb_raw_changenotify_recv "
+					"timed out\n");
+			}
+		}
+
+		torture_assert_ntstatus_ok(tctx, status,
+			"smb_raw_changenotify_recv");
+
+		for (i = 0; i < notify.nttrans.out.num_changes; i++) {
+			size_t j;
+
+			/* Ensure it was an 'add'. */
+			torture_assert(tctx,
+				notify.nttrans.out.changes[i].action ==
+					NOTIFY_ACTION_ADDED,
+				"");
+
+			for (j = 0; j < num_names; j++) {
+				if (strcmp(notify.nttrans.out.changes[i].name.s,
+						fnames[j]) == 0) {
+					if (fnames_received[j] == true) {
+						const char *err =
+							talloc_asprintf(tctx,
+								"Duplicate "
+								"name %s\n",
+								fnames[j]);
+						if (err == NULL) {
+							torture_fail(tctx,
+								"talloc "
+								"fail\n");
+						}
+						/* already got this. */
+						torture_fail(tctx, err);
+					}
+					fnames_received[j] = true;
+					break;
+				}
+			}
+			if (j == num_names) {
+				/* No name match. */
+				const char *err = talloc_asprintf(tctx,
+					"Unexpected name %s\n",
+					notify.nttrans.out.changes[i].name.s);
+				if (err == NULL) {
+					torture_fail(tctx, "talloc fail\n");
+				}
+				torture_fail(tctx, err);
+			}
+			total_names_received++;
+		}
 	}
 
 	smb_raw_exit(cli->session);
-	smbcli_deltree(cli->tree, BASEDIR);
+	smbcli_deltree(cli->tree, BASEDIR_CN1_NALIGN);
 	return true;
 }
 

@@ -150,7 +150,12 @@ static void ping_pong(int fd, int num_locks)
 
 	start_timer();
 
-	lock_range(fd, 0, 1, true);
+	ret = lock_range(fd, 0, 1, true);
+	if (ret != 0) {
+		printf("initial lock at 0 failed! - %s\n", strerror(errno));
+		goto done;
+	}
+
 	i = 0;
 
 	while (1) {
@@ -160,6 +165,9 @@ static void ping_pong(int fd, int num_locks)
 		}
 		if (do_check) {
 			ret = check_lock(fd, i, 1);
+			if (ret != 0) {
+				goto done;
+			}
 		}
 		if (do_reads) {
 			unsigned char c;
@@ -199,6 +207,12 @@ static void ping_pong(int fd, int num_locks)
 		}
 		loops++;
 	}
+
+done:
+	if (use_mmap) {
+		munmap(p, num_locks+1);
+	}
+	free(val);
 }
 
 static void usage(void)

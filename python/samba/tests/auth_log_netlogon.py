@@ -35,32 +35,31 @@ from samba.auth import system_session
 from samba.tests import delete_force
 from samba.dsdb import UF_WORKSTATION_TRUST_ACCOUNT, UF_PASSWD_NOTREQD
 from samba.dcerpc.misc import SEC_CHAN_WKSTA
+from samba.compat import text_type
+from samba.dcerpc.windows_event_ids import (
+    EVT_ID_SUCCESSFUL_LOGON,
+    EVT_LOGON_NETWORK
+)
 
 
 class AuthLogTestsNetLogon(samba.tests.auth_log_base.AuthLogTestBase):
 
     def setUp(self):
         super(AuthLogTestsNetLogon, self).setUp()
-        self.lp      = samba.tests.env_loadparm()
-        self.creds   = Credentials()
-
+        self.lp = samba.tests.env_loadparm()
         self.session = system_session()
         self.ldb = SamDB(
             session_info=self.session,
-            credentials=self.creds,
             lp=self.lp)
 
-        self.domain        = os.environ["DOMAIN"]
-        self.netbios_name  = "NetLogonGood"
-        self.machinepass   = "abcdefghij"
+        self.domain = os.environ["DOMAIN"]
+        self.netbios_name = "NetLogonGood"
+        self.machinepass = "abcdefghij"
         self.remoteAddress = AS_SYSTEM_MAGIC_PATH_TOKEN
-        self.base_dn       = self.ldb.domain_dn()
-        self.dn            = ("cn=%s,cn=users,%s" %
-                              (self.netbios_name, self.base_dn))
+        self.base_dn = self.ldb.domain_dn()
+        self.dn = ("cn=%s,cn=users,%s" % (self.netbios_name, self.base_dn))
 
-        utf16pw = unicode(
-            '"' + self.machinepass.encode('utf-8') + '"', 'utf-8'
-        ).encode('utf-16-le')
+        utf16pw = text_type('"' + self.machinepass + '"').encode('utf-16-le')
         self.ldb.add({
             "dn": self.dn,
             "objectclass": "computer",
@@ -78,8 +77,8 @@ class AuthLogTestsNetLogon(samba.tests.auth_log_base.AuthLogTestBase):
         def isLastExpectedMessage(msg):
             return (
                 msg["type"] == "Authorization" and
-                msg["Authorization"]["serviceDescription"]  == "DCE/RPC" and
-                msg["Authorization"]["authType"]            == "schannel" and
+                msg["Authorization"]["serviceDescription"] == "DCE/RPC" and
+                msg["Authorization"]["authType"] == "schannel" and
                 msg["Authorization"]["transportProtection"] == "SEAL")
 
         if binding:
@@ -127,6 +126,10 @@ class AuthLogTestsNetLogon(samba.tests.auth_log_base.AuthLogTestBase):
                           msg["Authentication"]["status"])
         self.assertEquals("HMAC-SHA256",
                           msg["Authentication"]["passwordType"])
+        self.assertEquals(EVT_ID_SUCCESSFUL_LOGON,
+                          msg["Authentication"]["eventId"])
+        self.assertEquals(EVT_LOGON_NETWORK,
+                          msg["Authentication"]["logonType"])
 
     def test_netlogon(self):
         self._test_netlogon("SEAL", self.netlogon_check)

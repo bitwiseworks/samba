@@ -105,8 +105,7 @@ bool test_netlogon_ex_ops(struct dcerpc_pipe *p, struct torture_context *tctx,
 	ninfo.nt.length = nt_resp.length;
 
 	ninfo.identity_info.parameter_control = 0;
-	ninfo.identity_info.logon_id_low = 0;
-	ninfo.identity_info.logon_id_high = 0;
+	ninfo.identity_info.logon_id = 0;
 	ninfo.identity_info.workstation.string = cli_credentials_get_workstation(credentials);
 
 	logon.network = &ninfo;
@@ -471,7 +470,7 @@ static bool test_schannel(struct torture_context *tctx,
 		"failed to connect lsarpc with schannel");
 
 	torture_assert(tctx,
-		test_many_LookupSids(p_lsa, tctx, NULL),
+		test_many_LookupSids(p_lsa, tctx, NULL, LSA_LOOKUP_NAMES_ALL),
 		"LsaLookupSids3 failed!\n");
 
 	status = dcerpc_binding_set_transport(b, transport);
@@ -872,8 +871,7 @@ static bool torture_schannel_bench_start(struct torture_schannel_bench_conn *con
 	conn->ninfo.nt.length = nt_resp.length;
 
 	conn->ninfo.identity_info.parameter_control = 0;
-	conn->ninfo.identity_info.logon_id_low = 0;
-	conn->ninfo.identity_info.logon_id_high = 0;
+	conn->ninfo.identity_info.logon_id = 0;
 	conn->ninfo.identity_info.workstation.string = cli_credentials_get_workstation(conn->wks_creds);
 
 	conn->r.in.server_name = talloc_asprintf(conn->tmp, "\\\\%s", dcerpc_server_name(conn->pipe));

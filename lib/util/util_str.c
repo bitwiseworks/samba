@@ -63,13 +63,14 @@ _PUBLIC_ bool conv_str_size_error(const char * str, uint64_t * val)
 {
 	char *		    end = NULL;
 	unsigned long long  lval;
+	int error = 0;
 
 	if (str == NULL || *str == '\0') {
 		return false;
 	}
 
-	lval = strtoull(str, &end, 10 /* base */);
-	if (end == NULL || end == str) {
+	lval = smb_strtoull(str, &end, 10, &error, SMB_STR_STANDARD);
+	if (error != 0) {
 		return false;
 	}
 
@@ -102,15 +103,15 @@ _PUBLIC_ bool conv_str_size_error(const char * str, uint64_t * val)
  */
 _PUBLIC_ bool conv_str_u64(const char * str, uint64_t * val)
 {
-	char *		    end = NULL;
 	unsigned long long  lval;
+	int error = 0;
 
 	if (str == NULL || *str == '\0') {
 		return false;
 	}
 
-	lval = strtoull(str, &end, 10 /* base */);
-	if (end == NULL || *end != '\0' || end == str) {
+	lval = smb_strtoull(str, NULL, 10, &error, SMB_STR_FULL_STR_CONV);
+	if (error != 0) {
 		return false;
 	}
 

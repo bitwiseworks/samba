@@ -1187,7 +1187,7 @@ void _tevent_req_oom(struct tevent_req *req,
 #endif
 
 /**
- * @brief Finish a request before the caller had the change to set the callback.
+ * @brief Finish a request before the caller had a chance to set the callback.
  *
  * An implementation of an async request might find that it can either finish
  * the request without waiting for an external event, or it can not even start
@@ -1685,7 +1685,7 @@ struct timeval tevent_timeval_add(const struct timeval *tv, uint32_t secs,
  *
  * @param[in]  usecs    The microseconds of the offset from now.
  *
- * @return              A timval with the given offset in the future.
+ * @return              A timeval with the given offset in the future.
  */
 struct timeval tevent_timeval_current_ofs(uint32_t secs, uint32_t usecs);
 
@@ -1907,7 +1907,7 @@ size_t tevent_queue_length(struct tevent_queue *queue);
  *
  * @param[in]  queue    The queue.
  *
- * @return              Wether the queue is running or not..
+ * @return              Whether the queue is running or not..
  */
 bool tevent_queue_running(struct tevent_queue *queue);
 
@@ -2160,6 +2160,7 @@ bool tevent_register_backend(const char *name, const struct tevent_ops *ops);
 
 /* @} */
 
+#ifdef TEVENT_DEPRECATED
 /**
  * @defgroup tevent_wrapper_ops The tevent wrapper operation functions
  * @ingroup tevent
@@ -2271,6 +2272,7 @@ struct tevent_wrapper_ops {
  * @return                    The wrapper event context, NULL on error.
  *
  * @note Available as of tevent 0.9.37
+ * @note Deprecated as of tevent 0.9.38
  */
 struct tevent_context *tevent_context_wrapper_create(struct tevent_context *main_ev,
 						TALLOC_CTX *mem_ctx,
@@ -2284,7 +2286,7 @@ struct tevent_context *_tevent_context_wrapper_create(struct tevent_context *mai
 						void *pstate,
 						size_t psize,
 						const char *type,
-						const char *location);
+						const char *location) _DEPRECATED_;
 #define tevent_context_wrapper_create(main_ev, mem_ctx, ops, state, type) \
 	_tevent_context_wrapper_create(main_ev, mem_ctx, ops, \
 				       state, sizeof(type), #type, __location__)
@@ -2300,8 +2302,9 @@ struct tevent_context *_tevent_context_wrapper_create(struct tevent_context *mai
  * @see tevent_context_wrapper_create()
  *
  * @note Available as of tevent 0.9.37
+ * @note Deprecated as of tevent 0.9.38
  */
-bool tevent_context_is_wrapper(struct tevent_context *ev);
+bool tevent_context_is_wrapper(struct tevent_context *ev) _DEPRECATED_;
 
 #ifdef DOXYGEN
 /**
@@ -2352,11 +2355,12 @@ bool tevent_context_is_wrapper(struct tevent_context *ev);
  * @see tevent_context_pop_use
  *
  * @note Available as of tevent 0.9.37
+ * @note Deprecated as of tevent 0.9.38
  */
 bool tevent_context_push_use(struct tevent_context *ev);
 #else
 bool _tevent_context_push_use(struct tevent_context *ev,
-				const char *location);
+				const char *location) _DEPRECATED_;
 #define tevent_context_push_use(ev) \
 	_tevent_context_push_use(ev, __location__)
 #endif
@@ -2380,11 +2384,12 @@ bool _tevent_context_push_use(struct tevent_context *ev,
  * @see tevent_context_push_use
  *
  * @note Available as of tevent 0.9.37
+ * @note Deprecated as of tevent 0.9.38
  */
 void tevent_context_pop_use(struct tevent_context *ev);
 #else
 void _tevent_context_pop_use(struct tevent_context *ev,
-			       const char *location);
+			       const char *location) _DEPRECATED_;
 #define tevent_context_pop_use(ev) \
 	_tevent_context_pop_use(ev, __location__)
 #endif
@@ -2406,11 +2411,13 @@ void _tevent_context_pop_use(struct tevent_context *ev,
  * @see tevent_context_wrapper_create
  *
  * @note Available as of tevent 0.9.37
+ * @note Deprecated as of tevent 0.9.38
  */
 bool tevent_context_same_loop(struct tevent_context *ev1,
-			      struct tevent_context *ev2);
+			      struct tevent_context *ev2) _DEPRECATED_;
 
 /* @} */
+#endif /* TEVENT_DEPRECATED */
 
 /**
  * @defgroup tevent_compat The tevent compatibility functions

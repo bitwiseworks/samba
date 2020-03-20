@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from __future__ import print_function
 
@@ -163,12 +163,12 @@ class UserTests(samba.tests.TestCase):
                                 scope=SCOPE_SUBTREE,
                                 attrs=['cn'])
             print('%d %s took %s' % (i, expression,
-                                                    time.time() - t), file=sys.stderr)
+                                     time.time() - t), file=sys.stderr)
 
     def _test_indexed_search(self):
         expressions = ['(objectclass=group)',
                        '(samaccountname=Administrator)'
-        ]
+                       ]
         for expression in expressions:
             t = time.time()
             for i in range(100):
@@ -177,7 +177,7 @@ class UserTests(samba.tests.TestCase):
                                 scope=SCOPE_SUBTREE,
                                 attrs=['cn'])
             print('%d runs %s took %s' % (i, expression,
-                                                         time.time() - t), file=sys.stderr)
+                                          time.time() - t), file=sys.stderr)
 
     def _test_add_many_users(self, n=BATCH_SIZE):
         s = self.state.next_user_id

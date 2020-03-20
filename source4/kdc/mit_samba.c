@@ -272,8 +272,8 @@ fetch_referral_principal:
 		 * We just redo the lookup in the database with the referral
 		 * principal and return success.
 		 */
-		dest_realm = smb_krb5_principal_get_realm(ctx->context,
-							  sentry.entry.principal);
+		dest_realm = smb_krb5_principal_get_realm(
+			ctx, ctx->context, sentry.entry.principal);
 		sdb_free_entry(&sentry);
 		if (dest_realm == NULL) {
 			ret = KRB5_KDB_NOENTRY;
@@ -286,7 +286,7 @@ fetch_referral_principal:
 					      KRB5_TGS_NAME,
 					      dest_realm,
 					      NULL);
-		SAFE_FREE(dest_realm);
+		TALLOC_FREE(dest_realm);
 		if (ret != 0) {
 			goto done;
 		}
@@ -303,6 +303,11 @@ fetch_referral_principal:
 	ret = sdb_entry_ex_to_kdb_entry_ex(ctx->context, &sentry, kentry);
 
 	sdb_free_entry(&sentry);
+
+	if ((kflags & KRB5_KDB_FLAG_CLIENT_REFERRALS_ONLY) == 0) {
+		kentry->attributes &= ~KRB5_KDB_DISALLOW_FORWARDABLE;
+		kentry->attributes &= ~KRB5_KDB_DISALLOW_PROXIABLE;
+	}
 
 done:
 	krb5_free_principal(ctx->context, referral_principal);
@@ -865,7 +870,7 @@ krb5_error_code encode_krb5_padata_sequence(krb5_pa_data *const *rep, krb5_data 
 static void samba_kdc_build_edata_reply(NTSTATUS nt_status, DATA_BLOB *e_data)
 {
 	krb5_error_code ret = 0;
-	krb5_pa_data pa, *ppa = NULL;
+	krb5_pa_data pa, *ppa[2];
 	krb5_data *d = NULL;
 
 	if (!e_data)
@@ -886,9 +891,10 @@ static void samba_kdc_build_edata_reply(NTSTATUS nt_status, DATA_BLOB *e_data)
 	SIVAL(pa.contents, 4, 0);
 	SIVAL(pa.contents, 8, 1);
 
-	ppa = &pa;
+	ppa[0] = &pa;
+	ppa[1] = NULL;
 
-	ret = encode_krb5_padata_sequence(&ppa, &d);
+	ret = encode_krb5_padata_sequence(ppa, &d);
 	free(pa.contents);
 	if (ret) {
 		return;

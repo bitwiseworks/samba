@@ -27,14 +27,28 @@
 
 #include "includes.h"
 #include "system/filesys.h"
+#include <tevent.h>
 #include "../lib/util/tevent_unix.h"
-#include "../lib/util/util_runcmd.h"
 #include "../lib/util/tfork.h"
 #include "../lib/util/sys_rw.h"
 
 #ifdef __OS2__
 #define pipe(A) os2_pipe(A)
 #endif
+
+struct samba_runcmd_state {
+	int stdout_log_level;
+	int stderr_log_level;
+	struct tevent_fd *fde_stdout;
+	struct tevent_fd *fde_stderr;
+	struct tevent_fd *fde_status;
+	int fd_stdin, fd_stdout, fd_stderr, fd_status;
+	char *arg0;
+	pid_t pid;
+	struct tfork *tfork;
+	char buf[1024];
+	uint16_t buf_used;
+};
 
 static void samba_runcmd_cleanup_fn(struct tevent_req *req,
 				    enum tevent_req_state req_state)
@@ -51,6 +65,17 @@ static void samba_runcmd_cleanup_fn(struct tevent_req *req,
 		close(state->fd_stdin);
 		state->fd_stdin = -1;
 	}
+}
+
+int samba_runcmd_export_stdin(struct tevent_req *req)
+{
+	struct samba_runcmd_state *state = tevent_req_data(req,
+					   struct samba_runcmd_state);
+	int ret = state->fd_stdin;
+
+	state->fd_stdin = -1;
+
+	return ret;
 }
 
 static void samba_runcmd_io_handler(struct tevent_context *ev,

@@ -398,16 +398,18 @@ static int ctdb_read_packet(int fd, int timeout, TALLOC_CTX *mem_ctx,
 static int ctdb_read_req(struct ctdbd_connection *conn, uint32_t reqid,
 			 TALLOC_CTX *mem_ctx, struct ctdb_req_header **result)
 {
-	struct ctdb_req_header *hdr;
+	struct ctdb_req_header *hdr = NULL;
 	int ret;
 
  next_pkt:
 
 	ret = ctdb_read_packet(conn->fd, conn->timeout, mem_ctx, &hdr);
 	if (ret != 0) {
-		DEBUG(0, ("ctdb_read_packet failed: %s\n", strerror(ret)));
-		cluster_fatal("ctdbd died\n");
+		DBG_ERR("ctdb_read_packet failed: %s\n", strerror(ret));
+		cluster_fatal("failed to read data from ctdbd\n");
+		return -1;
 	}
+	SMB_ASSERT(hdr != NULL);
 
 	DEBUG(11, ("Received ctdb packet\n"));
 	ctdb_packet_dump(hdr);
@@ -601,9 +603,10 @@ void ctdbd_socket_readable(struct tevent_context *ev,
 
 	ret = ctdb_read_packet(conn->fd, conn->timeout, talloc_tos(), &hdr);
 	if (ret != 0) {
-		DEBUG(0, ("ctdb_read_packet failed: %s\n", strerror(ret)));
-		cluster_fatal("ctdbd died\n");
+		DBG_ERR("ctdb_read_packet failed: %s\n", strerror(ret));
+		cluster_fatal("failed to read data from ctdbd\n");
 	}
+	SMB_ASSERT(hdr != NULL);
 
 	ret = ctdb_handle_message(ev, conn, hdr);
 
@@ -1038,7 +1041,7 @@ int ctdbd_traverse(struct ctdbd_connection *conn, uint32_t db_id,
 	int ret;
 	TDB_DATA key, data;
 	struct ctdb_traverse_start t;
-	int32_t cstatus;
+	int32_t cstatus = 0;
 
 	if (ctdbd_conn_has_async_reqs(conn)) {
 		/*
@@ -1082,10 +1085,10 @@ int ctdbd_traverse(struct ctdbd_connection *conn, uint32_t db_id,
 
 		ret = ctdb_read_packet(conn->fd, conn->timeout, conn, &hdr);
 		if (ret != 0) {
-			DEBUG(0, ("ctdb_read_packet failed: %s\n",
-				  strerror(ret)));
-			cluster_fatal("ctdbd died\n");
+			DBG_ERR("ctdb_read_packet failed: %s\n", strerror(ret));
+			cluster_fatal("failed to read data from ctdbd\n");
 		}
+		SMB_ASSERT(hdr != NULL);
 
 		if (hdr->operation != CTDB_REQ_MESSAGE) {
 			DEBUG(0, ("Got operation %u, expected a message\n",
@@ -1950,6 +1953,7 @@ static void ctdbd_parse_done(struct tevent_req *subreq)
 		DBG_ERR("ctdb_pkt_recv_recv returned %s\n", strerror(ret));
 		return;
 	}
+	SMB_ASSERT(hdr != NULL);
 
 	if (hdr->operation != CTDB_REPLY_CALL) {
 		DBG_ERR("received invalid reply\n");

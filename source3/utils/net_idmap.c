@@ -148,7 +148,7 @@ static char *net_idmap_dbfile(struct net_context *c,
 			d_fprintf(stderr, _("Out of memory!\n"));
 		}
 	} else if (strequal(backend, "tdb")) {
-		dbfile = state_path("winbindd_idmap.tdb");
+		dbfile = state_path(talloc_tos(), "winbindd_idmap.tdb");
 		if (dbfile == NULL) {
 			d_fprintf(stderr, _("Out of memory!\n"));
 		}
@@ -161,7 +161,7 @@ static char *net_idmap_dbfile(struct net_context *c,
 		}
 		ctx->backend = TDB;
 	} else if (strequal(backend, "autorid")) {
-		dbfile = state_path("autorid.tdb");
+		dbfile = state_path(talloc_tos(), "autorid.tdb");
 		if (dbfile == NULL) {
 			d_fprintf(stderr, _("Out of memory!\n"));
 		}
@@ -627,23 +627,13 @@ done:
 static bool parse_uint32(const char *str, uint32_t *result)
 {
 	unsigned long val;
-	char *endptr;
+	int error = 0;
 
-	val = strtoul(str, &endptr, 10);
+	val = smb_strtoul(str, NULL, 10, &error, SMB_STR_FULL_STR_CONV);
+	if (error != 0) {
+		return false;
+	}
 
-	if (str == endptr) {
-		return false;
-	}
-	if (*endptr != '\0') {
-		return false;
-	}
-	if ((val == ULONG_MAX) && (errno == ERANGE)) {
-		return false;
-	}
-	if ((val & UINT32_MAX) != val) {
-		/* overflow */
-		return false;
-	}
 	*result = val;		/* Potential crop */
 	return true;
 }
@@ -1321,7 +1311,7 @@ static int net_idmap_check(struct net_context *c, int argc, const char **argv)
 			   "    --repair,-r\trepair\n"
 			   "    --auto,-a\tnoninteractive mode\n"
 			   "    --test,-T\tdry run\n"
-			   "    --fore,-f\tforce\n"
+			   "    --force,-f\tforce\n"
 			   "    --lock,-l\tlock db while doing the check\n"
 			   "    TDB\tidmap database\n"));
 		return c->display_usage ? 0 : -1;

@@ -762,9 +762,9 @@ kdc_check_flags(krb5_context context,
 	    return KRB5KDC_ERR_POLICY;
 	}
 
-	if (!is_as_req && !client->flags.client){
+	if(!client->flags.client){
 	    kdc_log(context, config, 0,
-		    "Principal may only act as client in AS-REQ -- %s", client_name);
+		    "Principal may not act as client -- %s", client_name);
 	    return KRB5KDC_ERR_POLICY;
 	}
 
@@ -1056,7 +1056,7 @@ _kdc_as_rep(krb5_context context,
      */
 
     ret = _kdc_db_fetch(context, config, client_princ,
-			HDB_F_GET_ANY | flags, NULL,
+			HDB_F_GET_CLIENT | flags, NULL,
 			&clientdb, &client);
     if(ret == HDB_ERR_NOT_FOUND_HERE) {
 	kdc_log(context, config, 5, "client %s does not have secrets at this KDC, need to proxy", client_name);
@@ -1486,10 +1486,13 @@ _kdc_as_rep(krb5_context context,
     _krb5_principal2principalname(&rep.ticket.sname,
 				  server->entry.principal);
     /* java 1.6 expects the name to be the same type, lets allow that
-     * uncomplicated name-types. */
+     * uncomplicated name-types, when f.canonicalize is not set (to
+     * match Windows Server 1709). */
 #define CNT(sp,t) (((sp)->sname->name_type) == KRB5_NT_##t)
-    if (CNT(b, UNKNOWN) || CNT(b, PRINCIPAL) || CNT(b, SRV_INST) || CNT(b, SRV_HST) || CNT(b, SRV_XHST))
+    if (!f.canonicalize
+	&& (CNT(b, UNKNOWN) || CNT(b, PRINCIPAL) || CNT(b, SRV_INST) || CNT(b, SRV_HST) || CNT(b, SRV_XHST))) {
 	rep.ticket.sname.name_type = b->sname->name_type;
+    }
 #undef CNT
 
     et.flags.initial = 1;

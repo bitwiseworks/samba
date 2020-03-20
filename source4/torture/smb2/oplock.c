@@ -26,6 +26,7 @@
 #include "libcli/smb2/smb2_calls.h"
 #include "libcli/smb_composite/smb_composite.h"
 #include "libcli/resolve/resolve.h"
+#include "libcli/smb/smbXcli_base.h"
 
 #include "lib/cmdline/popt_common.h"
 #include "lib/events/events.h"
@@ -306,60 +307,6 @@ static bool open_smb2_connection_no_level2_oplocks(struct torture_context *tctx,
 		return false;
 	}
 	return true;
-}
-
-/*
-   Timer handler function notifies the registering function that time is up
-*/
-static void timeout_cb(struct tevent_context *ev,
-		       struct tevent_timer *te,
-		       struct timeval current_time,
-		       void *private_data)
-{
-	bool *timesup = (bool *)private_data;
-	*timesup = true;
-	return;
-}
-
-/*
-   Wait a short period of time to receive a single oplock break request
-*/
-static void torture_wait_for_oplock_break(struct torture_context *tctx)
-{
-	TALLOC_CTX *tmp_ctx = talloc_new(NULL);
-	struct tevent_timer *te = NULL;
-	struct timeval ne;
-	bool timesup = false;
-	int old_count = break_info.count;
-
-	/* Wait .1 seconds for an oplock break */
-	ne = tevent_timeval_current_ofs(0, 100000);
-
-	if ((te = tevent_add_timer(tctx->ev, tmp_ctx, ne, timeout_cb, &timesup))
-	    == NULL)
-	{
-		torture_comment(tctx, "Failed to wait for an oplock break. "
-				      "test results may not be accurate.");
-		goto done;
-	}
-
-	while (!timesup && break_info.count < old_count + 1) {
-		if (tevent_loop_once(tctx->ev) != 0) {
-			torture_comment(tctx, "Failed to wait for an oplock "
-					      "break. test results may not be "
-					      "accurate.");
-			goto done;
-		}
-	}
-
-done:
-	/* We don't know if the timed event fired and was freed, we received
-	 * our oplock break, or some other event triggered the loop.  Thus,
-	 * we create a tmp_ctx to be able to safely free/remove the timed
-	 * event in all 3 cases. */
-	talloc_free(tmp_ctx);
-
-	return;
 }
 
 static bool test_smb2_oplock_exclusive1(struct torture_context *tctx,
@@ -3953,6 +3900,78 @@ static void levelII501_timeout_cb(struct tevent_context *ev,
 	state->done = true;
 }
 
+static bool test_smb2_oplock_levelII502(struct torture_context *tctx,
+					struct smb2_tree *tree1,
+					struct smb2_tree *tree2)
+
+{
+	const char *fname = BASEDIR "\\test_levelII502.dat";
+	NTSTATUS status;
+	union smb_open io;
+	struct smb2_close closeio;
+	struct smb2_handle h;
+
+	status = torture_smb2_testdir(tree1, BASEDIR, &h);
+	torture_assert_ntstatus_ok(tctx, status, "Error creating directory");
+
+	/* cleanup */
+	smb2_util_unlink(tree1, fname);
+
+	/*
+	  base ntcreatex parms
+	*/
+	ZERO_STRUCT(io.smb2);
+	io.generic.level = RAW_OPEN_SMB2;
+	io.smb2.in.desired_access = SEC_RIGHTS_FILE_ALL;
+	io.smb2.in.alloc_size = 0;
+	io.smb2.in.file_attributes = FILE_ATTRIBUTE_NORMAL;
+	io.smb2.in.create_disposition = NTCREATEX_DISP_OPEN_IF;
+	io.smb2.in.create_options = 0;
+	io.smb2.in.impersonation_level = SMB2_IMPERSONATION_ANONYMOUS;
+	io.smb2.in.security_flags = 0;
+	io.smb2.in.fname = fname;
+
+	torture_comment(
+		tctx,
+		"LEVELII502: Open a stale LEVEL2 oplock with OVERWRITE");
+
+	io.smb2.in.desired_access = SEC_RIGHTS_FILE_READ |
+				SEC_RIGHTS_FILE_WRITE;
+	io.smb2.in.share_access = NTCREATEX_SHARE_ACCESS_READ |
+				NTCREATEX_SHARE_ACCESS_WRITE;
+	io.smb2.in.create_flags = NTCREATEX_FLAGS_EXTENDED;
+	io.smb2.in.oplock_level = SMB2_OPLOCK_LEVEL_II;
+	status = smb2_create(tree1, tctx, &(io.smb2));
+	torture_assert_ntstatus_ok(tctx, status, "Error opening the file");
+	torture_assert(tctx,
+		       io.smb2.out.oplock_level==SMB2_OPLOCK_LEVEL_II,
+		       "Did not get LEVEL_II oplock\n");
+
+	status = smbXcli_conn_samba_suicide(
+		tree1->session->transport->conn, 93);
+	torture_assert_ntstatus_ok(tctx, status, "suicide failed");
+
+	sleep(1);
+
+	io.smb2.in.oplock_level = SMB2_OPLOCK_LEVEL_BATCH;
+	io.smb2.in.create_disposition = NTCREATEX_DISP_OVERWRITE;
+
+	status = smb2_create(tree2, tctx, &(io.smb2));
+	torture_assert_ntstatus_ok(tctx, status, "Error opening the file");
+	torture_assert(tctx,
+		       io.smb2.out.oplock_level==SMB2_OPLOCK_LEVEL_BATCH,
+		       "Did not get BATCH oplock\n");
+
+	closeio = (struct smb2_close) {
+		.in.file.handle = io.smb2.out.file.handle,
+	};
+	status = smb2_close(tree2, &closeio);
+	torture_assert_ntstatus_equal(
+		tctx, status, NT_STATUS_OK, "close failed");
+
+	return true;
+}
+
 struct torture_suite *torture_smb2_oplocks_init(TALLOC_CTX *ctx)
 {
 	struct torture_suite *suite =
@@ -3999,6 +4018,8 @@ struct torture_suite *torture_smb2_oplocks_init(TALLOC_CTX *ctx)
 	torture_suite_add_1smb2_test(suite, "levelii500", test_smb2_oplock_levelII500);
 	torture_suite_add_2smb2_test(suite, "levelii501",
 				     test_smb2_oplock_levelII501);
+	torture_suite_add_2smb2_test(suite, "levelii502",
+				     test_smb2_oplock_levelII502);
 	suite->description = talloc_strdup(suite, "SMB2-OPLOCK tests");
 
 	return suite;
@@ -4090,14 +4111,26 @@ static struct hold_oplock_info {
 	uint32_t share_access;
 	struct smb2_handle handle;
 } hold_info[] = {
-	{ BASEDIR "\\notshared_close", true,
-	  NTCREATEX_SHARE_ACCESS_NONE, },
-	{ BASEDIR "\\notshared_noclose", false,
-	  NTCREATEX_SHARE_ACCESS_NONE, },
-	{ BASEDIR "\\shared_close", true,
-	  NTCREATEX_SHARE_ACCESS_READ|NTCREATEX_SHARE_ACCESS_WRITE|NTCREATEX_SHARE_ACCESS_DELETE, },
-	{ BASEDIR "\\shared_noclose", false,
-	  NTCREATEX_SHARE_ACCESS_READ|NTCREATEX_SHARE_ACCESS_WRITE|NTCREATEX_SHARE_ACCESS_DELETE, },
+	{
+		.fname          = BASEDIR "\\notshared_close",
+		.close_on_break = true,
+		.share_access   = NTCREATEX_SHARE_ACCESS_NONE,
+	},
+	{
+		.fname          = BASEDIR "\\notshared_noclose",
+		.close_on_break = false,
+		.share_access   = NTCREATEX_SHARE_ACCESS_NONE,
+	},
+	{
+		.fname          = BASEDIR "\\shared_close",
+		.close_on_break = true,
+		.share_access   = NTCREATEX_SHARE_ACCESS_READ|NTCREATEX_SHARE_ACCESS_WRITE|NTCREATEX_SHARE_ACCESS_DELETE,
+	},
+	{
+		.fname          = BASEDIR "\\shared_noclose",
+		.close_on_break = false,
+		.share_access   = NTCREATEX_SHARE_ACCESS_READ|NTCREATEX_SHARE_ACCESS_WRITE|NTCREATEX_SHARE_ACCESS_DELETE,
+	},
 };
 
 static bool torture_oplock_handler_hold(struct smb2_transport *transport,
@@ -4796,7 +4829,7 @@ done:
 	return ret;
 }
 
-#if HAVE_KERNEL_OPLOCKS_LINUX
+#ifdef HAVE_KERNEL_OPLOCKS_LINUX
 
 #ifndef F_SETLEASE
 #define F_SETLEASE      1024
@@ -4960,12 +4993,14 @@ static bool wait_for_child_oplock(struct torture_context *tctx,
 		char c;
 		/* Parent. */
 		TALLOC_FREE(name);
+		close(fds[1]);
 		ret = sys_read(fds[0], &c, 1);
 		torture_assert(tctx, ret == 1, "read failed");
 		return true;
 	}
 
 	/* Child process. */
+	close(fds[0]);
 	ret = do_child_process(fds[1], name);
 	_exit(ret);
 	/* Notreached. */

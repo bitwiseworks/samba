@@ -1,6 +1,6 @@
-# implement samba_tool ou commands
+# implement samba-tool ou commands
 #
-# Copyright Bjoern Baumbach <bb@sernet.de> 2018
+# Copyright Bjoern Baumbach 2018-2019 <bb@samba.org>
 #
 # This program is free software; you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -25,10 +25,11 @@ from samba.netcmd import (
     CommandError,
     Option,
     SuperCommand,
-    )
+)
 from samba.samdb import SamDB
 from samba import dsdb
 from operator import attrgetter
+
 
 class cmd_rename(Command):
     """Rename an organizational unit.
@@ -37,7 +38,7 @@ class cmd_rename(Command):
     or without the domainDN component.
 
     Examples:
-    samba-tool ou rename 'OU=OrgUnit,DC=samdom,DC=example,DC=com' \
+    samba-tool ou rename 'OU=OrgUnit,DC=samdom,DC=example,DC=com' \\
         'OU=NewNameOfOrgUnit,DC=samdom,DC=example,DC=com'
     samba-tool ou rename 'OU=OrgUnit' 'OU=NewNameOfOrgUnit'
 
@@ -58,7 +59,7 @@ class cmd_rename(Command):
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
         "versionopts": options.VersionOptions,
-        }
+    }
 
     def run(self, old_ou_dn, new_ou_dn, credopts=None, sambaopts=None,
             versionopts=None, H=None):
@@ -72,12 +73,12 @@ class cmd_rename(Command):
             full_old_ou_dn = samdb.normalize_dn_in_domain(old_ou_dn)
         except Exception as e:
             raise CommandError('Invalid old_ou_dn "%s": %s' %
-                               (old_ou_dn, e.message))
+                               (old_ou_dn, e))
         try:
             full_new_ou_dn = samdb.normalize_dn_in_domain(new_ou_dn)
         except Exception as e:
             raise CommandError('Invalid new_ou_dn "%s": %s' %
-                               (new_ou_dn, e.message))
+                               (new_ou_dn, e))
 
         try:
             res = samdb.search(base=full_old_ou_dn,
@@ -93,6 +94,7 @@ class cmd_rename(Command):
         self.outf.write('Renamed ou "%s" to "%s"\n' % (full_old_ou_dn,
                                                        full_new_ou_dn))
 
+
 class cmd_move(Command):
     """Move an organizational unit.
 
@@ -100,7 +102,7 @@ class cmd_move(Command):
     or without the domainDN component.
 
     Examples:
-    samba-tool ou move 'OU=OrgUnit,DC=samdom,DC=example,DC=com' \
+    samba-tool ou move 'OU=OrgUnit,DC=samdom,DC=example,DC=com' \\
         'OU=NewParentOfOrgUnit,DC=samdom,DC=example,DC=com'
     samba-tool ou rename 'OU=OrgUnit' 'OU=NewParentOfOrgUnit'
 
@@ -122,7 +124,7 @@ class cmd_move(Command):
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
         "versionopts": options.VersionOptions,
-        }
+    }
 
     def run(self, old_ou_dn, new_parent_dn, credopts=None, sambaopts=None,
             versionopts=None, H=None):
@@ -136,15 +138,15 @@ class cmd_move(Command):
             full_old_ou_dn = samdb.normalize_dn_in_domain(old_ou_dn)
         except Exception as e:
             raise CommandError('Invalid old_ou_dn "%s": %s' %
-                               (old_ou_dn, e.message))
+                               (old_ou_dn, e))
         try:
             full_new_parent_dn = samdb.normalize_dn_in_domain(new_parent_dn)
         except Exception as e:
             raise CommandError('Invalid new_parent_dn "%s": %s' %
-                               (new_parent_dn, e.message))
+                               (new_parent_dn, e))
 
         full_new_ou_dn = ldb.Dn(samdb, str(full_old_ou_dn))
-        full_new_ou_dn.remove_base_components(len(full_old_ou_dn)-1)
+        full_new_ou_dn.remove_base_components(len(full_old_ou_dn) - 1)
         full_new_ou_dn.add_base(full_new_parent_dn)
 
         try:
@@ -159,6 +161,7 @@ class cmd_move(Command):
             raise CommandError('Failed to move ou "%s"' % full_old_ou_dn, e)
         self.outf.write('Moved ou "%s" into "%s"\n' %
                         (full_old_ou_dn, full_new_parent_dn))
+
 
 class cmd_create(Command):
     """Create an organizational unit.
@@ -188,7 +191,7 @@ class cmd_create(Command):
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
         "versionopts": options.VersionOptions,
-        }
+    }
 
     def run(self, ou_dn, credopts=None, sambaopts=None, versionopts=None,
             H=None, description=None):
@@ -200,7 +203,7 @@ class cmd_create(Command):
         try:
             full_ou_dn = samdb.normalize_dn_in_domain(ou_dn)
         except Exception as e:
-            raise CommandError('Invalid ou_dn "%s": %s' % (ou_dn, e.message))
+            raise CommandError('Invalid ou_dn "%s": %s' % (ou_dn, e))
 
         try:
             samdb.create_ou(full_ou_dn, description=description)
@@ -208,6 +211,7 @@ class cmd_create(Command):
             raise CommandError('Failed to create ou "%s"' % full_ou_dn, e)
 
         self.outf.write('Created ou "%s"\n' % full_ou_dn)
+
 
 class cmd_listobjects(Command):
     """List all objects in an organizational unit.
@@ -233,12 +237,12 @@ class cmd_listobjects(Command):
                action='store_true', help="List objects recursively."),
     ]
 
-    takes_args = [ "ou_dn" ]
+    takes_args = ["ou_dn"]
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
         "versionopts": options.VersionOptions,
-        }
+    }
 
     def run(self, ou_dn, credopts=None, sambaopts=None, versionopts=None,
             H=None, full_dn=False, recursive=False):
@@ -251,7 +255,7 @@ class cmd_listobjects(Command):
         try:
             full_ou_dn = samdb.normalize_dn_in_domain(ou_dn)
         except Exception as e:
-            raise CommandError('Invalid ou_dn "%s": %s' % (ou_dn, e.message))
+            raise CommandError('Invalid ou_dn "%s": %s' % (ou_dn, e))
 
         minchilds = 0
         scope = ldb.SCOPE_ONELEVEL
@@ -278,6 +282,7 @@ class cmd_listobjects(Command):
             raise CommandError('Failed to list contents of ou "%s"' %
                                full_ou_dn, e)
 
+
 class cmd_list(Command):
     """List all organizational units.
 
@@ -293,25 +298,37 @@ class cmd_list(Command):
     takes_options = [
         Option("-H", "--URL", help="LDB URL for database or target server",
                type=str, metavar="URL", dest="H"),
+        Option("-b", "--base-dn",
+               help="Specify base DN to use.",
+               type=str),
         Option("--full-dn", dest="full_dn", default=False, action='store_true',
                help="Display DNs including the base DN."),
-        ]
+    ]
 
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
         "versionopts": options.VersionOptions,
-        }
+    }
 
-    def run(self, sambaopts=None, credopts=None, versionopts=None, H=None,
-        full_dn=False):
+    def run(self,
+            sambaopts=None,
+            credopts=None,
+            versionopts=None,
+            H=None,
+            base_dn=None,
+            full_dn=False):
         lp = sambaopts.get_loadparm()
         creds = credopts.get_credentials(lp, fallback_machine=True)
         samdb = SamDB(url=H, session_info=system_session(),
                       credentials=creds, lp=lp)
 
-        domain_dn = ldb.Dn(samdb, samdb.domain_dn())
-        res = samdb.search(domain_dn, scope=ldb.SCOPE_SUBTREE,
+        search_dn = ldb.Dn(samdb, samdb.domain_dn())
+        if base_dn:
+            search_dn = samdb.normalize_dn_in_domain(base_dn)
+
+        res = samdb.search(search_dn,
+                           scope=ldb.SCOPE_SUBTREE,
                            expression="(objectClass=organizationalUnit)",
                            attrs=[])
         if (len(res) == 0):
@@ -319,8 +336,10 @@ class cmd_list(Command):
 
         for msg in sorted(res, key=attrgetter('dn')):
             if not full_dn:
+                domain_dn = ldb.Dn(samdb, samdb.domain_dn())
                 msg.dn.remove_base_components(len(domain_dn))
             self.outf.write("%s\n" % str(msg.dn))
+
 
 class cmd_delete(Command):
     """Delete an organizational unit.
@@ -350,7 +369,7 @@ class cmd_delete(Command):
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
         "versionopts": options.VersionOptions,
-        }
+    }
 
     def run(self, ou_dn, credopts=None, sambaopts=None, versionopts=None,
             H=None, force_subtree_delete=False):
@@ -363,7 +382,7 @@ class cmd_delete(Command):
         try:
             full_ou_dn = samdb.normalize_dn_in_domain(ou_dn)
         except Exception as e:
-            raise CommandError('Invalid ou_dn "%s": %s' % (ou_dn, e.message))
+            raise CommandError('Invalid ou_dn "%s": %s' % (ou_dn, e))
 
         controls = []
         if force_subtree_delete:
@@ -384,7 +403,7 @@ class cmd_delete(Command):
 
 
 class cmd_ou(SuperCommand):
-    """Organizational Units (OU) management"""
+    """Organizational Units (OU) management."""
 
     subcommands = {}
     subcommands["create"] = cmd_create()

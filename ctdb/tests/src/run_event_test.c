@@ -60,7 +60,8 @@ static void do_run(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 	struct timeval timeout;
 	struct run_event_script_list *script_list = NULL;
 	char *arg_str;
-	int ret, t, i;
+	unsigned int i;
+	int ret, t;
 	bool status;
 
 	if (argc < 5) {
@@ -115,7 +116,8 @@ static void do_list(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 		    int argc, const char **argv)
 {
 	struct run_event_script_list *script_list = NULL;
-	int ret, i;
+	unsigned int i;
+	int ret;
 
 	ret = run_event_list(run_ctx, mem_ctx, &script_list);
 	if (ret != 0) {
@@ -167,8 +169,8 @@ int main(int argc, const char **argv)
 {
 	TALLOC_CTX *mem_ctx;
 	struct tevent_context *ev;
-	struct run_proc_context *run_proc_ctx;
-	struct run_event_context *run_ctx;
+	struct run_proc_context *run_proc_ctx = NULL;
+	struct run_event_context *run_ctx = NULL;
 	int ret;
 
 	if (argc < 3) {

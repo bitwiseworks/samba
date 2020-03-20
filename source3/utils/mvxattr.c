@@ -108,15 +108,59 @@ int main(int argc, const char *argv[])
 {
 	int c;
 	const char *path = NULL;
-	poptContext pc;
+	poptContext pc = NULL;
 	struct poptOption long_options[] = {
 		POPT_AUTOHELP
-		{"from", 		's', POPT_ARG_STRING,	&state.xattr_from,	's', "xattr source name" },
-		{"to",			'd', POPT_ARG_STRING, 	&state.xattr_to, 	'd', "xattr destination name" },
-		{"follow-symlinks",	'l', POPT_ARG_NONE,	&state.follow_symlink,	'l', "follow symlinks, the default is to ignore them" },
-		{"print",		'p', POPT_ARG_NONE,	&state.print,		'p', "print files where the xattr got renamed" },
-		{"verbose",		'v', POPT_ARG_NONE,	&state.verbose,		'v', "print files as they are checked" },
-		{"force",		'f', POPT_ARG_NONE,	&state.force,		'f', "force overwriting of destination xattr" },
+		{
+			.longName   = "from",
+			.shortName  = 's',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &state.xattr_from,
+			.val        = 's',
+			.descrip    = "xattr source name",
+		},
+		{
+			.longName   = "to",
+			.shortName  = 'd',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &state.xattr_to,
+			.val        = 'd',
+			.descrip    = "xattr destination name",
+		},
+		{
+			.longName   = "follow-symlinks",
+			.shortName  = 'l',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = &state.follow_symlink,
+			.val        = 'l',
+			.descrip    = "follow symlinks, the default is to "
+				      "ignore them",
+		},
+		{
+			.longName   = "print",
+			.shortName  = 'p',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = &state.print,
+			.val        = 'p',
+			.descrip    = "print files where the xattr got "
+				      "renamed",
+		},
+		{
+			.longName   = "verbose",
+			.shortName  = 'v',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = &state.verbose,
+			.val        = 'v',
+			.descrip    = "print files as they are checked",
+		},
+		{
+			.longName   = "force",
+			.shortName  = 'f',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = &state.force,
+			.val        = 'f',
+			.descrip    = "force overwriting of destination xattr",
+		},
 		POPT_TABLEEND
 	};
 	TALLOC_CTX *frame = talloc_stackframe();
@@ -170,9 +214,9 @@ int main(int argc, const char *argv[])
 			   state.follow_symlink ? 0 : FTW_PHYS);
 	}
 
+done:
 	poptFreeContext(pc);
 
-done:
 	TALLOC_FREE(frame);
 	return ret;
 }

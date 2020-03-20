@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # This tests the restrictions on userAccountControl that apply even if write access is permitted
 #
@@ -34,7 +34,7 @@ from ldb import SCOPE_SUBTREE, SCOPE_BASE, LdbError
 from ldb import Message, MessageElement, Dn
 from ldb import FLAG_MOD_ADD, FLAG_MOD_REPLACE, FLAG_MOD_DELETE
 from samba.dsdb import UF_SCRIPT, UF_ACCOUNTDISABLE, UF_00000004, UF_HOMEDIR_REQUIRED, \
-    UF_LOCKOUT,UF_PASSWD_NOTREQD, UF_PASSWD_CANT_CHANGE, UF_ENCRYPTED_TEXT_PASSWORD_ALLOWED,\
+    UF_LOCKOUT, UF_PASSWD_NOTREQD, UF_PASSWD_CANT_CHANGE, UF_ENCRYPTED_TEXT_PASSWORD_ALLOWED,\
     UF_TEMP_DUPLICATE_ACCOUNT, UF_NORMAL_ACCOUNT, UF_00000400, UF_INTERDOMAIN_TRUST_ACCOUNT, \
     UF_WORKSTATION_TRUST_ACCOUNT, UF_SERVER_TRUST_ACCOUNT, UF_00004000, \
     UF_00008000, UF_DONT_EXPIRE_PASSWD, UF_MNS_LOGON_ACCOUNT, UF_SMARTCARD_REQUIRED, \
@@ -58,19 +58,19 @@ if len(args) < 1:
     sys.exit(1)
 host = args[0]
 
-if not "://" in host:
+if "://" not in host:
     ldaphost = "ldap://%s" % host
 else:
     ldaphost = host
     start = host.rindex("://")
-    host = host.lstrip(start+3)
+    host = host.lstrip(start + 3)
 
 lp = sambaopts.get_loadparm()
 creds = credopts.get_credentials(lp)
 creds.set_gensec_features(creds.get_gensec_features() | gensec.FEATURE_SEAL)
 
 bits = [UF_SCRIPT, UF_ACCOUNTDISABLE, UF_00000004, UF_HOMEDIR_REQUIRED,
-        UF_LOCKOUT,UF_PASSWD_NOTREQD, UF_PASSWD_CANT_CHANGE,
+        UF_LOCKOUT, UF_PASSWD_NOTREQD, UF_PASSWD_CANT_CHANGE,
         UF_ENCRYPTED_TEXT_PASSWORD_ALLOWED,
         UF_TEMP_DUPLICATE_ACCOUNT, UF_NORMAL_ACCOUNT, UF_00000400,
         UF_INTERDOMAIN_TRUST_ACCOUNT,
@@ -98,9 +98,9 @@ class UserAccountControlTests(samba.tests.TestCase):
             "dn": dn,
             "objectclass": "computer"}
         if others is not None:
-            msg_dict = dict(msg_dict.items() + others.items())
+            msg_dict = dict(list(msg_dict.items()) + list(others.items()))
 
-        msg = ldb.Message.from_dict(self.samdb, msg_dict )
+        msg = ldb.Message.from_dict(self.samdb, msg_dict)
         msg["sAMAccountName"] = samaccountname
 
         print("Adding computer account %s" % computername)
@@ -115,7 +115,7 @@ class UserAccountControlTests(samba.tests.TestCase):
         creds_tmp.set_workstation(creds.get_workstation())
         creds_tmp.set_gensec_features(creds_tmp.get_gensec_features()
                                       | gensec.FEATURE_SEAL)
-        creds_tmp.set_kerberos_state(DONT_USE_KERBEROS) # kinit is too expensive to use in a tight loop
+        creds_tmp.set_kerberos_state(DONT_USE_KERBEROS)  # kinit is too expensive to use in a tight loop
         return creds_tmp
 
     def setUp(self):
@@ -179,7 +179,6 @@ class UserAccountControlTests(samba.tests.TestCase):
         # Now reconnect without domain admin rights
         self.samdb = SamDB(url=ldaphost, credentials=self.unpriv_creds, lp=lp)
 
-
     def tearDown(self):
         super(UserAccountControlTests, self).tearDown()
         for computername in self.computernames:
@@ -196,7 +195,7 @@ class UserAccountControlTests(samba.tests.TestCase):
 
         self.sd_utils.dacl_add_ace("OU=test_computer_ou1," + self.base_dn, mod)
 
-        computername=self.computernames[0]
+        computername = self.computernames[0]
         sd = ldb.MessageElement((ndr_pack(self.sd_reference_modify)),
                                 ldb.FLAG_MOD_ADD,
                                 "nTSecurityDescriptor")
@@ -216,7 +215,7 @@ class UserAccountControlTests(samba.tests.TestCase):
 
         m = ldb.Message()
         m.dn = res[0].dn
-        m["description"]= ldb.MessageElement(
+        m["description"] = ldb.MessageElement(
             ("A description"), ldb.FLAG_MOD_REPLACE,
             "description")
         self.samdb.modify(m)
@@ -234,7 +233,8 @@ class UserAccountControlTests(samba.tests.TestCase):
 
         m = ldb.Message()
         m.dn = res[0].dn
-        m["userAccountControl"] = ldb.MessageElement(str(samba.dsdb.UF_WORKSTATION_TRUST_ACCOUNT|samba.dsdb.UF_PARTIAL_SECRETS_ACCOUNT),
+        m["userAccountControl"] = ldb.MessageElement(str(samba.dsdb.UF_WORKSTATION_TRUST_ACCOUNT |
+                                                         samba.dsdb.UF_PARTIAL_SECRETS_ACCOUNT),
                                                      ldb.FLAG_MOD_REPLACE, "userAccountControl")
         try:
             self.samdb.modify(m)
@@ -280,7 +280,7 @@ class UserAccountControlTests(samba.tests.TestCase):
 
         self.sd_utils.dacl_add_ace("OU=test_computer_ou1," + self.base_dn, mod)
 
-        computername=self.computernames[0]
+        computername = self.computernames[0]
         self.add_computer_ldap(computername)
 
         res = self.admin_samdb.search("%s" % self.base_dn,
@@ -290,14 +290,15 @@ class UserAccountControlTests(samba.tests.TestCase):
 
         m = ldb.Message()
         m.dn = res[0].dn
-        m["description"]= ldb.MessageElement(
+        m["description"] = ldb.MessageElement(
             ("A description"), ldb.FLAG_MOD_REPLACE,
             "description")
         self.samdb.modify(m)
 
         m = ldb.Message()
         m.dn = res[0].dn
-        m["userAccountControl"] = ldb.MessageElement(str(samba.dsdb.UF_WORKSTATION_TRUST_ACCOUNT|samba.dsdb.UF_PARTIAL_SECRETS_ACCOUNT),
+        m["userAccountControl"] = ldb.MessageElement(str(samba.dsdb.UF_WORKSTATION_TRUST_ACCOUNT |
+                                                         samba.dsdb.UF_PARTIAL_SECRETS_ACCOUNT),
                                                      ldb.FLAG_MOD_REPLACE, "userAccountControl")
         try:
             self.samdb.modify(m)
@@ -311,11 +312,11 @@ class UserAccountControlTests(samba.tests.TestCase):
         m["userAccountControl"] = ldb.MessageElement(str(samba.dsdb.UF_SERVER_TRUST_ACCOUNT),
                                                      ldb.FLAG_MOD_REPLACE, "userAccountControl")
         try:
-             self.samdb.modify(m)
-             self.fail()
+            self.samdb.modify(m)
+            self.fail()
         except LdbError as e10:
-             (enum, estr) = e10.args
-             self.assertEqual(ldb.ERR_INSUFFICIENT_ACCESS_RIGHTS, enum)
+            (enum, estr) = e10.args
+            self.assertEqual(ldb.ERR_INSUFFICIENT_ACCESS_RIGHTS, enum)
 
         m = ldb.Message()
         m.dn = res[0].dn
@@ -334,9 +335,8 @@ class UserAccountControlTests(samba.tests.TestCase):
             (enum, estr) = e11.args
             self.assertEqual(ldb.ERR_INSUFFICIENT_ACCESS_RIGHTS, enum)
 
-
     def test_admin_mod_uac(self):
-        computername=self.computernames[0]
+        computername = self.computernames[0]
         self.add_computer_ldap(computername, samdb=self.admin_samdb)
 
         res = self.admin_samdb.search("%s" % self.base_dn,
@@ -344,11 +344,15 @@ class UserAccountControlTests(samba.tests.TestCase):
                                       scope=SCOPE_SUBTREE,
                                       attrs=["userAccountControl"])
 
-        self.assertEqual(int(res[0]["userAccountControl"][0]), UF_NORMAL_ACCOUNT|UF_ACCOUNTDISABLE|UF_PASSWD_NOTREQD)
+        self.assertEqual(int(res[0]["userAccountControl"][0]), (UF_NORMAL_ACCOUNT |
+                                                                UF_ACCOUNTDISABLE |
+                                                                UF_PASSWD_NOTREQD))
 
         m = ldb.Message()
         m.dn = res[0].dn
-        m["userAccountControl"] = ldb.MessageElement(str(UF_WORKSTATION_TRUST_ACCOUNT|UF_PARTIAL_SECRETS_ACCOUNT|UF_TRUSTED_FOR_DELEGATION),
+        m["userAccountControl"] = ldb.MessageElement(str(UF_WORKSTATION_TRUST_ACCOUNT |
+                                                         UF_PARTIAL_SECRETS_ACCOUNT |
+                                                         UF_TRUSTED_FOR_DELEGATION),
                                                      ldb.FLAG_MOD_REPLACE, "userAccountControl")
         try:
             self.admin_samdb.modify(m)
@@ -359,7 +363,8 @@ class UserAccountControlTests(samba.tests.TestCase):
 
         m = ldb.Message()
         m.dn = res[0].dn
-        m["userAccountControl"] = ldb.MessageElement(str(UF_WORKSTATION_TRUST_ACCOUNT|UF_PARTIAL_SECRETS_ACCOUNT),
+        m["userAccountControl"] = ldb.MessageElement(str(UF_WORKSTATION_TRUST_ACCOUNT |
+                                                         UF_PARTIAL_SECRETS_ACCOUNT),
                                                      ldb.FLAG_MOD_REPLACE, "userAccountControl")
         self.admin_samdb.modify(m)
 
@@ -368,7 +373,8 @@ class UserAccountControlTests(samba.tests.TestCase):
                                       scope=SCOPE_SUBTREE,
                                       attrs=["userAccountControl"])
 
-        self.assertEqual(int(res[0]["userAccountControl"][0]), UF_WORKSTATION_TRUST_ACCOUNT|UF_PARTIAL_SECRETS_ACCOUNT)
+        self.assertEqual(int(res[0]["userAccountControl"][0]), (UF_WORKSTATION_TRUST_ACCOUNT |
+                                                                UF_PARTIAL_SECRETS_ACCOUNT))
         m = ldb.Message()
         m.dn = res[0].dn
         m["userAccountControl"] = ldb.MessageElement(str(UF_ACCOUNTDISABLE),
@@ -380,8 +386,7 @@ class UserAccountControlTests(samba.tests.TestCase):
                                       scope=SCOPE_SUBTREE,
                                       attrs=["userAccountControl"])
 
-        self.assertEqual(int(res[0]["userAccountControl"][0]), UF_NORMAL_ACCOUNT| UF_ACCOUNTDISABLE)
-
+        self.assertEqual(int(res[0]["userAccountControl"][0]), UF_NORMAL_ACCOUNT | UF_ACCOUNTDISABLE)
 
     def test_uac_bits_set(self):
         user_sid = self.sd_utils.get_object_sid(self.unpriv_user_dn)
@@ -391,7 +396,7 @@ class UserAccountControlTests(samba.tests.TestCase):
 
         self.sd_utils.dacl_add_ace("OU=test_computer_ou1," + self.base_dn, mod)
 
-        computername=self.computernames[0]
+        computername = self.computernames[0]
         self.add_computer_ldap(computername)
 
         res = self.admin_samdb.search("%s" % self.base_dn,
@@ -401,7 +406,7 @@ class UserAccountControlTests(samba.tests.TestCase):
 
         m = ldb.Message()
         m.dn = res[0].dn
-        m["description"]= ldb.MessageElement(
+        m["description"] = ldb.MessageElement(
             ("A description"), ldb.FLAG_MOD_REPLACE,
             "description")
         self.samdb.modify(m)
@@ -420,7 +425,7 @@ class UserAccountControlTests(samba.tests.TestCase):
         for bit in bits:
             m = ldb.Message()
             m.dn = res[0].dn
-            m["userAccountControl"] = ldb.MessageElement(str(bit|UF_PASSWD_NOTREQD),
+            m["userAccountControl"] = ldb.MessageElement(str(bit | UF_PASSWD_NOTREQD),
                                                          ldb.FLAG_MOD_REPLACE, "userAccountControl")
             try:
                 self.samdb.modify(m)
@@ -437,7 +442,6 @@ class UserAccountControlTests(samba.tests.TestCase):
                 else:
                     self.fail("Unable to set userAccountControl bit 0x%08X on %s: %s" % (bit, m.dn, estr))
 
-
     def uac_bits_unrelated_modify_helper(self, account_type):
         user_sid = self.sd_utils.get_object_sid(self.unpriv_user_dn)
         mod = "(OA;;CC;bf967a86-0de6-11d0-a285-00aa003049e2;;%s)" % str(user_sid)
@@ -446,7 +450,7 @@ class UserAccountControlTests(samba.tests.TestCase):
 
         self.sd_utils.dacl_add_ace("OU=test_computer_ou1," + self.base_dn, mod)
 
-        computername=self.computernames[0]
+        computername = self.computernames[0]
         self.add_computer_ldap(computername, others={"userAccountControl": [str(account_type)]})
 
         res = self.admin_samdb.search("%s" % self.base_dn,
@@ -457,7 +461,7 @@ class UserAccountControlTests(samba.tests.TestCase):
 
         m = ldb.Message()
         m.dn = res[0].dn
-        m["description"]= ldb.MessageElement(
+        m["description"] = ldb.MessageElement(
             ("A description"), ldb.FLAG_MOD_REPLACE,
             "description")
         self.samdb.modify(m)
@@ -495,7 +499,7 @@ class UserAccountControlTests(samba.tests.TestCase):
 
             m = ldb.Message()
             m.dn = res[0].dn
-            m["userAccountControl"] = ldb.MessageElement(str(bit|UF_PASSWD_NOTREQD),
+            m["userAccountControl"] = ldb.MessageElement(str(bit | UF_PASSWD_NOTREQD),
                                                          ldb.FLAG_MOD_REPLACE, "userAccountControl")
             try:
                 self.admin_samdb.modify(m)
@@ -521,17 +525,23 @@ class UserAccountControlTests(samba.tests.TestCase):
                                           attrs=["userAccountControl"])
 
             if bit in ignored_bits:
-                self.assertEqual(int(res[0]["userAccountControl"][0]), UF_NORMAL_ACCOUNT|UF_PASSWD_NOTREQD, "Bit 0x%08x shouldn't stick" % bit)
+                self.assertEqual(int(res[0]["userAccountControl"][0]),
+                                 UF_NORMAL_ACCOUNT | UF_PASSWD_NOTREQD,
+                                 "Bit 0x%08x shouldn't stick" % bit)
             else:
                 if bit in account_types:
-                    self.assertEqual(int(res[0]["userAccountControl"][0]), bit|UF_PASSWD_NOTREQD, "Bit 0x%08x didn't stick" % bit)
+                    self.assertEqual(int(res[0]["userAccountControl"][0]),
+                                     bit | UF_PASSWD_NOTREQD,
+                                     "Bit 0x%08x didn't stick" % bit)
                 else:
-                    self.assertEqual(int(res[0]["userAccountControl"][0]), bit|UF_NORMAL_ACCOUNT|UF_PASSWD_NOTREQD, "Bit 0x%08x didn't stick" % bit)
+                    self.assertEqual(int(res[0]["userAccountControl"][0]),
+                                     bit | UF_NORMAL_ACCOUNT | UF_PASSWD_NOTREQD,
+                                     "Bit 0x%08x didn't stick" % bit)
 
             try:
                 m = ldb.Message()
                 m.dn = res[0].dn
-                m["userAccountControl"] = ldb.MessageElement(str(bit|UF_PASSWD_NOTREQD|UF_ACCOUNTDISABLE),
+                m["userAccountControl"] = ldb.MessageElement(str(bit | UF_PASSWD_NOTREQD | UF_ACCOUNTDISABLE),
                                                              ldb.FLAG_MOD_REPLACE, "userAccountControl")
                 self.samdb.modify(m)
 
@@ -546,28 +556,28 @@ class UserAccountControlTests(samba.tests.TestCase):
 
             if bit in account_types:
                 self.assertEqual(int(res[0]["userAccountControl"][0]),
-                                 bit|UF_ACCOUNTDISABLE|UF_PASSWD_NOTREQD,
+                                 bit | UF_ACCOUNTDISABLE | UF_PASSWD_NOTREQD,
                                  "bit 0X%08x should have been added (0X%08x vs 0X%08x)"
                                  % (bit, int(res[0]["userAccountControl"][0]),
-                                    bit|UF_ACCOUNTDISABLE|UF_PASSWD_NOTREQD))
+                                    bit | UF_ACCOUNTDISABLE | UF_PASSWD_NOTREQD))
             elif bit in ignored_bits:
                 self.assertEqual(int(res[0]["userAccountControl"][0]),
-                                 UF_NORMAL_ACCOUNT|UF_ACCOUNTDISABLE|UF_PASSWD_NOTREQD,
+                                 UF_NORMAL_ACCOUNT | UF_ACCOUNTDISABLE | UF_PASSWD_NOTREQD,
                                  "bit 0X%08x should have been added (0X%08x vs 0X%08x)"
                                  % (bit, int(res[0]["userAccountControl"][0]),
-                                    UF_NORMAL_ACCOUNT|UF_ACCOUNTDISABLE|UF_PASSWD_NOTREQD))
+                                    UF_NORMAL_ACCOUNT | UF_ACCOUNTDISABLE | UF_PASSWD_NOTREQD))
 
             else:
                 self.assertEqual(int(res[0]["userAccountControl"][0]),
-                                 bit|UF_NORMAL_ACCOUNT|UF_ACCOUNTDISABLE|UF_PASSWD_NOTREQD,
+                                 bit | UF_NORMAL_ACCOUNT | UF_ACCOUNTDISABLE | UF_PASSWD_NOTREQD,
                                  "bit 0X%08x should have been added (0X%08x vs 0X%08x)"
                                  % (bit, int(res[0]["userAccountControl"][0]),
-                                    bit|UF_NORMAL_ACCOUNT|UF_ACCOUNTDISABLE|UF_PASSWD_NOTREQD))
+                                    bit | UF_NORMAL_ACCOUNT | UF_ACCOUNTDISABLE | UF_PASSWD_NOTREQD))
 
             try:
                 m = ldb.Message()
                 m.dn = res[0].dn
-                m["userAccountControl"] = ldb.MessageElement(str(UF_PASSWD_NOTREQD|UF_ACCOUNTDISABLE),
+                m["userAccountControl"] = ldb.MessageElement(str(UF_PASSWD_NOTREQD | UF_ACCOUNTDISABLE),
                                                              ldb.FLAG_MOD_REPLACE, "userAccountControl")
                 self.samdb.modify(m)
                 if bit in priv_to_remove_bits:
@@ -588,15 +598,15 @@ class UserAccountControlTests(samba.tests.TestCase):
             if bit in priv_to_remove_bits:
                 if bit in account_types:
                     self.assertEqual(int(res[0]["userAccountControl"][0]),
-                                     bit|UF_ACCOUNTDISABLE|UF_PASSWD_NOTREQD,
+                                     bit | UF_ACCOUNTDISABLE | UF_PASSWD_NOTREQD,
                                      "bit 0X%08x should not have been removed" % bit)
                 else:
                     self.assertEqual(int(res[0]["userAccountControl"][0]),
-                                     bit|UF_NORMAL_ACCOUNT|UF_ACCOUNTDISABLE|UF_PASSWD_NOTREQD,
+                                     bit | UF_NORMAL_ACCOUNT | UF_ACCOUNTDISABLE | UF_PASSWD_NOTREQD,
                                      "bit 0X%08x should not have been removed" % bit)
             else:
                 self.assertEqual(int(res[0]["userAccountControl"][0]),
-                                 UF_NORMAL_ACCOUNT|UF_ACCOUNTDISABLE|UF_PASSWD_NOTREQD,
+                                 UF_NORMAL_ACCOUNT | UF_ACCOUNTDISABLE | UF_PASSWD_NOTREQD,
                                  "bit 0X%08x should have been removed" % bit)
 
     def test_uac_bits_unrelated_modify_normal(self):
@@ -606,7 +616,7 @@ class UserAccountControlTests(samba.tests.TestCase):
         self.uac_bits_unrelated_modify_helper(UF_WORKSTATION_TRUST_ACCOUNT)
 
     def test_uac_bits_add(self):
-        computername=self.computernames[0]
+        computername = self.computernames[0]
 
         user_sid = self.sd_utils.get_object_sid(self.unpriv_user_dn)
         mod = "(OA;;CC;bf967a86-0de6-11d0-a285-00aa003049e2;;%s)" % str(user_sid)
@@ -644,7 +654,7 @@ class UserAccountControlTests(samba.tests.TestCase):
                     self.fail("Unable to set userAccountControl bit 0x%08X on %s: %s" % (bit, computername, estr))
 
     def test_primarygroupID_cc_add(self):
-        computername=self.computernames[0]
+        computername = self.computernames[0]
 
         user_sid = self.sd_utils.get_object_sid(self.unpriv_user_dn)
         mod = "(OA;;CC;bf967a86-0de6-11d0-a285-00aa003049e2;;%s)" % str(user_sid)
@@ -660,9 +670,8 @@ class UserAccountControlTests(samba.tests.TestCase):
             (enum, estr) = e13.args
             self.assertEqual(enum, ldb.ERR_UNWILLING_TO_PERFORM)
 
-
     def test_primarygroupID_priv_DC_modify(self):
-        computername=self.computernames[0]
+        computername = self.computernames[0]
 
         self.add_computer_ldap(computername,
                                others={"userAccountControl": [str(UF_SERVER_TRUST_ACCOUNT)]},
@@ -672,18 +681,17 @@ class UserAccountControlTests(samba.tests.TestCase):
                                       scope=SCOPE_SUBTREE,
                                       attrs=[""])
 
-
         m = ldb.Message()
         m.dn = ldb.Dn(self.admin_samdb, "<SID=%s-%d>" % (str(self.domain_sid),
                                                          security.DOMAIN_RID_USERS))
-        m["member"]= ldb.MessageElement(
+        m["member"] = ldb.MessageElement(
             [str(res[0].dn)], ldb.FLAG_MOD_ADD,
             "member")
         self.admin_samdb.modify(m)
 
         m = ldb.Message()
         m.dn = res[0].dn
-        m["primaryGroupID"]= ldb.MessageElement(
+        m["primaryGroupID"] = ldb.MessageElement(
             [str(security.DOMAIN_RID_USERS)], ldb.FLAG_MOD_REPLACE,
             "primaryGroupID")
         try:
@@ -696,28 +704,27 @@ class UserAccountControlTests(samba.tests.TestCase):
             self.assertEqual(enum, ldb.ERR_UNWILLING_TO_PERFORM)
 
     def test_primarygroupID_priv_member_modify(self):
-        computername=self.computernames[0]
+        computername = self.computernames[0]
 
         self.add_computer_ldap(computername,
-                               others={"userAccountControl": [str(UF_WORKSTATION_TRUST_ACCOUNT|UF_PARTIAL_SECRETS_ACCOUNT)]},
+                               others={"userAccountControl": [str(UF_WORKSTATION_TRUST_ACCOUNT | UF_PARTIAL_SECRETS_ACCOUNT)]},
                                samdb=self.admin_samdb)
         res = self.admin_samdb.search("%s" % self.base_dn,
                                       expression="(&(objectClass=computer)(samAccountName=%s$))" % computername,
                                       scope=SCOPE_SUBTREE,
                                       attrs=[""])
 
-
         m = ldb.Message()
         m.dn = ldb.Dn(self.admin_samdb, "<SID=%s-%d>" % (str(self.domain_sid),
                                                          security.DOMAIN_RID_USERS))
-        m["member"]= ldb.MessageElement(
+        m["member"] = ldb.MessageElement(
             [str(res[0].dn)], ldb.FLAG_MOD_ADD,
             "member")
         self.admin_samdb.modify(m)
 
         m = ldb.Message()
         m.dn = res[0].dn
-        m["primaryGroupID"]= ldb.MessageElement(
+        m["primaryGroupID"] = ldb.MessageElement(
             [str(security.DOMAIN_RID_USERS)], ldb.FLAG_MOD_REPLACE,
             "primaryGroupID")
         try:
@@ -729,9 +736,8 @@ class UserAccountControlTests(samba.tests.TestCase):
             (enum, estr) = e15.args
             self.assertEqual(enum, ldb.ERR_UNWILLING_TO_PERFORM)
 
-
     def test_primarygroupID_priv_user_modify(self):
-        computername=self.computernames[0]
+        computername = self.computernames[0]
 
         self.add_computer_ldap(computername,
                                others={"userAccountControl": [str(UF_WORKSTATION_TRUST_ACCOUNT)]},
@@ -741,18 +747,17 @@ class UserAccountControlTests(samba.tests.TestCase):
                                       scope=SCOPE_SUBTREE,
                                       attrs=[""])
 
-
         m = ldb.Message()
         m.dn = ldb.Dn(self.admin_samdb, "<SID=%s-%d>" % (str(self.domain_sid),
                                                          security.DOMAIN_RID_ADMINS))
-        m["member"]= ldb.MessageElement(
+        m["member"] = ldb.MessageElement(
             [str(res[0].dn)], ldb.FLAG_MOD_ADD,
             "member")
         self.admin_samdb.modify(m)
 
         m = ldb.Message()
         m.dn = res[0].dn
-        m["primaryGroupID"]= ldb.MessageElement(
+        m["primaryGroupID"] = ldb.MessageElement(
             [str(security.DOMAIN_RID_ADMINS)], ldb.FLAG_MOD_REPLACE,
             "primaryGroupID")
         self.admin_samdb.modify(m)

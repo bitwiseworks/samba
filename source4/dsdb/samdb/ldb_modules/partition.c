@@ -902,11 +902,17 @@ static int partition_search(struct ldb_module *module, struct ldb_request *req)
 						 data->partitions[i]->ctrl->dn) == 0) &&
 			    (ldb_dn_compare(req->op.search.base,
 					    data->partitions[i]->ctrl->dn) != 0)) {
-				char *ref = talloc_asprintf(ac,
-							    "ldap://%s/%s%s",
-							    lpcfg_dnsdomain(lp_ctx),
-							    ldb_dn_get_linearized(data->partitions[i]->ctrl->dn),
-							    req->op.search.scope == LDB_SCOPE_ONELEVEL ? "??base" : "");
+				const char *scheme = ldb_get_opaque(
+				    ldb, LDAP_REFERRAL_SCHEME_OPAQUE);
+				char *ref = talloc_asprintf(
+					ac,
+					"%s://%s/%s%s",
+					scheme == NULL ? "ldap" : scheme,
+					lpcfg_dnsdomain(lp_ctx),
+					ldb_dn_get_linearized(
+					    data->partitions[i]->ctrl->dn),
+					req->op.search.scope ==
+					    LDB_SCOPE_ONELEVEL ? "??base" : "");
 
 				if (ref == NULL) {
 					return ldb_oom(ldb);
@@ -1026,8 +1032,8 @@ static int partition_rename(struct ldb_module *module, struct ldb_request *req)
 /* start a transaction */
 int partition_start_trans(struct ldb_module *module)
 {
-	int i;
-	int ret;
+	int i = 0;
+	int ret = 0;
 	struct partition_private_data *data = talloc_get_type(ldb_module_get_private(module),
 							      struct partition_private_data);
 	/* Look at base DN */
@@ -1037,18 +1043,58 @@ int partition_start_trans(struct ldb_module *module)
 		ldb_debug(ldb_module_get_ctx(module), LDB_DEBUG_TRACE, "partition_start_trans() -> (metadata partition)");
 	}
 
-	/* This order must match that in prepare_commit() and read_lock() */
+	/*
+	 * We start a transaction on metadata.tdb first and end it last in
+	 * end_trans. This makes locking semantics follow TDB rather than MDB,
+	 * and effectively locks all partitions at once.
+	 * Detail:
+	 * Samba AD is special in that the partitions module (this file)
+	 * combines multiple independently locked databases into one overall
+	 * transaction. Changes across multiple partition DBs in a single
+	 * transaction must ALL be either visible or invisible.
+	 * The way this is achieved is by taking out a write lock on
+	 * metadata.tdb at the start of prepare_commit, while unlocking it at
+	 * the end of end_trans. This is matched by read_lock, ensuring it
+	 * can't progress until that write lock is released.
+	 *
+	 * metadata.tdb needs to be a TDB file because MDB uses independent
+	 * locks, which means a read lock and a write lock can be held at the
+	 * same time, whereas in TDB, the two locks block each other. The TDB
+	 * behaviour is required to implement the functionality described
+	 * above.
+	 *
+	 * An important additional detail here is that if prepare_commit is
+	 * called on a TDB without any changes being made, no write lock is
+	 * taken. We address this by storing a sequence number in metadata.tdb
+	 * which is updated every time a replicated attribute is modified.
+	 * The possibility of a few unreplicated attributes being out of date
+	 * turns out not to be a problem.
+	 * For this reason, a lock on sam.ldb (which is a TDB) won't achieve
+	 * the same end as locking metadata.tdb, unless we made a modification
+	 * to the @ records found there before every prepare_commit.
+	 */
+	ret = partition_metadata_start_trans(module);
+	if (ret != LDB_SUCCESS) {
+		return ret;
+	}
+
 	ret = ldb_next_start_trans(module);
 	if (ret != LDB_SUCCESS) {
+		partition_metadata_del_trans(module);
 		return ret;
 	}
 
 	ret = partition_reload_if_required(module, data, NULL);
 	if (ret != LDB_SUCCESS) {
 		ldb_next_del_trans(module);
+		partition_metadata_del_trans(module);
 		return ret;
 	}
 
+	/*
+	 * The following per partition locks are required mostly because TDB
+	 * and MDB require locks before read and write ops are permitted.
+	 */
 	for (i=0; data && data->partitions && data->partitions[i]; i++) {
 		if ((module && ldb_module_flags(ldb_module_get_ctx(module)) & LDB_FLG_ENABLE_TRACING)) {
 			ldb_debug(ldb_module_get_ctx(module), LDB_DEBUG_TRACE, "partition_start_trans() -> %s",
@@ -1066,20 +1112,6 @@ int partition_start_trans(struct ldb_module *module)
 		}
 	}
 
-	/*
-	 * Because in prepare_commit this must come last, to ensure
-	 * lock ordering we have to do this last here also 
-	 */
-	ret = partition_metadata_start_trans(module);
-	if (ret != LDB_SUCCESS) {
-		/* Back it out, if it fails on one */
-		for (i--; i >= 0; i--) {
-			ldb_next_del_trans(data->partitions[i]->module);
-		}
-		ldb_next_del_trans(module);
-		return ret;
-	}
-
 	data->in_transaction++;
 
 	return LDB_SUCCESS;
@@ -1092,6 +1124,15 @@ int partition_prepare_commit(struct ldb_module *module)
 	struct partition_private_data *data = talloc_get_type(ldb_module_get_private(module),
 							      struct partition_private_data);
 	int ret;
+
+	/*
+	 * Order of prepare_commit calls must match that in
+	 * partition_start_trans. See comment in that function for detail.
+	 */
+	ret = partition_metadata_prepare_commit(module);
+	if (ret != LDB_SUCCESS) {
+		return ret;
+	}
 
 	ret = ldb_next_prepare_commit(module);
 	if (ret != LDB_SUCCESS) {
@@ -1116,9 +1157,7 @@ int partition_prepare_commit(struct ldb_module *module)
 		ldb_debug(ldb_module_get_ctx(module), LDB_DEBUG_TRACE, "partition_prepare_commit() -> (metadata partition)");
 	}
 
-	/* metadata prepare commit must come last, as other partitions could modify
-	 * the database inside the prepare commit method of a module */
-	return partition_metadata_prepare_commit(module);
+	return LDB_SUCCESS;
 }
 
 
@@ -1126,9 +1165,11 @@ int partition_prepare_commit(struct ldb_module *module)
 int partition_end_trans(struct ldb_module *module)
 {
 	int ret, ret2;
-	unsigned int i;
+	int i;
+	struct ldb_context *ldb = ldb_module_get_ctx(module);
 	struct partition_private_data *data = talloc_get_type(ldb_module_get_private(module),
 							      struct partition_private_data);
+	bool trace = module && ldb_module_flags(ldb) & LDB_FLG_ENABLE_TRACING;
 
 	ret = LDB_SUCCESS;
 
@@ -1139,22 +1180,35 @@ int partition_end_trans(struct ldb_module *module)
 		data->in_transaction--;
 	}
 
+	/*
+	 * Order of end_trans calls must be the reverse of that in
+	 * partition_start_trans. See comment in that function for detail.
+	 */
+	if (data && data->partitions) {
+		/* Just counting the partitions */
+		for (i=0; data->partitions[i]; i++) {}
 
-	for (i=0; data && data->partitions && data->partitions[i]; i++) {
-		if ((module && ldb_module_flags(ldb_module_get_ctx(module)) & LDB_FLG_ENABLE_TRACING)) {
-			ldb_debug(ldb_module_get_ctx(module), LDB_DEBUG_TRACE, "partition_end_trans() -> %s",
-				  ldb_dn_get_linearized(data->partitions[i]->ctrl->dn));
-		}
-		ret2 = ldb_next_end_trans(data->partitions[i]->module);
-		if (ret2 != LDB_SUCCESS) {
-			ldb_asprintf_errstring(ldb_module_get_ctx(module), "end_trans error on %s: %s",
-					       ldb_dn_get_linearized(data->partitions[i]->ctrl->dn),
-					       ldb_errstring(ldb_module_get_ctx(module)));
-			ret = ret2;
+		/* now walk them backwards */
+		for (i--; i>=0; i--) {
+			struct dsdb_partition *p = data->partitions[i];
+			if (trace) {
+				ldb_debug(ldb,
+					  LDB_DEBUG_TRACE,
+					  "partition_end_trans() -> %s",
+					  ldb_dn_get_linearized(p->ctrl->dn));
+			}
+			ret2 = ldb_next_end_trans(p->module);
+			if (ret2 != LDB_SUCCESS) {
+				ldb_asprintf_errstring(ldb,
+					"end_trans error on %s: %s",
+					ldb_dn_get_linearized(p->ctrl->dn),
+					ldb_errstring(ldb));
+				ret = ret2;
+			}
 		}
 	}
 
-	if ((module && ldb_module_flags(ldb_module_get_ctx(module)) & LDB_FLG_ENABLE_TRACING)) {
+	if (trace) {
 		ldb_debug(ldb_module_get_ctx(module), LDB_DEBUG_TRACE, "partition_end_trans() -> (metadata partition)");
 	}
 	ret2 = ldb_next_end_trans(module);
@@ -1174,33 +1228,46 @@ int partition_end_trans(struct ldb_module *module)
 int partition_del_trans(struct ldb_module *module)
 {
 	int ret, final_ret = LDB_SUCCESS;
-	unsigned int i;
+	int i;
+	struct ldb_context *ldb = ldb_module_get_ctx(module);
 	struct partition_private_data *data = talloc_get_type(ldb_module_get_private(module),
 							      struct partition_private_data);
+	bool trace = module && ldb_module_flags(ldb) & LDB_FLG_ENABLE_TRACING;
 
-	for (i=0; data && data->partitions && data->partitions[i]; i++) {
-		if (ldb_module_flags(ldb_module_get_ctx(module)) &
-		    LDB_FLG_ENABLE_TRACING) {
-			ldb_debug(ldb_module_get_ctx(module), LDB_DEBUG_TRACE, "partition_del_trans() -> %s",
-				  ldb_dn_get_linearized(data->partitions[i]->ctrl->dn));
-		}
-		ret = ldb_next_del_trans(data->partitions[i]->module);
-		if (ret != LDB_SUCCESS) {
-			ldb_asprintf_errstring(ldb_module_get_ctx(module), "del_trans error on %s: %s",
-					       ldb_dn_get_linearized(data->partitions[i]->ctrl->dn),
-					       ldb_errstring(ldb_module_get_ctx(module)));
-			final_ret = ret;
-		}
-	}	
-
-	if (data->in_transaction == 0) {
-		DEBUG(0,("partition del transaction mismatch\n"));
-		return ldb_operr(ldb_module_get_ctx(module));
+	if (data == NULL) {
+		DEBUG(0,("partion delete transaction with no private data\n"));
+		return ldb_operr(ldb);
 	}
-	data->in_transaction--;
 
-	if (ldb_module_flags(ldb_module_get_ctx(module)) &
-	    LDB_FLG_ENABLE_TRACING) {
+	/*
+	 * Order of del_trans calls must be the reverse of that in
+	 * partition_start_trans. See comment in that function for detail.
+	 */
+	if (data->partitions) {
+		/* Just counting the partitions */
+		for (i=0; data->partitions[i]; i++) {}
+
+		/* now walk them backwards */
+		for (i--; i>=0; i--) {
+			struct dsdb_partition *p = data->partitions[i];
+			if (trace) {
+				ldb_debug(ldb,
+					  LDB_DEBUG_TRACE,
+					  "partition_del_trans() -> %s",
+					  ldb_dn_get_linearized(p->ctrl->dn));
+			}
+			ret = ldb_next_del_trans(p->module);
+			if (ret != LDB_SUCCESS) {
+				ldb_asprintf_errstring(ldb,
+					"del_trans error on %s: %s",
+					ldb_dn_get_linearized(p->ctrl->dn),
+					ldb_errstring(ldb));
+				final_ret = ret;
+			}
+		}
+	}
+
+	if (trace) {
 		ldb_debug(ldb_module_get_ctx(module), LDB_DEBUG_TRACE, "partition_del_trans() -> (metadata partition)");
 	}
 	ret = ldb_next_del_trans(module);
@@ -1212,6 +1279,12 @@ int partition_del_trans(struct ldb_module *module)
 	if (ret != LDB_SUCCESS) {
 		final_ret = ret;
 	}
+
+	if (data->in_transaction == 0) {
+		DEBUG(0,("partition del transaction mismatch\n"));
+		return ldb_operr(ldb_module_get_ctx(module));
+	}
+	data->in_transaction--;
 
 	return final_ret;
 }
@@ -1376,9 +1449,9 @@ static int partition_sequence_number(struct ldb_module *module, struct ldb_reque
 /* lock all the backends */
 int partition_read_lock(struct ldb_module *module)
 {
-	int i;
-	int ret;
-	int ret2;
+	int i = 0;
+	int ret = 0;
+	int ret2 = 0;
 	struct ldb_context *ldb = ldb_module_get_ctx(module);
 	struct partition_private_data *data = \
 		talloc_get_type(ldb_module_get_private(module),
@@ -1424,9 +1497,8 @@ int partition_read_lock(struct ldb_module *module)
 	}
 
 	/*
-	 * This will lock the metadata partition (sam.ldb) and
-	 * will also call event loops, so we do it before we
-	 * get the whole db lock.
+	 * This will lock sam.ldb and will also call event loops,
+	 * so we do it before we get the whole db lock.
 	 */
 	ret = partition_reload_if_required(module, data, NULL);
 	if (ret != LDB_SUCCESS) {
@@ -1434,8 +1506,20 @@ int partition_read_lock(struct ldb_module *module)
 	}
 
 	/*
-	 * This order must match that in prepare_commit(), start with
-	 * the metadata partition (sam.ldb) lock
+	 * Order of read_lock calls must match that in partition_start_trans.
+	 * See comment in that function for detail.
+	 */
+	ret = partition_metadata_read_lock(module);
+	if (ret != LDB_SUCCESS) {
+		goto failed;
+	}
+
+	/*
+	 * The top level DB (sam.ldb) lock is not enough to block another
+	 * process in prepare_commit(), because if nothing was changed in the
+	 * specific backend, then prepare_commit() is a no-op. Therefore the
+	 * metadata.tdb lock is taken out above, as it is the best we can do
+	 * right now.
 	 */
 	ret = ldb_next_read_lock(module);
 	if (ret != LDB_SUCCESS) {
@@ -1449,12 +1533,8 @@ int partition_read_lock(struct ldb_module *module)
 	}
 
 	/*
-	 * The metadata partition (sam.ldb) lock is not
-	 * enough to block another process in prepare_commit(),
-	 * because prepare_commit() is a no-op, if nothing
-	 * was changed in the specific backend.
-	 *
-	 * That means the following per partition locks are required.
+	 * The following per partition locks are required mostly because TDB
+	 * and MDB require locks before reads are permitted.
 	 */
 	for (i=0; data && data->partitions && data->partitions[i]; i++) {
 		if ((module && ldb_module_flags(ldb) & LDB_FLG_ENABLE_TRACING)) {
@@ -1476,18 +1556,15 @@ int partition_read_lock(struct ldb_module *module)
 			      ldb_dn_get_linearized(
 				      data->partitions[i]->ctrl->dn));
 
-		/* Back it out, if it fails on one */
-		for (i--; i >= 0; i--) {
-			ret2 = ldb_next_read_unlock(data->partitions[i]->module);
-			if (ret2 != LDB_SUCCESS) {
-				ldb_debug(ldb,
-					  LDB_DEBUG_FATAL,
-					  "Failed to unlock db: %s / %s",
-					  ldb_errstring(ldb),
-					  ldb_strerror(ret2));
-			}
-		}
-		ret2 = ldb_next_read_unlock(module);
+		goto failed;
+	}
+
+	return LDB_SUCCESS;
+
+failed:
+	/* Back it out, if it fails on one */
+	for (i--; i >= 0; i--) {
+		ret2 = ldb_next_read_unlock(data->partitions[i]->module);
 		if (ret2 != LDB_SUCCESS) {
 			ldb_debug(ldb,
 				  LDB_DEBUG_FATAL,
@@ -1495,10 +1572,16 @@ int partition_read_lock(struct ldb_module *module)
 				  ldb_errstring(ldb),
 				  ldb_strerror(ret2));
 		}
-		return ret;
 	}
-
-	return LDB_SUCCESS;
+	ret2 = ldb_next_read_unlock(module);
+	if (ret2 != LDB_SUCCESS) {
+		ldb_debug(ldb,
+			  LDB_DEBUG_FATAL,
+			  "Failed to unlock db: %s / %s",
+			  ldb_errstring(ldb),
+			  ldb_strerror(ret2));
+	}
+	return ret;
 }
 
 /* unlock all the backends */
@@ -1511,40 +1594,45 @@ int partition_read_unlock(struct ldb_module *module)
 	struct partition_private_data *data = \
 		talloc_get_type(ldb_module_get_private(module),
 				struct partition_private_data);
+	bool trace = module && ldb_module_flags(ldb) & LDB_FLG_ENABLE_TRACING;
 
 	/*
-	 * This order must be similar to partition_{end,del}_trans()
-	 * the metadata partition (sam.ldb) unlock must be at the end.
+	 * Order of read_unlock calls must be the reverse of that in
+	 * partition_start_trans. See comment in that function for detail.
 	 */
+	if (data && data->partitions) {
+		/* Just counting the partitions */
+		for (i=0; data->partitions[i]; i++) {}
 
-	for (i=0; data && data->partitions && data->partitions[i]; i++) {
-		if ((module && ldb_module_flags(ldb) & LDB_FLG_ENABLE_TRACING)) {
-			ldb_debug(ldb, LDB_DEBUG_TRACE,
-				  "partition_read_unlock() -> %s",
-				  ldb_dn_get_linearized(
-					  data->partitions[i]->ctrl->dn));
-		}
-		ret2 = ldb_next_read_unlock(data->partitions[i]->module);
-		if (ret2 != LDB_SUCCESS) {
-			ldb_debug_set(ldb,
-				      LDB_DEBUG_FATAL,
-				      "Failed to lock db: %s / %s for %s",
-				      ldb_errstring(ldb),
-				      ldb_strerror(ret),
-				      ldb_dn_get_linearized(
-					      data->partitions[i]->ctrl->dn));
+		/* now walk them backwards */
+		for (i--; i>=0; i--) {
+			struct dsdb_partition *p = data->partitions[i];
+			if (trace) {
+				ldb_debug(ldb, LDB_DEBUG_TRACE,
+					  "partition_read_unlock() -> %s",
+					  ldb_dn_get_linearized(p->ctrl->dn));
+			}
+			ret2 = ldb_next_read_unlock(p->module);
+			if (ret2 != LDB_SUCCESS) {
+				ldb_debug_set(ldb,
+					   LDB_DEBUG_FATAL,
+					   "Failed to lock db: %s / %s for %s",
+					   ldb_errstring(ldb),
+					   ldb_strerror(ret),
+					   ldb_dn_get_linearized(p->ctrl->dn));
 
-			/*
-			 * Don't overwrite the original failure code
-			 * if there was one
-			 */
-			if (ret == LDB_SUCCESS) {
-				ret = ret2;
+				/*
+				 * Don't overwrite the original failure code
+				 * if there was one
+				 */
+				if (ret == LDB_SUCCESS) {
+					ret = ret2;
+				}
 			}
 		}
 	}
 
-	if (ldb_module_flags(ldb) & LDB_FLG_ENABLE_TRACING) {
+	if (trace) {
 		ldb_debug(ldb, LDB_DEBUG_TRACE,
 			  "partition_read_unlock() -> (metadata partition)");
 	}
@@ -1564,6 +1652,16 @@ int partition_read_unlock(struct ldb_module *module)
 		if (ret == LDB_SUCCESS) {
 			ret = ret2;
 		}
+	}
+
+	ret = partition_metadata_read_unlock(module);
+
+	/*
+	 * Don't overwrite the original failure code
+	 * if there was one
+	 */
+	if (ret == LDB_SUCCESS) {
+		ret = ret2;
 	}
 
 	return ret;

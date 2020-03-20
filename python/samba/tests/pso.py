@@ -21,20 +21,18 @@
 #
 
 import ldb
-from ldb import SCOPE_BASE, FLAG_MOD_DELETE, FLAG_MOD_ADD, FLAG_MOD_REPLACE
+from ldb import FLAG_MOD_DELETE, FLAG_MOD_ADD, FLAG_MOD_REPLACE
 from samba.dcerpc.samr import (DOMAIN_PASSWORD_COMPLEX,
                                DOMAIN_PASSWORD_STORE_CLEARTEXT)
-from samba.credentials import Credentials
-from samba.samdb import SamDB
-from samba import gensec
+
 
 class TestUser:
     def __init__(self, username, samdb, userou=None):
         initial_password = "Initial12#"
         self.name = username
         self.ldb = samdb
-        self.dn = "CN=%s,%s,%s" %(username, (userou or "CN=Users"),
-                                  self.ldb.domain_dn())
+        self.dn = "CN=%s,%s,%s" % (username, (userou or "CN=Users"),
+                                   self.ldb.domain_dn())
 
         # store all passwords that have ever been used for this user, as well
         # as a pwd_history that more closely resembles the history on the DC
@@ -58,8 +56,9 @@ class TestUser:
         if hist_len == 0:
             return self.all_old_passwords[:]
 
-        # just exclude our pwd_history if there's not much in it. This can happen
-        # if we've been using a lower PasswordHistoryLength setting previously
+        # just exclude our pwd_history if there's not much in it. This can
+        # happen if we've been using a lower PasswordHistoryLength setting
+        # previously
         hist_len = min(len(self.pwd_history), hist_len)
 
         # return any passwords up to the nth-from-last item
@@ -69,8 +68,9 @@ class TestUser:
         """Updates the user's password history to reflect a password change"""
         # we maintain 2 lists: all passwords the user has ever had, and an
         # effective password-history that should roughly mirror the DC.
-        # pwd_history_change() handles the corner-case where we need to truncate
-        # password-history due to PasswordHistoryLength settings changes
+        # pwd_history_change() handles the corner-case where we need to
+        # truncate password-history due to PasswordHistoryLength settings
+        # changes
         if new_password in self.all_old_passwords:
             self.all_old_passwords.remove(new_password)
         self.all_old_passwords.append(new_password)
@@ -84,7 +84,7 @@ class TestUser:
         res = self.ldb.search(self.dn, attrs=['msDS-ResultantPSO'])
 
         if 'msDS-ResultantPSO' in res[0]:
-            return res[0]['msDS-ResultantPSO'][0]
+            return str(res[0]['msDS-ResultantPSO'][0])
         else:
             return None
 
@@ -104,15 +104,16 @@ add: userPassword
 userPassword: %s
 """ % (self.dn, self.get_password(), new_password)
         # this modify will throw an exception if new_password doesn't meet the
-        # PSO constraints (which the test code catches if it's expected to fail)
+        # PSO constraints (which the test code catches if it's expected to
+        # fail)
         self.ldb.modify_ldif(ldif)
         self.update_pwd_history(new_password)
 
     def pwd_history_change(self, old_hist_len, new_hist_len):
         """
-        Updates what in the password history will take effect, to reflect changes
-        on the DC. When the PasswordHistoryLength applied to a user changes from
-        a low setting (e.g. 2) to a higher setting (e.g. 4), passwords #3 and #4
+        Updates the effective password history, to reflect changes on the DC.
+        When the PasswordHistoryLength applied to a user changes from a low
+        setting (e.g. 2) to a higher setting (e.g. 4), passwords #3 and #4
         won't actually have been stored on the DC, so we need to make sure they
         are removed them from our mirror pwd_history list.
         """
@@ -148,15 +149,16 @@ userPassword: %s
                                                  "primaryGroupID")
         self.ldb.modify(m)
 
+
 class PasswordSettings:
     def default_settings(self, samdb):
         """
         Returns a object representing the default password settings that will
         take effect (i.e. when no other Fine-Grained Password Policy applies)
         """
-        pw_attrs=["minPwdAge", "lockoutDuration", "lockOutObservationWindow",
-                  "lockoutThreshold", "maxPwdAge", "minPwdAge", "minPwdLength",
-                  "pwdHistoryLength", "pwdProperties"]
+        pw_attrs = ["minPwdAge", "lockoutDuration", "lockOutObservationWindow",
+                    "lockoutThreshold", "maxPwdAge", "minPwdAge",
+                    "minPwdLength", "pwdHistoryLength", "pwdProperties"]
         res = samdb.search(samdb.domain_dn(), scope=ldb.SCOPE_BASE,
                            attrs=pw_attrs)
 
@@ -195,7 +197,7 @@ class PasswordSettings:
             container = "CN=Password Settings Container,CN=System,%s" % base_dn
 
         self.name = name
-        self.dn = "CN=%s,%s" %(name, container)
+        self.dn = "CN=%s,%s" % (name, container)
         self.ldb = samdb
         self.precedence = precedence
         self.complexity = complexity
@@ -226,21 +228,21 @@ class PasswordSettings:
 
         # all the following fields are mandatory for the PSO object
         ldif = """
-dn: %s
+dn: {0}
 objectClass: msDS-PasswordSettings
-msDS-PasswordSettingsPrecedence: %u
-msDS-PasswordReversibleEncryptionEnabled: %s
-msDS-PasswordHistoryLength: %u
-msDS-PasswordComplexityEnabled: %s
-msDS-MinimumPasswordLength: %u
-msDS-MinimumPasswordAge: %d
-msDS-MaximumPasswordAge: %d
-msDS-LockoutThreshold: %u
-msDS-LockoutObservationWindow: %d
-msDS-LockoutDuration: %d
-""" % (self.dn, self.precedence, plaintext_str, self.history_len,
-       complexity_str, self.password_len, min_age, max_age,
-       self.lockout_attempts, lockout_window, lockout_duration)
+msDS-PasswordSettingsPrecedence: {1}
+msDS-PasswordReversibleEncryptionEnabled: {2}
+msDS-PasswordHistoryLength: {3}
+msDS-PasswordComplexityEnabled: {4}
+msDS-MinimumPasswordLength: {5}
+msDS-MinimumPasswordAge: {6}
+msDS-MaximumPasswordAge: {7}
+msDS-LockoutThreshold: {8}
+msDS-LockoutObservationWindow: {9}
+msDS-LockoutDuration: {10}
+""".format(self.dn, self.precedence, plaintext_str, self.history_len,
+           complexity_str, self.password_len, min_age, max_age,
+           self.lockout_attempts, lockout_window, lockout_duration)
 
         return ldif
 
@@ -268,4 +270,3 @@ msDS-PasswordSettingsPrecedence: %u
 """ % (self.dn, new_precedence)
         samdb.modify_ldif(ldif)
         self.precedence = new_precedence
-

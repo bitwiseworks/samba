@@ -42,15 +42,26 @@
 #include "dsdb/samdb/ldb_modules/util.h"
 #include "dsdb/samdb/ldb_modules/password_modules.h"
 #include "librpc/gen_ndr/ndr_drsblobs.h"
-#include "../lib/crypto/crypto.h"
+#include "lib/crypto/md4.h"
 #include "param/param.h"
 #include "lib/krb5_wrap/krb5_samba.h"
 #include "auth/common_auth.h"
 #include "lib/messaging/messaging.h"
 
+#include <gnutls/gnutls.h>
+#include <gnutls/crypto.h>
+
 #ifdef ENABLE_GPGME
 #undef class
 #include <gpgme.h>
+
+/*
+ * 1.2.0 is what dpkg-shlibdeps generates, based on used symbols and
+ * libgpgme11.symbols
+ * https://salsa.debian.org/debian/gpgme/blob/debian/master/debian/libgpgme11.symbols
+ */
+
+#define MINIMUM_GPGME_VERSION "1.2.0"
 #endif
 
 /* If we have decided there is a reason to work on this request, then
@@ -130,6 +141,7 @@ struct setup_password_fields_io {
 		NTTIME pwdLastSet;
 		const char *sAMAccountName;
 		const char *user_principal_name;
+		const char *displayName; /* full name */
 		bool is_krbtgt;
 		uint32_t restrictions;
 		struct dom_sid *account_sid;
@@ -771,56 +783,21 @@ static int setup_kerberos_keys(struct setup_password_fields_io *io)
 	}
 
 	/*
-	 * create ENCTYPE_DES_CBC_MD5 key out of
-	 * the salt and the cleartext password
+	 * As per RFC-6649 single DES encryption types are no longer considered
+	 * secure to be used in Kerberos, we store random keys instead of the
+	 * ENCTYPE_DES_CBC_MD5 and ENCTYPE_DES_CBC_CRC keys.
 	 */
-	krb5_ret = smb_krb5_create_key_from_string(io->smb_krb5_context->krb5_context,
-						   NULL,
-						   &salt,
-						   &cleartext_data,
-						   ENCTYPE_DES_CBC_MD5,
-						   &key);
-	if (krb5_ret) {
-		ldb_asprintf_errstring(ldb,
-				       "setup_kerberos_keys: "
-				       "generation of a des-cbc-md5 key failed: %s",
-				       smb_get_krb5_error_message(io->smb_krb5_context->krb5_context,
-								  krb5_ret, io->ac));
-		return LDB_ERR_OPERATIONS_ERROR;
-	}
-	io->g.des_md5 = data_blob_talloc(io->ac,
-					 KRB5_KEY_DATA(&key),
-					 KRB5_KEY_LENGTH(&key));
-	krb5_free_keyblock_contents(io->smb_krb5_context->krb5_context, &key);
+	io->g.des_md5 = data_blob_talloc(io->ac, NULL, 8);
 	if (!io->g.des_md5.data) {
 		return ldb_oom(ldb);
 	}
+	generate_secret_buffer(io->g.des_md5.data, 8);
 
-	/*
-	 * create ENCTYPE_DES_CBC_CRC key out of
-	 * the salt and the cleartext password
-	 */
-	krb5_ret = smb_krb5_create_key_from_string(io->smb_krb5_context->krb5_context,
-						   NULL,
-						   &salt,
-						   &cleartext_data,
-						   ENCTYPE_DES_CBC_CRC,
-						   &key);
-	if (krb5_ret) {
-		ldb_asprintf_errstring(ldb,
-				       "setup_kerberos_keys: "
-				       "generation of a des-cbc-crc key failed: %s",
-				       smb_get_krb5_error_message(io->smb_krb5_context->krb5_context,
-								  krb5_ret, io->ac));
-		return LDB_ERR_OPERATIONS_ERROR;
-	}
-	io->g.des_crc = data_blob_talloc(io->ac,
-					 KRB5_KEY_DATA(&key),
-					 KRB5_KEY_LENGTH(&key));
-	krb5_free_keyblock_contents(io->smb_krb5_context->krb5_context, &key);
+	io->g.des_crc = data_blob_talloc(io->ac, NULL, 8);
 	if (!io->g.des_crc.data) {
 		return ldb_oom(ldb);
 	}
+	generate_secret_buffer(io->g.des_crc.data, 8);
 
 	return LDB_SUCCESS;
 }
@@ -1297,6 +1274,7 @@ static int setup_primary_wdigest(struct setup_password_fields_io *io,
 		.realm	= &digest
 		},
 	};
+	int rc = LDB_ERR_OTHER;
 
 	/* prepare DATA_BLOB's used in the combinations array */
 	sAMAccountName		= data_blob_string_const(io->u.sAMAccountName);
@@ -1357,23 +1335,77 @@ static int setup_primary_wdigest(struct setup_password_fields_io *io,
 	}
 
 	for (i=0; i < ARRAY_SIZE(wdigest); i++) {
-		MD5_CTX md5;
-		MD5Init(&md5);
+		gnutls_hash_hd_t hash_hnd = NULL;
+
+		rc = gnutls_hash_init(&hash_hnd, GNUTLS_DIG_MD5);
+		if (rc < 0) {
+			rc = ldb_oom(ldb);
+			goto out;
+		}
+
 		if (wdigest[i].nt4dom) {
-			MD5Update(&md5, wdigest[i].nt4dom->data, wdigest[i].nt4dom->length);
-			MD5Update(&md5, backslash.data, backslash.length);
+			rc = gnutls_hash(hash_hnd,
+					  wdigest[i].nt4dom->data,
+					  wdigest[i].nt4dom->length);
+			if (rc < 0) {
+				gnutls_hash_deinit(hash_hnd, NULL);
+				rc = LDB_ERR_UNWILLING_TO_PERFORM;
+				goto out;
+			}
+			rc = gnutls_hash(hash_hnd,
+					  backslash.data,
+					  backslash.length);
+			if (rc < 0) {
+				gnutls_hash_deinit(hash_hnd, NULL);
+				rc = LDB_ERR_UNWILLING_TO_PERFORM;
+				goto out;
+			}
 		}
-		MD5Update(&md5, wdigest[i].user->data, wdigest[i].user->length);
-		MD5Update(&md5, delim.data, delim.length);
+		rc = gnutls_hash(hash_hnd,
+				 wdigest[i].user->data,
+				 wdigest[i].user->length);
+		if (rc < 0) {
+			gnutls_hash_deinit(hash_hnd, NULL);
+			rc = LDB_ERR_UNWILLING_TO_PERFORM;
+			goto out;
+		}
+		rc = gnutls_hash(hash_hnd, delim.data, delim.length);
+		if (rc < 0) {
+			gnutls_hash_deinit(hash_hnd, NULL);
+			rc = LDB_ERR_UNWILLING_TO_PERFORM;
+			goto out;
+		}
 		if (wdigest[i].realm) {
-			MD5Update(&md5, wdigest[i].realm->data, wdigest[i].realm->length);
+			rc = gnutls_hash(hash_hnd,
+					 wdigest[i].realm->data,
+					 wdigest[i].realm->length);
+			if (rc < 0) {
+				gnutls_hash_deinit(hash_hnd, NULL);
+				rc = LDB_ERR_UNWILLING_TO_PERFORM;
+				goto out;
+			}
 		}
-		MD5Update(&md5, delim.data, delim.length);
-		MD5Update(&md5, io->n.cleartext_utf8->data, io->n.cleartext_utf8->length);
-		MD5Final(pdb->hashes[i].hash, &md5);
+		rc = gnutls_hash(hash_hnd, delim.data, delim.length);
+		if (rc < 0) {
+			gnutls_hash_deinit(hash_hnd, NULL);
+			rc = LDB_ERR_UNWILLING_TO_PERFORM;
+			goto out;
+		}
+		rc = gnutls_hash(hash_hnd,
+				  io->n.cleartext_utf8->data,
+				  io->n.cleartext_utf8->length);
+		if (rc < 0) {
+			gnutls_hash_deinit(hash_hnd, NULL);
+			rc = LDB_ERR_UNWILLING_TO_PERFORM;
+			goto out;
+		}
+
+		gnutls_hash_deinit(hash_hnd, pdb->hashes[i].hash);
 	}
 
-	return LDB_SUCCESS;
+	rc = LDB_SUCCESS;
+out:
+	return rc;
 }
 
 #define SHA_SALT_PERMITTED_CHARS "abcdefghijklmnopqrstuvwxyz" \
@@ -1482,6 +1514,7 @@ static int setup_primary_userPassword_hash(
 	 * Relies on the assertion that cleartext_utf8->data is a zero
 	 * terminated UTF-8 string
 	 */
+	errno = 0;
 #ifdef HAVE_CRYPT_R
 	hash = crypt_r((char *)io->n.cleartext_utf8->data, cmd, &crypt_data);
 #else
@@ -1491,7 +1524,10 @@ static int setup_primary_userPassword_hash(
 	 */
 	hash = crypt((char *)io->n.cleartext_utf8->data, cmd);
 #endif
-	if (hash == NULL) {
+	/* crypt_r and crypt may return a null pointer upon error depending on
+	 * how libcrypt was configured. POSIX specifies returning a null
+	 * pointer and setting errno. */
+	if (hash == NULL || errno != 0) {
 		char buf[1024];
 		int err = strerror_r(errno, buf, sizeof(buf));
 		if (err != 0) {
@@ -2716,6 +2752,9 @@ static int check_password_restrictions(struct setup_password_fields_io *io, WERR
 	if (io->n.cleartext_utf8 != NULL) {
 		enum samr_ValidationStatus vstat;
 		vstat = samdb_check_password(io->ac, lp_ctx,
+					     io->u.sAMAccountName,
+					     io->u.user_principal_name,
+					     io->u.displayName,
 					     io->n.cleartext_utf8,
 					     io->ac->status->domain_data.pwdProperties,
 					     io->ac->status->domain_data.minPwdLength);
@@ -2906,7 +2945,6 @@ static int check_password_restrictions_and_log(struct setup_password_fields_io *
 					 status,
 					 domain_name,
 					 io->u.sAMAccountName,
-					 NULL,
 					 io->u.account_sid);
 
 	}
@@ -3191,6 +3229,8 @@ static int setup_io(struct ph_context *ac,
 								      "sAMAccountName", NULL);
 	io->u.user_principal_name	= ldb_msg_find_attr_as_string(info_msg,
 								      "userPrincipalName", NULL);
+	io->u.displayName		= ldb_msg_find_attr_as_string(info_msg,
+								      "displayName", NULL);
 
 	/* Ensure it has an objectSID too */
 	io->u.account_sid = samdb_result_dom_sid(ac, info_msg, "objectSid");
@@ -4707,6 +4747,7 @@ static int password_hash_mod_search_self(struct ph_context *ac)
 					      "sAMAccountName",
 					      "objectSid",
 					      "userPrincipalName",
+					      "displayName",
 					      "supplementalCredentials",
 					      "lmPwdHistory",
 					      "ntPwdHistory",
@@ -4805,13 +4846,13 @@ int ldb_password_hash_module_init(const char *version)
 	 * if none is active already. See:
 	 * https://www.gnupg.org/documentation/manuals/gpgme/Signal-Handling.html#Signal-Handling
 	 */
-	gversion = gpgme_check_version(GPGME_VERSION);
+	gversion = gpgme_check_version(MINIMUM_GPGME_VERSION);
 	if (gversion == NULL) {
 		fprintf(stderr, "%s() in %s version[%s]: "
 			"gpgme_check_version(%s) not available, "
 			"gpgme_check_version(NULL) => '%s'\n",
 			__func__, __FILE__, version,
-			GPGME_VERSION, gpgme_check_version(NULL));
+			MINIMUM_GPGME_VERSION, gpgme_check_version(NULL));
 		return LDB_ERR_UNAVAILABLE;
 	}
 #endif /* ENABLE_GPGME */

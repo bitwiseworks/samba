@@ -97,7 +97,9 @@ int ctdb_call_local(struct ctdb_db_context *ctdb_db, struct ctdb_call *call,
 	c->header = header;
 
 	for (fn=ctdb_db->calls;fn;fn=fn->next) {
-		if (fn->id == call->call_id) break;
+		if (fn->id == (uint32_t)call->call_id) {
+			break;
+		}
 	}
 	if (fn == NULL) {
 		ctdb_set_error(ctdb, "Unknown call id %u\n", call->call_id);
@@ -640,7 +642,7 @@ static void ctdb_client_reply_control(struct ctdb_context *ctdb,
 	}
 
 	/* state->outdata now uses resources from c so we don't want c
-	   to just dissappear from under us while state is still alive
+	   to just disappear from under us while state is still alive
 	*/
 	talloc_steal(state, c);
 
@@ -846,7 +848,7 @@ int ctdb_control(struct ctdb_context *ctdb, uint32_t destnode, uint64_t srvid,
 			timeout, errormsg);
 
 	/* FIXME: Error conditions in ctdb_control_send return NULL without
-	 * setting errormsg.  So, there is no way to distinguish between sucess
+	 * setting errormsg.  So, there is no way to distinguish between success
 	 * and failure when CTDB_CTRL_FLAG_NOREPLY is set */
 	if (flags & CTDB_CTRL_FLAG_NOREPLY) {
 		if (status != NULL) {
@@ -1586,17 +1588,6 @@ void ctdb_set_flags(struct ctdb_context *ctdb, unsigned flags)
 	ctdb->flags |= flags;
 }
 
-/*
-  setup the local socket name
-*/
-int ctdb_set_socketname(struct ctdb_context *ctdb, const char *socketname)
-{
-	ctdb->daemon.name = talloc_strdup(ctdb, socketname);
-	CTDB_NO_MEMORY(ctdb, ctdb->daemon.name);
-
-	return 0;
-}
-
 const char *ctdb_get_socketname(struct ctdb_context *ctdb)
 {
 	return ctdb->daemon.name;
@@ -1612,7 +1603,7 @@ uint32_t ctdb_get_pnn(struct ctdb_context *ctdb)
 
 /*
   callback for the async helpers used when sending the same control
-  to multiple nodes in parallell.
+  to multiple nodes in parallel.
 */
 static void async_callback(struct ctdb_client_control_state *state)
 {
@@ -1757,7 +1748,7 @@ uint32_t *list_of_vnnmap_nodes(struct ctdb_context *ctdb,
 				TALLOC_CTX *mem_ctx,
 				bool include_self)
 {
-	int i, j, num_nodes;
+	unsigned int i, j, num_nodes;
 	uint32_t *nodes;
 
 	for (i=num_nodes=0;i<vnn_map->size;i++) {
@@ -1780,17 +1771,18 @@ uint32_t *list_of_vnnmap_nodes(struct ctdb_context *ctdb,
 	return nodes;
 }
 
-/* Get list of nodes not including those with flags specified by mask.
- * If exclude_pnn is not -1 then exclude that pnn from the list.
- */
-uint32_t *list_of_nodes(struct ctdb_context *ctdb,
-			struct ctdb_node_map_old *node_map,
-			TALLOC_CTX *mem_ctx,
-			uint32_t mask,
-			int exclude_pnn)
+/* Get list of nodes not including those with flags specified by mask */
+static uint32_t *list_of_nodes(struct ctdb_context *ctdb,
+			       struct ctdb_node_map_old *node_map,
+			       TALLOC_CTX *mem_ctx,
+			       uint32_t mask,
+			       bool include_self)
 {
-	int i, j, num_nodes;
+	unsigned int i, j, num_nodes;
+	uint32_t exclude_pnn;
 	uint32_t *nodes;
+
+	exclude_pnn = include_self ? CTDB_UNKNOWN_PNN : ctdb->pnn;
 
 	for (i=num_nodes=0;i<node_map->num;i++) {
 		if (node_map->nodes[i].flags & mask) {
@@ -1823,8 +1815,11 @@ uint32_t *list_of_active_nodes(struct ctdb_context *ctdb,
 				TALLOC_CTX *mem_ctx,
 				bool include_self)
 {
-	return list_of_nodes(ctdb, node_map, mem_ctx, NODE_FLAGS_INACTIVE,
-			     include_self ? -1 : ctdb->pnn);
+	return list_of_nodes(ctdb,
+			     node_map,
+			     mem_ctx,
+			     NODE_FLAGS_INACTIVE,
+			     include_self);
 }
 
 uint32_t *list_of_connected_nodes(struct ctdb_context *ctdb,
@@ -1832,8 +1827,11 @@ uint32_t *list_of_connected_nodes(struct ctdb_context *ctdb,
 				TALLOC_CTX *mem_ctx,
 				bool include_self)
 {
-	return list_of_nodes(ctdb, node_map, mem_ctx, NODE_FLAGS_DISCONNECTED,
-			     include_self ? -1 : ctdb->pnn);
+	return list_of_nodes(ctdb,
+			     node_map,
+			     mem_ctx,
+			     NODE_FLAGS_DISCONNECTED,
+			     include_self);
 }
 
 /*

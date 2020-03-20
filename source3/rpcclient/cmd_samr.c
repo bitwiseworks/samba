@@ -32,7 +32,7 @@
 #include "rpc_client/init_lsa.h"
 #include "../libcli/security/security.h"
 
-extern struct dom_sid domain_sid;
+static struct dom_sid domain_sid;
 
 /****************************************************************************
  display samr_user_info_7 structure
@@ -268,6 +268,95 @@ static void display_sam_info_5(struct samr_DispEntryAscii *r)
 {
 	printf("index: 0x%x ", r->idx);
 	printf("Account: %s\n", r->account_name.string);
+}
+
+static NTSTATUS rpccli_try_samr_connects(
+	struct rpc_pipe_client *cli,
+	TALLOC_CTX *mem_ctx,
+	uint32_t access_mask,
+	struct policy_handle *connect_pol)
+{
+	struct dcerpc_binding_handle *b = cli->binding_handle;
+	NTSTATUS status;
+	NTSTATUS result = NT_STATUS_UNSUCCESSFUL;
+	uint32_t start_idx = 0;
+	uint32_t i, num_entries;
+	struct samr_SamArray *sam = NULL;
+	struct dom_sid *domsid = NULL;
+
+	status = dcerpc_try_samr_connects(
+		b,
+		mem_ctx,
+		cli->srv_name_slash,
+		access_mask,
+		connect_pol,
+		&result);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+	if (!NT_STATUS_IS_OK(result)) {
+		return result;
+	}
+
+	if (!is_null_sid(&domain_sid)) {
+		return NT_STATUS_OK;
+	}
+
+	/*
+	 * Look up the servers domain SID. Just pick the first
+	 * non-builtin domain from samr_EnumDomains.
+	 */
+
+	status = dcerpc_samr_EnumDomains(
+		b,
+		mem_ctx,
+		connect_pol,
+		&start_idx,
+		&sam,
+		0xffff,
+		&num_entries,
+		&result);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto fail;
+	}
+	if (!NT_STATUS_IS_OK(result)) {
+		status = result;
+		goto fail;
+	}
+
+	for (i=0; i<num_entries; i++) {
+		if (!strequal(sam->entries[i].name.string, "builtin")) {
+			break;
+		}
+	}
+	if (i == num_entries) {
+		status = NT_STATUS_NOT_FOUND;
+		goto fail;
+	}
+
+	status = dcerpc_samr_LookupDomain(
+		b,
+		mem_ctx,
+		connect_pol,
+		&sam->entries[i].name,
+		&domsid,
+		&result);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto fail;
+	}
+	if (!NT_STATUS_IS_OK(result)) {
+		status = result;
+		goto fail;
+	}
+
+	sid_copy(&domain_sid, domsid);
+	TALLOC_FREE(domsid);
+
+	return NT_STATUS_OK;
+
+fail:
+	dcerpc_samr_Close(b, mem_ctx, connect_pol, &result);
+	return status;
 }
 
 /****************************************************************************
@@ -1172,7 +1261,7 @@ static NTSTATUS cmd_samr_enum_domains(struct rpc_pipe_client *cli,
 		goto done;
 	}
 
-	/* Enumerate alias groups */
+	/* Enumerate domains */
 
 	start_idx = 0;
 	size = 0xffff;
@@ -1279,10 +1368,10 @@ static NTSTATUS cmd_samr_query_aliasmem(struct rpc_pipe_client *cli,
 	}
 
 	for (i = 0; i < sid_array.num_sids; i++) {
-		fstring sid_str;
+		struct dom_sid_buf sid_str;
 
-		sid_to_fstring(sid_str, sid_array.sids[i].sid);
-		printf("\tsid:[%s]\n", sid_str);
+		printf("\tsid:[%s]\n",
+		       dom_sid_str_buf(sid_array.sids[i].sid, &sid_str));
 	}
 
 	dcerpc_samr_Close(b, mem_ctx, &alias_pol, &result);
@@ -1406,13 +1495,18 @@ static NTSTATUS cmd_samr_delete_alias(struct rpc_pipe_client *cli,
 	uint32_t alias_rid;
 	uint32_t access_mask = MAXIMUM_ALLOWED_ACCESS;
 	struct dcerpc_binding_handle *b = cli->binding_handle;
+	int error = 0;
 
 	if (argc != 3) {
 		printf("Usage: %s builtin|domain [rid|name]\n", argv[0]);
 		return NT_STATUS_OK;
 	}
 
-	alias_rid = strtoul(argv[2], NULL, 10);
+	alias_rid = smb_strtoul(argv[2], NULL, 10, &error, SMB_STR_STANDARD);
+	if (error != 0) {
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
 
 	/* Open SAMR handle */
 
@@ -2636,10 +2730,9 @@ static NTSTATUS cmd_samr_get_usrdom_pwinfo(struct rpc_pipe_client *cli,
 	}
 	status = result;
 	if (NT_STATUS_IS_OK(result)) {
-		printf("min_password_length: %d\n", info.min_password_length);
 		printf("%s\n",
 			NDR_PRINT_STRUCT_STRING(mem_ctx,
-				samr_PasswordProperties, &info.password_properties));
+				samr_PwInfo, &info));
 	}
 
  done:
@@ -2690,7 +2783,6 @@ static NTSTATUS cmd_samr_lookup_domain(struct rpc_pipe_client *cli,
 	struct policy_handle connect_pol, domain_pol;
 	NTSTATUS status, result;
 	uint32_t access_mask = MAXIMUM_ALLOWED_ACCESS;
-	fstring sid_string;
 	struct lsa_String domain_name;
 	struct dom_sid *sid = NULL;
 	struct dcerpc_binding_handle *b = cli->binding_handle;
@@ -2737,9 +2829,10 @@ static NTSTATUS cmd_samr_lookup_domain(struct rpc_pipe_client *cli,
 	}
 
 	if (NT_STATUS_IS_OK(result)) {
-		sid_to_fstring(sid_string, sid);
+		struct dom_sid_buf sid_str;
 		printf("SAMR_LOOKUP_DOMAIN: Domain Name: %s Domain SID: %s\n",
-		       argv[1], sid_string);
+		       argv[1],
+		       dom_sid_str_buf(sid, &sid_str));
 	}
 
 	dcerpc_samr_Close(b, mem_ctx, &domain_pol, &result);
@@ -3039,12 +3132,16 @@ static NTSTATUS cmd_samr_setuserinfo_int(struct rpc_pipe_client *cli,
 	DATA_BLOB session_key;
 	uint8_t password_expired = 0;
 	struct dcerpc_binding_handle *b = cli->binding_handle;
+	TALLOC_CTX *frame = NULL;
+	int rc;
 
 	if (argc < 4) {
 		printf("Usage: %s username level password [password_expired]\n",
 			argv[0]);
 		return NT_STATUS_INVALID_PARAMETER;
 	}
+
+	frame = talloc_stackframe();
 
 	user = argv[1];
 	level = atoi(argv[2]);
@@ -3054,13 +3151,19 @@ static NTSTATUS cmd_samr_setuserinfo_int(struct rpc_pipe_client *cli,
 		password_expired = atoi(argv[4]);
 	}
 
-	status = cli_get_session_key(mem_ctx, cli, &session_key);
+	status = cli_get_session_key(frame, cli, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
-		return status;
+		goto done;
 	}
 
-	init_samr_CryptPassword(param, &session_key, &pwd_buf);
-	init_samr_CryptPasswordEx(param, &session_key, &pwd_buf_ex);
+	status = init_samr_CryptPassword(param, &session_key, &pwd_buf);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto done;
+	}
+	status = init_samr_CryptPasswordEx(param, &session_key, &pwd_buf_ex);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto done;
+	}
 	nt_lm_owf_gen(param, nt_hash, lm_hash);
 
 	switch (level) {
@@ -3068,15 +3171,31 @@ static NTSTATUS cmd_samr_setuserinfo_int(struct rpc_pipe_client *cli,
 		{
 			DATA_BLOB in,out;
 			in = data_blob_const(nt_hash, 16);
-			out = data_blob_talloc_zero(mem_ctx, 16);
-			sess_crypt_blob(&out, &in, &session_key, true);
+			out = data_blob_talloc_zero(frame, 16);
+			if (out.data == NULL) {
+				status = NT_STATUS_NO_MEMORY;
+				goto done;
+			}
+			rc = sess_crypt_blob(&out, &in, &session_key, SAMBA_GNUTLS_ENCRYPT);
+			if (rc != 0) {
+				status = gnutls_error_to_ntstatus(rc,
+								  NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+			}
 			memcpy(nt_hash, out.data, out.length);
 		}
 		{
 			DATA_BLOB in,out;
 			in = data_blob_const(lm_hash, 16);
-			out = data_blob_talloc_zero(mem_ctx, 16);
-			sess_crypt_blob(&out, &in, &session_key, true);
+			out = data_blob_talloc_zero(frame, 15);
+			if (out.data == NULL) {
+				status = NT_STATUS_NO_MEMORY;
+				goto done;
+			}
+			rc = sess_crypt_blob(&out, &in, &session_key, SAMBA_GNUTLS_ENCRYPT);
+			if (rc != 0) {
+				status = gnutls_error_to_ntstatus(rc,
+								  NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+			}
 			memcpy(lm_hash, out.data, out.length);
 		}
 
@@ -3108,18 +3227,34 @@ static NTSTATUS cmd_samr_setuserinfo_int(struct rpc_pipe_client *cli,
 		{
 			DATA_BLOB in,out;
 			in = data_blob_const(nt_hash, 16);
-			out = data_blob_talloc_zero(mem_ctx, 16);
-			sess_crypt_blob(&out, &in, &session_key, true);
+			out = data_blob_talloc_zero(frame, 16);
+			if (out.data == NULL) {
+				status = NT_STATUS_NO_MEMORY;
+				goto done;
+			}
+			rc = sess_crypt_blob(&out, &in, &session_key, SAMBA_GNUTLS_ENCRYPT);
+			if (rc != 0) {
+				status = gnutls_error_to_ntstatus(rc,
+								  NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+			}
 			info.info21.nt_owf_password.array =
-				(uint16_t *)talloc_memdup(mem_ctx, out.data, 16);
+				(uint16_t *)talloc_memdup(frame, out.data, 16);
 		}
 		{
 			DATA_BLOB in,out;
 			in = data_blob_const(lm_hash, 16);
-			out = data_blob_talloc_zero(mem_ctx, 16);
-			sess_crypt_blob(&out, &in, &session_key, true);
+			out = data_blob_talloc_zero(frame, 16);
+			rc = sess_crypt_blob(&out, &in, &session_key, SAMBA_GNUTLS_ENCRYPT);
+			if (rc != 0) {
+				status = gnutls_error_to_ntstatus(rc,
+								  NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+			}
 			info.info21.lm_owf_password.array =
-				(uint16_t *)talloc_memdup(mem_ctx, out.data, 16);
+				(uint16_t *)talloc_memdup(frame, out.data, 16);
+			if (out.data == NULL) {
+				status = NT_STATUS_NO_MEMORY;
+				goto done;
+			}
 		}
 
 		break;
@@ -3165,7 +3300,7 @@ static NTSTATUS cmd_samr_setuserinfo_int(struct rpc_pipe_client *cli,
 
 	/* Get sam policy handle */
 
-	status = rpccli_try_samr_connects(cli, mem_ctx,
+	status = rpccli_try_samr_connects(cli, frame,
 					  MAXIMUM_ALLOWED_ACCESS,
 					  &connect_pol);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -3174,7 +3309,7 @@ static NTSTATUS cmd_samr_setuserinfo_int(struct rpc_pipe_client *cli,
 
 	/* Get domain policy handle */
 
-	status = dcerpc_samr_OpenDomain(b, mem_ctx,
+	status = dcerpc_samr_OpenDomain(b, frame,
 					&connect_pol,
 					access_mask,
 					&domain_sid,
@@ -3190,7 +3325,7 @@ static NTSTATUS cmd_samr_setuserinfo_int(struct rpc_pipe_client *cli,
 
 	user_rid = strtol(user, NULL, 0);
 	if (user_rid) {
-		status = dcerpc_samr_OpenUser(b, mem_ctx,
+		status = dcerpc_samr_OpenUser(b, frame,
 					      &domain_pol,
 					      access_mask,
 					      user_rid,
@@ -3212,7 +3347,7 @@ static NTSTATUS cmd_samr_setuserinfo_int(struct rpc_pipe_client *cli,
 
 		init_lsa_String(&lsa_acct_name, user);
 
-		status = dcerpc_samr_LookupNames(b, mem_ctx,
+		status = dcerpc_samr_LookupNames(b, frame,
 						 &domain_pol,
 						 1,
 						 &lsa_acct_name,
@@ -3232,7 +3367,7 @@ static NTSTATUS cmd_samr_setuserinfo_int(struct rpc_pipe_client *cli,
 			return NT_STATUS_INVALID_NETWORK_RESPONSE;
 		}
 
-		status = dcerpc_samr_OpenUser(b, mem_ctx,
+		status = dcerpc_samr_OpenUser(b, frame,
 					      &domain_pol,
 					      access_mask,
 					      rids.ids[0],
@@ -3248,14 +3383,14 @@ static NTSTATUS cmd_samr_setuserinfo_int(struct rpc_pipe_client *cli,
 
 	switch (opcode) {
 	case NDR_SAMR_SETUSERINFO:
-		status = dcerpc_samr_SetUserInfo(b, mem_ctx,
+		status = dcerpc_samr_SetUserInfo(b, frame,
 						 &user_pol,
 						 level,
 						 &info,
 						 &result);
 		break;
 	case NDR_SAMR_SETUSERINFO2:
-		status = dcerpc_samr_SetUserInfo2(b, mem_ctx,
+		status = dcerpc_samr_SetUserInfo2(b, frame,
 						  &user_pol,
 						  level,
 						  &info,
@@ -3273,7 +3408,10 @@ static NTSTATUS cmd_samr_setuserinfo_int(struct rpc_pipe_client *cli,
 		DEBUG(0,("result: %s\n", nt_errstr(status)));
 		goto done;
 	}
+
+	status = NT_STATUS_OK;
  done:
+	TALLOC_FREE(frame);
 	return status;
 }
 
@@ -3369,42 +3507,343 @@ static NTSTATUS cmd_samr_get_dispinfo_idx(struct rpc_pipe_client *cli,
 
 struct cmd_set samr_commands[] = {
 
-	{ "SAMR" },
+	{
+		.name = "SAMR",
+	},
 
-	{ "queryuser", 	RPC_RTYPE_NTSTATUS, cmd_samr_query_user, 		NULL, &ndr_table_samr, NULL,	"Query user info",         "" },
-	{ "querygroup", 	RPC_RTYPE_NTSTATUS, cmd_samr_query_group, 		NULL, &ndr_table_samr, NULL,	"Query group info",        "" },
-	{ "queryusergroups", 	RPC_RTYPE_NTSTATUS, cmd_samr_query_usergroups, 	NULL, &ndr_table_samr, NULL,	"Query user groups",       "" },
-	{ "queryuseraliases", 	RPC_RTYPE_NTSTATUS, cmd_samr_query_useraliases, 	NULL, &ndr_table_samr, NULL,	"Query user aliases",      "" },
-	{ "querygroupmem", 	RPC_RTYPE_NTSTATUS, cmd_samr_query_groupmem, 	NULL, &ndr_table_samr, NULL,	"Query group membership",  "" },
-	{ "queryaliasmem", 	RPC_RTYPE_NTSTATUS, cmd_samr_query_aliasmem, 	NULL, &ndr_table_samr, NULL,	"Query alias membership",  "" },
-	{ "queryaliasinfo", 	RPC_RTYPE_NTSTATUS, cmd_samr_query_aliasinfo, 	NULL, &ndr_table_samr, NULL,	"Query alias info",       "" },
-	{ "deletealias", 	RPC_RTYPE_NTSTATUS, cmd_samr_delete_alias, 	NULL, &ndr_table_samr, NULL,	"Delete an alias",  "" },
-	{ "querydispinfo", 	RPC_RTYPE_NTSTATUS, cmd_samr_query_dispinfo, 	NULL, &ndr_table_samr, NULL,	"Query display info",      "" },
-	{ "querydispinfo2", 	RPC_RTYPE_NTSTATUS, cmd_samr_query_dispinfo2, 	NULL, &ndr_table_samr, NULL,	"Query display info",      "" },
-	{ "querydispinfo3", 	RPC_RTYPE_NTSTATUS, cmd_samr_query_dispinfo3, 	NULL, &ndr_table_samr, NULL,	"Query display info",      "" },
-	{ "querydominfo", 	RPC_RTYPE_NTSTATUS, cmd_samr_query_dominfo, 	NULL, &ndr_table_samr, NULL,	"Query domain info",       "" },
-	{ "enumdomusers",       RPC_RTYPE_NTSTATUS, cmd_samr_enum_dom_users,       NULL, &ndr_table_samr, NULL,	"Enumerate domain users", "" },
-	{ "enumdomgroups",      RPC_RTYPE_NTSTATUS, cmd_samr_enum_dom_groups,       NULL, &ndr_table_samr, NULL,	"Enumerate domain groups", "" },
-	{ "enumalsgroups",      RPC_RTYPE_NTSTATUS, cmd_samr_enum_als_groups,       NULL, &ndr_table_samr, NULL,	"Enumerate alias groups",  "" },
-	{ "enumdomains",        RPC_RTYPE_NTSTATUS, cmd_samr_enum_domains,          NULL, &ndr_table_samr, NULL,	"Enumerate domains",  "" },
+	{
+		.name               = "queryuser",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_query_user,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Query user info",
+		.usage              = "",
+	},
+	{
+		.name               = "querygroup",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_query_group,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Query group info",
+		.usage              = "",
+	},
+	{
+		.name               = "queryusergroups",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_query_usergroups,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Query user groups",
+		.usage              = "",
+	},
+	{
+		.name               = "queryuseraliases",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_query_useraliases,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Query user aliases",
+		.usage              = "",
+	},
+	{
+		.name               = "querygroupmem",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_query_groupmem,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Query group membership",
+		.usage              = "",
+	},
+	{
+		.name               = "queryaliasmem",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_query_aliasmem,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Query alias membership",
+		.usage              = "",
+	},
+	{
+		.name               = "queryaliasinfo",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_query_aliasinfo,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Query alias info",
+		.usage              = "",
+	},
+	{
+		.name               = "deletealias",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_delete_alias,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Delete an alias",
+		.usage              = "",
+	},
+	{
+		.name               = "querydispinfo",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_query_dispinfo,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Query display info",
+		.usage              = "",
+	},
+	{
+		.name               = "querydispinfo2",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_query_dispinfo2,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Query display info",
+		.usage              = "",
+	},
+	{
+		.name               = "querydispinfo3",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_query_dispinfo3,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Query display info",
+		.usage              = "",
+	},
+	{
+		.name               = "querydominfo",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_query_dominfo,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Query domain info",
+		.usage              = "",
+	},
+	{
+		.name               = "enumdomusers",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_enum_dom_users,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Enumerate domain users",
+		.usage              = "",
+	},
+	{
+		.name               = "enumdomgroups",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_enum_dom_groups,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Enumerate domain groups",
+		.usage              = "",
+	},
+	{
+		.name               = "enumalsgroups",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_enum_als_groups,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Enumerate alias groups",
+		.usage              = "",
+	},
+	{
+		.name               = "enumdomains",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_enum_domains,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Enumerate domains",
+		.usage              = "",
+	},
 
-	{ "createdomuser",      RPC_RTYPE_NTSTATUS, cmd_samr_create_dom_user,       NULL, &ndr_table_samr, NULL,	"Create domain user",      "" },
-	{ "createdomgroup",     RPC_RTYPE_NTSTATUS, cmd_samr_create_dom_group,      NULL, &ndr_table_samr, NULL,	"Create domain group",     "" },
-	{ "createdomalias",     RPC_RTYPE_NTSTATUS, cmd_samr_create_dom_alias,      NULL, &ndr_table_samr, NULL,	"Create domain alias",     "" },
-	{ "samlookupnames",     RPC_RTYPE_NTSTATUS, cmd_samr_lookup_names,          NULL, &ndr_table_samr, NULL,	"Look up names",           "" },
-	{ "samlookuprids",      RPC_RTYPE_NTSTATUS, cmd_samr_lookup_rids,           NULL, &ndr_table_samr, NULL,	"Look up names",           "" },
-	{ "deletedomgroup",     RPC_RTYPE_NTSTATUS, cmd_samr_delete_dom_group,      NULL, &ndr_table_samr, NULL,	"Delete domain group",     "" },
-	{ "deletedomuser",      RPC_RTYPE_NTSTATUS, cmd_samr_delete_dom_user,       NULL, &ndr_table_samr, NULL,	"Delete domain user",      "" },
-	{ "samquerysecobj",     RPC_RTYPE_NTSTATUS, cmd_samr_query_sec_obj,         NULL, &ndr_table_samr, NULL, "Query SAMR security object",   "" },
-	{ "getdompwinfo",       RPC_RTYPE_NTSTATUS, cmd_samr_get_dom_pwinfo,        NULL, &ndr_table_samr, NULL, "Retrieve domain password info", "" },
-	{ "getusrdompwinfo",    RPC_RTYPE_NTSTATUS, cmd_samr_get_usrdom_pwinfo,     NULL, &ndr_table_samr, NULL, "Retrieve user domain password info", "" },
+	{
+		.name               = "createdomuser",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_create_dom_user,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Create domain user",
+		.usage              = "",
+	},
+	{
+		.name               = "createdomgroup",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_create_dom_group,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Create domain group",
+		.usage              = "",
+	},
+	{
+		.name               = "createdomalias",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_create_dom_alias,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Create domain alias",
+		.usage              = "",
+	},
+	{
+		.name               = "samlookupnames",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_lookup_names,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Look up names",
+		.usage              = "",
+	},
+	{
+		.name               = "samlookuprids",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_lookup_rids,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Look up names",
+		.usage              = "",
+	},
+	{
+		.name               = "deletedomgroup",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_delete_dom_group,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Delete domain group",
+		.usage              = "",
+	},
+	{
+		.name               = "deletedomuser",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_delete_dom_user,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Delete domain user",
+		.usage              = "",
+	},
+	{
+		.name               = "samquerysecobj",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_query_sec_obj,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Query SAMR security object",
+		.usage              = "",
+	},
+	{
+		.name               = "getdompwinfo",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_get_dom_pwinfo,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Retrieve domain password info",
+		.usage              = "",
+	},
+	{
+		.name               = "getusrdompwinfo",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_get_usrdom_pwinfo,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Retrieve user domain password info",
+		.usage              = "",
+	},
 
-	{ "lookupdomain",       RPC_RTYPE_NTSTATUS, cmd_samr_lookup_domain,         NULL, &ndr_table_samr, NULL, "Lookup Domain Name", "" },
-	{ "chgpasswd",          RPC_RTYPE_NTSTATUS, cmd_samr_chgpasswd,             NULL, &ndr_table_samr, NULL, "Change user password", "" },
-	{ "chgpasswd2",         RPC_RTYPE_NTSTATUS, cmd_samr_chgpasswd2,            NULL, &ndr_table_samr, NULL, "Change user password", "" },
-	{ "chgpasswd3",         RPC_RTYPE_NTSTATUS, cmd_samr_chgpasswd3,            NULL, &ndr_table_samr, NULL, "Change user password", "" },
-	{ "getdispinfoidx",     RPC_RTYPE_NTSTATUS, cmd_samr_get_dispinfo_idx,      NULL, &ndr_table_samr, NULL, "Get Display Information Index", "" },
-	{ "setuserinfo",        RPC_RTYPE_NTSTATUS, cmd_samr_setuserinfo,           NULL, &ndr_table_samr, NULL, "Set user info", "" },
-	{ "setuserinfo2",       RPC_RTYPE_NTSTATUS, cmd_samr_setuserinfo2,          NULL, &ndr_table_samr, NULL, "Set user info2", "" },
-	{ NULL }
+	{
+		.name               = "lookupdomain",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_lookup_domain,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Lookup Domain Name",
+		.usage              = "",
+	},
+	{
+		.name               = "chgpasswd",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_chgpasswd,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Change user password",
+		.usage              = "",
+	},
+	{
+		.name               = "chgpasswd2",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_chgpasswd2,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Change user password",
+		.usage              = "",
+	},
+	{
+		.name               = "chgpasswd3",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_chgpasswd3,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Change user password",
+		.usage              = "",
+	},
+	{
+		.name               = "getdispinfoidx",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_get_dispinfo_idx,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Get Display Information Index",
+		.usage              = "",
+	},
+	{
+		.name               = "setuserinfo",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_setuserinfo,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Set user info",
+		.usage              = "",
+	},
+	{
+		.name               = "setuserinfo2",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_samr_setuserinfo2,
+		.wfn                = NULL,
+		.table              = &ndr_table_samr,
+		.rpc_pipe           = NULL,
+		.description        = "Set user info2",
+		.usage              = "",
+	},
+	{
+		.name = NULL,
+	},
 };

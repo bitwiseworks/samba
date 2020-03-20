@@ -25,7 +25,23 @@
  *
  *  Component: ldb linked_attributes module
  *
- *  Description: Module to ensure linked attribute pairs remain in sync
+ *  Description: Module to ensure linked attribute pairs (i.e. forward-links
+ *  and backlinks) remain in sync.
+ *
+ *  Backlinks are 'plain' links (without extra metadata). When the link target
+ *  object is modified (e.g. renamed), we use the backlinks to keep the link
+ *  source object updated. Note there are some cases where we can't do this:
+ *    - one-way links, which don't have a corresponding backlink
+ *    - two-way deactivated links, i.e. when a user is removed from a group,
+ *      the forward 'member' link still exists (but is inactive), however, the
+ *      'memberOf' backlink is deleted.
+ *  In these cases, we can end up with a dangling forward link which is
+ *  incorrect (i.e. the target has been renamed or deleted). We have dbcheck
+ *  rules to detect and fix this, and cope otherwise by filtering at runtime
+ *  (i.e. in the extended_dn module).
+ *
+ *  See also repl_meta_data.c, which handles updating links for deleted
+ *  objects, as well as link changes received from another DC.
  *
  *  Author: Andrew Bartlett
  */
@@ -37,8 +53,15 @@
 #include "librpc/gen_ndr/ndr_misc.h"
 #include "dsdb/samdb/ldb_modules/util.h"
 
-struct la_private {
+
+struct la_private_transaction {
 	struct la_context *la_list;
+};
+
+
+struct la_private {
+	struct la_private_transaction *transaction;
+	bool sorted_links;
 };
 
 struct la_op_store {
@@ -635,7 +658,7 @@ static int linked_attributes_modify(struct ldb_module *module, struct ldb_reques
 		if (!attrs) {
 			return ldb_oom(ldb);
 		}
-		for (i = 0; ac->rc && i < ac->rc->num_elements; i++) {
+		for (i = 0; i < ac->rc->num_elements; i++) {
 			attrs[i] = ac->rc->el[i].name;
 		}
 		attrs[i] = NULL;
@@ -671,19 +694,276 @@ static int linked_attributes_modify(struct ldb_module *module, struct ldb_reques
 	return ret;
 }
 
+
+static int linked_attributes_fix_link_slow(struct ldb_module *module,
+					   struct ldb_request *parent,
+					   struct ldb_message *msg,
+					   struct ldb_dn *new_dn,
+					   struct GUID self_guid,
+					   const char *syntax_oid,
+					   const char *reverse_syntax_oid)
+{
+	int ret;
+	unsigned int i;
+	struct GUID link_guid;
+	struct ldb_message_element *el = &msg->elements[0];
+	struct ldb_context *ldb = ldb_module_get_ctx(module);
+	bool has_unique_value = strcmp(reverse_syntax_oid, LDB_SYNTAX_DN) == 0;
+	TALLOC_CTX *tmp_ctx = talloc_new(module);
+	if (tmp_ctx == NULL) {
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+	/*
+	 * The msg has one element (el) containing links of one particular
+	 * type from the remote object. We know that at least one of those
+	 * links points to the object being renamed (identified by self_guid,
+	 * renamed to new_dn). Usually only one of the links will point back
+	 * to renamed object, but there can be more when the reverse link is a
+	 * DN+Binary link.
+	 *
+	 * This is used for unsorted links, which is to say back links and
+	 * forward links on old databases. It necessarily involves a linear
+	 * search, though when the link is a plain DN link, we can skip
+	 * checking as soon as we find it.
+	 *
+	 * NOTE: if there are duplicate links, the extra ones will end up as
+	 * dangling links to the old DN. This may or may not be worse than
+	 * leaving them as duplicate links.
+	 */
+	for (i = 0; i < el->num_values; i++) {
+		struct dsdb_dn *dsdb_dn = dsdb_dn_parse(msg,
+							ldb,
+							&el->values[i],
+							syntax_oid);
+		if (dsdb_dn == NULL) {
+			talloc_free(tmp_ctx);
+			return LDB_ERR_INVALID_DN_SYNTAX;
+		}
+
+		ret = la_guid_from_dn(module, parent, dsdb_dn->dn, &link_guid);
+		if (ret != LDB_SUCCESS) {
+			talloc_free(tmp_ctx);
+			return ret;
+		}
+
+		/*
+		 * By comparing using the GUID we ensure that even if somehow
+		 * the name has got out of sync, this rename will fix it.
+		 *
+		 * If somehow we don't have a GUID on the DN in the DB, the
+		 * la_guid_from_dn call will be more costly, but still give us
+		 * a GUID. dbcheck will fix this if run.
+		 */
+		if (!GUID_equal(&self_guid, &link_guid)) {
+			continue;
+		}
+
+		ret = ldb_dn_update_components(dsdb_dn->dn, new_dn);
+		if (ret != LDB_SUCCESS) {
+			talloc_free(tmp_ctx);
+			return ret;
+		}
+
+		el->values[i] = data_blob_string_const(
+			dsdb_dn_get_extended_linearized(el->values, dsdb_dn, 1));
+		if (has_unique_value) {
+			break;
+		}
+	}
+
+	talloc_free(tmp_ctx);
+	return LDB_SUCCESS;
+}
+
+
+static int linked_attributes_fix_forward_link(struct ldb_module *module,
+					      struct ldb_message *msg,
+					      struct ldb_dn *new_dn,
+					      struct GUID self_guid,
+					      const char *syntax_oid)
+{
+	int ret;
+	struct ldb_context *ldb = ldb_module_get_ctx(module);
+	struct parsed_dn *pdn_list = NULL;
+	struct parsed_dn *exact = NULL;
+	struct parsed_dn *next = NULL;
+	bool is_plain_dn;
+	struct ldb_message_element *el = &msg->elements[0];
+	unsigned int num_parsed_dns = el->num_values;
+
+	TALLOC_CTX *tmp_ctx = talloc_new(module);
+	if (tmp_ctx == NULL) {
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+
+	/*
+	 * The msg has a single element (el) containing forward links which we
+	 * trust are sorted in GUID order. We know that at least one of those
+	 * links points to the object being renamed (identified by self_guid,
+	 * renamed to new_dn), because that object has a backlink pointing
+	 * here.
+	 *
+	 * In most cases we assume there will only be one forward link, which
+	 * is found by parsed_dn_find(), but in the case of DN+Binary links
+	 * (e.g. msDS-RevealedUsers) there may be many forward links that
+	 * share the same DN/GUID but differ in the binary part. For those we
+	 * need to look around the link found by parsed_dn_find() and convert
+	 * them all -- there is no way to know which forward link belongs to
+	 * which backlink.
+	 */
+
+	ret = get_parsed_dns_trusted(tmp_ctx, el, &pdn_list);
+	if (ret != LDB_SUCCESS) {
+		ldb_asprintf_errstring(ldb, "get_parsed_dn_trusted() "
+				       "error fixing %s links for %s",
+				       el->name,
+				       ldb_dn_get_linearized(msg->dn));
+		talloc_free(tmp_ctx);
+		return ret;
+	}
+
+	/* find our DN in the values */
+	ret = parsed_dn_find(ldb, pdn_list, num_parsed_dns,
+			     &self_guid,
+			     NULL,
+			     data_blob_null, 0,
+			     &exact, &next,
+			     syntax_oid,
+			     false);
+
+	if (ret != LDB_SUCCESS) {
+		ldb_asprintf_errstring(ldb, "parsed_dn_find() "
+				       "error fixing %s links for %s",
+				       el->name,
+				       ldb_dn_get_linearized(msg->dn));
+		talloc_free(tmp_ctx);
+		return ret;
+	}
+
+	if (exact == NULL) {
+		ldb_asprintf_errstring(
+			ldb,
+			"parsed_dn_find could not find %s link for %s",
+			el->name,
+			ldb_dn_get_linearized(msg->dn));
+		talloc_free(tmp_ctx);
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+
+	is_plain_dn = strcmp(syntax_oid, LDB_SYNTAX_DN) == 0;
+
+	if (is_plain_dn) {
+		/*
+		 *  The common case -- we only have to update a single link
+		 */
+		ret = ldb_dn_update_components(exact->dsdb_dn->dn, new_dn);
+		if (ret != LDB_SUCCESS) {
+			DBG_ERR("could not update components  %s  %s\n",
+				ldb_dn_get_linearized(exact->dsdb_dn->dn),
+				ldb_dn_get_linearized(new_dn)
+				);
+
+			talloc_free(tmp_ctx);
+			return ret;
+		}
+		*(exact->v) = data_blob_string_const(
+				dsdb_dn_get_extended_linearized(el->values,
+								exact->dsdb_dn,
+								1));
+	} else {
+		/*
+		 * The forward link is a DN+Binary (or in some alternate
+		 * universes, DN+String), which means the parsed_dns are keyed
+		 * on GUID+Binary. We don't know the binary part, which means
+		 * from our point of view the list can have entries with
+		 * duplicate GUIDs that we can't tell apart. We don't know
+		 * which backlink belongs to which GUID+binary, and the binary
+		 * search will always find the same one. That means one link
+		 * link will get fixed n times, whil n-1 links get fixed
+		 * never.
+		 *
+		 * If we instead fixing all the possible links, we end up
+		 * fixing n links n times, which at least works and is
+		 * probably not too costly because n is probably small.
+		 */
+		struct parsed_dn *first = exact;
+		struct parsed_dn *last = exact;
+		struct parsed_dn *p = NULL;
+		int cmp;
+		while (first > pdn_list) {
+			p = first - 1;
+			if (p->dsdb_dn == NULL) {
+				ret = really_parse_trusted_dn(tmp_ctx,
+							      ldb, p,
+							      syntax_oid);
+				if (ret != LDB_SUCCESS) {
+					talloc_free(tmp_ctx);
+					return ret;
+				}
+			}
+			cmp = ndr_guid_compare(&exact->guid, &p->guid);
+			if (cmp != 0) {
+				break;
+			}
+			first = p;
+		}
+
+		while (last < pdn_list + num_parsed_dns - 1) {
+			p = last + 1;
+			if (p->dsdb_dn == NULL) {
+				ret = really_parse_trusted_dn(tmp_ctx,
+							      ldb, p,
+							      syntax_oid);
+				if (ret != LDB_SUCCESS) {
+					talloc_free(tmp_ctx);
+					return ret;
+				}
+			}
+			cmp = ndr_guid_compare(&exact->guid, &p->guid);
+			if (cmp != 0) {
+				break;
+			}
+			last = p;
+		}
+
+		for (p = first; p <= last; p++) {
+			ret = ldb_dn_update_components(p->dsdb_dn->dn, new_dn);
+			if (ret != LDB_SUCCESS) {
+				DBG_ERR("could not update components  %s  %s\n",
+					ldb_dn_get_linearized(p->dsdb_dn->dn),
+					ldb_dn_get_linearized(new_dn)
+					);
+				talloc_free(tmp_ctx);
+				return ret;
+			}
+			*(p->v) = data_blob_string_const(
+				   dsdb_dn_get_extended_linearized(el->values,
+								   p->dsdb_dn,
+								   1));
+		}
+	}
+
+	talloc_free(tmp_ctx);
+	return LDB_SUCCESS;
+}
+
+
 static int linked_attributes_fix_links(struct ldb_module *module,
 				       struct GUID self_guid,
-				       struct ldb_dn *old_dn, struct ldb_dn *new_dn,
-				       struct ldb_message_element *el, struct dsdb_schema *schema,
+				       struct ldb_dn *old_dn,
+				       struct ldb_dn *new_dn,
+				       struct ldb_message_element *el,
+				       struct dsdb_schema *schema,
 				       const struct dsdb_attribute *schema_attr,
 				       struct ldb_request *parent)
 {
-	unsigned int i, j;
-	TALLOC_CTX *tmp_ctx = talloc_new(module);
+	unsigned int i;
+	TALLOC_CTX *tmp_ctx = NULL;
 	struct ldb_context *ldb = ldb_module_get_ctx(module);
-	const struct dsdb_attribute *target;
+	const struct dsdb_attribute *target = NULL;
 	const char *attrs[2];
 	int ret;
+	struct la_private *la_private = NULL;
 
 	target = dsdb_attribute_by_linkID(schema, schema_attr->linkID ^ 1);
 	if (target == NULL) {
@@ -691,17 +971,31 @@ static int linked_attributes_fix_links(struct ldb_module *module,
 		return LDB_SUCCESS;
 	}
 
+	tmp_ctx = talloc_new(module);
+	if (tmp_ctx == NULL) {
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+
+	la_private = talloc_get_type(ldb_module_get_private(module),
+				     struct la_private);
+	if (la_private == NULL) {
+		talloc_free(tmp_ctx);
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+
 	attrs[0] = target->lDAPDisplayName;
 	attrs[1] = NULL;
 
 	for (i=0; i<el->num_values; i++) {
-		struct dsdb_dn *dsdb_dn;
-		struct ldb_result *res;
-		struct ldb_message *msg;
-		struct ldb_message_element *el2;
+		struct dsdb_dn *dsdb_dn = NULL;
+		struct ldb_result *res = NULL;
+		struct ldb_message *msg  = NULL;
+		struct ldb_message_element *el2 = NULL;
 		struct GUID link_guid;
+		char *link_guid_str = NULL;
 
-		dsdb_dn = dsdb_dn_parse(tmp_ctx, ldb, &el->values[i], schema_attr->syntax->ldap_oid);
+		dsdb_dn = dsdb_dn_parse(tmp_ctx, ldb, &el->values[i],
+					schema_attr->syntax->ldap_oid);
 		if (dsdb_dn == NULL) {
 			talloc_free(tmp_ctx);
 			return LDB_ERR_INVALID_DN_SYNTAX;
@@ -718,11 +1012,18 @@ static int linked_attributes_fix_links(struct ldb_module *module,
 			return ret;
 		}
 
+		link_guid_str = GUID_string(tmp_ctx, &link_guid);
+		if (link_guid_str == NULL) {
+			talloc_free(tmp_ctx);
+			return LDB_ERR_OPERATIONS_ERROR;
+		}
+
 		/*
 		 * get the existing message from the db for the object with
 		 * this GUID, returning attribute being modified. We will then
 		 * use this msg as the basis for a modify call
 		 */
+
 		ret = dsdb_module_search(module, tmp_ctx, &res, NULL, LDB_SCOPE_SUBTREE, attrs,
 					 DSDB_FLAG_NEXT_MODULE |
 					 DSDB_SEARCH_SEARCH_ALL_PARTITIONS |
@@ -730,13 +1031,13 @@ static int linked_attributes_fix_links(struct ldb_module *module,
 					 DSDB_SEARCH_SHOW_DN_IN_STORAGE_FORMAT |
 					 DSDB_SEARCH_REVEAL_INTERNALS,
 					 parent,
-					 "objectGUID=%s", GUID_string(tmp_ctx, &link_guid));
+					 "objectGUID=%s", link_guid_str);
 		if (ret != LDB_SUCCESS) {
 			ldb_asprintf_errstring(ldb, "Linked attribute %s->%s between %s and %s - target GUID %s not found - %s",
 					       el->name, target->lDAPDisplayName,
 					       ldb_dn_get_linearized(old_dn),
 					       ldb_dn_get_linearized(dsdb_dn->dn),
-					       GUID_string(tmp_ctx, &link_guid),
+					       link_guid_str,
 					       ldb_errstring(ldb));
 			talloc_free(tmp_ctx);
 			return ret;
@@ -750,7 +1051,7 @@ static int linked_attributes_fix_links(struct ldb_module *module,
 					       el->name, target->lDAPDisplayName,
 					       ldb_dn_get_linearized(old_dn),
 					       ldb_dn_get_linearized(dsdb_dn->dn),
-					       GUID_string(tmp_ctx, &link_guid));
+					       link_guid_str);
 			talloc_free(tmp_ctx);
 			return LDB_ERR_OPERATIONS_ERROR;
 		}
@@ -775,47 +1076,27 @@ static int linked_attributes_fix_links(struct ldb_module *module,
 
 		el2->flags = LDB_FLAG_MOD_REPLACE;
 
-		/* find our DN in the values */
-		for (j=0; j<el2->num_values; j++) {
-			struct dsdb_dn *dsdb_dn2;
-			struct GUID link_guid2;
-
-			dsdb_dn2 = dsdb_dn_parse(msg, ldb, &el2->values[j], target->syntax->ldap_oid);
-			if (dsdb_dn2 == NULL) {
-				talloc_free(tmp_ctx);
-				return LDB_ERR_INVALID_DN_SYNTAX;
-			}
-
-			ret = la_guid_from_dn(module, parent, dsdb_dn2->dn, &link_guid2);
-			if (ret != LDB_SUCCESS) {
-				talloc_free(tmp_ctx);
-				return ret;
-			}
-
-			/*
-			 * By comparing using the GUID we ensure that
-			 * even if somehow the name has got out of
-			 * sync, this rename will fix it.
-			 *
-			 * If somehow we don't have a GUID on the DN
-			 * in the DB, the la_guid_from_dn call will be
-			 * more costly, but still give us a GUID.
-			 * dbcheck will fix this if run.
-			 */
-			if (!GUID_equal(&self_guid, &link_guid2)) {
-				continue;
-			}
-
-			ret = ldb_dn_update_components(dsdb_dn2->dn, new_dn);
-			if (ret != LDB_SUCCESS) {
-				talloc_free(tmp_ctx);
-				return ret;
-			}
-
-			el2->values[j] = data_blob_string_const(
-				dsdb_dn_get_extended_linearized(el2->values, dsdb_dn2, 1));
+		if (target->linkID & 1 ||
+			! la_private->sorted_links) {
+			/* handle backlinks (which aren't sorted in the DB)
+			   and forward links in old unsorted databases. */
+			ret = linked_attributes_fix_link_slow(
+				module,
+				parent,
+				msg,
+				new_dn,
+				self_guid,
+				target->syntax->ldap_oid,
+				schema_attr->syntax->ldap_oid);
+		} else {
+			/* we can binary search to find forward links */
+			ret = linked_attributes_fix_forward_link(
+				module,
+				msg,
+				new_dn,
+				self_guid,
+				target->syntax->ldap_oid);
 		}
-
 		ret = dsdb_check_single_valued_link(target, el2);
 		if (ret != LDB_SUCCESS) {
 			talloc_free(tmp_ctx);
@@ -907,15 +1188,18 @@ static int linked_attributes_rename(struct ldb_module *module, struct ldb_reques
 static int la_queue_mod_request(struct la_context *ac)
 {
 	struct la_private *la_private =
-		talloc_get_type(ldb_module_get_private(ac->module), struct la_private);
+		talloc_get_type(ldb_module_get_private(ac->module),
+				struct la_private);
 
-	if (la_private == NULL) {
-		ldb_debug(ldb_module_get_ctx(ac->module), LDB_DEBUG_ERROR, __location__ ": No la_private transaction setup\n");
+	if (la_private == NULL || la_private->transaction == NULL) {
+		ldb_debug(ldb_module_get_ctx(ac->module),
+			  LDB_DEBUG_ERROR,
+			  __location__ ": No la_private transaction setup\n");
 		return ldb_operr(ldb_module_get_ctx(ac->module));
 	}
 
-	talloc_steal(la_private, ac);
-	DLIST_ADD(la_private->la_list, ac);
+	talloc_steal(la_private->transaction, ac);
+	DLIST_ADD(la_private->transaction->la_list, ac);
 
 	return ldb_module_done(ac->req, ac->op_controls,
 			       ac->op_response, LDB_SUCCESS);
@@ -942,7 +1226,7 @@ static int la_mod_del_callback(struct ldb_request *req, struct ldb_reply *ares)
 
 	if (ares->type != LDB_REPLY_DONE) {
 		ldb_set_errstring(ldb,
-				  "invalid ldb_reply_type in callback");
+		     "invalid reply type in linked attributes delete callback");
 		talloc_free(ares);
 		return ldb_module_done(ac->req, NULL, NULL,
 					LDB_ERR_OPERATIONS_ERROR);
@@ -988,7 +1272,7 @@ static int la_add_callback(struct ldb_request *req, struct ldb_reply *ares)
 
 	if (ares->type != LDB_REPLY_DONE) {
 		ldb_set_errstring(ldb,
-				  "invalid ldb_reply_type in callback");
+			"invalid reply type in linked attributes add callback");
 		talloc_free(ares);
 		return ldb_module_done(ac->req, NULL, NULL,
 					LDB_ERR_OPERATIONS_ERROR);
@@ -1180,15 +1464,19 @@ static int la_do_mod_request(struct ldb_module *module, struct la_context *ac)
 static int linked_attributes_start_transaction(struct ldb_module *module)
 {
 	/* create our private structure for this transaction */
-	struct la_private *la_private = talloc_get_type(ldb_module_get_private(module),
-							struct la_private);
-	talloc_free(la_private);
-	la_private = talloc(module, struct la_private);
+	struct la_private *la_private =
+		talloc_get_type(ldb_module_get_private(module),
+				struct la_private);
+
 	if (la_private == NULL) {
 		return ldb_oom(ldb_module_get_ctx(module));
 	}
-	la_private->la_list = NULL;
-	ldb_module_set_private(module, la_private);
+	talloc_free(la_private->transaction);
+	la_private->transaction = talloc(module, struct la_private_transaction);
+	if (la_private->transaction == NULL) {
+		return ldb_oom(ldb_module_get_ctx(module));
+	}
+	la_private->transaction->la_list = NULL;
 	return ldb_next_start_trans(module);
 }
 
@@ -1198,12 +1486,14 @@ static int linked_attributes_start_transaction(struct ldb_module *module)
  */
 static int linked_attributes_prepare_commit(struct ldb_module *module)
 {
-	struct la_private *la_private =
-		talloc_get_type(ldb_module_get_private(module), struct la_private);
 	struct la_context *ac;
-
-	if (!la_private) {
-		/* prepare commit without begin_transaction - let someone else return the error, just don't segfault */
+	struct la_private *la_private =
+		talloc_get_type(ldb_module_get_private(module),
+				struct la_private);
+	if (la_private == NULL || la_private->transaction == NULL) {
+		DBG_ERR("prepare_commit without begin_transaction\n");
+		/* prepare commit without begin_transaction - let someone else
+		 * return the error, just don't segfault */
 		return ldb_next_prepare_commit(module);
 	}
 	/* walk the list backwards, to do the first entry first, as we
@@ -1213,7 +1503,7 @@ static int linked_attributes_prepare_commit(struct ldb_module *module)
 	/* Start at the end of the list - so we can start
 	 * there, but ensure we don't create a loop by NULLing
 	 * it out in the first element */
-	ac = DLIST_TAIL(la_private->la_list);
+	ac = DLIST_TAIL(la_private->transaction->la_list);
 
 	for (; ac; ac=DLIST_PREV(ac)) {
 		int ret;
@@ -1221,14 +1511,12 @@ static int linked_attributes_prepare_commit(struct ldb_module *module)
 		ret = la_do_mod_request(module, ac);
 		if (ret != LDB_SUCCESS) {
 			DEBUG(0,(__location__ ": Failed mod request ret=%d\n", ret));
-			talloc_free(la_private);
-			ldb_module_set_private(module, NULL);
+			TALLOC_FREE(la_private->transaction);
 			return ret;
 		}
 	}
 
-	talloc_free(la_private);
-	ldb_module_set_private(module, NULL);
+	TALLOC_FREE(la_private->transaction);
 
 	return ldb_next_prepare_commit(module);
 }
@@ -1236,15 +1524,17 @@ static int linked_attributes_prepare_commit(struct ldb_module *module)
 static int linked_attributes_del_transaction(struct ldb_module *module)
 {
 	struct la_private *la_private =
-		talloc_get_type(ldb_module_get_private(module), struct la_private);
-	talloc_free(la_private);
-	ldb_module_set_private(module, NULL);
+		talloc_get_type(ldb_module_get_private(module),
+				struct la_private);
+	TALLOC_FREE(la_private->transaction);
 	return ldb_next_del_trans(module);
 }
 
 static int linked_attributes_ldb_init(struct ldb_module *module)
 {
 	int ret;
+	struct la_private *la_private = NULL;
+	struct ldb_context *ldb = ldb_module_get_ctx(module);
 
 	ret = ldb_mod_register_control(module, LDB_CONTROL_VERIFY_NAME_OID);
 	if (ret != LDB_SUCCESS) {
@@ -1253,6 +1543,21 @@ static int linked_attributes_ldb_init(struct ldb_module *module)
 		return ldb_operr(ldb_module_get_ctx(module));
 	}
 
+	la_private = talloc_zero(module, struct la_private);
+	if (la_private == NULL) {
+		ldb_oom(ldb);
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+
+	ret = dsdb_check_samba_compatible_feature(module,
+						  SAMBA_SORTED_LINKS_FEATURE,
+						  &la_private->sorted_links);
+	if (ret != LDB_SUCCESS) {
+		talloc_free(la_private);
+		return ret;
+	}
+
+	ldb_module_set_private(module, la_private);
 	return ldb_next_init(module);
 }
 

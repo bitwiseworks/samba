@@ -28,6 +28,7 @@
 #include "auth/credentials/pycredentials.h"
 #include "libcli/util/pyerrors.h"
 #include "python/py3compat.h"
+#include "python/modules.h"
 
 /* A Python C API module to use LIBGPO */
 
@@ -38,7 +39,7 @@ static PyObject* GPO_get_##ATTR(PyObject *self, void *closure) \
 		= pytalloc_get_ptr(self); \
 	\
 	if (gpo_ptr->ATTR) \
-		return PyStr_FromString(gpo_ptr->ATTR); \
+		return PyUnicode_FromString(gpo_ptr->ATTR); \
 	else \
 		return Py_None; \
 }
@@ -74,24 +75,23 @@ static PyObject *py_gpo_get_unix_path(PyObject *self, PyObject *args,
 {
 	NTSTATUS status;
 	const char *cache_dir = NULL;
-	PyObject *ret = Py_None;
+	PyObject *ret = NULL;
 	char *unix_path = NULL;
 	TALLOC_CTX *frame = NULL;
 	static const char *kwlist[] = {"cache_dir", NULL};
 	struct GROUP_POLICY_OBJECT *gpo_ptr \
 		= (struct GROUP_POLICY_OBJECT *)pytalloc_get_ptr(self);
 
+	frame = talloc_stackframe();
+
 	if (!PyArg_ParseTupleAndKeywords(args, kwds, "|s",
 					 discard_const_p(char *, kwlist),
 					 &cache_dir)) {
-		PyErr_SetString(PyExc_SystemError,
-				"Failed to parse arguments to "
-				"gpo_get_unix_path()");
 		goto out;
 	}
 
 	if (!cache_dir) {
-		cache_dir = cache_path(GPO_CACHE_DIR);
+		cache_dir = cache_path(talloc_tos(), GPO_CACHE_DIR);
 		if (!cache_dir) {
 			PyErr_SetString(PyExc_MemoryError,
 					"Failed to determine gpo cache dir");
@@ -99,26 +99,26 @@ static PyObject *py_gpo_get_unix_path(PyObject *self, PyObject *args,
 		}
 	}
 
-	frame = talloc_stackframe();
-
 	status = gpo_get_unix_path(frame, cache_dir, gpo_ptr, &unix_path);
 
-	TALLOC_FREE(frame);
-
 	if (!NT_STATUS_IS_OK(status)) {
-		PyErr_SetString(PyExc_SystemError,
-				"Failed to determine gpo unix path");
+		PyErr_Format(PyExc_RuntimeError,
+				"Failed to determine gpo unix path: %s",
+				get_friendly_nt_error_msg(status));
 		goto out;
 	}
 
-	ret = PyStr_FromString(unix_path);
+	ret = PyUnicode_FromString(unix_path);
 
 out:
+	TALLOC_FREE(frame);
 	return ret;
 }
 
 static PyMethodDef GPO_methods[] = {
-	{"get_unix_path", (PyCFunction)py_gpo_get_unix_path, METH_KEYWORDS,
+	{"get_unix_path", PY_DISCARD_FUNC_SIG(PyCFunction,
+					      py_gpo_get_unix_path),
+		METH_VARARGS | METH_KEYWORDS,
 		NULL },
 	{NULL}
 };
@@ -135,31 +135,27 @@ static PyTypeObject GPOType = {
 typedef struct {
 	PyObject_HEAD
 	ADS_STRUCT *ads_ptr;
+	PyObject *py_creds;
 	struct cli_credentials *cli_creds;
 } ADS;
 
 static void py_ads_dealloc(ADS* self)
 {
 	ads_destroy(&(self->ads_ptr));
+	Py_CLEAR(self->py_creds);
 	Py_TYPE(self)->tp_free((PyObject*)self);
 }
 
-static PyObject* py_ads_new(PyTypeObject *type, PyObject *args, PyObject *kwds)
-{
-	ADS *self;
-	self = (ADS*)type->tp_alloc(type, 0);
-	return (PyObject*)self;
-}
-
-static PyObject* py_ads_connect(ADS *self);
+static PyObject* py_ads_connect(ADS *self, PyObject *Py_UNUSED(ignored));
 static int py_ads_init(ADS *self, PyObject *args, PyObject *kwds)
 {
 	const char *realm = NULL;
 	const char *workgroup = NULL;
 	const char *ldap_server = NULL;
-	PyObject *py_creds = NULL;
 	PyObject *lp_obj = NULL;
+	PyObject *py_creds = NULL;
 	struct loadparm_context *lp_ctx = NULL;
+	bool ok = false;
 
 	static const char *kwlist[] = {
 		"ldap_server", "loadparm_context", "credentials", NULL
@@ -169,36 +165,35 @@ static int py_ads_init(ADS *self, PyObject *args, PyObject *kwds)
 					 &ldap_server, &lp_obj, &py_creds)) {
 		return -1;
 	}
+	/* keep reference to the credentials. Clear any earlier ones */
+	Py_CLEAR(self->py_creds);
+	self->cli_creds = NULL;
+	self->py_creds = py_creds;
+	Py_XINCREF(self->py_creds);
 
-	if (py_creds) {
-		if (!py_check_dcerpc_type(py_creds, "samba.credentials",
-					  "Credentials")) {
-			PyErr_Format(PyExc_TypeError,
-				     "Expected samba.credentials "
-				     "for credentials argument");
+	if (self->py_creds) {
+		ok = py_check_dcerpc_type(self->py_creds, "samba.credentials",
+					  "Credentials");
+		if (!ok) {
 			return -1;
 		}
 		self->cli_creds
-			= PyCredentials_AsCliCredentials(py_creds);
+			= PyCredentials_AsCliCredentials(self->py_creds);
 	}
 
-	if (lp_obj) {
-		bool ok = py_check_dcerpc_type(lp_obj, "samba.param",
-					       "LoadParm");
-		if (!ok) {
-			PyErr_Format(PyExc_TypeError,
-				     "Expected samba.param.LoadParm "
-				     "for lp argument");
-			return -1;
-		}
-		lp_ctx = pytalloc_get_type(lp_obj, struct loadparm_context);
-		if (lp_ctx == NULL) {
-			return -1;
-		}
-		ok = lp_load_initial_only(lp_ctx->szConfigFile);
-		if (!ok) {
-			return -1;
-		}
+	ok = py_check_dcerpc_type(lp_obj, "samba.param", "LoadParm");
+	if (!ok) {
+		return -1;
+	}
+	lp_ctx = pytalloc_get_type(lp_obj, struct loadparm_context);
+	if (lp_ctx == NULL) {
+		return -1;
+	}
+	ok = lp_load_initial_only(lp_ctx->szConfigFile);
+	if (!ok) {
+		PyErr_Format(PyExc_RuntimeError, "Could not load config file '%s'",
+				lp_ctx->szConfigFile);
+		return -1;
 	}
 
 	if (self->cli_creds) {
@@ -209,88 +204,86 @@ static int py_ads_init(ADS *self, PyObject *args, PyObject *kwds)
 		workgroup = lp_workgroup();
 	}
 
-	if (ldap_server == NULL) {
-		return -1;
+	/* in case __init__ is called more than once */
+	if (self->ads_ptr) {
+		ads_destroy(&self->ads_ptr);
+		self->ads_ptr = NULL;
 	}
-
-	self->ads_ptr = ads_init(realm, workgroup, ldap_server);
-	if (self->ads_ptr == NULL) {
-		return -1;
-	}
-
+	/* always succeeds or crashes */
+	self->ads_ptr = ads_init(realm, workgroup, ldap_server, ADS_SASL_PLAIN);
+	
 	return 0;
 }
 
-static PyObject* py_ads_connect(ADS *self)
+/* connect.  Failure to connect results in an Exception */
+static PyObject* py_ads_connect(ADS *self,
+		PyObject *Py_UNUSED(ignored))
 {
 	ADS_STATUS status;
 	TALLOC_CTX *frame = talloc_stackframe();
+	if (!self->ads_ptr) {
+		PyErr_SetString(PyExc_RuntimeError, "Uninitialized");
+		return NULL;
+	}
+	SAFE_FREE(self->ads_ptr->auth.user_name);
+	SAFE_FREE(self->ads_ptr->auth.password);
+	SAFE_FREE(self->ads_ptr->auth.realm);
 	if (self->cli_creds) {
 		self->ads_ptr->auth.user_name =
 			SMB_STRDUP(cli_credentials_get_username(self->cli_creds));
-		self->ads_ptr->auth.flags |= ADS_AUTH_USER_CREDS;
 		self->ads_ptr->auth.password =
 			SMB_STRDUP(cli_credentials_get_password(self->cli_creds));
 		self->ads_ptr->auth.realm =
 			SMB_STRDUP(cli_credentials_get_realm(self->cli_creds));
-
+		self->ads_ptr->auth.flags |= ADS_AUTH_USER_CREDS;
 		status = ads_connect_user_creds(self->ads_ptr);
-		if (!ADS_ERR_OK(status)) {
-			PyErr_SetString(PyExc_SystemError,
-					"ads_connect() failed");
-			TALLOC_FREE(frame);
-			Py_RETURN_FALSE;
-		}
 	} else {
 		char *passwd = NULL;
-		int ret = asprintf(&(self->ads_ptr->auth.user_name), "%s$",
-				   lp_netbios_name());
-		if (ret == -1) {
-			PyErr_SetString(PyExc_SystemError,
-					"Failed to asprintf");
-			TALLOC_FREE(frame);
-			Py_RETURN_FALSE;
-		} else {
-			self->ads_ptr->auth.flags |= ADS_AUTH_USER_CREDS;
-		}
-
+		int ret;
 		if (!secrets_init()) {
-			PyErr_SetString(PyExc_SystemError,
+			PyErr_SetString(PyExc_RuntimeError,
 					"secrets_init() failed");
-			TALLOC_FREE(frame);
-			Py_RETURN_FALSE;
+			goto err;
 		}
 
 		passwd = secrets_fetch_machine_password(self->ads_ptr->server.workgroup,
 							NULL, NULL);
 		if (passwd == NULL) {
-			PyErr_SetString(PyExc_SystemError,
+			PyErr_SetString(PyExc_RuntimeError,
 					"Failed to fetch the machine account "
 					"password");
-			TALLOC_FREE(frame);
-			Py_RETURN_FALSE;
+			goto err;
 		}
-		self->ads_ptr->auth.password = smb_xstrdup(passwd);
-		SAFE_FREE(passwd);
+		ret = asprintf(&(self->ads_ptr->auth.user_name), "%s$",
+				   lp_netbios_name());
+		if (ret == -1) {
+			SAFE_FREE(passwd);
+			PyErr_NoMemory();
+			goto err;
+		}
+		self->ads_ptr->auth.password = passwd; /* take ownership of this data */
 		self->ads_ptr->auth.realm =
-			smb_xstrdup(self->ads_ptr->server.realm);
+			SMB_STRDUP(self->ads_ptr->server.realm);
 		if (!strupper_m(self->ads_ptr->auth.realm)) {
-			PyErr_SetString(PyExc_SystemError, "Failed to strdup");
-			TALLOC_FREE(frame);
-			Py_RETURN_FALSE;
+			PyErr_SetString(PyExc_RuntimeError, "Failed to strupper");
+			goto err;
 		}
-
+		self->ads_ptr->auth.flags |= ADS_AUTH_USER_CREDS;
 		status = ads_connect(self->ads_ptr);
-		if (!ADS_ERR_OK(status)) {
-			PyErr_SetString(PyExc_SystemError,
-					"ads_connect() failed");
-			TALLOC_FREE(frame);
-			Py_RETURN_FALSE;
-		}
+	}
+	if (!ADS_ERR_OK(status)) {
+		PyErr_Format(PyExc_RuntimeError,
+				"ads_connect() failed: %s",
+				ads_errstr(status));
+		goto err;
 	}
 
 	TALLOC_FREE(frame);
 	Py_RETURN_TRUE;
+
+err:
+	TALLOC_FREE(frame);
+	return NULL;
 }
 
 /* Parameter mapping and functions for the GP_EXT struct */
@@ -307,10 +300,12 @@ static PyObject *py_gpo_get_sysvol_gpt_version(PyObject * self,
 	PyObject *result;
 	NTSTATUS status;
 
-	tmp_ctx = talloc_new(NULL);
-
 	if (!PyArg_ParseTuple(args, "s", &unix_path)) {
 		return NULL;
+	}
+	tmp_ctx = talloc_new(NULL);
+	if (!tmp_ctx) {
+		return PyErr_NoMemory();
 	}
 	status = gpo_get_sysvol_gpt_version(tmp_ctx, unix_path,
 					    &sysvol_version,
@@ -321,8 +316,8 @@ static PyObject *py_gpo_get_sysvol_gpt_version(PyObject * self,
 		return NULL;
 	}
 
-	talloc_free(tmp_ctx);
 	result = Py_BuildValue("[s,i]", display_name, sysvol_version);
+	talloc_free(tmp_ctx);
 	return result;
 }
 
@@ -396,8 +391,8 @@ static PyObject *py_ads_get_gpo_list(ADS *self, PyObject *args, PyObject *kwds)
 	uint32_t uac = 0;
 	uint32_t flags = 0;
 	struct security_token *token = NULL;
-	PyObject *ret = Py_None;
-	TALLOC_CTX *gpo_ctx;
+	PyObject *ret = NULL;
+	TALLOC_CTX *gpo_ctx = NULL;
 	size_t list_size;
 	size_t i;
 
@@ -405,10 +400,11 @@ static PyObject *py_ads_get_gpo_list(ADS *self, PyObject *args, PyObject *kwds)
 	if (!PyArg_ParseTupleAndKeywords(args, kwds, "s",
 					 discard_const_p(char *, kwlist),
 					 &samaccountname)) {
-		PyErr_SetString(PyExc_SystemError,
-				"Failed to parse arguments to "
-				"py_ads_get_gpo_list()");
-		goto out;
+		return NULL;
+	}
+	if (!self->ads_ptr) {
+		PyErr_SetString(PyExc_RuntimeError, "Uninitialized");
+		return NULL;
 	}
 
 	frame = talloc_stackframe();
@@ -416,9 +412,9 @@ static PyObject *py_ads_get_gpo_list(ADS *self, PyObject *args, PyObject *kwds)
 	status = find_samaccount(self->ads_ptr, frame,
 				 samaccountname, &uac, &dn);
 	if (!ADS_ERR_OK(status)) {
-		TALLOC_FREE(frame);
-		PyErr_SetString(PyExc_SystemError,
-				"Failed to find samAccountName");
+		PyErr_Format(PyExc_RuntimeError,
+				"Failed to find samAccountName '%s': %s",
+				samaccountname, ads_errstr(status));
 		goto out;
 	}
 
@@ -427,21 +423,33 @@ static PyObject *py_ads_get_gpo_list(ADS *self, PyObject *args, PyObject *kwds)
 		flags |= GPO_LIST_FLAG_MACHINE;
 		status = gp_get_machine_token(self->ads_ptr, frame, dn,
 					      &token);
+		if (!ADS_ERR_OK(status)) {
+			PyErr_Format(PyExc_RuntimeError,
+				"Failed to get machine token for '%s'(%s): %s",
+				samaccountname, dn, ads_errstr(status));
+			goto out;
+		}
 	} else {
 		status = ads_get_sid_token(self->ads_ptr, frame, dn, &token);
-	}
-	if (!ADS_ERR_OK(status)) {
-		TALLOC_FREE(frame);
-		PyErr_SetString(PyExc_SystemError, "Failed to get token");
-		goto out;
+		if (!ADS_ERR_OK(status)) {
+			PyErr_Format(PyExc_RuntimeError,
+				"Failed to get sid token for '%s'(%s): %s",
+				samaccountname, dn, ads_errstr(status));
+			goto out;
+		}
 	}
 
 	gpo_ctx = talloc_new(frame);
+	if (!gpo_ctx) {
+		PyErr_NoMemory();
+		goto out;
+	}
 	status = ads_get_gpo_list(self->ads_ptr, gpo_ctx, dn, flags, token,
 				  &gpo_list);
 	if (!ADS_ERR_OK(status)) {
-		TALLOC_FREE(frame);
-		PyErr_SetString(PyExc_SystemError, "Failed to fetch GPO list");
+		PyErr_Format(PyExc_RuntimeError,
+			"Failed to fetch GPO list: %s",
+			ads_errstr(status));
 		goto out;
 	}
 
@@ -454,7 +462,6 @@ static PyObject *py_ads_get_gpo_list(ADS *self, PyObject *args, PyObject *kwds)
 	i = 0;
 	ret = PyList_New(list_size);
 	if (ret == NULL) {
-		TALLOC_FREE(frame);
 		goto out;
 	}
 
@@ -462,7 +469,7 @@ static PyObject *py_ads_get_gpo_list(ADS *self, PyObject *args, PyObject *kwds)
 		PyObject *obj = pytalloc_reference_ex(&GPOType,
 						      gpo_ctx, gpo);
 		if (obj == NULL) {
-			TALLOC_FREE(frame);
+			Py_CLEAR(ret);
 			goto out;
 		}
 
@@ -471,7 +478,7 @@ static PyObject *py_ads_get_gpo_list(ADS *self, PyObject *args, PyObject *kwds)
 	}
 
 out:
-
+	TALLOC_FREE(gpo_ctx);
 	TALLOC_FREE(frame);
 	return ret;
 }
@@ -482,7 +489,8 @@ static PyMethodDef ADS_methods[] = {
 	{ "connect", (PyCFunction)py_ads_connect, METH_NOARGS,
 		"Connect to the LDAP server" },
 #ifdef HAVE_ADS
-	{ "get_gpo_list", (PyCFunction)py_ads_get_gpo_list, METH_VARARGS | METH_KEYWORDS,
+	{ "get_gpo_list", PY_DISCARD_FUNC_SIG(PyCFunction, py_ads_get_gpo_list),
+		METH_VARARGS | METH_KEYWORDS,
 		NULL },
 #endif
 	{ NULL }
@@ -496,7 +504,6 @@ static PyTypeObject ads_ADSType = {
 	.tp_doc = "ADS struct",
 	.tp_methods = ADS_methods,
 	.tp_init = (initproc)py_ads_init,
-	.tp_new = py_ads_new,
 };
 
 static PyMethodDef py_gpo_methods[] = {
@@ -526,25 +533,36 @@ MODULE_INIT_FUNC(gpo)
 	/* Instantiate the types */
 	m = PyModule_Create(&moduledef);
 	if (m == NULL) {
-		return m;
+		goto err;
 	}
 
-	PyModule_AddObject(m, "version",
-			   PyStr_FromString(SAMBA_VERSION_STRING));
+	if (PyModule_AddObject(m, "version",
+			   PyUnicode_FromString(SAMBA_VERSION_STRING)) ) {
+		goto err;
+	}
 
+	ads_ADSType.tp_new = PyType_GenericNew;
 	if (PyType_Ready(&ads_ADSType) < 0) {
-		return m;
+		goto err;
 	}
 
-	PyModule_AddObject(m, "ADS_STRUCT", (PyObject *)&ads_ADSType);
+	Py_INCREF(&ads_ADSType);
+	if (PyModule_AddObject(m, "ADS_STRUCT", (PyObject *)&ads_ADSType)) {
+		goto err;
+	}
 
 	if (pytalloc_BaseObject_PyType_Ready(&GPOType) < 0) {
-		return m;
+		goto err;
 	}
 
 	Py_INCREF((PyObject *)(void *)&GPOType);
-	PyModule_AddObject(m, "GROUP_POLICY_OBJECT",
-			   (PyObject *)&GPOType);
+	if (PyModule_AddObject(m, "GROUP_POLICY_OBJECT",
+			   (PyObject *)&GPOType)) {
+		goto err;
+	}
 	return m;
 
+err:
+	Py_CLEAR(m);
+	return NULL;
 }

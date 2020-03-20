@@ -350,7 +350,7 @@ _PUBLIC_ NTSTATUS authsam_make_user_info_dc(TALLOC_CTX *mem_ctx,
 	char *filter = NULL;
 	/* SIDs for the account and his primary group */
 	struct dom_sid *account_sid;
-	const char *primary_group_string;
+	struct dom_sid_buf buf;
 	const char *primary_group_dn;
 	DATA_BLOB primary_group_blob;
 	/* SID structures for the expanded group memberships */
@@ -364,7 +364,7 @@ _PUBLIC_ NTSTATUS authsam_make_user_info_dc(TALLOC_CTX *mem_ctx,
 	NT_STATUS_HAVE_NO_MEMORY(user_info_dc);
 
 	tmp_ctx = talloc_new(user_info_dc);
-	if (user_info_dc == NULL) {
+	if (tmp_ctx == NULL) {
 		TALLOC_FREE(user_info_dc);
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -377,7 +377,7 @@ _PUBLIC_ NTSTATUS authsam_make_user_info_dc(TALLOC_CTX *mem_ctx,
 
 	num_sids = 2;
 
-	account_sid = samdb_result_dom_sid(user_info_dc, msg, "objectSid");
+	account_sid = samdb_result_dom_sid(tmp_ctx, msg, "objectSid");
 	if (account_sid == NULL) {
 		TALLOC_FREE(user_info_dc);
 		return NT_STATUS_NO_MEMORY;
@@ -404,13 +404,10 @@ _PUBLIC_ NTSTATUS authsam_make_user_info_dc(TALLOC_CTX *mem_ctx,
 		return status;
 	}
 
-	primary_group_string = dom_sid_string(tmp_ctx, &sids[PRIMARY_GROUP_SID_INDEX]);
-	if (primary_group_string == NULL) {
-		TALLOC_FREE(user_info_dc);
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	primary_group_dn = talloc_asprintf(tmp_ctx, "<SID=%s>", primary_group_string);
+	primary_group_dn = talloc_asprintf(
+		tmp_ctx,
+		"<SID=%s>",
+		dom_sid_str_buf(&sids[PRIMARY_GROUP_SID_INDEX], &buf));
 	if (primary_group_dn == NULL) {
 		TALLOC_FREE(user_info_dc);
 		return NT_STATUS_NO_MEMORY;
@@ -632,16 +629,14 @@ _PUBLIC_ NTSTATUS authsam_update_user_info_dc(TALLOC_CTX *mem_ctx,
 	n = user_info_dc->num_sids;
 	for (i = 0; i < n; i++) {
 		struct dom_sid *sid = &user_info_dc->sids[i];
-		char sid_buf[DOM_SID_STR_BUFLEN] = {0,};
-		char dn_str[DOM_SID_STR_BUFLEN*2] = {0,};
+		struct dom_sid_buf sid_buf;
+		char dn_str[sizeof(sid_buf.buf)*2];
 		DATA_BLOB dn_blob = data_blob_null;
-		int len;
 
-		len = dom_sid_string_buf(sid, sid_buf, sizeof(sid_buf));
-		if (len+1 > sizeof(sid_buf)) {
-			return NT_STATUS_INVALID_SID;
-		}
-		snprintf(dn_str, sizeof(dn_str), "<SID=%s>", sid_buf);
+		snprintf(dn_str,
+			sizeof(dn_str),
+			"<SID=%s>",
+			dom_sid_str_buf(sid, &sid_buf));
 		dn_blob = data_blob_string_const(dn_str);
 
 		/*
@@ -757,8 +752,9 @@ NTSTATUS authsam_get_user_info_dc_principal(TALLOC_CTX *mem_ctx,
 					  "(&(objectSid=%s)(objectClass=domain))",
 					    ldap_encode_ndr_dom_sid(tmp_ctx, domain_sid));
 		if (!domain_dn) {
+			struct dom_sid_buf buf;
 			DEBUG(3, ("authsam_get_user_info_dc_principal: Failed to find domain with: SID %s\n",
-				  dom_sid_string(tmp_ctx, domain_sid)));
+				  dom_sid_str_buf(domain_sid, &buf)));
 			return NT_STATUS_NO_SUCH_USER;
 		}
 
@@ -890,8 +886,10 @@ NTSTATUS authsam_update_bad_pwd_count(struct ldb_context *sam_ctx,
 
 done:
 	if (ret != LDB_SUCCESS) {
-		DEBUG(0, ("Failed to update badPwdCount, badPasswordTime or set lockoutTime on %s: %s\n",
-			  ldb_dn_get_linearized(msg_mod->dn), ldb_errstring(sam_ctx)));
+		DBG_ERR("Failed to update badPwdCount, badPasswordTime or "
+			"set lockoutTime on %s: %s\n",
+			ldb_dn_get_linearized(msg->dn),
+			ldb_errstring(sam_ctx));
 		TALLOC_FREE(mem_ctx);
 		return NT_STATUS_INTERNAL_ERROR;
 	}

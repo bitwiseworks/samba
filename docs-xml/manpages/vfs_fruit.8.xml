@@ -144,23 +144,6 @@
 	  </varlistentry>
 
 	  <varlistentry>
-	    <term>fruit:zero_file_id = yes | no</term>
-	    <listitem>
-	      <para>A <emphasis>global</emphasis> option whether to return
-	      zero to queries of on-disk file identifier, if the client
-	      has negotiated AAPL.</para>
-	      <para>Mac applications and / or the Mac SMB
-	      client code expect the on-disk file identifier to have the
-	      semantics of HFS+ Catalog Node Identifier (CNID). Samba
-	      doesn't provide those semantics, and that occasionally cause
-	      usability issues or even data loss. Returning a file identifier
-	      of zero causes the Mac client to stop using and trusting the
-	      file id returned from the server.</para>
-	      <para>The default is <emphasis>yes</emphasis>.</para>
-	    </listitem>
-	  </varlistentry>
-
-	  <varlistentry>
 	    <term>fruit:model = MacSamba</term>
 	    <listitem>
 	      <para>This option defines the model string inside the AAPL
@@ -207,7 +190,7 @@
 		<emphasis>Warning: </emphasis> this option should not be used
 		with the <emphasis>streams_xattr</emphasis> module due to the
 		extended attributes size limitations of most
-		filesytems.</para></listitem>
+		filesystems.</para></listitem>
 	      </itemizedlist>
 
 	    </listitem>
@@ -249,7 +232,7 @@
 	      backup. The option takes a number plus an optional unit.</para>
 	      <para><emphasis>IMPORTANT</emphasis>: This is an approximated
 	      calculation that only takes into account the contents of Time
-	      Machine sparsebundle images. Therefor you <emphasis>MUST
+	      Machine sparsebundle images. Therefore you <emphasis>MUST
 	      NOT</emphasis> use this volume to store other content when using
 	      this option, because it would NOT be accounted.</para>
 	      <para>The calculation works by reading the band size from the
@@ -331,9 +314,13 @@
 	      <parameter>file</parameter>, vfs_fruit may create ._ AppleDouble
 	      files. This options controls whether these ._ AppleDouble files
 	      are vetoed which prevents the client from accessing them.</para>
-	      <para>Vetoing ._ files may break some applications, eg
-	      extracting Mac ZIP archives from Mac clients failes,
-	      because they contain ._ files. Setting this option to
+	      <para>Vetoing ._ files may break some applications, e.g.
+	      extracting Mac ZIP archives from Mac clients fails,
+	      because they contain ._ files. <command>rsync</command> will
+	      also be unable to sync files beginning with underscores, as
+	      the temporary files it uses for these will start with ._ and
+	      so cannot be created.</para>
+	      <para>Setting this option to
 	      false will fix this, but the abstraction leak of
 	      exposing the internally created ._ files may have other
 	      unknown side effects.</para>
@@ -374,6 +361,47 @@
 	      <para>Return the user's effective maximum permissions in SMB2 FIND
 	      responses. This is an expensive computation, setting this to off
 	      pretends the use has maximum effective permissions.</para>
+	      <para>The default is <emphasis>yes</emphasis>.</para>
+	    </listitem>
+	  </varlistentry>
+
+	  <varlistentry>
+	    <term>fruit:wipe_intentionally_left_blank_rfork = yes | no</term>
+	    <listitem>
+	      <para>Whether to wipe Resource Fork data that matches the special
+	      286 bytes sized placeholder blob that macOS client create on
+	      occasion. The blob contains a string <quote>This resource fork
+	      intentionally left blank</quote>, the remaining bytes being mostly
+	      zero. There being no one use of this data, it is probably safe to
+	      discard it. When this option is enabled, this module truncates the
+	      Resource Fork stream to 0 bytes.</para>
+	      <para>The default is <emphasis>no</emphasis>.</para>
+	    </listitem>
+	  </varlistentry>
+
+	  <varlistentry>
+	    <term>fruit:delete_empty_adfiles = yes | no</term>
+	    <listitem>
+	      <para>Whether to delete empty AppleDouble files. Empty means that
+	      the resource fork entry in the AppleDouble files is of size 0, or
+	      the size is exactly 286 bytes and the content matches a special
+	      boilerplate resource fork created my macOS.</para>
+	      <para>The default is <emphasis>no</emphasis>.</para>
+	    </listitem>
+	  </varlistentry>
+
+	  <varlistentry>
+	    <term>fruit:zero_file_id = yes | no</term>
+	    <listitem>
+	      <para>Whether to return zero to queries of on-disk file
+	      identifier if the client has negotiated AAPL.</para>
+	      <para>Mac applications and / or the Mac SMB client code expect the
+	      on-disk file identifier to have the semantics of HFS+ Catalog Node
+	      Identifier (CNID). Samba provides File-IDs based on a file's
+	      initial creation date if the option <smbconfoption name="store dos
+	      attributes"/> is enabled.  Returning a file identifier of
+	      zero causes the Mac client to stop using and trusting the file id
+	      returned from the server.</para>
 	      <para>The default is <emphasis>yes</emphasis>.</para>
 	    </listitem>
 	  </varlistentry>

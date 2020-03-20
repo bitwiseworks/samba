@@ -32,26 +32,41 @@ struct smb2_request *smb2_getinfo_send(struct smb2_tree *tree, struct smb2_getin
 {
 	struct smb2_request *req;
 	NTSTATUS status;
+	size_t max_payload;
 
 	req = smb2_request_init_tree(tree, SMB2_OP_GETINFO, 0x28, true, 
-				     io->in.blob.length);
+				     io->in.input_buffer.length);
 	if (req == NULL) return NULL;
 
 	SCVAL(req->out.body, 0x02, io->in.info_type);
 	SCVAL(req->out.body, 0x03, io->in.info_class);
 	SIVAL(req->out.body, 0x04, io->in.output_buffer_length);
-	SIVAL(req->out.body, 0x0C, io->in.reserved);
-	SIVAL(req->out.body, 0x08, io->in.input_buffer_length);
+	/*
+	 * uint16_t input_buffer_offset
+	 * uint16_t reserved
+	 * uint32_t input_buffer_length
+	 *
+	 * We use smb2_push_o32s32_blob() which would
+	 * expect uint32_t offset, uint32_t length.
+	 *
+	 * Everything is little endian, we can just
+	 * overwrite the reserved field later.
+	 */
 	SIVAL(req->out.body, 0x10, io->in.additional_information);
 	SIVAL(req->out.body, 0x14, io->in.getinfo_flags);
 	smb2_push_handle(req->out.body+0x18, &io->in.file.handle);
 
 	/* this blob is used for quota queries */
-	status = smb2_push_o32s32_blob(&req->out, 0x08, io->in.blob);
+	status = smb2_push_o32s32_blob(&req->out, 0x08, io->in.input_buffer);
 	if (!NT_STATUS_IS_OK(status)) {
 		talloc_free(req);
 		return NULL;
 	}
+	SSVAL(req->out.body, 0x0C, io->in.reserved);
+
+	max_payload = MAX(io->in.output_buffer_length, io->in.input_buffer.length);
+	req->credit_charge = (MAX(max_payload, 1) - 1)/ 65536 + 1;
+
 	smb2_transport_send(req);
 
 	return req;
@@ -97,9 +112,9 @@ NTSTATUS smb2_getinfo(struct smb2_tree *tree, TALLOC_CTX *mem_ctx,
 */
 uint16_t smb2_getinfo_map_level(uint16_t level, uint8_t info_class)
 {
-	if (info_class == SMB2_GETINFO_FILE &&
+	if (info_class == SMB2_0_INFO_FILE &&
 	    level == RAW_FILEINFO_SEC_DESC) {
-		return SMB2_GETINFO_SECURITY;
+		return SMB2_0_INFO_SECURITY;
 	}
 	if ((level & 0xFF) == info_class) {
 		return level;
@@ -117,7 +132,8 @@ uint16_t smb2_getinfo_map_level(uint16_t level, uint8_t info_class)
 struct smb2_request *smb2_getinfo_file_send(struct smb2_tree *tree, union smb_fileinfo *io)
 {
 	struct smb2_getinfo b;
-	uint16_t smb2_level = smb2_getinfo_map_level(io->generic.level, SMB2_GETINFO_FILE);
+	uint16_t smb2_level = smb2_getinfo_map_level(
+		io->generic.level, SMB2_0_INFO_FILE);
 	
 	if (smb2_level == 0) {
 		return NULL;
@@ -127,7 +143,7 @@ struct smb2_request *smb2_getinfo_file_send(struct smb2_tree *tree, union smb_fi
 	b.in.info_type            = smb2_level & 0xFF;
 	b.in.info_class           = smb2_level >> 8;
 	b.in.output_buffer_length = 0x10000;
-	b.in.input_buffer_length  = 0;
+	b.in.input_buffer         = data_blob_null;
 	b.in.file.handle          = io->generic.in.file.handle;
 
 	if (io->generic.level == RAW_FILEINFO_SEC_DESC) {
@@ -175,7 +191,8 @@ NTSTATUS smb2_getinfo_file(struct smb2_tree *tree, TALLOC_CTX *mem_ctx,
 struct smb2_request *smb2_getinfo_fs_send(struct smb2_tree *tree, union smb_fsinfo *io)
 {
 	struct smb2_getinfo b;
-	uint16_t smb2_level = smb2_getinfo_map_level(io->generic.level, SMB2_GETINFO_FS);
+	uint16_t smb2_level = smb2_getinfo_map_level(
+		io->generic.level, SMB2_0_INFO_FILESYSTEM);
 	
 	if (smb2_level == 0) {
 		return NULL;
@@ -196,7 +213,9 @@ struct smb2_request *smb2_getinfo_fs_send(struct smb2_tree *tree, union smb_fsin
 NTSTATUS smb2_getinfo_fs_recv(struct smb2_request *req, TALLOC_CTX *mem_ctx,
 				union smb_fsinfo *io)
 {
-	struct smb2_getinfo b;
+	struct smb2_getinfo b = {
+		.in = {0},
+	};
 	NTSTATUS status;
 
 	status = smb2_getinfo_recv(req, mem_ctx, &b);

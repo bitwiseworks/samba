@@ -22,10 +22,10 @@
 
 
 #include "includes.h"
-#include "../lib/crypto/crypto.h"
 #include "../libcli/auth/libcli_auth.h"
 #include "../libcli/samsync/samsync.h"
 #include "librpc/gen_ndr/ndr_netlogon.h"
+#include "lib/crypto/gnutls_helpers.h"
 
 /**
  * Decrypt and extract the user's passwords.
@@ -44,13 +44,19 @@ static NTSTATUS fix_user(TALLOC_CTX *mem_ctx,
 	struct netr_DELTA_USER *user = delta->delta_union.user;
 	struct samr_Password lm_hash;
 	struct samr_Password nt_hash;
+	int rc;
 
 	/* Note that win2000 may send us all zeros
 	 * for the hashes if it doesn't
 	 * think this channel is secure enough. */
 	if (user->lm_password_present) {
 		if (!all_zero(user->lmpassword.hash, 16)) {
-			sam_rid_crypt(rid, user->lmpassword.hash, lm_hash.hash, 0);
+			rc = sam_rid_crypt(rid, user->lmpassword.hash,
+					    lm_hash.hash, SAMBA_GNUTLS_DECRYPT);
+			if (rc != 0) {
+				return gnutls_error_to_ntstatus(rc,
+								NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+			}
 		} else {
 			memset(lm_hash.hash, '\0', sizeof(lm_hash.hash));
 		}
@@ -59,7 +65,12 @@ static NTSTATUS fix_user(TALLOC_CTX *mem_ctx,
 
 	if (user->nt_password_present) {
 		if (!all_zero(user->ntpassword.hash, 16)) {
-			sam_rid_crypt(rid, user->ntpassword.hash, nt_hash.hash, 0);
+			rc = sam_rid_crypt(rid, user->ntpassword.hash,
+					    nt_hash.hash, SAMBA_GNUTLS_DECRYPT);
+			if (rc != 0) {
+				return gnutls_error_to_ntstatus(rc,
+								NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+			}
 		} else {
 			memset(nt_hash.hash, '\0', sizeof(nt_hash.hash));
 		}
@@ -70,9 +81,18 @@ static NTSTATUS fix_user(TALLOC_CTX *mem_ctx,
 		DATA_BLOB data;
 		struct netr_USER_KEYS keys;
 		enum ndr_err_code ndr_err;
+		NTSTATUS status;
+
 		data.data = user->user_private_info.SensitiveData;
 		data.length = user->user_private_info.DataLength;
-		netlogon_creds_arcfour_crypt(creds, data.data, data.length);
+
+		status = netlogon_creds_arcfour_crypt(creds,
+						      data.data,
+						      data.length);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
+
 		user->user_private_info.SensitiveData = data.data;
 		user->user_private_info.DataLength = data.length;
 
@@ -89,9 +109,13 @@ static NTSTATUS fix_user(TALLOC_CTX *mem_ctx,
 		if (keys.keys.keys2.lmpassword.length == 16) {
 			if (!all_zero(keys.keys.keys2.lmpassword.pwd.hash,
 				      16)) {
-				sam_rid_crypt(rid,
-					      keys.keys.keys2.lmpassword.pwd.hash,
-					      lm_hash.hash, 0);
+				rc = sam_rid_crypt(rid,
+					           keys.keys.keys2.lmpassword.pwd.hash,
+					           lm_hash.hash, SAMBA_GNUTLS_DECRYPT);
+				if (rc != 0) {
+					return gnutls_error_to_ntstatus(rc,
+									NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+				}
 			} else {
 				memset(lm_hash.hash, '\0', sizeof(lm_hash.hash));
 			}
@@ -101,9 +125,13 @@ static NTSTATUS fix_user(TALLOC_CTX *mem_ctx,
 		if (keys.keys.keys2.ntpassword.length == 16) {
 			if (!all_zero(keys.keys.keys2.ntpassword.pwd.hash,
 				      16)) {
-				sam_rid_crypt(rid,
-					      keys.keys.keys2.ntpassword.pwd.hash,
-					      nt_hash.hash, 0);
+				rc = sam_rid_crypt(rid,
+						   keys.keys.keys2.ntpassword.pwd.hash,
+						   nt_hash.hash, SAMBA_GNUTLS_DECRYPT);
+				if (rc != 0) {
+					return gnutls_error_to_ntstatus(rc,
+									NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+				}
 			} else {
 				memset(nt_hash.hash, '\0', sizeof(nt_hash.hash));
 			}
@@ -126,11 +154,21 @@ static NTSTATUS fix_secret(TALLOC_CTX *mem_ctx,
 			   struct netr_DELTA_ENUM *delta) 
 {
 	struct netr_DELTA_SECRET *secret = delta->delta_union.secret;
-	netlogon_creds_arcfour_crypt(creds, secret->current_cipher.cipher_data, 
-			    secret->current_cipher.maxlen); 
+	NTSTATUS status;
 
-	netlogon_creds_arcfour_crypt(creds, secret->old_cipher.cipher_data, 
-			    secret->old_cipher.maxlen); 
+	status = netlogon_creds_arcfour_crypt(creds,
+					      secret->current_cipher.cipher_data,
+					      secret->current_cipher.maxlen);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	status = netlogon_creds_arcfour_crypt(creds,
+					      secret->old_cipher.cipher_data,
+					      secret->old_cipher.maxlen);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
 
 	return NT_STATUS_OK;
 }

@@ -41,6 +41,7 @@
 #include "../libcli/smb/smb_seal.h"
 #include "lib/param/param.h"
 #include "../libcli/smb/smb2_negotiate_context.h"
+#include "libads/krb5_errs.h"
 
 #define STAR_SMBSERVER "*SMBSERVER"
 
@@ -228,59 +229,17 @@ NTSTATUS cli_session_creds_prepare_krb5(struct cli_state *cli,
 	const char *user_account = NULL;
 	const char *user_domain = NULL;
 	const char *pass = NULL;
+	char *canon_principal = NULL;
+	char *canon_realm = NULL;
 	const char *target_hostname = NULL;
-	const DATA_BLOB *server_blob = NULL;
-	bool got_kerberos_mechanism = false;
 	enum credentials_use_kerberos krb5_state;
 	bool try_kerberos = false;
 	bool need_kinit = false;
 	bool auth_requested = true;
 	int ret;
+	bool ok;
 
 	target_hostname = smbXcli_conn_remote_name(cli->conn);
-	server_blob = smbXcli_conn_server_gss_blob(cli->conn);
-
-	/* the server might not even do spnego */
-	if (server_blob != NULL && server_blob->length != 0) {
-		char *OIDs[ASN1_MAX_OIDS] = { NULL, };
-		size_t i;
-		bool ok;
-
-		/*
-		 * The server sent us the first part of the SPNEGO exchange in the
-		 * negprot reply. It is WRONG to depend on the principal sent in the
-		 * negprot reply, but right now we do it. If we don't receive one,
-		 * we try to best guess, then fall back to NTLM.
-		 */
-		ok = spnego_parse_negTokenInit(frame,
-					       *server_blob,
-					       OIDs,
-					       NULL,
-					       NULL);
-		if (!ok) {
-			TALLOC_FREE(frame);
-			return NT_STATUS_INVALID_PARAMETER;
-		}
-		if (OIDs[0] == NULL) {
-			TALLOC_FREE(frame);
-			return NT_STATUS_INVALID_PARAMETER;
-		}
-
-		/* make sure the server understands kerberos */
-		for (i = 0; OIDs[i] != NULL; i++) {
-			if (i == 0) {
-				DEBUG(3,("got OID=%s\n", OIDs[i]));
-			} else {
-				DEBUGADD(3,("got OID=%s\n", OIDs[i]));
-			}
-
-			if (strcmp(OIDs[i], OID_KERBEROS5_OLD) == 0 ||
-			    strcmp(OIDs[i], OID_KERBEROS5) == 0) {
-				got_kerberos_mechanism = true;
-				break;
-			}
-		}
-	}
 
 	auth_requested = cli_credentials_authentication_requested(creds);
 	if (auth_requested) {
@@ -330,12 +289,6 @@ NTSTATUS cli_session_creds_prepare_krb5(struct cli_state *cli,
 		need_kinit = false;
 	} else if (krb5_state == CRED_MUST_USE_KERBEROS) {
 		need_kinit = try_kerberos;
-	} else if (!got_kerberos_mechanism) {
-		/*
-		 * Most likely the server doesn't support
-		 * Kerberos, don't waste time doing a kinit
-		 */
-		need_kinit = false;
 	} else {
 		need_kinit = try_kerberos;
 	}
@@ -345,15 +298,27 @@ NTSTATUS cli_session_creds_prepare_krb5(struct cli_state *cli,
 		return NT_STATUS_OK;
 	}
 
+	DBG_INFO("Doing kinit for %s to access %s\n",
+		 user_principal, target_hostname);
 
 	/*
 	 * TODO: This should be done within the gensec layer
 	 * only if required!
 	 */
 	setenv(KRB5_ENV_CCNAME, "MEMORY:cliconnect", 1);
-	ret = kerberos_kinit_password(user_principal, pass,
-				0 /* no time correction for now */,
-				NULL);
+	ret = kerberos_kinit_password_ext(user_principal,
+					  pass,
+					  0,
+					  0,
+					  0,
+					  NULL,
+					  false,
+					  false,
+					  0,
+					  frame,
+					  &canon_principal,
+					  &canon_realm,
+					  NULL);
 	if (ret != 0) {
 		int dbglvl = DBGLVL_NOTICE;
 
@@ -372,7 +337,31 @@ NTSTATUS cli_session_creds_prepare_krb5(struct cli_state *cli,
 		/*
 		 * Ignore the error and hope that NTLM will work
 		 */
+		TALLOC_FREE(frame);
+		return NT_STATUS_OK;
 	}
+
+	ok = cli_credentials_set_principal(creds,
+					   canon_principal,
+					   CRED_SPECIFIED);
+	if (!ok) {
+		TALLOC_FREE(frame);
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	ok = cli_credentials_set_realm(creds,
+				       canon_realm,
+				       CRED_SPECIFIED);
+	if (!ok) {
+		TALLOC_FREE(frame);
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	DBG_DEBUG("Successfully authenticated as %s (%s) to access %s using "
+		  "Kerberos\n",
+		  user_principal,
+		  canon_principal,
+		  target_hostname);
 
 	TALLOC_FREE(frame);
 	return NT_STATUS_OK;
@@ -638,7 +627,6 @@ static void cli_session_setup_guest_done(struct tevent_req *subreq)
 		tevent_req_nterror(req, status);
 		return;
 	}
-	p += ret;
 
 	tevent_req_done(req);
 }
@@ -1131,6 +1119,58 @@ static void cli_session_setup_gensec_remote_done(struct tevent_req *subreq)
 	cli_session_setup_gensec_local_next(req);
 }
 
+static void cli_session_dump_keys(TALLOC_CTX *mem_ctx,
+				  struct smbXcli_session *session,
+				  DATA_BLOB session_key)
+{
+	NTSTATUS status;
+	DATA_BLOB sig = data_blob_null;
+	DATA_BLOB app = data_blob_null;
+	DATA_BLOB enc = data_blob_null;
+	DATA_BLOB dec = data_blob_null;
+	uint64_t sid = smb2cli_session_current_id(session);
+
+	status = smb2cli_session_signing_key(session, mem_ctx, &sig);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto out;
+	}
+	status = smbXcli_session_application_key(session, mem_ctx, &app);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto out;
+	}
+	status = smb2cli_session_encryption_key(session, mem_ctx, &enc);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto out;
+	}
+	status = smb2cli_session_decryption_key(session, mem_ctx, &dec);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto out;
+	}
+
+	DEBUG(0, ("debug encryption: dumping generated session keys\n"));
+	DEBUGADD(0, ("Session Id    "));
+	dump_data(0, (uint8_t*)&sid, sizeof(sid));
+	DEBUGADD(0, ("Session Key   "));
+	dump_data(0, session_key.data, session_key.length);
+	DEBUGADD(0, ("Signing Key   "));
+	dump_data(0, sig.data, sig.length);
+	DEBUGADD(0, ("App Key       "));
+	dump_data(0, app.data, app.length);
+
+	/* In client code, ServerIn is the encryption key */
+
+	DEBUGADD(0, ("ServerIn Key  "));
+	dump_data(0, enc.data, enc.length);
+	DEBUGADD(0, ("ServerOut Key "));
+	dump_data(0, dec.data, dec.length);
+
+out:
+	data_blob_clear_free(&sig);
+	data_blob_clear_free(&app);
+	data_blob_clear_free(&enc);
+	data_blob_clear_free(&dec);
+}
+
 static void cli_session_setup_gensec_ready(struct tevent_req *req)
 {
 	struct cli_session_setup_gensec_state *state =
@@ -1197,6 +1237,11 @@ static void cli_session_setup_gensec_ready(struct tevent_req *req)
 							 state->recv_iov);
 		if (tevent_req_nterror(req, status)) {
 			return;
+		}
+		if (smbXcli_conn_protocol(state->cli->conn) >= PROTOCOL_SMB3_00
+		    && lp_debug_encryption())
+		{
+			cli_session_dump_keys(state, session, state->session_key);
 		}
 	} else {
 		struct smbXcli_session *session = state->cli->smb1.session;
@@ -1293,6 +1338,10 @@ static struct tevent_req *cli_session_setup_spnego_send(
 		return tevent_req_post(req, ev);
 	}
 
+	DBG_INFO("Connect to %s as %s using SPNEGO\n",
+		 target_hostname,
+		 cli_credentials_get_principal(creds, talloc_tos()));
+
 	subreq = cli_session_setup_gensec_send(state, ev, cli, creds,
 					       target_service, target_hostname);
 	if (tevent_req_nomem(subreq, req)) {
@@ -1356,7 +1405,7 @@ static void cli_session_setup_creds_cleanup(struct tevent_req *req,
 	 * We only call data_blob_clear() as
 	 * some of the blobs point to the same memory.
 	 *
-	 * We let the talloc hierachy free the memory.
+	 * We let the talloc hierarchy free the memory.
 	 */
 	data_blob_clear(&state->apassword_blob);
 	data_blob_clear(&state->upassword_blob);
@@ -1495,6 +1544,8 @@ struct tevent_req *cli_session_setup_creds_send(TALLOC_CTX *mem_ctx,
 	if (tevent_req_nomem(domain, req)) {
 		return tevent_req_post(req, ev);
 	}
+
+	DBG_INFO("Connect to %s as %s using NTLM\n", domain, username);
 
 	if ((sec_mode & NEGOTIATE_SECURITY_CHALLENGE_RESPONSE) == 0) {
 		bool use_unicode = smbXcli_conn_use_unicode(cli->conn);
@@ -1803,7 +1854,7 @@ NTSTATUS cli_session_setup_creds(struct cli_state *cli,
 
 NTSTATUS cli_session_setup_anon(struct cli_state *cli)
 {
-	NTSTATUS status = NT_STATUS_NO_MEMORY;
+	NTSTATUS status;
 	struct cli_credentials *creds = NULL;
 
 	creds = cli_credentials_init_anon(cli);

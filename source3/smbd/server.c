@@ -44,7 +44,6 @@
 #include "lib/id_cache.h"
 #include "lib/param/param.h"
 #include "lib/background.h"
-#include "lib/conn_tdb.h"
 #include "../lib/util/pidfile.h"
 #include "lib/smbd_shim.h"
 #include "scavenger.h"
@@ -54,6 +53,10 @@
 #include "lib/util/sys_rw.h"
 #include "cleanupdb.h"
 #include "g_lock.h"
+#include "rpc_server/epmd.h"
+#include "rpc_server/lsasd.h"
+#include "rpc_server/fssd.h"
+#include "rpc_server/mdssd.h"
 
 #ifdef CLUSTER_SUPPORT
 #include "ctdb_protocol.h"
@@ -97,18 +100,6 @@ struct smbd_child_pid {
 	pid_t pid;
 };
 
-extern void start_epmd(struct tevent_context *ev_ctx,
-		       struct messaging_context *msg_ctx);
-
-extern void start_lsasd(struct tevent_context *ev_ctx,
-			struct messaging_context *msg_ctx);
-
-extern void start_fssd(struct tevent_context *ev_ctx,
-		       struct messaging_context *msg_ctx);
-
-extern void start_mdssd(struct tevent_context *ev_ctx,
-			struct messaging_context *msg_ctx);
-
 /*******************************************************************
  What to do when smb.conf is updated.
  ********************************************************************/
@@ -121,12 +112,18 @@ static void smbd_parent_conf_updated(struct messaging_context *msg,
 {
 	struct tevent_context *ev_ctx =
 		talloc_get_type_abort(private_data, struct tevent_context);
+	bool ok;
 
 	DEBUG(10,("smbd_parent_conf_updated: Got message saying smb.conf was "
 		  "updated. Reloading.\n"));
 	change_to_root_user();
 	reload_services(NULL, NULL, false);
 	printing_subsystem_update(ev_ctx, msg, false);
+
+	ok = reinit_guest_session_info(NULL);
+	if (!ok) {
+		DBG_ERR("Failed to reinit guest info\n");
+	}
 }
 
 /*******************************************************************
@@ -185,7 +182,7 @@ static void msg_inject_fault(struct messaging_context *msg,
 		return;
 	}
 
-#if HAVE_STRSIGNAL
+#ifdef HAVE_STRSIGNAL
 	DEBUG(0, ("Process %s requested injection of signal %d (%s)\n",
 		  server_id_str_buf(src, &tmp), sig, strsignal(sig)));
 #else
@@ -194,6 +191,36 @@ static void msg_inject_fault(struct messaging_context *msg,
 #endif
 
 	kill(getpid(), sig);
+}
+#endif /* DEVELOPER */
+
+#if defined(DEVELOPER) || defined(ENABLE_SELFTEST)
+/*
+ * Sleep for the specified number of seconds.
+ */
+static void msg_sleep(struct messaging_context *msg,
+		      void *private_data,
+		      uint32_t msg_type,
+		      struct server_id src,
+		      DATA_BLOB *data)
+{
+	unsigned int seconds;
+	struct server_id_buf tmp;
+
+	if (data->length != sizeof(seconds)) {
+		DBG_ERR("Process %s sent bogus sleep request\n",
+			server_id_str_buf(src, &tmp));
+		return;
+	}
+
+	seconds = *(unsigned int *)data->data;
+	DBG_ERR("Process %s request a sleep of %u seconds\n",
+		server_id_str_buf(src, &tmp),
+		seconds);
+	sleep(seconds);
+	DBG_ERR("Restarting after %u second sleep requested by process %s\n",
+		seconds,
+		server_id_str_buf(src, &tmp));
 }
 #endif /* DEVELOPER */
 
@@ -276,31 +303,6 @@ static void smbd_parent_id_cache_delete(struct messaging_context *ctx,
 
 	messaging_send_to_children(ctx, msg_type, msg_data);
 }
-
-#ifdef CLUSTER_SUPPORT
-static int smbd_parent_ctdb_reconfigured(
-	struct tevent_context *ev,
-	uint32_t src_vnn, uint32_t dst_vnn, uint64_t dst_srvid,
-	const uint8_t *msg, size_t msglen, void *private_data)
-{
-	struct messaging_context *msg_ctx = talloc_get_type_abort(
-		private_data, struct messaging_context);
-
-	DEBUG(10, ("Got %s message\n", (dst_srvid == CTDB_SRVID_RECONFIGURE)
-		   ? "cluster reconfigure" : "SAMBA_NOTIFY"));
-
-	/*
-	 * Someone from the family died, validate our locks
-	 */
-
-	if (am_parent) {
-		messaging_send_buf(msg_ctx, am_parent->cleanupd,
-				   MSG_SMB_BRL_VALIDATE, NULL, 0);
-	}
-
-	return 0;
-}
-#endif
 
 static void add_child_pid(struct smbd_parent_context *parent,
 			  pid_t pid)
@@ -387,6 +389,17 @@ static void notifyd_stopped(struct tevent_req *req)
 	DEBUG(1, ("notifyd stopped: %s\n", strerror(ret)));
 }
 
+static void notifyd_sig_hup_handler(struct tevent_context *ev,
+				    struct tevent_signal *se,
+				    int signum,
+				    int count,
+				    void *siginfo,
+				    void *pvt)
+{
+	DBG_NOTICE("notifyd: Reloading services after SIGHUP\n");
+	reload_services(NULL, NULL, false);
+}
+
 static bool smbd_notifyd_init(struct messaging_context *msg, bool interactive,
 			      struct server_id *ppid)
 {
@@ -395,6 +408,7 @@ static bool smbd_notifyd_init(struct messaging_context *msg, bool interactive,
 	pid_t pid;
 	NTSTATUS status;
 	bool ok;
+	struct tevent_signal *se;
 
 	if (interactive) {
 		req = notifyd_req(msg, ev);
@@ -409,7 +423,7 @@ static bool smbd_notifyd_init(struct messaging_context *msg, bool interactive,
 	}
 
 	if (pid != 0) {
-		if (am_parent != 0) {
+		if (am_parent != NULL) {
 			add_child_pid(am_parent, pid);
 		}
 		*ppid = pid_to_procid(pid);
@@ -423,6 +437,19 @@ static bool smbd_notifyd_init(struct messaging_context *msg, bool interactive,
 		exit(1);
 	}
 
+	reopen_logs();
+
+	/* Set up sighup handler for notifyd */
+	se = tevent_add_signal(ev,
+			       ev,
+			       SIGHUP, 0,
+			       notifyd_sig_hup_handler,
+			       NULL);
+	if (!se) {
+		DEBUG(0, ("failed to setup notifyd SIGHUP handler\n"));
+		exit(1);
+	}
+
 	req = notifyd_req(msg, ev);
 	if (req == NULL) {
 		exit(1);
@@ -430,7 +457,6 @@ static bool smbd_notifyd_init(struct messaging_context *msg, bool interactive,
 	tevent_req_set_callback(req, notifyd_stopped, msg);
 
 	/* Block those signals that we are not handling */
-	BlockSignals(True, SIGHUP);
 	BlockSignals(True, SIGUSR1);
 
 	messaging_send(msg, pid_to_procid(getppid()), MSG_SMB_NOTIFY_STARTED,
@@ -738,32 +764,6 @@ static bool cleanupd_init_recv(struct tevent_req *req)
 	return state->ok;
 }
 
-/*
-  at most every smbd:cleanuptime seconds (default 20), we scan the BRL
-  and locking database for entries to cleanup. As a side effect this
-  also cleans up dead entries in the connections database (due to the
-  traversal in message_send_all()
-
-  Using a timer for this prevents a flood of traversals when a large
-  number of clients disconnect at the same time (perhaps due to a
-  network outage).  
-*/
-
-static void cleanup_timeout_fn(struct tevent_context *event_ctx,
-				struct tevent_timer *te,
-				struct timeval now,
-				void *private_data)
-{
-	struct smbd_parent_context *parent =
-		talloc_get_type_abort(private_data,
-		struct smbd_parent_context);
-
-	parent->cleanup_te = NULL;
-
-	messaging_send_buf(parent->msg_ctx, parent->cleanupd,
-			   MSG_SMB_BRL_VALIDATE, NULL, 0);
-}
-
 static void cleanupd_started(struct tevent_req *req)
 {
 	bool ok;
@@ -864,25 +864,6 @@ static void remove_child_pid(struct smbd_parent_context *parent,
 		if (!NT_STATUS_IS_OK(status)) {
 			DBG_ERR("messaging_send returned %s\n",
 				nt_errstr(status));
-		}
-	}
-
-	if (unclean_shutdown) {
-		/* a child terminated uncleanly so tickle all
-		   processes to see if they can grab any of the
-		   pending locks
-                */
-		DEBUG(3,(__location__ " Unclean shutdown of pid %u\n",
-			(unsigned int)pid));
-		if (parent->cleanup_te == NULL) {
-			/* call the cleanup timer, but not too often */
-			int cleanup_time = lp_parm_int(-1, "smbd", "cleanuptime", 20);
-			parent->cleanup_te = tevent_add_timer(parent->ev_ctx,
-						parent,
-						timeval_current_ofs(cleanup_time, 0),
-						cleanup_timeout_fn,
-						parent);
-			DEBUG(1,("Scheduled cleanup of brl and lock database after unclean shutdown\n"));
 		}
 	}
 }
@@ -1222,7 +1203,7 @@ static bool open_sockets_smbd(struct smbd_parent_context *parent,
 		char *sock_tok;
 		const char *sock_ptr;
 
-#if HAVE_IPV6
+#ifdef HAVE_IPV6
 		sock_addr = "::,0.0.0.0";
 #else
 		sock_addr = "0.0.0.0";
@@ -1277,6 +1258,8 @@ static bool open_sockets_smbd(struct smbd_parent_context *parent,
 	messaging_register(msg_ctx, NULL, MSG_DEBUG, smbd_msg_debug);
 	messaging_register(msg_ctx, NULL, MSG_SMB_FORCE_TDIS,
 			   smb_parent_send_to_children);
+	messaging_register(msg_ctx, NULL, MSG_SMB_FORCE_TDIS_DENIED,
+			   smb_parent_send_to_children);
 	messaging_register(msg_ctx, NULL, MSG_SMB_KILL_CLIENT_IP,
 			   smb_parent_send_to_children);
 	messaging_register(msg_ctx, NULL, MSG_SMB_TELL_NUM_CHILDREN,
@@ -1289,20 +1272,13 @@ static bool open_sockets_smbd(struct smbd_parent_context *parent,
 	messaging_register(msg_ctx, NULL, MSG_SMB_NOTIFY_STARTED,
 			   smb_parent_send_to_children);
 
-#ifdef CLUSTER_SUPPORT
-	if (lp_clustering()) {
-		struct ctdbd_connection *conn = messaging_ctdb_connection();
-
-		register_with_ctdbd(conn, CTDB_SRVID_RECONFIGURE,
-				    smbd_parent_ctdb_reconfigured, msg_ctx);
-		register_with_ctdbd(conn, CTDB_SRVID_SAMBA_NOTIFY,
-				    smbd_parent_ctdb_reconfigured, msg_ctx);
-	}
-#endif
-
 #ifdef DEVELOPER
 	messaging_register(msg_ctx, NULL, MSG_SMB_INJECT_FAULT,
 			   msg_inject_fault);
+#endif
+
+#if defined(DEVELOPER) || defined(ENABLE_SELFTEST)
+	messaging_register(msg_ctx, NULL, MSG_SMB_SLEEP, msg_sleep);
 #endif
 
 	if (lp_multicast_dns_register() && (dns_port != 0)) {
@@ -1449,8 +1425,9 @@ struct smbd_claim_version_state {
 	char *version;
 };
 
-static void smbd_claim_version_parser(const struct g_lock_rec *locks,
-				      size_t num_locks,
+static void smbd_claim_version_parser(struct server_id exclusive,
+				      size_t num_shared,
+				      struct server_id *shared,
 				      const uint8_t *data,
 				      size_t datalen,
 				      void *private_data)
@@ -1514,7 +1491,7 @@ static NTSTATUS smbd_claim_version(struct messaging_context *msg,
 		return NT_STATUS_OK;
 	}
 
-	status = g_lock_lock(ctx, string_term_tdb_data(name), G_LOCK_WRITE,
+	status = g_lock_lock(ctx, string_term_tdb_data(name), G_LOCK_UPGRADE,
 			     (struct timeval) { .tv_sec = 60 });
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_WARNING("g_lock_lock(G_LOCK_WRITE) failed: %s\n",
@@ -1535,7 +1512,7 @@ static NTSTATUS smbd_claim_version(struct messaging_context *msg,
 		return status;
 	}
 
-	status = g_lock_lock(ctx, string_term_tdb_data(name), G_LOCK_READ,
+	status = g_lock_lock(ctx, string_term_tdb_data(name), G_LOCK_DOWNGRADE,
 			     (struct timeval) { .tv_sec = 60 });
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_WARNING("g_lock_lock(G_LOCK_READ) failed: %s\n",
@@ -1582,17 +1559,73 @@ extern void build_options(bool screen);
 		OPT_LOG_STDOUT
 	};
 	struct poptOption long_options[] = {
-	POPT_AUTOHELP
-	{"daemon", 'D', POPT_ARG_NONE, NULL, OPT_DAEMON, "Become a daemon (default)" },
-	{"interactive", 'i', POPT_ARG_NONE, NULL, OPT_INTERACTIVE, "Run interactive (not a daemon) and log to stdout"},
-	{"foreground", 'F', POPT_ARG_NONE, NULL, OPT_FORK, "Run daemon in foreground (for daemontools, etc.)" },
-	{"no-process-group", '\0', POPT_ARG_NONE, NULL, OPT_NO_PROCESS_GROUP, "Don't create a new process group" },
-	{"log-stdout", 'S', POPT_ARG_NONE, NULL, OPT_LOG_STDOUT, "Log to stdout" },
-	{"build-options", 'b', POPT_ARG_NONE, NULL, 'b', "Print build options" },
-	{"port", 'p', POPT_ARG_STRING, &ports, 0, "Listen on the specified ports"},
-	{"profiling-level", 'P', POPT_ARG_STRING, &profile_level, 0, "Set profiling level","PROFILE_LEVEL"},
-	POPT_COMMON_SAMBA
-	POPT_TABLEEND
+		POPT_AUTOHELP
+		{
+			.longName   = "daemon",
+			.shortName  = 'D',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = OPT_DAEMON,
+			.descrip    = "Become a daemon (default)" ,
+		},
+		{
+			.longName   = "interactive",
+			.shortName  = 'i',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = OPT_INTERACTIVE,
+			.descrip    = "Run interactive (not a daemon) and log to stdout",
+		},
+		{
+			.longName   = "foreground",
+			.shortName  = 'F',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = OPT_FORK,
+			.descrip    = "Run daemon in foreground (for daemontools, etc.)",
+		},
+		{
+			.longName   = "no-process-group",
+			.shortName  = '\0',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = OPT_NO_PROCESS_GROUP,
+			.descrip    = "Don't create a new process group" ,
+		},
+		{
+			.longName   = "log-stdout",
+			.shortName  = 'S',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = OPT_LOG_STDOUT,
+			.descrip    = "Log to stdout" ,
+		},
+		{
+			.longName   = "build-options",
+			.shortName  = 'b',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'b',
+			.descrip    = "Print build options" ,
+		},
+		{
+			.longName   = "port",
+			.shortName  = 'p',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &ports,
+			.val        = 0,
+			.descrip    = "Listen on the specified ports",
+		},
+		{
+			.longName   = "profiling-level",
+			.shortName  = 'P',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &profile_level,
+			.val        = 0,
+			.descrip    = "Set profiling level","PROFILE_LEVEL",
+		},
+		POPT_COMMON_SAMBA
+		POPT_TABLEEND
 	};
 	struct smbd_parent_context *parent = NULL;
 	TALLOC_CTX *frame;
@@ -1603,9 +1636,10 @@ extern void build_options(bool screen);
 	struct tevent_signal *se;
 	int profiling_level;
 	char *np_dir = NULL;
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	static const struct smbd_shim smbd_shim_fns =
 	{
-		.cancel_pending_lock_requests_by_fid = smbd_cancel_pending_lock_requests_by_fid,
 		.send_stat_cache_delete_message = smbd_send_stat_cache_delete_message,
 		.change_to_root_user = smbd_change_to_root_user,
 		.become_authenticated_pipe_user = smbd_become_authenticated_pipe_user,
@@ -1717,7 +1751,7 @@ extern void build_options(bool screen);
 	gain_root_group_privilege();
 
 	fault_setup();
-	dump_core_setup("smbd", lp_logfile(talloc_tos()));
+	dump_core_setup("smbd", lp_logfile(talloc_tos(), lp_sub));
 
 	/* we are never interested in SIGPIPE */
 	BlockSignals(True,SIGPIPE);
@@ -1771,6 +1805,13 @@ extern void build_options(bool screen);
 		exit(1);
 	}
 
+	/*
+	 * This calls unshare(CLONE_FS); on linux
+	 * in order to check if the running kernel/container
+	 * environment supports it.
+	 */
+	per_thread_cwd_check();
+
 	if (!cluster_probe_ok()) {
 		exit(1);
 	}
@@ -1783,7 +1824,7 @@ extern void build_options(bool screen);
 	 * initialized before the messaging context, cause the messaging
 	 * context holds an event context.
 	 */
-	ev_ctx = server_event_context();
+	ev_ctx = global_event_context();
 	if (ev_ctx == NULL) {
 		exit(1);
 	}
@@ -1792,7 +1833,7 @@ extern void build_options(bool screen);
 	 * Init the messaging context
 	 * FIXME: This should only call messaging_init()
 	 */
-	msg_ctx = server_messaging_context();
+	msg_ctx = global_messaging_context();
 	if (msg_ctx == NULL) {
 		exit(1);
 	}
@@ -1850,7 +1891,7 @@ extern void build_options(bool screen);
 		become_daemon(Fork, no_process_group, log_stdout);
 	}
 
-#if HAVE_SETPGID
+#ifdef HAVE_SETPGID
 	/*
 	 * If we're interactive we want to set our own process group for
 	 * signal management.
@@ -1992,7 +2033,8 @@ extern void build_options(bool screen);
 	   after the fork on every single connection.  This is a small
 	   performance improvment and reduces the total number of system
 	   fds used. */
-	if (!share_info_db_init()) {
+	status = share_info_db_init();
+	if (!NT_STATUS_IS_OK(status)) {
 		exit_daemon("ERROR: failed to load share info db.", EACCES);
 	}
 
@@ -2020,7 +2062,7 @@ extern void build_options(bool screen);
 	if (lp_clustering() && !lp_allow_unsafe_cluster_upgrade()) {
 		status = smbd_claim_version(msg_ctx, samba_version_string());
 		if (!NT_STATUS_IS_OK(status)) {
-			DBG_WARNING("Could not claim version: %s\n",
+			DBG_ERR("Could not claim version: %s\n",
 				    nt_errstr(status));
 			return -1;
 		}
@@ -2053,7 +2095,9 @@ extern void build_options(bool screen);
 		}
 	}
 
-	if (!dcesrv_ep_setup(ev_ctx, msg_ctx)) {
+	status = dcesrv_ep_setup(ev_ctx, msg_ctx);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_ERR("Failed to setup RPC server: %s\n", nt_errstr(status));
 		exit_daemon("Samba cannot setup ep pipe", EACCES);
 	}
 

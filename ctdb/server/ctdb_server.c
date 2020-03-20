@@ -45,24 +45,36 @@ int ctdb_set_transport(struct ctdb_context *ctdb, const char *transport)
 	return 0;
 }
 
-/*
-  Check whether an ip is a valid node ip
-  Returns the node id for this ip address or -1
-*/
-int ctdb_ip_to_nodeid(struct ctdb_context *ctdb, const ctdb_sock_addr *nodeip)
+/* Return the node structure for nodeip, NULL if nodeip is invalid */
+struct ctdb_node *ctdb_ip_to_node(struct ctdb_context *ctdb,
+				  const ctdb_sock_addr *nodeip)
 {
-	int nodeid;
+	unsigned int nodeid;
 
 	for (nodeid=0;nodeid<ctdb->num_nodes;nodeid++) {
 		if (ctdb->nodes[nodeid]->flags & NODE_FLAGS_DELETED) {
 			continue;
 		}
 		if (ctdb_same_ip(&ctdb->nodes[nodeid]->address, nodeip)) {
-			return nodeid;
+			return ctdb->nodes[nodeid];
 		}
 	}
 
-	return -1;
+	return NULL;
+}
+
+/* Return the PNN for nodeip, CTDB_UNKNOWN_PNN if nodeip is invalid */
+uint32_t ctdb_ip_to_pnn(struct ctdb_context *ctdb,
+			const ctdb_sock_addr *nodeip)
+{
+	struct ctdb_node *node;
+
+	node = ctdb_ip_to_node(ctdb, nodeip);
+	if (node == NULL) {
+		return CTDB_UNKNOWN_PNN;
+	}
+
+	return node->pnn;
 }
 
 /* Load a nodes list file into a nodes array */
@@ -72,7 +84,7 @@ static int convert_node_map_to_list(struct ctdb_context *ctdb,
 				    struct ctdb_node ***nodes,
 				    uint32_t *num_nodes)
 {
-	int i;
+	unsigned int i;
 
 	*nodes = talloc_zero_array(mem_ctx,
 					struct ctdb_node *, node_map->num);
@@ -157,7 +169,7 @@ int ctdb_set_address(struct ctdb_context *ctdb, const char *address)
 */
 uint32_t ctdb_get_num_active_nodes(struct ctdb_context *ctdb)
 {
-	int i;
+	unsigned int i;
 	uint32_t count=0;
 	for (i=0; i < ctdb->num_nodes; i++) {
 		if (!(ctdb->nodes[i]->flags & NODE_FLAGS_INACTIVE)) {
@@ -363,8 +375,9 @@ static void ctdb_defer_packet(struct ctdb_context *ctdb, struct ctdb_req_header 
 		return;
 	}
 	q->ctdb = ctdb;
-	q->hdr = talloc_memdup(ctdb, hdr, hdr->length);
+	q->hdr = talloc_memdup(q, hdr, hdr->length);
 	if (q->hdr == NULL) {
+		talloc_free(q);
 		DEBUG(DEBUG_ERR,("Error copying deferred packet to self\n"));
 		return;
 	}
@@ -383,7 +396,7 @@ static void ctdb_defer_packet(struct ctdb_context *ctdb, struct ctdb_req_header 
 static void ctdb_broadcast_packet_all(struct ctdb_context *ctdb, 
 				      struct ctdb_req_header *hdr)
 {
-	int i;
+	unsigned int i;
 	for (i=0; i < ctdb->num_nodes; i++) {
 		if (ctdb->nodes[i]->flags & NODE_FLAGS_DELETED) {
 			continue;
@@ -399,7 +412,7 @@ static void ctdb_broadcast_packet_all(struct ctdb_context *ctdb,
 static void ctdb_broadcast_packet_active(struct ctdb_context *ctdb,
 					 struct ctdb_req_header *hdr)
 {
-	int i;
+	unsigned int i;
 	for (i = 0; i < ctdb->num_nodes; i++) {
 		if (ctdb->nodes[i]->flags & NODE_FLAGS_INACTIVE) {
 			continue;
@@ -416,7 +429,7 @@ static void ctdb_broadcast_packet_active(struct ctdb_context *ctdb,
 static void ctdb_broadcast_packet_connected(struct ctdb_context *ctdb, 
 					    struct ctdb_req_header *hdr)
 {
-	int i;
+	unsigned int i;
 	for (i=0; i < ctdb->num_nodes; i++) {
 		if (ctdb->nodes[i]->flags & NODE_FLAGS_DELETED) {
 			continue;

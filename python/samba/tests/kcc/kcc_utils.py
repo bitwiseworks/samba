@@ -20,7 +20,8 @@
 """Tests for samba.kcc.kcc_utils"""
 import samba
 import samba.tests
-from samba.kcc.kcc_utils import *
+from samba.kcc.kcc_utils import new_connection_schedule, drsblobs
+from samba.kcc.kcc_utils import uncovered_sites_to_cover
 from samba.credentials import Credentials
 from samba.auth import system_session
 from samba.samdb import SamDB
@@ -69,7 +70,7 @@ class SiteCoverageTests(samba.tests.TestCase):
         self.samdb.transaction_commit()
 
     def _add_server(self, name, site):
-        dn = "CN={},CN=Servers,{}".format(name, site)
+        dn = "CN={0},CN=Servers,{1}".format(name, site)
         self.samdb.add({
             "dn": dn,
             "objectClass": "server",
@@ -78,7 +79,7 @@ class SiteCoverageTests(samba.tests.TestCase):
         return dn
 
     def _add_site(self, name):
-        dn = "CN={},CN=Sites,{}".format(
+        dn = "CN={0},CN=Sites,{1}".format(
             name, self.samdb.get_config_basedn()
         )
         self.samdb.add({
@@ -94,7 +95,7 @@ class SiteCoverageTests(samba.tests.TestCase):
         return dn, name.lower()
 
     def _add_site_link(self, name, links=[], cost=100):
-        dn = "CN={},CN=IP,CN=Inter-Site Transports,CN=Sites,{}".format(
+        dn = "CN={0},CN=IP,CN=Inter-Site Transports,CN=Sites,{1}".format(
             name, self.samdb.get_config_basedn()
         )
         self.samdb.add({
@@ -254,7 +255,8 @@ class SiteCoverageTests(samba.tests.TestCase):
 
         self.assertEqual([], to_cover)
 
-    def test_three_site_links_different_costs(self):
+    def test_three_site_links_duplicate_costs(self):
+        # two of the links have the same cost; the other is higher
         self.samdb.transaction_start()
         site1, name1 = self._add_site(self.prefix + "ABCD")
         site2, name2 = self._add_site(self.prefix + "BCDE")

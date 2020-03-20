@@ -206,15 +206,23 @@ static NTSTATUS gse_context_init(TALLOC_CTX *mem_ctx,
 	gse_ctx->gss_want_flags |= add_gss_c_flags;
 
 	/* Initialize Kerberos Context */
-	initialize_krb5_error_table();
-
-	k5ret = krb5_init_context(&gse_ctx->k5ctx);
+	k5ret = smb_krb5_init_context_common(&gse_ctx->k5ctx);
 	if (k5ret) {
-		DEBUG(0, ("Failed to initialize kerberos context! (%s)\n",
-			  error_message(k5ret)));
+		DBG_ERR("kerberos init context failed (%s)\n",
+			error_message(k5ret));
 		status = NT_STATUS_INTERNAL_ERROR;
 		goto err_out;
 	}
+
+#ifdef SAMBA4_USES_HEIMDAL
+	k5ret = gsskrb5_set_dns_canonicalize(false);
+	if (k5ret) {
+		DBG_ERR("gsskrb5_set_dns_canonicalize() failed (%s)\n",
+			error_message(k5ret));
+		status = NT_STATUS_INTERNAL_ERROR;
+		goto err_out;
+	}
+#endif
 
 	if (!ccache_name) {
 		ccache_name = krb5_cc_default_name(gse_ctx->k5ctx);
@@ -236,6 +244,10 @@ static NTSTATUS gse_context_init(TALLOC_CTX *mem_ctx,
 	return NT_STATUS_OK;
 
 err_out:
+	if (gse_ctx->k5ctx) {
+		krb5_free_context(gse_ctx->k5ctx);
+	}
+
 	TALLOC_FREE(gse_ctx);
 	return status;
 }
@@ -557,7 +569,7 @@ init_sec_context_done:
 			status = NT_STATUS_NO_MEMORY;
 		}
 
-		gss_maj = gss_release_buffer(&gss_min, &out_data);
+		gss_release_buffer(&gss_min, &out_data);
 	}
 
 done:
@@ -682,7 +694,7 @@ static NTSTATUS gse_get_server_auth_token(TALLOC_CTX *mem_ctx,
 		if (!blob.data) {
 			status = NT_STATUS_NO_MEMORY;
 		}
-		gss_maj = gss_release_buffer(&gss_min, &out_data);
+		gss_release_buffer(&gss_min, &out_data);
 	}
 
 
@@ -734,10 +746,10 @@ static char *gse_errstr(TALLOC_CTX *mem_ctx, OM_uint32 maj, OM_uint32 min)
 
 done:
 	if (msg_min.value) {
-		gss_maj = gss_release_buffer(&gss_min, &msg_min);
+		gss_release_buffer(&gss_min, &msg_min);
 	}
 	if (msg_maj.value) {
-		gss_maj = gss_release_buffer(&gss_min, &msg_maj);
+		gss_release_buffer(&gss_min, &msg_maj);
 	}
 	return errstr;
 }

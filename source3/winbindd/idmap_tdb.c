@@ -63,7 +63,7 @@ static int convert_fn(struct db_record *rec, void *private_data)
 	NTSTATUS status;
 	struct dom_sid sid;
 	uint32_t rid;
-	fstring keystr;
+	struct dom_sid_buf keystr;
 	fstring dom_name;
 	TDB_DATA key;
 	TDB_DATA key2;
@@ -104,8 +104,7 @@ static int convert_fn(struct db_record *rec, void *private_data)
 
 	sid_compose(&sid, &domain->sid, rid);
 
-	sid_to_fstring(keystr, &sid);
-	key2 = string_term_tdb_data(keystr);
+	key2 = string_term_tdb_data(dom_sid_str_buf(&sid, &keystr));
 
 	value = dbwrap_record_get_value(rec);
 
@@ -310,7 +309,7 @@ static NTSTATUS idmap_tdb_open_db(struct idmap_domain *dom)
 	mem_ctx = talloc_stackframe();
 
 	/* use the old database if present */
-	tdbfile = state_path("winbindd_idmap.tdb");
+	tdbfile = state_path(talloc_tos(), "winbindd_idmap.tdb");
 	if (!tdbfile) {
 		DEBUG(0, ("Out of memory!\n"));
 		ret = NT_STATUS_NO_MEMORY;

@@ -41,6 +41,12 @@
 #include "lib/param/loadparm.h"
 #include "utils/net_dns.h"
 
+#ifdef HAVE_JANSSON
+#include <jansson.h>
+#include "audit_logging.h" /* various JSON helpers */
+#include "auth/common_auth.h"
+#endif /* [HAVE_JANSSON] */
+
 #ifdef HAVE_ADS
 
 /* when we do not have sufficient input parameters to contact a remote domain
@@ -55,6 +61,264 @@ static const char *assume_own_realm(struct net_context *c)
 	return NULL;
 }
 
+#ifdef HAVE_JANSSON
+
+/*
+ * note: JSON output deliberately bypasses gettext so as to provide the same
+ * output irrespective of the locale.
+ */
+
+static int output_json(const struct json_object *jsobj)
+{
+	TALLOC_CTX *ctx = NULL;
+	char *json = NULL;
+
+	if (json_is_invalid(jsobj)) {
+		return -1;
+	}
+
+	ctx = talloc_new(NULL);
+	if (ctx == NULL) {
+		d_fprintf(stderr, _("Out of memory\n"));
+		return -1;
+	}
+
+	json = json_to_string(ctx, jsobj);
+	if (!json) {
+		d_fprintf(stderr, _("error encoding to JSON\n"));
+		return -1;
+	}
+
+	d_printf("%s\n", json);
+	TALLOC_FREE(ctx);
+
+	return 0;
+}
+
+static int net_ads_cldap_netlogon_json
+	(ADS_STRUCT *ads,
+	 const char *addr,
+	 const struct NETLOGON_SAM_LOGON_RESPONSE_EX *reply)
+{
+	struct json_object jsobj = json_new_object();
+	struct json_object flagsobj = json_new_object();
+	char response_type [32] = { '\0' };
+	int ret = 0;
+
+	if (json_is_invalid(&jsobj) || json_is_invalid(&flagsobj)) {
+		d_fprintf(stderr, _("error setting up JSON value\n"));
+
+		goto failure;
+	}
+
+	switch (reply->command) {
+		case LOGON_SAM_LOGON_USER_UNKNOWN_EX:
+			strncpy(response_type,
+				"LOGON_SAM_LOGON_USER_UNKNOWN_EX",
+				sizeof(response_type));
+			break;
+		case LOGON_SAM_LOGON_RESPONSE_EX:
+			strncpy(response_type, "LOGON_SAM_LOGON_RESPONSE_EX",
+	      sizeof(response_type));
+			break;
+		default:
+			snprintf(response_type, sizeof(response_type), "0x%x",
+	       reply->command);
+			break;
+	}
+
+	ret = json_add_string(&jsobj, "Information for Domain Controller",
+			      addr);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_string(&jsobj, "Response Type", response_type);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_guid(&jsobj, "GUID", &reply->domain_uuid);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool(&flagsobj, "Is a PDC",
+			    reply->server_type & NBT_SERVER_PDC);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool(&flagsobj, "Is a GC of the forest",
+			    reply->server_type & NBT_SERVER_GC);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool(&flagsobj, "Is an LDAP server",
+			    reply->server_type & NBT_SERVER_LDAP);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool(&flagsobj, "Supports DS",
+			    reply->server_type & NBT_SERVER_DS);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool(&flagsobj, "Is running a KDC",
+			    reply->server_type & NBT_SERVER_KDC);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool(&flagsobj, "Is running time services",
+			    reply->server_type & NBT_SERVER_TIMESERV);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool(&flagsobj, "Is the closest DC",
+			    reply->server_type & NBT_SERVER_CLOSEST);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool(&flagsobj, "Is writable",
+			    reply->server_type & NBT_SERVER_WRITABLE);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool(&flagsobj, "Has a hardware clock",
+			    reply->server_type & NBT_SERVER_GOOD_TIMESERV);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool(&flagsobj,
+			    "Is a non-domain NC serviced by LDAP server",
+			    reply->server_type & NBT_SERVER_NDNC);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool
+		(&flagsobj, "Is NT6 DC that has some secrets",
+		 reply->server_type & NBT_SERVER_SELECT_SECRET_DOMAIN_6);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool
+		(&flagsobj, "Is NT6 DC that has all secrets",
+		 reply->server_type & NBT_SERVER_FULL_SECRET_DOMAIN_6);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool(&flagsobj, "Runs Active Directory Web Services",
+			    reply->server_type & NBT_SERVER_ADS_WEB_SERVICE);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_bool(&flagsobj, "Runs on Windows 2012 or later",
+			    reply->server_type & NBT_SERVER_DS_8);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_string(&jsobj, "Forest", reply->forest);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_string(&jsobj, "Domain", reply->dns_domain);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_string(&jsobj, "Domain Controller", reply->pdc_dns_name);
+	if (ret != 0) {
+		goto failure;
+	}
+
+
+	ret = json_add_string(&jsobj, "Pre-Win2k Domain", reply->domain_name);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_string(&jsobj, "Pre-Win2k Hostname", reply->pdc_name);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	if (*reply->user_name) {
+		ret = json_add_string(&jsobj, "User name", reply->user_name);
+		if (ret != 0) {
+			goto failure;
+		}
+	}
+
+	ret = json_add_string(&jsobj, "Server Site Name", reply->server_site);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_string(&jsobj, "Client Site Name", reply->client_site);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_int(&jsobj, "NT Version", reply->nt_version);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_int(&jsobj, "LMNT Token", reply->lmnt_token);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_int(&jsobj, "LM20 Token", reply->lm20_token);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_object(&jsobj, "Flags", &flagsobj);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = output_json(&jsobj);
+	json_free(&jsobj); /* frees flagsobj recursively */
+
+	return ret;
+
+failure:
+	json_free(&flagsobj);
+	json_free(&jsobj);
+
+	return ret;
+}
+
+#else /* [HAVE_JANSSON] */
+
+static int net_ads_cldap_netlogon_json
+	(ADS_STRUCT *ads,
+	 const char *addr,
+	 const struct NETLOGON_SAM_LOGON_RESPONSE_EX * reply)
+{
+	d_fprintf(stderr, _("JSON support not available\n"));
+
+	return -1;
+}
+
+#endif /* [HAVE_JANSSON] */
+
 /*
   do a cldap netlogon query
 */
@@ -68,6 +332,10 @@ static int net_ads_cldap_netlogon(struct net_context *c, ADS_STRUCT *ads)
 	if ( !ads_cldap_netlogon_5(talloc_tos(), &ads->ldap.ss, ads->server.realm, &reply ) ) {
 		d_fprintf(stderr, _("CLDAP query failed!\n"));
 		return -1;
+	}
+
+	if (c->opt_json) {
+		return net_ads_cldap_netlogon_json(ads, addr, &reply);
 	}
 
 	d_printf(_("Information for Domain Controller: %s\n\n"),
@@ -119,17 +387,17 @@ static int net_ads_cldap_netlogon(struct net_context *c, ADS_STRUCT *ads)
 		   (reply.server_type & NBT_SERVER_DS_8) ? _("yes") : _("no"));
 
 
-	printf(_("Forest:\t\t\t%s\n"), reply.forest);
-	printf(_("Domain:\t\t\t%s\n"), reply.dns_domain);
-	printf(_("Domain Controller:\t%s\n"), reply.pdc_dns_name);
+	printf(_("Forest: %s\n"), reply.forest);
+	printf(_("Domain: %s\n"), reply.dns_domain);
+	printf(_("Domain Controller: %s\n"), reply.pdc_dns_name);
 
-	printf(_("Pre-Win2k Domain:\t%s\n"), reply.domain_name);
-	printf(_("Pre-Win2k Hostname:\t%s\n"), reply.pdc_name);
+	printf(_("Pre-Win2k Domain: %s\n"), reply.domain_name);
+	printf(_("Pre-Win2k Hostname: %s\n"), reply.pdc_name);
 
-	if (*reply.user_name) printf(_("User name:\t%s\n"), reply.user_name);
+	if (*reply.user_name) printf(_("User name: %s\n"), reply.user_name);
 
-	printf(_("Server Site Name :\t\t%s\n"), reply.server_site);
-	printf(_("Client Site Name :\t\t%s\n"), reply.client_site);
+	printf(_("Server Site Name: %s\n"), reply.server_site);
+	printf(_("Client Site Name: %s\n"), reply.client_site);
 
 	d_printf(_("NT Version: %d\n"), reply.nt_version);
 	d_printf(_("LMNT Token: %.2x\n"), reply.lmnt_token);
@@ -173,6 +441,93 @@ static int net_ads_lookup(struct net_context *c, int argc, const char **argv)
 }
 
 
+#ifdef HAVE_JANSSON
+
+static int net_ads_info_json(ADS_STRUCT *ads)
+{
+	int ret = 0;
+	char addr[INET6_ADDRSTRLEN];
+	time_t pass_time;
+	struct json_object jsobj = json_new_object();
+
+	if (json_is_invalid(&jsobj)) {
+		d_fprintf(stderr, _("error setting up JSON value\n"));
+
+		goto failure;
+	}
+
+	pass_time = secrets_fetch_pass_last_set_time(ads->server.workgroup);
+
+	print_sockaddr(addr, sizeof(addr), &ads->ldap.ss);
+
+	ret = json_add_string (&jsobj, "LDAP server", addr);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_string (&jsobj, "LDAP server name",
+			       ads->config.ldap_server_name);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_string (&jsobj, "Realm", ads->config.realm);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_string (&jsobj, "Bind Path", ads->config.bind_path);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_int (&jsobj, "LDAP port", ads->ldap.port);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_int (&jsobj, "Server time", ads->config.current_time);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_string (&jsobj, "KDC server", ads->auth.kdc_server);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_int (&jsobj, "Server time offset",
+			    ads->auth.time_offset);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = json_add_int (&jsobj, "Last machine account password change",
+			    pass_time);
+	if (ret != 0) {
+		goto failure;
+	}
+
+	ret = output_json(&jsobj);
+failure:
+	json_free(&jsobj);
+	ads_destroy(&ads);
+
+	return ret;
+}
+
+#else /* [HAVE_JANSSON] */
+
+static int net_ads_info_json(ADS_STRUCT *ads)
+{
+	d_fprintf(stderr, _("JSON support not available\n"));
+
+	return -1;
+}
+
+#endif /* [HAVE_JANSSON] */
+
+
 
 static int net_ads_info(struct net_context *c, int argc, const char **argv)
 {
@@ -206,6 +561,10 @@ static int net_ads_info(struct net_context *c, int argc, const char **argv)
 
 	if ( !ADS_ERR_OK(ads_current_time( ads )) ) {
 		d_fprintf( stderr, _("Failed to get server's current time!\n"));
+	}
+
+	if (c->opt_json) {
+		return net_ads_info_json(ads);
 	}
 
 	pass_time = secrets_fetch_pass_last_set_time(ads->server.workgroup);
@@ -261,7 +620,10 @@ retry_connect:
 		realm = assume_own_realm(c);
 	}
 
-	ads = ads_init(realm, c->opt_target_workgroup, c->opt_host);
+	ads = ads_init(realm,
+			c->opt_target_workgroup,
+			c->opt_host,
+			ADS_SASL_PLAIN);
 
 	if (!c->opt_user_name) {
 		c->opt_user_name = "administrator";
@@ -370,7 +732,8 @@ static int net_ads_check_int(const char *realm, const char *workgroup, const cha
 	ADS_STRUCT *ads;
 	ADS_STATUS status;
 
-	if ( (ads = ads_init( realm, workgroup, host )) == NULL ) {
+	ads = ads_init(realm, workgroup, host, ADS_SASL_PLAIN);
+	if (ads == NULL ) {
 		return -1;
 	}
 
@@ -964,7 +1327,7 @@ static int net_ads_leave(struct net_context *c, int argc, const char **argv)
 
 	if (c->display_usage) {
 		d_printf(  "%s\n"
-			   "net ads leave\n"
+			   "net ads leave [--keep-account]\n"
 			   "    %s\n",
 			 _("Usage:"),
 			 _("Leave an AD domain"));
@@ -1009,7 +1372,12 @@ static int net_ads_leave(struct net_context *c, int argc, const char **argv)
 	   WKSSVC_JOIN_FLAGS_ACCOUNT_DELETE really means "disable */
 	r->in.unjoin_flags	= WKSSVC_JOIN_FLAGS_JOIN_TYPE |
 				  WKSSVC_JOIN_FLAGS_ACCOUNT_DELETE;
-	r->in.delete_machine_account = true;
+	if (c->opt_keep_account) {
+		r->in.delete_machine_account = false;
+	} else {
+		r->in.delete_machine_account = true;
+	}
+
 	r->in.msg_ctx		= c->msg_ctx;
 
 	werr = libnet_Unjoin(ctx, r);
@@ -1106,7 +1474,7 @@ int net_ads_testjoin(struct net_context *c, int argc, const char **argv)
 }
 
 /*******************************************************************
-  Simple configu checks before beginning the join
+  Simple config checks before beginning the join
  ********************************************************************/
 
 static WERROR check_ads_config( void )
@@ -1400,7 +1768,7 @@ static void _net_ads_join_dns_updates(struct net_context *c, TALLOC_CTX *ctx, st
 	 * kinit with the machine password to do dns update.
 	 */
 
-	ads_dns = ads_init(lp_realm(), NULL, r->in.dc_name);
+	ads_dns = ads_init(lp_realm(), NULL, r->in.dc_name, ADS_SASL_PLAIN);
 
 	if (ads_dns == NULL) {
 		d_fprintf(stderr, _("DNS update failed: out of memory!\n"));
@@ -1772,7 +2140,8 @@ static int net_ads_dns_unregister(struct net_context *c,
 			   "net ads dns unregister [hostname]\n"
 			   "    %s\n",
 			 _("Usage:"),
-			 _("Register hostname with DNS\n"));
+			 _("Remove all IP Address entires for a given\n"
+                           "    hostname from the Active Directory server.\n"));
 		return -1;
 	}
 
@@ -1828,8 +2197,8 @@ static int net_ads_dns_gethostbyname(struct net_context *c, int argc, const char
 			 _("Usage:"),
 			 _("net ads dns gethostbyname <server> <name>\n"),
 			 _("  Look up hostname from the AD\n"
-			   "    server\tName server to use\n"
-			   "    name\tName to look up\n"));
+			   "    nameserver\tName server to use\n"
+			   "    hostname\tName to look up\n"));
 		return -1;
 	}
 
@@ -2290,7 +2659,8 @@ static int net_ads_password(struct net_context *c, int argc, const char **argv)
 
 	/* use the realm so we can eventually change passwords for users
 	in realms other than default */
-	if (!(ads = ads_init(realm, c->opt_workgroup, c->opt_host))) {
+	ads = ads_init(realm, c->opt_workgroup, c->opt_host, ADS_SASL_PLAIN);
+	if (ads == NULL) {
 		return -1;
 	}
 
@@ -2718,7 +3088,7 @@ int net_ads_keytab(struct net_context *c, int argc, const char **argv)
 			NET_TRANSPORT_ADS,
 			N_("Create a fresh keytab"),
 			N_("net ads keytab create\n"
-			   "    Create a fresh keytab or update exising one.")
+			   "    Create a fresh keytab or update existing one.")
 		},
 		{
 			"flush",
@@ -2988,6 +3358,9 @@ static int net_ads_kerberos_kinit(struct net_context *c, int argc, const char **
 					  true,
 					  true,
 					  2592000, /* one month */
+					  NULL,
+					  NULL,
+					  NULL,
 					  &status);
 	if (ret) {
 		d_printf(_("failed to kinit password: %s\n"),

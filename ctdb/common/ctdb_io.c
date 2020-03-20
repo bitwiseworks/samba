@@ -43,7 +43,7 @@ struct ctdb_buffer {
 	uint8_t *data;
 	uint32_t length;
 	uint32_t size;
-	uint32_t extend;
+	uint32_t offset;
 };
 
 struct ctdb_queue_pkt {
@@ -65,14 +65,14 @@ struct ctdb_queue {
 	size_t alignment;
 	void *private_data;
 	ctdb_queue_cb_fn_t callback;
-	bool *destroyed;
+	TALLOC_CTX *data_pool;
 	const char *name;
 	uint32_t buffer_size;
 };
 
 
 
-int ctdb_queue_length(struct ctdb_queue *queue)
+uint32_t ctdb_queue_length(struct ctdb_queue *queue)
 {
 	return queue->out_queue_length;
 }
@@ -97,39 +97,44 @@ static void queue_process_event(struct tevent_context *ev, struct tevent_immedia
 static void queue_process(struct ctdb_queue *queue)
 {
 	uint32_t pkt_size;
-	uint8_t *data;
+	uint8_t *data = NULL;
 
 	if (queue->buffer.length < sizeof(pkt_size)) {
 		return;
 	}
 
-	pkt_size = *(uint32_t *)queue->buffer.data;
+	/* Did we at least read the size into the buffer */
+	pkt_size = *(uint32_t *)(queue->buffer.data + queue->buffer.offset);
 	if (pkt_size == 0) {
 		DEBUG(DEBUG_CRIT, ("Invalid packet of length 0\n"));
 		goto failed;
 	}
 
+	/* the buffer doesn't contain the full packet, return to get the rest */
 	if (queue->buffer.length < pkt_size) {
-		if (pkt_size > queue->buffer_size) {
-			queue->buffer.extend = pkt_size;
-		}
 		return;
 	}
 
 	/* Extract complete packet */
-	data = talloc_memdup(queue, queue->buffer.data, pkt_size);
+	data = talloc_memdup(queue->data_pool,
+			     queue->buffer.data + queue->buffer.offset,
+			     pkt_size);
+
 	if (data == NULL) {
 		D_ERR("read error alloc failed for %u\n", pkt_size);
 		return;
 	}
 
-	/* Shift packet out from buffer */
-	if (queue->buffer.length > pkt_size) {
-		memmove(queue->buffer.data,
-			queue->buffer.data + pkt_size,
-			queue->buffer.length - pkt_size);
-	}
+	queue->buffer.offset += pkt_size;
 	queue->buffer.length -= pkt_size;
+
+	if (queue->buffer.offset < pkt_size ||
+	    queue->buffer.offset > queue->buffer.size) {
+		D_ERR("buffer offset overflow\n");
+		TALLOC_FREE(queue->buffer.data);
+		memset(&queue->buffer, 0, sizeof(queue->buffer));
+		goto failed;
+	}
 
 	if (queue->buffer.length > 0) {
 		/* There is more data to be processed, schedule an event */
@@ -140,6 +145,7 @@ static void queue_process(struct ctdb_queue *queue)
 			TALLOC_FREE(queue->buffer.data);
 			queue->buffer.size = 0;
 		}
+		queue->buffer.offset = 0;
 	}
 
 	/* It is the responsibility of the callback to free 'data' */
@@ -148,9 +154,7 @@ static void queue_process(struct ctdb_queue *queue)
 
 failed:
 	queue->callback(NULL, 0, queue->private_data);
-
 }
-
 
 /*
   called when an incoming connection is readable
@@ -159,9 +163,10 @@ failed:
 static void queue_io_read(struct ctdb_queue *queue)
 {
 	int num_ready = 0;
+	uint32_t pkt_size = 0;
+	uint32_t start_offset;
 	ssize_t nread;
 	uint8_t *data;
-	int navail;
 
 	/* check how much data is available on the socket for immediately
 	   guaranteed nonblocking access.
@@ -185,26 +190,60 @@ static void queue_io_read(struct ctdb_queue *queue)
 			goto failed;
 		}
 		queue->buffer.size = queue->buffer_size;
-	} else if (queue->buffer.extend > 0) {
-		/* extending buffer */
-		data = talloc_realloc_size(queue, queue->buffer.data, queue->buffer.extend);
+		goto data_read;
+	}
+
+	if (sizeof(pkt_size) > queue->buffer.length) {
+		/* data read is not sufficient to gather message size */
+		goto buffer_shift;
+	}
+
+	pkt_size = *(uint32_t *)(queue->buffer.data + queue->buffer.offset);
+	if (pkt_size > queue->buffer.size) {
+		data = talloc_realloc_size(queue,
+					   queue->buffer.data,
+					   pkt_size);
 		if (data == NULL) {
-			DEBUG(DEBUG_ERR, ("read error realloc failed for %u\n", queue->buffer.extend));
+			DBG_ERR("read error realloc failed for %u\n", pkt_size);
 			goto failed;
 		}
 		queue->buffer.data = data;
-		queue->buffer.size = queue->buffer.extend;
-		queue->buffer.extend = 0;
+		queue->buffer.size = pkt_size;
+		/* fall through here as we might need to move the data as well */
 	}
 
-	navail = queue->buffer.size - queue->buffer.length;
-	if (num_ready > navail) {
-		num_ready = navail;
+buffer_shift:
+	if (sizeof(pkt_size) > queue->buffer.size - queue->buffer.offset ||
+	    pkt_size > queue->buffer.size - queue->buffer.offset) {
+		/* Either the offset has progressed too far to host at least
+		 * the size information or the remaining space in the buffer
+		 * is not sufficient for the full message.
+		 * Therefore, move the data and try again.
+		 */
+		memmove(queue->buffer.data,
+			queue->buffer.data + queue->buffer.offset,
+			queue->buffer.length);
+		queue->buffer.offset = 0;
 	}
+
+data_read:
+	start_offset = queue->buffer.length + queue->buffer.offset;
+	if (start_offset < queue->buffer.length) {
+		DBG_ERR("Buffer overflow\n");
+		goto failed;
+	}
+	if (start_offset > queue->buffer.size) {
+		DBG_ERR("Buffer overflow\n");
+		goto failed;
+	}
+
+	num_ready = MIN(num_ready, queue->buffer.size - start_offset);
 
 	if (num_ready > 0) {
 		nread = sys_read(queue->fd,
-				 queue->buffer.data + queue->buffer.length,
+				 queue->buffer.data +
+					queue->buffer.offset +
+					queue->buffer.length,
 				 num_ready);
 		if (nread <= 0) {
 			DEBUG(DEBUG_ERR, ("read error nread=%d\n", (int)nread));
@@ -251,8 +290,7 @@ static void queue_io_write(struct ctdb_queue *queue)
 				queue->out_queue_length--;
 				talloc_free(pkt);
 			}
-			talloc_free(queue->fde);
-			queue->fde = NULL;
+			TALLOC_FREE(queue->fde);
 			queue->fd = -1;
 			tevent_schedule_immediate(queue->im, queue->ctdb->ev,
 						  queue_dead, queue);
@@ -324,8 +362,7 @@ int ctdb_queue_send(struct ctdb_queue *queue, uint8_t *data, uint32_t length)
 	    !(queue->ctdb->flags & CTDB_FLAG_TORTURE)) {
 		ssize_t n = write(queue->fd, data, length2);
 		if (n == -1 && errno != EAGAIN && errno != EWOULDBLOCK) {
-			talloc_free(queue->fde);
-			queue->fde = NULL;
+			TALLOC_FREE(queue->fde);
 			queue->fd = -1;
 			tevent_schedule_immediate(queue->im, queue->ctdb->ev,
 						  queue_dead, queue);
@@ -391,8 +428,7 @@ int ctdb_queue_send(struct ctdb_queue *queue, uint8_t *data, uint32_t length)
 int ctdb_queue_set_fd(struct ctdb_queue *queue, int fd)
 {
 	queue->fd = fd;
-	talloc_free(queue->fde);
-	queue->fde = NULL;
+	TALLOC_FREE(queue->fde);
 
 	if (fd != -1) {
 		queue->fde = tevent_add_fd(queue->ctdb->ev, queue, fd,
@@ -408,17 +444,6 @@ int ctdb_queue_set_fd(struct ctdb_queue *queue, int fd)
 		}
 	}
 
-	return 0;
-}
-
-/* If someone sets up this pointer, they want to know if the queue is freed */
-static int queue_destructor(struct ctdb_queue *queue)
-{
-	TALLOC_FREE(queue->buffer.data);
-	queue->buffer.length = 0;
-	queue->buffer.size = 0;
-	if (queue->destroyed != NULL)
-		*queue->destroyed = true;
 	return 0;
 }
 
@@ -454,7 +479,6 @@ struct ctdb_queue *ctdb_queue_setup(struct ctdb_context *ctdb,
 			return NULL;
 		}
 	}
-	talloc_set_destructor(queue, queue_destructor);
 
 	queue->buffer_size = ctdb->tunable.queue_buffer_size;
 	/* In client code, ctdb->tunable is not initialized.
@@ -462,6 +486,12 @@ struct ctdb_queue *ctdb_queue_setup(struct ctdb_context *ctdb,
 	 */
 	if (queue->buffer_size == 0) {
 		queue->buffer_size = 1024;
+	}
+
+	queue->data_pool = talloc_pool(queue, queue->buffer_size);
+	if (queue->data_pool == NULL) {
+		TALLOC_FREE(queue);
+		return NULL;
 	}
 
 	return queue;

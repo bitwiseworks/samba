@@ -24,6 +24,7 @@ from samba.tests.samba_tool.base import SambaToolCmdTest
 from samba.credentials import Credentials
 from samba.auth import system_session
 
+
 class RodcCmdTestCase(SambaToolCmdTest):
     def setUp(self):
         super(RodcCmdTestCase, self).setUp()
@@ -35,7 +36,7 @@ class RodcCmdTestCase(SambaToolCmdTest):
         self.creds.guess(self.lp)
         self.session = system_session()
         self.ldb = SamDB("ldap://" + os.environ["DC_SERVER"],
-            session_info=self.session, credentials=self.creds,lp=self.lp)
+                         session_info=self.session, credentials=self.creds, lp=self.lp)
 
         self.base_dn = self.ldb.domain_dn()
 
@@ -61,7 +62,6 @@ class RodcCmdTestCase(SambaToolCmdTest):
         self.ldb.deleteuser("sambatool6")
         (result, out, err) = self.runsubcmd("drs", "replicate", "--local", "unused",
                                             os.environ["DC_SERVER"], self.base_dn)
-
 
     def test_single_by_account_name(self):
         (result, out, err) = self.runsubcmd("rodc", "preload", "sambatool1",

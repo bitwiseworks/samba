@@ -27,7 +27,6 @@
 #include "auth/kerberos/kerberos.h"
 #include "librpc/gen_ndr/ndr_drsblobs.h"
 #include "librpc/gen_ndr/ndr_lsa.h"
-#include "../lib/crypto/crypto.h"
 #include "lib/util/tsort.h"
 #include "dsdb/common/util.h"
 #include "libcli/security/session.h"
@@ -35,17 +34,25 @@
 #include "lib/messaging/irpc.h"
 #include "libds/common/roles.h"
 
-#define DCESRV_INTERFACE_LSARPC_BIND(call, iface) \
-       dcesrv_interface_lsarpc_bind(call, iface)
-static NTSTATUS dcesrv_interface_lsarpc_bind(struct dcesrv_call_state *dce_call,
+#include "lib/crypto/gnutls_helpers.h"
+#include <gnutls/gnutls.h>
+#include <gnutls/crypto.h>
+
+#define DCESRV_INTERFACE_LSARPC_BIND(context, iface) \
+       dcesrv_interface_lsarpc_bind(context, iface)
+static NTSTATUS dcesrv_interface_lsarpc_bind(struct dcesrv_connection_context *context,
 					     const struct dcesrv_interface *iface)
 {
-	return dcesrv_interface_bind_reject_connect(dce_call, iface);
+	return dcesrv_interface_bind_reject_connect(context, iface);
 }
 
 static NTSTATUS lsarpc__op_init_server(struct dcesrv_context *dce_ctx,
 				       const struct dcesrv_endpoint_server *ep_server);
 static const struct dcesrv_interface dcesrv_lsarpc_interface;
+
+#define NCACN_NP_PIPE_NETLOGON "ncacn_np:[\\pipe\\netlogon]"
+#define NCACN_NP_PIPE_LSASS "ncacn_np:[\\pipe\\lsass]"
+#define DCESRV_INTERFACE_LSARPC_NCACN_NP_SECONDARY_ENDPOINT NCACN_NP_PIPE_LSASS
 
 #define DCESRV_INTERFACE_LSARPC_INIT_SERVER	\
        dcesrv_interface_lsarpc_init_server
@@ -54,7 +61,8 @@ static NTSTATUS dcesrv_interface_lsarpc_init_server(struct dcesrv_context *dce_c
 {
 	if (lpcfg_lsa_over_netlogon(dce_ctx->lp_ctx)) {
 		NTSTATUS ret = dcesrv_interface_register(dce_ctx,
-						"ncacn_np:[\\pipe\\netlogon]",
+						NCACN_NP_PIPE_NETLOGON,
+						NCACN_NP_PIPE_LSASS,
 						&dcesrv_lsarpc_interface, NULL);
 		if (!NT_STATUS_IS_OK(ret)) {
 			DEBUG(1,("lsarpc_op_init_server: failed to register endpoint '\\pipe\\netlogon'\n"));
@@ -241,6 +249,8 @@ static NTSTATUS dcesrv_lsa_Delete(struct dcesrv_call_state *dce_call, TALLOC_CTX
 static NTSTATUS dcesrv_lsa_DeleteObject(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
 		       struct lsa_DeleteObject *r)
 {
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
 	struct dcesrv_handle *h;
 	int ret;
 
@@ -250,7 +260,7 @@ static NTSTATUS dcesrv_lsa_DeleteObject(struct dcesrv_call_state *dce_call, TALL
 		struct lsa_secret_state *secret_state = h->data;
 
 		/* Ensure user is permitted to delete this... */
-		switch (security_session_user_level(dce_call->conn->auth_state.session_info, NULL))
+		switch (security_session_user_level(session_info, NULL))
 		{
 		case SECURITY_SYSTEM:
 		case SECURITY_ADMINISTRATOR:
@@ -397,6 +407,8 @@ static NTSTATUS dcesrv_lsa_EnumPrivs(struct dcesrv_call_state *dce_call, TALLOC_
 static NTSTATUS dcesrv_lsa_QuerySecurity(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
 					 struct lsa_QuerySecurity *r)
 {
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
 	struct dcesrv_handle *h;
 	const struct security_descriptor *sd = NULL;
 	uint32_t access_granted = 0;
@@ -406,7 +418,7 @@ static NTSTATUS dcesrv_lsa_QuerySecurity(struct dcesrv_call_state *dce_call, TAL
 
 	DCESRV_PULL_HANDLE(h, r->in.handle, DCESRV_HANDLE_ANY);
 
-	sid = &dce_call->conn->auth_state.session_info->security_token->sids[PRIMARY_USER_SID_INDEX];
+	sid = &session_info->security_token->sids[PRIMARY_USER_SID_INDEX];
 
 	if (h->wire_handle.handle_type == LSA_HANDLE_POLICY) {
 		struct lsa_policy_state *pstate = h->data;
@@ -774,7 +786,7 @@ static NTSTATUS dcesrv_lsa_CreateAccount(struct dcesrv_call_state *dce_call, TAL
 		 (unsigned)r->in.access_mask,
 		 (unsigned)astate->access_mask));
 
-	ah = dcesrv_handle_new(dce_call->context, LSA_HANDLE_ACCOUNT);
+	ah = dcesrv_handle_create(dce_call, LSA_HANDLE_ACCOUNT);
 	if (!ah) {
 		talloc_free(astate);
 		return NT_STATUS_NO_MEMORY;
@@ -854,13 +866,38 @@ static NTSTATUS get_trustdom_auth_blob(struct dcesrv_call_state *dce_call,
 	DATA_BLOB session_key = data_blob(NULL, 0);
 	enum ndr_err_code ndr_err;
 	NTSTATUS nt_status;
+	gnutls_cipher_hd_t cipher_hnd = NULL;
+	gnutls_datum_t _session_key;
+	int rc;
 
-	nt_status = dcesrv_fetch_session_key(dce_call->conn, &session_key);
+	nt_status = dcesrv_transport_session_key(dce_call, &session_key);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		return nt_status;
 	}
 
-	arcfour_crypt_blob(auth_blob->data, auth_blob->length, &session_key);
+	_session_key = (gnutls_datum_t) {
+		.data = session_key.data,
+		.size = session_key.length,
+	};
+
+	rc = gnutls_cipher_init(&cipher_hnd,
+				GNUTLS_CIPHER_ARCFOUR_128,
+				&_session_key,
+				NULL);
+	if (rc < 0) {
+		nt_status = gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+		goto out;
+	}
+
+	rc = gnutls_cipher_encrypt(cipher_hnd,
+				   auth_blob->data,
+				   auth_blob->length);
+	gnutls_cipher_deinit(cipher_hnd);
+	if (rc < 0) {
+		nt_status = gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+		goto out;
+	}
+
 	ndr_err = ndr_pull_struct_blob(auth_blob, mem_ctx,
 				       auth_struct,
 				       (ndr_pull_flags_fn_t)ndr_pull_trustDomainPasswords);
@@ -868,7 +905,9 @@ static NTSTATUS get_trustdom_auth_blob(struct dcesrv_call_state *dce_call,
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	return NT_STATUS_OK;
+	nt_status = NT_STATUS_OK;
+out:
+	return nt_status;
 }
 
 static NTSTATUS get_trustauth_inout_blob(struct dcesrv_call_state *dce_call,
@@ -1066,6 +1105,8 @@ static NTSTATUS dcesrv_lsa_CreateTrustedDomain_base(struct dcesrv_call_state *dc
 	char *dns_encoded = NULL;
 	char *netbios_encoded = NULL;
 	char *sid_encoded = NULL;
+	struct imessaging_context *imsg_ctx =
+		dcesrv_imessaging_context(dce_call->conn);
 
 	DCESRV_PULL_HANDLE(policy_handle, r->in.policy_handle, LSA_HANDLE_POLICY);
 	ZERO_STRUCTP(r->out.trustdom_handle);
@@ -1325,17 +1366,20 @@ static NTSTATUS dcesrv_lsa_CreateTrustedDomain_base(struct dcesrv_call_state *dc
 	/*
 	 * Notify winbindd that we have a new trust
 	 */
-	status = irpc_servers_byname(dce_call->msg_ctx,
+	status = irpc_servers_byname(imsg_ctx,
 				     mem_ctx,
 				     "winbind_server",
-				     &num_server_ids, &server_ids);
+				     &num_server_ids,
+				     &server_ids);
 	if (NT_STATUS_IS_OK(status) && num_server_ids >= 1) {
-		imessaging_send(dce_call->msg_ctx, server_ids[0],
-				MSG_WINBIND_RELOAD_TRUSTED_DOMAINS, NULL);
+		imessaging_send(imsg_ctx,
+				server_ids[0],
+				MSG_WINBIND_RELOAD_TRUSTED_DOMAINS,
+				NULL);
 	}
 	TALLOC_FREE(server_ids);
 
-	handle = dcesrv_handle_new(dce_call->context, LSA_HANDLE_TRUSTED_DOMAIN);
+	handle = dcesrv_handle_create(dce_call, LSA_HANDLE_TRUSTED_DOMAIN);
 	if (!handle) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -1467,7 +1511,7 @@ static NTSTATUS dcesrv_lsa_OpenTrustedDomain_common(
 		}
 	}
 
-	handle = dcesrv_handle_new(dce_call->context, LSA_HANDLE_TRUSTED_DOMAIN);
+	handle = dcesrv_handle_create(dce_call, LSA_HANDLE_TRUSTED_DOMAIN);
 	if (!handle) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -1689,6 +1733,7 @@ static NTSTATUS update_uint32_t_value(TALLOC_CTX *mem_ctx,
 	uint32_t orig_uint = 0;
 	unsigned int flags = 0;
 	int ret;
+	int error = 0;
 
 	orig_val = ldb_msg_find_ldb_val(orig, attribute);
 	if (!orig_val || !orig_val->data) {
@@ -1696,9 +1741,12 @@ static NTSTATUS update_uint32_t_value(TALLOC_CTX *mem_ctx,
 		flags = LDB_FLAG_MOD_ADD;
 
 	} else {
-		errno = 0;
-		orig_uint = strtoul((const char *)orig_val->data, NULL, 0);
-		if (errno != 0 || orig_uint != value) {
+		orig_uint = smb_strtoul((const char *)orig_val->data,
+					NULL,
+					0,
+					&error,
+					SMB_STR_STANDARD);
+		if (error != 0 || orig_uint != value) {
 			/* replace also if can't get value */
 			flags = LDB_FLAG_MOD_REPLACE;
 		}
@@ -2715,7 +2763,7 @@ static NTSTATUS dcesrv_lsa_OpenAccount(struct dcesrv_call_state *dce_call, TALLO
 		 (unsigned)r->in.access_mask,
 		 (unsigned)astate->access_mask));
 
-	ah = dcesrv_handle_new(dce_call->context, LSA_HANDLE_ACCOUNT);
+	ah = dcesrv_handle_create(dce_call, LSA_HANDLE_ACCOUNT);
 	if (!ah) {
 		talloc_free(astate);
 		return NT_STATUS_NO_MEMORY;
@@ -2871,6 +2919,8 @@ static NTSTATUS dcesrv_lsa_AddRemoveAccountRights(struct dcesrv_call_state *dce_
 					   struct dom_sid *sid,
 					   const struct lsa_RightSet *rights)
 {
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
 	const char *sidstr, *sidndrstr;
 	struct ldb_message *msg;
 	struct ldb_message_element *el;
@@ -2879,7 +2929,7 @@ static NTSTATUS dcesrv_lsa_AddRemoveAccountRights(struct dcesrv_call_state *dce_
 	struct lsa_EnumAccountRights r2;
 	char *dnstr;
 
-	if (security_session_user_level(dce_call->conn->auth_state.session_info, NULL) <
+	if (security_session_user_level(session_info, NULL) <
 	    SECURITY_ADMINISTRATOR) {
 		DEBUG(0,("lsa_AddRemoveAccount refused for supplied security token\n"));
 		return NT_STATUS_ACCESS_DENIED;
@@ -3173,6 +3223,8 @@ static NTSTATUS dcesrv_lsa_SetSystemAccessAccount(struct dcesrv_call_state *dce_
 static NTSTATUS dcesrv_lsa_CreateSecret(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
 				 struct lsa_CreateSecret *r)
 {
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
 	struct dcesrv_handle *policy_handle;
 	struct lsa_policy_state *policy_state;
 	struct lsa_secret_state *secret_state;
@@ -3190,7 +3242,7 @@ static NTSTATUS dcesrv_lsa_CreateSecret(struct dcesrv_call_state *dce_call, TALL
 	DCESRV_PULL_HANDLE(policy_handle, r->in.handle, LSA_HANDLE_POLICY);
 	ZERO_STRUCTP(r->out.sec_handle);
 
-	switch (security_session_user_level(dce_call->conn->auth_state.session_info, NULL))
+	switch (security_session_user_level(session_info, NULL))
 	{
 	case SECURITY_SYSTEM:
 	case SECURITY_ADMINISTRATOR:
@@ -3316,7 +3368,7 @@ static NTSTATUS dcesrv_lsa_CreateSecret(struct dcesrv_call_state *dce_call, TALL
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
-	handle = dcesrv_handle_new(dce_call->context, LSA_HANDLE_SECRET);
+	handle = dcesrv_handle_create(dce_call, LSA_HANDLE_SECRET);
 	NT_STATUS_HAVE_NO_MEMORY(handle);
 
 	handle->data = talloc_steal(handle, secret_state);
@@ -3337,8 +3389,9 @@ static NTSTATUS dcesrv_lsa_CreateSecret(struct dcesrv_call_state *dce_call, TALL
 static NTSTATUS dcesrv_lsa_OpenSecret(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
 			       struct lsa_OpenSecret *r)
 {
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
 	struct dcesrv_handle *policy_handle;
-
 	struct lsa_policy_state *policy_state;
 	struct lsa_secret_state *secret_state;
 	struct dcesrv_handle *handle;
@@ -3347,9 +3400,7 @@ static NTSTATUS dcesrv_lsa_OpenSecret(struct dcesrv_call_state *dce_call, TALLOC
 	const char *attrs[] = {
 		NULL
 	};
-
 	const char *name;
-
 	int ret;
 
 	DCESRV_PULL_HANDLE(policy_handle, r->in.handle, LSA_HANDLE_POLICY);
@@ -3360,7 +3411,7 @@ static NTSTATUS dcesrv_lsa_OpenSecret(struct dcesrv_call_state *dce_call, TALLOC
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	switch (security_session_user_level(dce_call->conn->auth_state.session_info, NULL))
+	switch (security_session_user_level(session_info, NULL))
 	{
 	case SECURITY_SYSTEM:
 	case SECURITY_ADMINISTRATOR:
@@ -3439,7 +3490,7 @@ static NTSTATUS dcesrv_lsa_OpenSecret(struct dcesrv_call_state *dce_call, TALLOC
 
 	secret_state->secret_dn = talloc_reference(secret_state, msgs[0]->dn);
 
-	handle = dcesrv_handle_new(dce_call->context, LSA_HANDLE_SECRET);
+	handle = dcesrv_handle_create(dce_call, LSA_HANDLE_SECRET);
 	if (!handle) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -3487,7 +3538,7 @@ static NTSTATUS dcesrv_lsa_SetSecret(struct dcesrv_call_state *dce_call, TALLOC_
 	if (!msg->dn) {
 		return NT_STATUS_NO_MEMORY;
 	}
-	status = dcesrv_fetch_session_key(dce_call->conn, &session_key);
+	status = dcesrv_transport_session_key(dce_call, &session_key);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
@@ -3622,6 +3673,8 @@ static NTSTATUS dcesrv_lsa_SetSecret(struct dcesrv_call_state *dce_call, TALLOC_
 static NTSTATUS dcesrv_lsa_QuerySecret(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
 				struct lsa_QuerySecret *r)
 {
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
 	struct dcesrv_handle *h;
 	struct lsa_secret_state *secret_state;
 	struct ldb_message *msg;
@@ -3642,7 +3695,7 @@ static NTSTATUS dcesrv_lsa_QuerySecret(struct dcesrv_call_state *dce_call, TALLO
 	DCESRV_PULL_HANDLE(h, r->in.sec_handle, LSA_HANDLE_SECRET);
 
 	/* Ensure user is permitted to read this... */
-	switch (security_session_user_level(dce_call->conn->auth_state.session_info, NULL))
+	switch (security_session_user_level(session_info, NULL))
 	{
 	case SECURITY_SYSTEM:
 	case SECURITY_ADMINISTRATOR:
@@ -3662,7 +3715,7 @@ static NTSTATUS dcesrv_lsa_QuerySecret(struct dcesrv_call_state *dce_call, TALLO
 	}
 	msg = res[0];
 
-	nt_status = dcesrv_fetch_session_key(dce_call->conn, &session_key);
+	nt_status = dcesrv_transport_session_key(dce_call, &session_key);
 	if (!NT_STATUS_IS_OK(nt_status)) {
 		return nt_status;
 	}
@@ -3958,6 +4011,8 @@ static NTSTATUS dcesrv_lsa_GetUserName(struct dcesrv_call_state *dce_call, TALLO
 {
 	enum dcerpc_transport_t transport =
 		dcerpc_binding_get_transport(dce_call->conn->endpoint->ep_description);
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
 	NTSTATUS status = NT_STATUS_OK;
 	const char *account_name;
 	const char *authority_name;
@@ -3986,8 +4041,8 @@ static NTSTATUS dcesrv_lsa_GetUserName(struct dcesrv_call_state *dce_call, TALLO
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	account_name = talloc_reference(mem_ctx, dce_call->conn->auth_state.session_info->info->account_name);
-	authority_name = talloc_reference(mem_ctx, dce_call->conn->auth_state.session_info->info->domain_name);
+	account_name = talloc_reference(mem_ctx, session_info->info->account_name);
+	authority_name = talloc_reference(mem_ctx, session_info->info->domain_name);
 
 	_account_name = talloc(mem_ctx, struct lsa_String);
 	NT_STATUS_HAVE_NO_MEMORY(_account_name);
@@ -4353,6 +4408,8 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 	enum ndr_err_code ndr_err;
 	int ret;
 	bool in_transaction = false;
+	struct imessaging_context *imsg_ctx =
+		dcesrv_imessaging_context(dce_call->conn);
 
 	DCESRV_PULL_HANDLE(h, r->in.handle, LSA_HANDLE_POLICY);
 
@@ -4591,17 +4648,20 @@ static NTSTATUS dcesrv_lsa_lsaRSetForestTrustInformation(struct dcesrv_call_stat
 	/*
 	 * Notify winbindd that we have a acquired forest trust info
 	 */
-	status = irpc_servers_byname(dce_call->msg_ctx,
+	status = irpc_servers_byname(imsg_ctx,
 				     mem_ctx,
 				     "winbind_server",
-				     &num_server_ids, &server_ids);
+				     &num_server_ids,
+				     &server_ids);
 	if (!NT_STATUS_IS_OK(status)) {
 		DBG_ERR("irpc_servers_byname failed\n");
 		goto done;
 	}
 
-	imessaging_send(dce_call->msg_ctx, server_ids[0],
-			MSG_WINBIND_RELOAD_TRUSTED_DOMAINS, NULL);
+	imessaging_send(imsg_ctx,
+			server_ids[0],
+			MSG_WINBIND_RELOAD_TRUSTED_DOMAINS,
+			NULL);
 
 	status = NT_STATUS_OK;
 

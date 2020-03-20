@@ -20,13 +20,14 @@
 __docformat__ = "restructuredText"
 
 import optparse
+from copy import copy
 import os
 from samba.credentials import (
     Credentials,
     AUTO_USE_KERBEROS,
     DONT_USE_KERBEROS,
     MUST_USE_KERBEROS,
-    )
+)
 import sys
 
 
@@ -63,9 +64,6 @@ class SambaOptions(optparse.OptionGroup):
         self._configfile = arg
 
     def _set_debuglevel(self, option, opt_str, arg, parser):
-        if arg < 0:
-            raise optparse.OptionValueError("invalid %s option value: %s" %
-                                            (opt_str, arg))
         self._lp.set('debug level', arg)
         parser.values.debuglevel = arg
 
@@ -100,8 +98,8 @@ class VersionOptions(optparse.OptionGroup):
     def __init__(self, parser):
         optparse.OptionGroup.__init__(self, parser, "Version Options")
         self.add_option("-V", "--version", action="callback",
-                callback=self._display_version,
-                help="Display version number")
+                        callback=self._display_version,
+                        help="Display version number")
 
     def _display_version(self, option, opt_str, arg, parser):
         import samba
@@ -136,30 +134,30 @@ class CredentialsOptions(optparse.OptionGroup):
         self.machine_pass = False
         optparse.OptionGroup.__init__(self, parser, self.section)
         self._add_option("--simple-bind-dn", metavar="DN", action="callback",
-                        callback=self._set_simple_bind_dn, type=str,
-                        help="DN to use for a simple bind")
+                         callback=self._set_simple_bind_dn, type=str,
+                         help="DN to use for a simple bind")
         self._add_option("--password", metavar="PASSWORD", action="callback",
-                        help="Password", type=str, callback=self._set_password)
+                         help="Password", type=str, callback=self._set_password)
         self._add_option("-U", "--username", metavar="USERNAME",
-                        action="callback", type=str,
-                        help="Username", callback=self._parse_username)
+                         action="callback", type=str,
+                         help="Username", callback=self._parse_username)
         self._add_option("-W", "--workgroup", metavar="WORKGROUP",
-                        action="callback", type=str,
-                        help="Workgroup", callback=self._parse_workgroup)
+                         action="callback", type=str,
+                         help="Workgroup", callback=self._parse_workgroup)
         self._add_option("-N", "--no-pass", action="callback",
-                        help="Don't ask for a password",
-                        callback=self._set_no_password)
+                         help="Don't ask for a password",
+                         callback=self._set_no_password)
         self._add_option("-k", "--kerberos", metavar="KERBEROS",
-                        action="callback", type=str,
-                        help="Use Kerberos", callback=self._set_kerberos)
+                         action="callback", type=str,
+                         help="Use Kerberos", callback=self._set_kerberos)
         self._add_option("", "--ipaddress", metavar="IPADDRESS",
-                        action="callback", type=str,
-                        help="IP address of server",
-                        callback=self._set_ipaddress)
+                         action="callback", type=str,
+                         help="IP address of server",
+                         callback=self._set_ipaddress)
         self._add_option("-P", "--machine-pass",
-                        action="callback",
-                        help="Use stored machine account password",
-                        callback=self._set_machine_pass)
+                         action="callback",
+                         help="Use stored machine account password",
+                         callback=self._set_machine_pass)
         self._add_option("--krb5-ccache", metavar="KRB5CCNAME",
                          action="callback", type=str,
                          help="Kerberos Credentials cache",
@@ -288,3 +286,47 @@ class CredentialsOptionsDouble(CredentialsOptions):
         if self.no_pass2:
             self.creds2.set_cmdline_callbacks()
         return self.creds2
+
+# Custom option type to allow the input of sizes using byte, kb, mb ...
+# units, e.g. 2Gb, 4KiB ...
+#    e.g. Option("--size", type="bytes", metavar="SIZE")
+#
+def check_bytes(option, opt, value):
+
+    multipliers = {
+            "B"  : 1,
+            "KB" : 1024,
+            "MB" : 1024 * 1024,
+            "GB" : 1024 * 1024 * 1024}
+
+    # strip out any spaces
+    v = value.replace(" ", "")
+
+    # extract the numeric prefix
+    digits = ""
+    while v and v[0:1].isdigit() or v[0:1] == '.':
+        digits += v[0]
+        v = v[1:]
+
+    try:
+        m = float(digits)
+    except ValueError:
+        msg = ("{0} option requires a numeric value, "
+               "with an optional unit suffix").format(opt)
+        raise optparse.OptionValueError(msg)
+
+
+    # strip out the 'i' and convert to upper case so
+    # kib Kib kb KB are all equivalent
+    suffix = v.upper().replace("I", "")
+    try:
+        return m * multipliers[suffix]
+    except KeyError as k:
+        msg = ("{0} invalid suffix '{1}', "
+               "should be B, Kb, Mb or Gb").format(opt, v)
+        raise optparse.OptionValueError(msg)
+
+class SambaOption(optparse.Option):
+    TYPES = optparse.Option.TYPES + ("bytes",)
+    TYPE_CHECKER = copy(optparse.Option.TYPE_CHECKER)
+    TYPE_CHECKER["bytes"] = check_bytes

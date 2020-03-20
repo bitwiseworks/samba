@@ -39,7 +39,6 @@
 #include "../libcli/security/dom_sid.h"
 #include "../librpc/gen_ndr/drsblobs.h"
 #include "../librpc/gen_ndr/ndr_drsblobs.h"
-#include "../lib/crypto/arcfour.h"
 #include "../libcli/security/dom_sid.h"
 #include "../librpc/gen_ndr/ndr_security.h"
 #include "passdb.h"
@@ -50,6 +49,10 @@
 #include "../libcli/auth/libcli_auth.h"
 #include "../libcli/lsarpc/util_lsarpc.h"
 #include "lsa.h"
+
+#include "lib/crypto/gnutls_helpers.h"
+#include <gnutls/gnutls.h>
+#include <gnutls/crypto.h>
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_RPC_SRV
@@ -1682,22 +1685,50 @@ static NTSTATUS get_trustdom_auth_blob(struct pipes_struct *p,
 {
 	enum ndr_err_code ndr_err;
 	DATA_BLOB lsession_key;
+	gnutls_cipher_hd_t cipher_hnd = NULL;
+	gnutls_datum_t my_session_key;
 	NTSTATUS status;
+	int rc;
 
 	status = session_extract_session_key(p->session_info, &lsession_key, KEY_USE_16BYTES);
 	if (!NT_STATUS_IS_OK(status)) {
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	arcfour_crypt_blob(auth_blob->data, auth_blob->length, &lsession_key);
+	my_session_key = (gnutls_datum_t) {
+		.data = lsession_key.data,
+		.size = lsession_key.length,
+	};
+
+	rc = gnutls_cipher_init(&cipher_hnd,
+				GNUTLS_CIPHER_ARCFOUR_128,
+				&my_session_key,
+				NULL);
+	if (rc < 0) {
+		status = gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+		goto out;
+	}
+
+	rc = gnutls_cipher_encrypt(cipher_hnd,
+				   auth_blob->data,
+				   auth_blob->length);
+	gnutls_cipher_deinit(cipher_hnd);
+	if (rc < 0) {
+		status = gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+		goto out;
+	}
+
 	ndr_err = ndr_pull_struct_blob(auth_blob, mem_ctx,
 				       auth_struct,
 				       (ndr_pull_flags_fn_t)ndr_pull_trustDomainPasswords);
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-		return NT_STATUS_INVALID_PARAMETER;
+		status = NT_STATUS_INVALID_PARAMETER;
+		goto out;
 	}
 
-	return NT_STATUS_OK;
+	status = NT_STATUS_OK;
+out:
+	return status;
 }
 
 static NTSTATUS get_trustauth_inout_blob(TALLOC_CTX *mem_ctx,
@@ -1959,8 +1990,9 @@ NTSTATUS _lsa_DeleteTrustedDomain(struct pipes_struct *p,
 	}
 
 	if (td->netbios_name == NULL || *td->netbios_name == '\0') {
+		struct dom_sid_buf buf;
 		DEBUG(10, ("Missing netbios name for for trusted domain %s.\n",
-			   sid_string_tos(r->in.dom_sid)));
+			   dom_sid_str_buf(r->in.dom_sid, &buf)));
 		return NT_STATUS_UNSUCCESSFUL;
 	}
 
@@ -2936,6 +2968,7 @@ NTSTATUS _lsa_EnumPrivsAccount(struct pipes_struct *p,
 	struct lsa_info *info=NULL;
 	PRIVILEGE_SET *privileges;
 	struct lsa_PrivilegeSet *priv_set = NULL;
+	struct dom_sid_buf buf;
 
 	/* find the connection policy handle. */
 	if (!find_policy_by_hnd(p, r->in.handle, (void **)(void *)&info))
@@ -2959,7 +2992,7 @@ NTSTATUS _lsa_EnumPrivsAccount(struct pipes_struct *p,
 	}
 
 	DEBUG(10,("_lsa_EnumPrivsAccount: %s has %d privileges\n",
-		  sid_string_dbg(&info->sid),
+		  dom_sid_str_buf(&info->sid, &buf),
 		  privileges->count));
 
 	priv_set->count = privileges->count;
@@ -3092,8 +3125,9 @@ NTSTATUS _lsa_AddPrivilegesToAccount(struct pipes_struct *p,
 	set = r->in.privs;
 
 	if ( !grant_privilege_set( &info->sid, set ) ) {
+		struct dom_sid_buf buf;
 		DEBUG(3,("_lsa_AddPrivilegesToAccount: grant_privilege_set(%s) failed!\n",
-			 sid_string_dbg(&info->sid) ));
+			 dom_sid_str_buf(&info->sid, &buf)));
 		return NT_STATUS_NO_SUCH_PRIVILEGE;
 	}
 
@@ -3126,8 +3160,9 @@ NTSTATUS _lsa_RemovePrivilegesFromAccount(struct pipes_struct *p,
 	set = r->in.privs;
 
 	if ( !revoke_privilege_set( &info->sid, set) ) {
+		struct dom_sid_buf buf;
 		DEBUG(3,("_lsa_RemovePrivilegesFromAccount: revoke_privilege(%s) failed!\n",
-			 sid_string_dbg(&info->sid) ));
+			 dom_sid_str_buf(&info->sid, &buf)));
 		return NT_STATUS_NO_SUCH_PRIVILEGE;
 	}
 
@@ -3423,6 +3458,7 @@ NTSTATUS _lsa_EnumAccountRights(struct pipes_struct *p,
 	NTSTATUS status;
 	struct lsa_info *info = NULL;
 	PRIVILEGE_SET *privileges;
+	struct dom_sid_buf buf;
 
 	/* find the connection policy handle. */
 
@@ -3450,7 +3486,8 @@ NTSTATUS _lsa_EnumAccountRights(struct pipes_struct *p,
 	}
 
 	DEBUG(10,("_lsa_EnumAccountRights: %s has %d privileges\n",
-		  sid_string_dbg(r->in.sid), privileges->count));
+		  dom_sid_str_buf(r->in.sid, &buf),
+		  privileges->count));
 
 	status = init_lsa_right_set(p->mem_ctx, r->out.rights, privileges);
 

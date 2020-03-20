@@ -52,14 +52,21 @@ static PyObject *py_get_gpo_flags(PyObject *self, PyObject *args)
 
 	py_ret = PyList_New(0);
 	for (i = 0; ret[i]; i++) {
-		PyObject *item = PyStr_FromString(ret[i]);
+		int res = 0;
+		PyObject *item = PyUnicode_FromString(ret[i]);
 		if (item == NULL) {
 			talloc_free(mem_ctx);
 			Py_DECREF(py_ret);
 			PyErr_NoMemory();
 			return NULL;
 		}
-		PyList_Append(py_ret, item);
+		res = PyList_Append(py_ret, item);
+		Py_CLEAR(item);
+		if (res == -1) {
+			Py_DECREF(py_ret);
+			talloc_free(mem_ctx);
+			return NULL;
+		}
 	}
 
 	talloc_free(mem_ctx);
@@ -94,14 +101,21 @@ static PyObject *py_get_gplink_options(PyObject *self, PyObject *args)
 
 	py_ret = PyList_New(0);
 	for (i = 0; ret[i]; i++) {
-		PyObject *item = PyStr_FromString(ret[i]);
+		int res = 0;
+		PyObject *item = PyUnicode_FromString(ret[i]);
 		if (item == NULL) {
 			talloc_free(mem_ctx);
 			Py_DECREF(py_ret);
 			PyErr_NoMemory();
 			return NULL;
 		}
-		PyList_Append(py_ret, item);
+		res = PyList_Append(py_ret, item);
+		Py_CLEAR(item);
+		if (res == -1) {
+			Py_DECREF(py_ret);
+			talloc_free(mem_ctx);
+			return NULL;
+		}
 	}
 
 	talloc_free(mem_ctx);

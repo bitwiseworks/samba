@@ -205,19 +205,22 @@ bool get_domain_group_from_sid(struct dom_sid sid, GROUP_MAP *map)
 
 int smb_create_group(const char *unix_group, gid_t *new_gid)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	char *add_script = NULL;
 	int 	ret = -1;
 	int 	fd = 0;
+	int error = 0;
 
 	*new_gid = 0;
 
 	/* defer to scripts */
 
-	if ( *lp_add_group_script(talloc_tos()) ) {
+	if ( *lp_add_group_script(talloc_tos(), lp_sub) ) {
 		TALLOC_CTX *ctx = talloc_tos();
 
 		add_script = talloc_strdup(ctx,
-					lp_add_group_script(ctx));
+					lp_add_group_script(ctx, lp_sub));
 		if (!add_script) {
 			return -1;
 		}
@@ -244,7 +247,16 @@ int smb_create_group(const char *unix_group, gid_t *new_gid)
 			nread = read(fd, output, sizeof(output)-1);
 			if (nread > 0) {
 				output[nread] = '\0';
-				*new_gid = (gid_t)strtoul(output, NULL, 10);
+				*new_gid = (gid_t)smb_strtoul(output,
+							      NULL,
+							      10,
+							      &error,
+							      SMB_STR_STANDARD);
+				if (error != 0) {
+					*new_gid = 0;
+					close(fd);
+					return -1;
+				}
 			}
 
 			close(fd);
@@ -268,16 +280,18 @@ int smb_create_group(const char *unix_group, gid_t *new_gid)
 
 int smb_delete_group(const char *unix_group)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	char *del_script = NULL;
 	int ret = -1;
 
 	/* defer to scripts */
 
-	if ( *lp_delete_group_script(talloc_tos()) ) {
+	if ( *lp_delete_group_script(talloc_tos(), lp_sub) ) {
 		TALLOC_CTX *ctx = talloc_tos();
 
 		del_script = talloc_strdup(ctx,
-				lp_delete_group_script(ctx));
+				lp_delete_group_script(ctx, lp_sub));
 		if (!del_script) {
 			return -1;
 		}
@@ -303,16 +317,18 @@ int smb_delete_group(const char *unix_group)
 
 int smb_set_primary_group(const char *unix_group, const char* unix_user)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	char *add_script = NULL;
 	int ret = -1;
 
 	/* defer to scripts */
 
-	if ( *lp_set_primary_group_script(talloc_tos()) ) {
+	if ( *lp_set_primary_group_script(talloc_tos(), lp_sub) ) {
 		TALLOC_CTX *ctx = talloc_tos();
 
 		add_script = talloc_strdup(ctx,
-				lp_set_primary_group_script(ctx));
+				lp_set_primary_group_script(ctx, lp_sub));
 		if (!add_script) {
 			return -1;
 		}
@@ -345,16 +361,18 @@ int smb_set_primary_group(const char *unix_group, const char* unix_user)
 
 int smb_add_user_group(const char *unix_group, const char *unix_user)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	char *add_script = NULL;
 	int ret = -1;
 
 	/* defer to scripts */
 
-	if ( *lp_add_user_to_group_script(talloc_tos()) ) {
+	if ( *lp_add_user_to_group_script(talloc_tos(), lp_sub) ) {
 		TALLOC_CTX *ctx = talloc_tos();
 
 		add_script = talloc_strdup(ctx,
-				lp_add_user_to_group_script(ctx));
+				lp_add_user_to_group_script(ctx, lp_sub));
 		if (!add_script) {
 			return -1;
 		}
@@ -385,16 +403,18 @@ int smb_add_user_group(const char *unix_group, const char *unix_user)
 
 int smb_delete_user_group(const char *unix_group, const char *unix_user)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	char *del_script = NULL;
 	int ret = -1;
 
 	/* defer to scripts */
 
-	if ( *lp_delete_user_from_group_script(talloc_tos()) ) {
+	if ( *lp_delete_user_from_group_script(talloc_tos(), lp_sub) ) {
 		TALLOC_CTX *ctx = talloc_tos();
 
 		del_script = talloc_strdup(ctx,
-				lp_delete_user_from_group_script(ctx));
+				lp_delete_user_from_group_script(ctx, lp_sub));
 		if (!del_script) {
 			return -1;
 		}
@@ -606,8 +626,9 @@ NTSTATUS pdb_default_get_aliasinfo(struct pdb_methods *methods,
 
 	if ((map->sid_name_use != SID_NAME_ALIAS) &&
 	    (map->sid_name_use != SID_NAME_WKN_GRP)) {
+		struct dom_sid_buf buf;
 		DEBUG(2, ("%s is a %s, expected an alias\n",
-			  sid_string_dbg(sid),
+			  dom_sid_str_buf(sid, &buf),
 			  sid_type_lookup(map->sid_name_use)));
 		status = NT_STATUS_NO_SUCH_ALIAS;
 		goto done;
@@ -634,7 +655,7 @@ NTSTATUS pdb_default_set_aliasinfo(struct pdb_methods *methods,
 				   const struct dom_sid *sid,
 				   struct acct_info *info)
 {
-	NTSTATUS status = NT_STATUS_OK;
+	NTSTATUS status;
 	GROUP_MAP *map;
 
 	map = talloc_zero(NULL, GROUP_MAP);

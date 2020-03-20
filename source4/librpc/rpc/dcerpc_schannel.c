@@ -456,10 +456,16 @@ static void continue_bind_auth(struct composite_context *ctx)
 	/* if we have a AES encrypted connection, verify the capabilities */
 	if (ndr_syntax_id_equal(&s->table->syntax_id,
 				&ndr_table_netlogon.syntax_id)) {
+		NTSTATUS status;
 		ZERO_STRUCT(s->return_auth);
 
 		s->save_creds_state = *s->creds_state;
-		netlogon_creds_client_authenticator(&s->save_creds_state, &s->auth);
+		status = netlogon_creds_client_authenticator(&s->save_creds_state,
+							     &s->auth);
+		if (!NT_STATUS_IS_OK(status)) {
+			composite_error(c, status);
+			return;
+		}
 
 		s->c.in.server_name = talloc_asprintf(c,
 						      "\\\\%s",
@@ -606,22 +612,4 @@ NTSTATUS dcerpc_bind_auth_schannel_recv(struct composite_context *c)
 	
 	talloc_free(c);
 	return status;
-}
-
-
-/*
-  Perform schannel authenticated bind - sync version
- */
-_PUBLIC_ NTSTATUS dcerpc_bind_auth_schannel(TALLOC_CTX *tmp_ctx, 
-				   struct dcerpc_pipe *p,
-				   const struct ndr_interface_table *table,
-				   struct cli_credentials *credentials,
-				   struct loadparm_context *lp_ctx,
-				   uint8_t auth_level)
-{
-	struct composite_context *c;
-
-	c = dcerpc_bind_auth_schannel_send(tmp_ctx, p, table, credentials, lp_ctx,
-					   auth_level);
-	return dcerpc_bind_auth_schannel_recv(c);
 }

@@ -30,6 +30,9 @@ bool leases_db_init(bool read_only);
 NTSTATUS leases_db_add(const struct GUID *client_guid,
 		       const struct smb2_lease_key *lease_key,
 		       const struct file_id *id,
+		       uint32_t current_state,
+		       uint16_t lease_version,
+		       uint16_t epoch,
 		       const char *servicepath,
 		       const char *filename,
 		       const char *stream_name);
@@ -48,6 +51,28 @@ NTSTATUS leases_db_rename(const struct GUID *client_guid,
 			const char *servicepath_new,
 			const char *filename_new,
 			const char *stream_name_new);
+NTSTATUS leases_db_set(const struct GUID *client_guid,
+		       const struct smb2_lease_key *lease_key,
+		       uint32_t current_state,
+		       bool breaking,
+		       uint32_t breaking_to_requested,
+		       uint32_t	breaking_to_required,
+		       uint16_t lease_version,
+		       uint16_t epoch);
+NTSTATUS leases_db_get(const struct GUID *client_guid,
+		       const struct smb2_lease_key *lease_key,
+		       const struct file_id *file_id,
+		       uint32_t *current_state,
+		       bool *breaking,
+		       uint32_t *breaking_to_requested,
+		       uint32_t	*breaking_to_required,
+		       uint16_t *lease_version,
+		       uint16_t *epoch);
+NTSTATUS leases_db_get_current_state(
+	const struct GUID *client_guid,
+	const struct smb2_lease_key *lease_key,
+	int *database_seqnum,
+	uint32_t *current_state);
 NTSTATUS leases_db_copy_file_ids(TALLOC_CTX *mem_ctx,
 			uint32_t num_files,
 			const struct leases_db_file *files,

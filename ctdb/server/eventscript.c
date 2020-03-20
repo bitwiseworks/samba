@@ -324,13 +324,8 @@ static void eventd_dead_handler(struct tevent_context *ev,
 				struct tevent_fd *fde, uint16_t flags,
 				void *private_data)
 {
-	struct eventd_context *ectx = talloc_get_type_abort(
-		private_data, struct eventd_context);
-
-	DEBUG(DEBUG_ERR, ("Eventd went away\n"));
-
-	TALLOC_FREE(ectx->eventd_fde);
-	ectx->eventd_pid = -1;
+	D_ERR("Eventd went away - exiting\n");
+	exit(1);
 }
 
 void ctdb_stop_eventd(struct ctdb_context *ctdb)
@@ -399,7 +394,7 @@ static int eventd_client_write(struct eventd_context *ectx,
 						void *private_data),
 			       void *private_data)
 {
-	struct ctdb_event_header header;
+	struct ctdb_event_header header = { 0 };
 	struct eventd_client_state *state;
 	int ret;
 
@@ -616,6 +611,7 @@ int ctdb_event_script_run(struct ctdb_context *ctdb,
 		DEBUG(DEBUG_ERR,
 		      ("Refusing to run event '%s' while in recovery\n",
 		       ctdb_eventscript_call_names[event]));
+		return -1;
 	}
 
 	state = talloc_zero(mem_ctx, struct ctdb_event_script_run_state);
@@ -745,7 +741,7 @@ static bool event_allowed_during_recovery(enum ctdb_event event)
 		CTDB_EVENT_RELEASE_IP,
 		CTDB_EVENT_IPREALLOCATED,
 	};
-	int i;
+	size_t i;
 
 	for (i = 0; i < ARRAY_SIZE(allowed_events); i++) {
 		if (event == allowed_events[i]) {

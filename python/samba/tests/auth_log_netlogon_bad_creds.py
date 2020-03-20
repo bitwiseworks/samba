@@ -37,32 +37,31 @@ from samba.tests import delete_force
 from samba.dsdb import UF_WORKSTATION_TRUST_ACCOUNT, UF_PASSWD_NOTREQD
 from samba.dcerpc.misc import SEC_CHAN_WKSTA
 from samba.dcerpc.netlogon import NETLOGON_NEG_STRONG_KEYS
+from samba.compat import get_string
+from samba.dcerpc.windows_event_ids import (
+    EVT_ID_UNSUCCESSFUL_LOGON,
+    EVT_LOGON_NETWORK
+)
 
 
 class AuthLogTestsNetLogonBadCreds(samba.tests.auth_log_base.AuthLogTestBase):
 
     def setUp(self):
         super(AuthLogTestsNetLogonBadCreds, self).setUp()
-        self.lp      = samba.tests.env_loadparm()
-        self.creds   = Credentials()
-
+        self.lp = samba.tests.env_loadparm()
         self.session = system_session()
         self.ldb = SamDB(
             session_info=self.session,
-            credentials=self.creds,
             lp=self.lp)
 
-        self.domain        = os.environ["DOMAIN"]
-        self.netbios_name  = "NetLogonBad"
-        self.machinepass   = "abcdefghij"
+        self.domain = os.environ["DOMAIN"]
+        self.netbios_name = "NetLogonBad"
+        self.machinepass = "abcdefghij"
         self.remoteAddress = AS_SYSTEM_MAGIC_PATH_TOKEN
-        self.base_dn       = self.ldb.domain_dn()
-        self.dn            = ("cn=%s,cn=users,%s" %
-                              (self.netbios_name, self.base_dn))
+        self.base_dn = self.ldb.domain_dn()
+        self.dn = ("cn=%s,cn=users,%s" % (self.netbios_name, self.base_dn))
 
-        utf16pw = unicode(
-            '"' + self.machinepass.encode('utf-8') + '"', 'utf-8'
-        ).encode('utf-16-le')
+        utf16pw = get_string('"' + self.machinepass + '"').encode('utf-16-le')
         self.ldb.add({
             "dn": self.dn,
             "objectclass": "computer",
@@ -75,7 +74,7 @@ class AuthLogTestsNetLogonBadCreds(samba.tests.auth_log_base.AuthLogTestBase):
         super(AuthLogTestsNetLogonBadCreds, self).tearDown()
         delete_force(self.ldb, self.dn)
 
-    def _test_netlogon(self, name, pwd, status, checkFunction):
+    def _test_netlogon(self, name, pwd, status, checkFunction, event_id):
 
         def isLastExpectedMessage(msg):
             return (
@@ -83,7 +82,9 @@ class AuthLogTestsNetLogonBadCreds(samba.tests.auth_log_base.AuthLogTestBase):
                 msg["Authentication"]["serviceDescription"] == "NETLOGON" and
                 msg["Authentication"]["authDescription"] ==
                 "ServerAuthenticate" and
-                msg["Authentication"]["status"] == status)
+                msg["Authentication"]["status"] == status and
+                msg["Authentication"]["eventId"] == event_id and
+                msg["Authentication"]["logonType"] == EVT_LOGON_NETWORK)
 
         machine_creds = Credentials()
         machine_creds.guess(self.get_loadparm())
@@ -122,13 +123,15 @@ class AuthLogTestsNetLogonBadCreds(samba.tests.auth_log_base.AuthLogTestBase):
         self._test_netlogon("bad_name",
                             self.machinepass,
                             "NT_STATUS_NO_TRUST_SAM_ACCOUNT",
-                            self.netlogon_check)
+                            self.netlogon_check,
+                            EVT_ID_UNSUCCESSFUL_LOGON)
 
     def test_netlogon_bad_password(self):
         self._test_netlogon(self.netbios_name,
                             "badpass",
                             "NT_STATUS_ACCESS_DENIED",
-                            self.netlogon_check)
+                            self.netlogon_check,
+                            EVT_ID_UNSUCCESSFUL_LOGON)
 
     def test_netlogon_password_DES(self):
         """Logon failure that exercises the "DES" passwordType path.
@@ -139,7 +142,10 @@ class AuthLogTestsNetLogonBadCreds(samba.tests.auth_log_base.AuthLogTestBase):
                 msg["Authentication"]["serviceDescription"] == "NETLOGON" and
                 msg["Authentication"]["authDescription"] ==
                 "ServerAuthenticate" and
-                msg["Authentication"]["passwordType"] == "DES")
+                msg["Authentication"]["passwordType"] == "DES" and
+                (msg["Authentication"]["eventId"] ==
+                    EVT_ID_UNSUCCESSFUL_LOGON) and
+                msg["Authentication"]["logonType"] == EVT_LOGON_NETWORK)
 
         c = netlogon.netlogon("ncalrpc:[schannel]", self.get_loadparm())
         creds = netlogon.netr_Credential()
@@ -164,7 +170,11 @@ class AuthLogTestsNetLogonBadCreds(samba.tests.auth_log_base.AuthLogTestBase):
                 msg["Authentication"]["serviceDescription"] == "NETLOGON" and
                 msg["Authentication"]["authDescription"] ==
                 "ServerAuthenticate" and
-                msg["Authentication"]["passwordType"] == "HMAC-MD5")
+                msg["Authentication"]["passwordType"] == "HMAC-MD5" and
+                (msg["Authentication"]["eventId"] ==
+                    EVT_ID_UNSUCCESSFUL_LOGON) and
+                msg["Authentication"]["logonType"] == EVT_LOGON_NETWORK)
+
         c = netlogon.netlogon("ncalrpc:[schannel]", self.get_loadparm())
         creds = netlogon.netr_Credential()
         c.netr_ServerReqChallenge(self.server, self.netbios_name, creds)

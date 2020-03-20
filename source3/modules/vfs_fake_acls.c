@@ -405,46 +405,6 @@ static int fake_acls_sys_acl_delete_def_file(vfs_handle_struct *handle,
 	return ret;
 }
 
-static int fake_acls_chown(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname,
-			uid_t uid,
-			gid_t gid)
-{
-	int ret;
-	uint8_t id_buf[4];
-	if (uid != -1) {
-		uid_t current_uid = get_current_uid(handle->conn);
-
-		if (current_uid != 0 && current_uid != uid) {
-			return EACCES;
-		}
-
-		SIVAL(id_buf, 0, uid);
-		ret = SMB_VFS_NEXT_SETXATTR(handle,
-				smb_fname,
-				FAKE_UID,
-				id_buf,
-				sizeof(id_buf),
-				0);
-		if (ret != 0) {
-			return ret;
-		}
-	}
-	if (gid != -1) {
-		SIVAL(id_buf, 0, gid);
-		ret = SMB_VFS_NEXT_SETXATTR(handle,
-				smb_fname,
-				FAKE_GID,
-				id_buf,
-				sizeof(id_buf),
-				0);
-		if (ret != 0) {
-			return ret;
-		}
-	}
-	return 0;
-}
-
 static int fake_acls_lchown(vfs_handle_struct *handle,
 			const struct smb_filename *smb_fname,
 			uid_t uid,
@@ -568,7 +528,10 @@ static int fake_acl_process_chmod(SMB_ACL_T *pp_the_acl,
 		}
 		switch (tagtype) {
 			case SMB_ACL_USER_OBJ:
-				map_acl_perms_to_permset(umode, &permset);
+				ret = map_acl_perms_to_permset(umode, &permset);
+				if (ret == -1) {
+					return -1;
+				}
 				break;
 			case SMB_ACL_USER:
 				puid = (uid_t *)sys_acl_get_qualifier(entry);
@@ -578,18 +541,27 @@ static int fake_acl_process_chmod(SMB_ACL_T *pp_the_acl,
 				if (owner != *puid) {
 					break;
 				}
-				map_acl_perms_to_permset(umode, &permset);
+				ret = map_acl_perms_to_permset(umode, &permset);
+				if (ret == -1) {
+					return -1;
+				}
 				break;
 			case SMB_ACL_GROUP_OBJ:
 			case SMB_ACL_GROUP:
 				/* Ignore all group entries. */
 				break;
 			case SMB_ACL_MASK:
-				map_acl_perms_to_permset(mmode, &permset);
+				ret = map_acl_perms_to_permset(mmode, &permset);
+				if (ret == -1) {
+					return -1;
+				}
 				got_mask = true;
 				break;
 			case SMB_ACL_OTHER:
-				map_acl_perms_to_permset(omode, &permset);
+				ret = map_acl_perms_to_permset(omode, &permset);
+				if (ret == -1) {
+					return -1;
+				}
 				break;
 			default:
 				errno = EINVAL;
@@ -614,7 +586,10 @@ static int fake_acl_process_chmod(SMB_ACL_T *pp_the_acl,
 		if (ret == -1) {
 			return -1;
 		}
-		map_acl_perms_to_permset(mmode, &mask_permset);
+		ret = map_acl_perms_to_permset(mmode, &mask_permset);
+		if (ret == -1) {
+			return -1;
+		}
 		ret = sys_acl_set_permset(mask_entry, mask_permset);
 		if (ret == -1) {
 			return -1;
@@ -746,7 +721,6 @@ static struct vfs_fn_pointers vfs_fake_acls_fns = {
 	.sys_acl_set_file_fn = fake_acls_sys_acl_set_file,
 	.sys_acl_set_fd_fn = fake_acls_sys_acl_set_fd,
 	.sys_acl_delete_def_file_fn = fake_acls_sys_acl_delete_def_file,
-	.chown_fn = fake_acls_chown,
 	.lchown_fn = fake_acls_lchown,
 	.fchown_fn = fake_acls_fchown,
 	

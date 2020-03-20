@@ -20,12 +20,13 @@
 from samba.dcerpc import server_id, misc, srvsvc, samr
 import samba.tests
 
+
 class IntegerTests(samba.tests.TestCase):
 
     def test_uint32_into_hyper(self):
         s = server_id.server_id()
         s.unique_id = server_id.NONCLUSTER_VNN
-        self.assertEquals(s.unique_id, 0xFFFFFFFFL)
+        self.assertEquals(s.unique_id, 0xFFFFFFFF)
 
     def test_int_into_hyper(self):
         s = server_id.server_id()
@@ -34,18 +35,21 @@ class IntegerTests(samba.tests.TestCase):
 
     def test_negative_int_into_hyper(self):
         s = server_id.server_id()
+
         def assign():
             s.unique_id = -1
         self.assertRaises(OverflowError, assign)
 
     def test_hyper_into_uint32(self):
         s = server_id.server_id()
+
         def assign():
             s.vnn = server_id.SERVERID_UNIQUE_ID_NOT_TO_VERIFY
         self.assertRaises(OverflowError, assign)
 
     def test_hyper_into_int32(self):
         s = srvsvc.NetRemoteTODInfo()
+
         def assign():
             s.timezone = server_id.SERVERID_UNIQUE_ID_NOT_TO_VERIFY
         self.assertRaises(OverflowError, assign)
@@ -57,17 +61,25 @@ class IntegerTests(samba.tests.TestCase):
 
     def test_uint32_into_int32(self):
         s = srvsvc.NetRemoteTODInfo()
+
         def assign():
             s.timezone = server_id.NONCLUSTER_VNN
         self.assertRaises(OverflowError, assign)
 
     def test_long_into_int32(self):
         s = srvsvc.NetRemoteTODInfo()
-        s.timezone = 5L
+        # here we force python2 to convert its 32/64 bit python int into
+        # an arbitrarily long python long, then reduce the number back
+        # down to something that would fit in an int anyway. In a pure
+        # python2 world, you could achieve the same thing by writing
+        #    s.timezone = 5L
+        # but that is a syntax error in py3.
+        s.timezone = (5 << 65) >> 65
         self.assertEquals(s.timezone, 5)
 
     def test_larger_long_int_into_int32(self):
         s = srvsvc.NetRemoteTODInfo()
+
         def assign():
             s.timezone = 2147483648
         self.assertRaises(OverflowError, assign)
@@ -79,12 +91,14 @@ class IntegerTests(samba.tests.TestCase):
 
     def test_float_into_int32(self):
         s = srvsvc.NetRemoteTODInfo()
+
         def assign():
             s.timezone = 2.5
         self.assertRaises(TypeError, assign)
 
     def test_int_float_into_int32(self):
         s = srvsvc.NetRemoteTODInfo()
+
         def assign():
             s.timezone = 2.0
         self.assertRaises(TypeError, assign)
@@ -96,36 +110,28 @@ class IntegerTests(samba.tests.TestCase):
 
     def test_negative_into_uint32(self):
         s = server_id.server_id()
+
         def assign():
             s.vnn = -1
         self.assertRaises(OverflowError, assign)
 
     def test_hyper_into_uint16(self):
         g = misc.GUID()
+
         def assign():
             g.time_mid = server_id.SERVERID_UNIQUE_ID_NOT_TO_VERIFY
         self.assertRaises(OverflowError, assign)
 
     def test_int_into_uint16(self):
         g = misc.GUID()
+
         def assign():
             g.time_mid = 200000
         self.assertRaises(OverflowError, assign)
 
     def test_negative_int_into_uint16(self):
         g = misc.GUID()
-        def assign():
-            g.time_mid = -2
-        self.assertRaises(OverflowError, assign)
 
-    def test_int_into_uint16(self):
-        g = misc.GUID()
-        def assign():
-            g.time_mid = 200000
-        self.assertRaises(OverflowError, assign)
-
-    def test_negative_int_into_uint16(self):
-        g = misc.GUID()
         def assign():
             g.time_mid = -2
         self.assertRaises(OverflowError, assign)
@@ -142,18 +148,21 @@ class IntegerTests(samba.tests.TestCase):
 
     def test_overflow_bitmap_into_uint16(self):
         g = misc.GUID()
+
         def assign():
             g.time_mid = misc.SV_TYPE_LOCAL_LIST_ONLY
         self.assertRaises(OverflowError, assign)
 
     def test_overflow_bitmap_into_uint16_2(self):
         g = misc.GUID()
+
         def assign():
             g.time_mid = misc.SV_TYPE_DOMAIN_ENUM
         self.assertRaises(OverflowError, assign)
 
     def test_hyper_into_int64(self):
         s = samr.DomInfo1()
+
         def assign():
             s.max_password_age = server_id.SERVERID_UNIQUE_ID_NOT_TO_VERIFY
         self.assertRaises(OverflowError, assign)
@@ -171,12 +180,12 @@ class IntegerTests(samba.tests.TestCase):
     def test_larger_int_into_int64(self):
         s = samr.DomInfo1()
         s.max_password_age = server_id.NONCLUSTER_VNN
-        self.assertEquals(s.max_password_age, 0xFFFFFFFFL)
+        self.assertEquals(s.max_password_age, 0xFFFFFFFF)
 
     def test_larger_negative_int_into_int64(self):
         s = samr.DomInfo1()
         s.max_password_age = -2147483649
-        self.assertEquals(s.max_password_age, -2147483649L)
+        self.assertEquals(s.max_password_age, -2147483649)
 
     def test_int_list_over_list(self):
         g = misc.GUID()
@@ -185,29 +194,33 @@ class IntegerTests(samba.tests.TestCase):
 
     def test_long_int_list_over_uint8_list(self):
         g = misc.GUID()
-        g.node = [5L, 0, 5, 0, 7, 4]
+        g.node = [5, 0, 5, 0, 7, 4]
         self.assertEqual(g.node[0], 5)
 
     def test_negative_list_over_uint8_list(self):
         g = misc.GUID()
+
         def assign():
             g.node = [-1, 0, 5, 0, 7, 4]
         self.assertRaises(OverflowError, assign)
 
     def test_overflow_list_over_uint8_list(self):
         g = misc.GUID()
+
         def assign():
             g.node = [256, 0, 5, 0, 7, 4]
         self.assertRaises(OverflowError, assign)
 
     def test_short_list_over_uint8_list(self):
         g = misc.GUID()
+
         def assign():
             g.node = [5, 0, 5]
         self.assertRaises(TypeError, assign)
 
     def test_long_list_over_uint8_list(self):
         g = misc.GUID()
+
         def assign():
             g.node = [5, 0, 5, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF]
         self.assertRaises(TypeError, assign)
@@ -224,12 +237,14 @@ class IntegerTests(samba.tests.TestCase):
 
     def test_negative_into_uint8_list(self):
         g = misc.GUID()
+
         def assign():
             g.node[1] = -1
         self.assertRaises(OverflowError, assign)
 
     def test_overflow_into_uint8_list(self):
         g = misc.GUID()
+
         def assign():
             g.node[1] = 256
         self.assertRaises(OverflowError, assign)

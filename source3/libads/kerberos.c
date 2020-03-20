@@ -31,6 +31,7 @@
 #include "secrets.h"
 #include "../lib/tsocket/tsocket.h"
 #include "lib/util/asn1.h"
+#include "krb5_errs.h"
 
 #ifdef HAVE_KRB5
 
@@ -59,7 +60,7 @@ kerb_prompter(krb5_context ctx, void *data,
 		 * version have looping detection and return with a proper error code.
 		 */
 
-#if HAVE_KRB5_PROMPT_TYPE /* Heimdal */
+#if defined(HAVE_KRB5_PROMPT_TYPE) /* Heimdal */
 		 if (prompts[0].type == KRB5_PROMPT_TYPE_NEW_PASSWORD &&
 		     prompts[1].type == KRB5_PROMPT_TYPE_NEW_PASSWORD_AGAIN) {
 			/*
@@ -105,7 +106,7 @@ kerb_prompter(krb5_context ctx, void *data,
   place in default cache location.
   remus@snapserver.com
 */
-int kerberos_kinit_password_ext(const char *principal,
+int kerberos_kinit_password_ext(const char *given_principal,
 				const char *password,
 				int time_offset,
 				time_t *expire_time,
@@ -114,8 +115,12 @@ int kerberos_kinit_password_ext(const char *principal,
 				bool request_pac,
 				bool add_netbios_addr,
 				time_t renewable_time,
+				TALLOC_CTX *mem_ctx,
+				char **_canon_principal,
+				char **_canon_realm,
 				NTSTATUS *ntstatus)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	krb5_context ctx = NULL;
 	krb5_error_code code = 0;
 	krb5_ccache cc = NULL;
@@ -124,27 +129,33 @@ int kerberos_kinit_password_ext(const char *principal,
 	krb5_creds my_creds;
 	krb5_get_init_creds_opt *opt = NULL;
 	smb_krb5_addresses *addr = NULL;
+	char *canon_principal = NULL;
+	char *canon_realm = NULL;
 
 	ZERO_STRUCT(my_creds);
 
-	initialize_krb5_error_table();
-	if ((code = krb5_init_context(&ctx)))
-		goto out;
+	code = smb_krb5_init_context_common(&ctx);
+	if (code != 0) {
+		DBG_ERR("kerberos init context failed (%s)\n",
+			error_message(code));
+		TALLOC_FREE(frame);
+		return code;
+	}
 
 	if (time_offset != 0) {
 		krb5_set_real_time(ctx, time(NULL) + time_offset, 0);
 	}
 
-	DEBUG(10,("kerberos_kinit_password: as %s using [%s] as ccache and config [%s]\n",
-			principal,
-			cache_name ? cache_name: krb5_cc_default_name(ctx),
-			getenv("KRB5_CONFIG")));
+	DBG_DEBUG("as %s using [%s] as ccache and config [%s]\n",
+		  given_principal,
+		  cache_name ? cache_name: krb5_cc_default_name(ctx),
+		  getenv("KRB5_CONFIG"));
 
 	if ((code = krb5_cc_resolve(ctx, cache_name ? cache_name : krb5_cc_default_name(ctx), &cc))) {
 		goto out;
 	}
 
-	if ((code = smb_krb5_parse_name(ctx, principal, &me))) {
+	if ((code = smb_krb5_parse_name(ctx, given_principal, &me))) {
 		goto out;
 	}
 
@@ -156,7 +167,10 @@ int kerberos_kinit_password_ext(const char *principal,
 	krb5_get_init_creds_opt_set_forwardable(opt, True);
 
 	/* Turn on canonicalization for lower case realm support */
-#ifndef SAMBA4_USES_HEIMDAL /* MIT */
+#ifdef SAMBA4_USES_HEIMDAL
+	krb5_get_init_creds_opt_set_win2k(ctx, opt, true);
+	krb5_get_init_creds_opt_set_canonicalize(ctx, opt, true);
+#else /* MIT */
 	krb5_get_init_creds_opt_set_canonicalize(opt, true);
 #endif /* MIT */
 #if 0
@@ -185,10 +199,23 @@ int kerberos_kinit_password_ext(const char *principal,
 		goto out;
 	}
 
-	canon_princ = me;
-#ifndef SAMBA4_USES_HEIMDAL /* MIT */
 	canon_princ = my_creds.client;
-#endif /* MIT */
+
+	code = smb_krb5_unparse_name(frame,
+				     ctx,
+				     canon_princ,
+				     &canon_principal);
+	if (code != 0) {
+		goto out;
+	}
+
+	DBG_DEBUG("%s mapped to %s\n", given_principal, canon_principal);
+
+	canon_realm = smb_krb5_principal_get_realm(frame, ctx, canon_princ);
+	if (canon_realm == NULL) {
+		code = ENOMEM;
+		goto out;
+	}
 
 	if ((code = krb5_cc_initialize(ctx, cc, canon_princ))) {
 		goto out;
@@ -204,6 +231,13 @@ int kerberos_kinit_password_ext(const char *principal,
 
 	if (renew_till_time) {
 		*renew_till_time = (time_t) my_creds.times.renew_till;
+	}
+
+	if (_canon_principal != NULL) {
+		*_canon_principal = talloc_move(mem_ctx, &canon_principal);
+	}
+	if (_canon_realm != NULL) {
+		*_canon_realm = talloc_move(mem_ctx, &canon_realm);
 	}
  out:
 	if (ntstatus) {
@@ -234,6 +268,7 @@ int kerberos_kinit_password_ext(const char *principal,
 	if (ctx) {
 		krb5_free_context(ctx);
 	}
+	TALLOC_FREE(frame);
 	return code;
 }
 
@@ -243,10 +278,10 @@ int ads_kdestroy(const char *cc_name)
 	krb5_context ctx = NULL;
 	krb5_ccache cc = NULL;
 
-	initialize_krb5_error_table();
-	if ((code = krb5_init_context (&ctx))) {
-		DEBUG(3, ("ads_kdestroy: kdb5_init_context failed: %s\n", 
-			error_message(code)));
+	code = smb_krb5_init_context_common(&ctx);
+	if (code != 0) {
+		DBG_ERR("kerberos init context failed (%s)\n",
+			error_message(code));
 		return code;
 	}
 
@@ -323,6 +358,9 @@ int kerberos_kinit_password(const char *principal,
 					   False,
 					   False,
 					   0,
+					   NULL,
+					   NULL,
+					   NULL,
 					   NULL);
 }
 
@@ -628,7 +666,7 @@ bool create_local_private_krb5_conf_for_domain(const char *realm,
 		return false;
 	}
 
-	dname = lock_path("smb_krb5");
+	dname = lock_path(talloc_tos(), "smb_krb5");
 	if (!dname) {
 		return false;
 	}
@@ -639,7 +677,7 @@ bool create_local_private_krb5_conf_for_domain(const char *realm,
 		goto done;
 	}
 
-	tmpname = lock_path("smb_tmp_krb5.XXXXXX");
+	tmpname = lock_path(talloc_tos(), "smb_tmp_krb5.XXXXXX");
 	if (!tmpname) {
 		goto done;
 	}
@@ -673,11 +711,19 @@ bool create_local_private_krb5_conf_for_domain(const char *realm,
 	}
 #endif
 
+	/*
+	 * We are setting 'dns_lookup_kdc' to true, because we want to lookup
+	 * KDCs which are not configured via DNS SRV records, eg. if we do:
+	 *
+	 *     net ads join -Uadmin@otherdomain
+	 */
 	file_contents =
 	    talloc_asprintf(fname,
-			    "[libdefaults]\n\tdefault_realm = %s\n"
+			    "[libdefaults]\n"
+			    "\tdefault_realm = %s\n"
 			    "%s"
-			    "\tdns_lookup_realm = false\n\n"
+			    "\tdns_lookup_realm = false\n"
+			    "\tdns_lookup_kdc = true\n\n"
 			    "[realms]\n\t%s = {\n"
 			    "%s\t}\n"
 			    "%s\n",

@@ -1333,7 +1333,7 @@ static int samldb_schema_info_update(struct samldb_ctx *ac)
 	}
 
 	/* do not update schemaInfo during provisioning */
-	if (ldb_request_get_control(ac->req, LDB_CONTROL_RELAX_OID)) {
+	if (ldb_request_get_control(ac->req, LDB_CONTROL_PROVISION_OID)) {
 		return LDB_SUCCESS;
 	}
 
@@ -1680,9 +1680,14 @@ static int samldb_prim_group_change(struct samldb_ctx *ac)
 	struct ldb_result *res, *group_res;
 	struct ldb_message_element *el;
 	struct ldb_message *msg;
+	uint32_t search_flags =
+		DSDB_FLAG_NEXT_MODULE | DSDB_SEARCH_SHOW_EXTENDED_DN;
 	uint32_t prev_rid, new_rid, uac;
 	struct dom_sid *prev_sid, *new_sid;
 	struct ldb_dn *prev_prim_group_dn, *new_prim_group_dn;
+	const char *new_prim_group_dn_ext_str = NULL;
+	struct ldb_dn *user_dn = NULL;
+	const char *user_dn_ext_str = NULL;
 	int ret;
 	const char * const noattrs[] = { NULL };
 
@@ -1696,9 +1701,14 @@ static int samldb_prim_group_change(struct samldb_ctx *ac)
 	/* Fetch information from the existing object */
 
 	ret = dsdb_module_search_dn(ac->module, ac, &res, ac->msg->dn, attrs,
-				    DSDB_FLAG_NEXT_MODULE, ac->req);
+				    search_flags, ac->req);
 	if (ret != LDB_SUCCESS) {
 		return ret;
+	}
+	user_dn = res->msgs[0]->dn;
+	user_dn_ext_str = ldb_dn_get_extended_linearized(ac, user_dn, 1);
+	if (user_dn_ext_str == NULL) {
+		return ldb_operr(ldb);
 	}
 
 	uac = ldb_msg_find_attr_as_uint(res->msgs[0], "userAccountControl", 0);
@@ -1763,7 +1773,7 @@ static int samldb_prim_group_change(struct samldb_ctx *ac)
 	ret = dsdb_module_search(ac->module, ac, &group_res,
 				 ldb_get_default_basedn(ldb),
 				 LDB_SCOPE_SUBTREE,
-				 noattrs, DSDB_FLAG_NEXT_MODULE,
+				 noattrs, search_flags,
 				 ac->req,
 				 "(objectSid=%s)",
 				 ldap_encode_ndr_dom_sid(ac, prev_sid));
@@ -1783,7 +1793,7 @@ static int samldb_prim_group_change(struct samldb_ctx *ac)
 	ret = dsdb_module_search(ac->module, ac, &group_res,
 				 ldb_get_default_basedn(ldb),
 				 LDB_SCOPE_SUBTREE,
-				 noattrs, DSDB_FLAG_NEXT_MODULE,
+				 noattrs, search_flags,
 				 ac->req,
 				 "(objectSid=%s)",
 				 ldap_encode_ndr_dom_sid(ac, new_sid));
@@ -1796,11 +1806,16 @@ static int samldb_prim_group_change(struct samldb_ctx *ac)
 		return LDB_ERR_UNWILLING_TO_PERFORM;
 	}
 	new_prim_group_dn = group_res->msgs[0]->dn;
+	new_prim_group_dn_ext_str = ldb_dn_get_extended_linearized(ac,
+							new_prim_group_dn, 1);
+	if (new_prim_group_dn_ext_str == NULL) {
+		return ldb_operr(ldb);
+	}
 
 	/* We need to be already a normal member of the new primary
 	 * group in order to be successful. */
 	el = samdb_find_attribute(ldb, res->msgs[0], "memberOf",
-				  ldb_dn_get_linearized(new_prim_group_dn));
+				  new_prim_group_dn_ext_str);
 	if (el == NULL) {
 		return LDB_ERR_UNWILLING_TO_PERFORM;
 	}
@@ -1812,8 +1827,7 @@ static int samldb_prim_group_change(struct samldb_ctx *ac)
 	}
 	msg->dn = new_prim_group_dn;
 
-	ret = samdb_msg_add_delval(ldb, msg, msg, "member",
-				   ldb_dn_get_linearized(ac->msg->dn));
+	ret = samdb_msg_add_delval(ldb, msg, msg, "member", user_dn_ext_str);
 	if (ret != LDB_SUCCESS) {
 		return ret;
 	}
@@ -1831,8 +1845,7 @@ static int samldb_prim_group_change(struct samldb_ctx *ac)
 	}
 	msg->dn = prev_prim_group_dn;
 
-	ret = samdb_msg_add_addval(ldb, msg, msg, "member",
-				   ldb_dn_get_linearized(ac->msg->dn));
+	ret = samdb_msg_add_addval(ldb, msg, msg, "member", user_dn_ext_str);
 	if (ret != LDB_SUCCESS) {
 		return ret;
 	}
@@ -3292,7 +3305,7 @@ static int check_address_roundtrip(const char *address, int family,
  */
 static int verify_cidr(const char *cidr)
 {
-	char *address = NULL, *slash = NULL, *endptr = NULL;
+	char *address = NULL, *slash = NULL;
 	bool has_colon, has_dot;
 	int res, ret;
 	unsigned long mask;
@@ -3300,6 +3313,7 @@ static int verify_cidr(const char *cidr)
 	char *address_redux = NULL;
 	unsigned int address_len;
 	TALLOC_CTX *frame = NULL;
+	int error = 0;
 
 	DBG_DEBUG("CIDR is %s\n", cidr);
 	frame = talloc_stackframe();
@@ -3316,14 +3330,14 @@ static int verify_cidr(const char *cidr)
 	/* terminate the address for strchr, inet_pton */
 	*slash = '\0';
 
-	mask = strtoul(slash + 1, &endptr, 10);
+	mask = smb_strtoul(slash + 1, NULL, 10, &error, SMB_STR_FULL_STR_CONV);
 	if (mask == 0){
 		DBG_INFO("Windows does not like the zero mask, "
 			 "so nor do we: %s\n", cidr);
 		goto error;
 	}
 
-	if (*endptr != '\0' || endptr == slash + 1){
+	if (error != 0){
 		DBG_INFO("CIDR mask is not a proper integer: %s\n", cidr);
 		goto error;
 	}
@@ -3808,9 +3822,15 @@ static int samldb_modify(struct ldb_module *module, struct ldb_request *req)
 
 	el = ldb_msg_find_element(ac->msg, "member");
 	if (el != NULL) {
-		ret = samldb_member_check(ac);
-		if (ret != LDB_SUCCESS) {
-			return ret;
+		struct ldb_control *fix_link_sid_ctrl = NULL;
+
+		fix_link_sid_ctrl = ldb_request_get_control(ac->req,
+					DSDB_CONTROL_DBCHECK_FIX_LINK_DN_SID);
+		if (fix_link_sid_ctrl == NULL) {
+			ret = samldb_member_check(ac);
+			if (ret != LDB_SUCCESS) {
+				return ret;
+			}
 		}
 	}
 
@@ -4044,7 +4064,6 @@ static int check_rename_constraints(struct ldb_message *msg,
 	if (samdb_find_attribute(ldb, msg, "objectclass", "subnet") != NULL) {
 		ret = samldb_verify_subnet(ac, newdn);
 		if (ret != LDB_SUCCESS) {
-			talloc_free(ac);
 			return ret;
 		}
 	}

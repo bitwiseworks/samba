@@ -24,6 +24,7 @@
 #include "dbwrap/dbwrap.h"
 #include "dbwrap/dbwrap_open.h"
 #include "source3/lib/xattr_tdb.h"
+#include "lib/util/tevent_unix.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_VFS
@@ -100,6 +101,134 @@ static ssize_t xattr_tdb_getxattr(struct vfs_handle_struct *handle,
 	}
 	memcpy(value, blob.data, xattr_size);
 	TALLOC_FREE(frame);
+	return xattr_size;
+}
+
+struct xattr_tdb_getxattrat_state {
+	struct vfs_aio_state vfs_aio_state;
+	ssize_t xattr_size;
+	uint8_t *xattr_value;
+};
+
+static struct tevent_req *xattr_tdb_getxattrat_send(
+			TALLOC_CTX *mem_ctx,
+			struct tevent_context *ev,
+			struct vfs_handle_struct *handle,
+			files_struct *dir_fsp,
+			const struct smb_filename *smb_fname,
+			const char *xattr_name,
+			size_t alloc_hint)
+{
+	struct tevent_req *req = NULL;
+	struct xattr_tdb_getxattrat_state *state = NULL;
+	struct smb_filename *cwd = NULL;
+	struct db_context *db = NULL;
+	struct file_id id;
+	int ret;
+	int error;
+	int cwd_ret;
+	DATA_BLOB xattr_blob;
+
+	req = tevent_req_create(mem_ctx, &state,
+				struct xattr_tdb_getxattrat_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	state->xattr_size = -1;
+
+	SMB_VFS_HANDLE_GET_DATA(handle, db, struct db_context,
+				if (!xattr_tdb_init(-1, state, &db)) {
+					tevent_req_error(req, EIO);
+					return tevent_req_post(req, ev);
+				});
+
+	cwd = SMB_VFS_GETWD(dir_fsp->conn, state);
+	if (tevent_req_nomem(cwd, req)) {
+		return tevent_req_post(req, ev);
+	}
+
+	ret = SMB_VFS_CHDIR(dir_fsp->conn, dir_fsp->fsp_name);
+	if (ret != 0) {
+		tevent_req_error(req, errno);
+		return tevent_req_post(req, ev);
+	}
+
+	ret = xattr_tdb_get_file_id(handle, smb_fname->base_name, &id);
+	error = errno;
+
+	cwd_ret = SMB_VFS_CHDIR(dir_fsp->conn, cwd);
+	SMB_ASSERT(cwd_ret == 0);
+
+	if (ret == -1) {
+		tevent_req_error(req, error);
+		return tevent_req_post(req, ev);
+	}
+
+	state->xattr_size = xattr_tdb_getattr(db,
+					      state,
+					      &id,
+					      xattr_name,
+					      &xattr_blob);
+	if (state->xattr_size == -1) {
+		tevent_req_error(req, errno);
+		return tevent_req_post(req, ev);
+	}
+
+	if (alloc_hint == 0) {
+		/*
+		 * The caller only wants to know the size.
+		 */
+		tevent_req_done(req);
+		return tevent_req_post(req, ev);
+	}
+
+	if (state->xattr_size == 0) {
+		/*
+		 * There's no data.
+		 */
+		tevent_req_done(req);
+		return tevent_req_post(req, ev);
+	}
+
+	if (xattr_blob.length > alloc_hint) {
+		/*
+		 * The data doesn't fit.
+		 */
+		state->xattr_size = -1;
+		tevent_req_error(req, ERANGE);
+		return tevent_req_post(req, ev);
+	}
+
+	/*
+	 * take the whole blob.
+	 */
+	state->xattr_value = xattr_blob.data;
+
+	tevent_req_done(req);
+	return tevent_req_post(req, ev);
+}
+
+static ssize_t xattr_tdb_getxattrat_recv(struct tevent_req *req,
+					 struct vfs_aio_state *aio_state,
+					 TALLOC_CTX *mem_ctx,
+					 uint8_t **xattr_value)
+{
+	struct xattr_tdb_getxattrat_state *state = tevent_req_data(
+		req, struct xattr_tdb_getxattrat_state);
+	ssize_t xattr_size;
+
+	if (tevent_req_is_unix_error(req, &aio_state->error)) {
+		tevent_req_received(req);
+		return -1;
+	}
+
+	*aio_state = state->vfs_aio_state;
+	xattr_size = state->xattr_size;
+	if (xattr_value != NULL) {
+		*xattr_value = talloc_move(mem_ctx, &state->xattr_value);
+	}
+
+	tevent_req_received(req);
 	return xattr_size;
 }
 
@@ -328,7 +457,7 @@ static bool xattr_tdb_init(int snum, TALLOC_CTX *mem_ctx, struct db_context **p_
 	const char *dbname;
 	char *def_dbname;
 
-	def_dbname = state_path("xattr.tdb");
+	def_dbname = state_path(talloc_tos(), "xattr.tdb");
 	if (def_dbname == NULL) {
 		errno = ENOSYS;
 		return false;
@@ -408,7 +537,8 @@ static int xattr_tdb_open(vfs_handle_struct *handle,
 	return fsp->fh->fd;
 }
 
-static int xattr_tdb_mkdir(vfs_handle_struct *handle,
+static int xattr_tdb_mkdirat(vfs_handle_struct *handle,
+		struct files_struct *dirfsp,
 		const struct smb_filename *smb_fname,
 		mode_t mode)
 {
@@ -418,7 +548,10 @@ static int xattr_tdb_mkdir(vfs_handle_struct *handle,
 	int ret;
 	struct smb_filename *smb_fname_tmp = NULL;
 
-	ret = SMB_VFS_NEXT_MKDIR(handle, smb_fname, mode);
+	ret = SMB_VFS_NEXT_MKDIRAT(handle,
+				dirfsp,
+				smb_fname,
+				mode);
 	if (ret < 0) {
 		return ret;
 	}
@@ -460,8 +593,10 @@ static int xattr_tdb_mkdir(vfs_handle_struct *handle,
 /*
  * On unlink we need to delete the tdb record
  */
-static int xattr_tdb_unlink(vfs_handle_struct *handle,
-			    const struct smb_filename *smb_fname)
+static int xattr_tdb_unlinkat(vfs_handle_struct *handle,
+			struct files_struct *dirfsp,
+			const struct smb_filename *smb_fname,
+			int flags)
 {
 	struct smb_filename *smb_fname_tmp = NULL;
 	struct file_id id;
@@ -492,12 +627,20 @@ static int xattr_tdb_unlink(vfs_handle_struct *handle,
 		goto out;
 	}
 
-	if (smb_fname_tmp->st.st_ex_nlink == 1) {
-		/* Only remove record on last link to file. */
+	if (flags & AT_REMOVEDIR) {
+		/* Always remove record when removing a directory succeeds. */
 		remove_record = true;
+	} else {
+		if (smb_fname_tmp->st.st_ex_nlink == 1) {
+			/* Only remove record on last link to file. */
+			remove_record = true;
+		}
 	}
 
-	ret = SMB_VFS_NEXT_UNLINK(handle, smb_fname_tmp);
+	ret = SMB_VFS_NEXT_UNLINKAT(handle,
+				dirfsp,
+				smb_fname_tmp,
+				flags);
 
 	if (ret == -1) {
 		goto out;
@@ -514,46 +657,6 @@ static int xattr_tdb_unlink(vfs_handle_struct *handle,
  out:
 	TALLOC_FREE(frame);
 	return ret;
-}
-
-/*
- * On rmdir we need to delete the tdb record
- */
-static int xattr_tdb_rmdir(vfs_handle_struct *handle,
-			const struct smb_filename *smb_fname)
-{
-	SMB_STRUCT_STAT sbuf;
-	struct file_id id;
-	struct db_context *db;
-	int ret;
-	TALLOC_CTX *frame = talloc_stackframe();
-
-	SMB_VFS_HANDLE_GET_DATA(handle, db, struct db_context,
-				if (!xattr_tdb_init(-1, frame, &db))
-				{
-					TALLOC_FREE(frame); return -1;
-				});
-
-	if (vfs_stat_smb_basename(handle->conn,
-				smb_fname,
-				&sbuf) == -1) {
-		TALLOC_FREE(frame);
-		return -1;
-	}
-
-	ret = SMB_VFS_NEXT_RMDIR(handle, smb_fname);
-
-	if (ret == -1) {
-		TALLOC_FREE(frame);
-		return -1;
-	}
-
-	id = SMB_VFS_NEXT_FILE_ID_CREATE(handle, &sbuf);
-
-	xattr_tdb_remove_all_attrs(db, &id);
-
-	TALLOC_FREE(frame);
-	return 0;
 }
 
 /*
@@ -602,6 +705,8 @@ static int xattr_tdb_connect(vfs_handle_struct *handle, const char *service,
 
 static struct vfs_fn_pointers vfs_xattr_tdb_fns = {
 	.getxattr_fn = xattr_tdb_getxattr,
+	.getxattrat_send_fn = xattr_tdb_getxattrat_send,
+	.getxattrat_recv_fn = xattr_tdb_getxattrat_recv,
 	.fgetxattr_fn = xattr_tdb_fgetxattr,
 	.setxattr_fn = xattr_tdb_setxattr,
 	.fsetxattr_fn = xattr_tdb_fsetxattr,
@@ -610,9 +715,8 @@ static struct vfs_fn_pointers vfs_xattr_tdb_fns = {
 	.removexattr_fn = xattr_tdb_removexattr,
 	.fremovexattr_fn = xattr_tdb_fremovexattr,
 	.open_fn = xattr_tdb_open,
-	.mkdir_fn = xattr_tdb_mkdir,
-	.unlink_fn = xattr_tdb_unlink,
-	.rmdir_fn = xattr_tdb_rmdir,
+	.mkdirat_fn = xattr_tdb_mkdirat,
+	.unlinkat_fn = xattr_tdb_unlinkat,
 	.connect_fn = xattr_tdb_connect,
 };
 

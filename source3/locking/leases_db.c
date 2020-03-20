@@ -41,16 +41,19 @@ bool leases_db_init(bool read_only)
 		return true;
 	}
 
-	db_path = lock_path("leases.tdb");
+	db_path = lock_path(talloc_tos(), "leases.tdb");
 	if (db_path == NULL) {
 		return false;
 	}
 
 	leases_db = db_open(NULL, db_path, 0,
-			    TDB_DEFAULT|TDB_VOLATILE|TDB_CLEAR_IF_FIRST|
+			    TDB_DEFAULT|
+			    TDB_VOLATILE|
+			    TDB_CLEAR_IF_FIRST|
+			    TDB_SEQNUM|
 			    TDB_INCOMPATIBLE_HASH,
 			    read_only ? O_RDONLY : O_RDWR|O_CREAT, 0644,
-			    DBWRAP_LOCK_ORDER_2, DBWRAP_FLAG_NONE);
+			    DBWRAP_LOCK_ORDER_4, DBWRAP_FLAG_NONE);
 	TALLOC_FREE(db_path);
 	if (leases_db == NULL) {
 		DEBUG(1, ("ERROR: Failed to initialise leases database\n"));
@@ -60,263 +63,270 @@ bool leases_db_init(bool read_only)
 	return true;
 }
 
-static bool leases_db_key(TALLOC_CTX *mem_ctx,
-			  const struct GUID *client_guid,
-			  const struct smb2_lease_key *lease_key,
-			  TDB_DATA *key)
+struct leases_db_key_buf {
+	uint8_t buf[32];
+};
+
+static TDB_DATA leases_db_key(struct leases_db_key_buf *buf,
+			      const struct GUID *client_guid,
+			      const struct smb2_lease_key *lease_key)
 {
 	struct leases_db_key db_key = {
 		.client_guid = *client_guid,
 		.lease_key = *lease_key };
-	DATA_BLOB blob;
+	DATA_BLOB blob = { .data = buf->buf, .length = sizeof(buf->buf) };
 	enum ndr_err_code ndr_err;
 
 	if (DEBUGLEVEL >= 10) {
-		DEBUG(10, ("%s:\n", __func__));
+		DBG_DEBUG("\n");
 		NDR_PRINT_DEBUG(leases_db_key, &db_key);
 	}
 
-	ndr_err = ndr_push_struct_blob(
-		&blob, mem_ctx, &db_key,
-		(ndr_push_flags_fn_t)ndr_push_leases_db_key);
-	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-		DEBUG(10, ("%s: ndr_push_struct_blob_failed: %s\n",
-			   __func__, ndr_errstr(ndr_err)));
-		return false;
-	}
+	ndr_err = ndr_push_struct_into_fixed_blob(
+		&blob, &db_key, (ndr_push_flags_fn_t)ndr_push_leases_db_key);
+	SMB_ASSERT(NDR_ERR_CODE_IS_SUCCESS(ndr_err));
 
-	*key = make_tdb_data(blob.data, blob.length);
-	return true;
+	return (TDB_DATA) { .dptr = buf->buf, .dsize = sizeof(buf->buf) };
 }
 
-NTSTATUS leases_db_add(const struct GUID *client_guid,
-		       const struct smb2_lease_key *lease_key,
-		       const struct file_id *id,
-		       const char *servicepath,
-		       const char *base_name,
-		       const char *stream_name)
-{
-	TDB_DATA db_key, db_value;
-	DATA_BLOB blob;
-	struct db_record *rec;
+struct leases_db_do_locked_state {
+	void (*fn)(struct leases_db_value *value,
+		   bool *modified,
+		   void *private_data);
+	void *private_data;
 	NTSTATUS status;
-	bool ok;
-	struct leases_db_value new_value;
-	struct leases_db_file new_file;
+};
+
+static void leases_db_do_locked_fn(
+	struct db_record *rec,
+	TDB_DATA db_value,
+	void *private_data)
+{
+	struct leases_db_do_locked_state *state = private_data;
+	DATA_BLOB blob = { .data = db_value.dptr, .length = db_value.dsize };
 	struct leases_db_value *value = NULL;
 	enum ndr_err_code ndr_err;
+	bool modified = false;
 
-	if (!leases_db_init(false)) {
-		return NT_STATUS_INTERNAL_ERROR;
+	value = talloc_zero(talloc_tos(), struct leases_db_value);
+	if (value == NULL) {
+		state->status = NT_STATUS_NO_MEMORY;
+		goto done;
 	}
 
-	ok = leases_db_key(talloc_tos(), client_guid, lease_key, &db_key);
-	if (!ok) {
-		DEBUG(10, ("%s: leases_db_key failed\n", __func__));
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	rec = dbwrap_fetch_locked(leases_db, talloc_tos(), db_key);
-	TALLOC_FREE(db_key.dptr);
-	if (rec == NULL) {
-		return NT_STATUS_INTERNAL_ERROR;
-	}
-
-	db_value = dbwrap_record_get_value(rec);
-	if (db_value.dsize != 0) {
-		uint32_t i;
-
-		DEBUG(10, ("%s: record exists\n", __func__));
-
-		value = talloc(talloc_tos(), struct leases_db_value);
-		if (value == NULL) {
-			status = NT_STATUS_NO_MEMORY;
-			goto out;
-		}
-
-		blob.data = db_value.dptr;
-		blob.length = db_value.dsize;
-
+	if (blob.length != 0) {
 		ndr_err = ndr_pull_struct_blob_all(
-			&blob, value, value,
+			&blob,
+			value,
+			value,
 			(ndr_pull_flags_fn_t)ndr_pull_leases_db_value);
 		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-			DEBUG(10, ("%s: ndr_pull_struct_blob_failed: %s\n",
-				   __func__, ndr_errstr(ndr_err)));
-			status = ndr_map_error2ntstatus(ndr_err);
-			goto out;
+			DBG_DEBUG("ndr_pull_struct_blob_failed: %s\n",
+				  ndr_errstr(ndr_err));
+			state->status = ndr_map_error2ntstatus(ndr_err);
+			goto done;
 		}
+	}
 
-		/* id must be unique. */
-		for (i = 0; i < value->num_files; i++) {
-			if (file_id_equal(id, &value->files[i].id)) {
-				status = NT_STATUS_OBJECT_NAME_COLLISION;
-				goto out;
-			}
+	state->fn(value, &modified, state->private_data);
+
+	if (!modified) {
+		goto done;
+	}
+
+	if (value->num_files == 0) {
+		state->status = dbwrap_record_delete(rec);
+		if (!NT_STATUS_IS_OK(state->status)) {
+			DBG_DEBUG("dbwrap_record_delete returned %s\n",
+				  nt_errstr(state->status));
 		}
-
-		value->files = talloc_realloc(value, value->files,
-					struct leases_db_file,
-					value->num_files + 1);
-		if (value->files == NULL) {
-			status = NT_STATUS_NO_MEMORY;
-			goto out;
-		}
-		value->files[value->num_files].id = *id;
-		value->files[value->num_files].servicepath = servicepath;
-		value->files[value->num_files].base_name = base_name;
-		value->files[value->num_files].stream_name = stream_name;
-		value->num_files += 1;
-
-	} else {
-		DEBUG(10, ("%s: new record\n", __func__));
-
-		new_file = (struct leases_db_file) {
-			.id = *id,
-			.servicepath = servicepath,
-			.base_name = base_name,
-			.stream_name = stream_name,
-		};
-
-		new_value = (struct leases_db_value) {
-			.num_files = 1,
-			.files = &new_file,
-		};
-		value = &new_value;
+		goto done;
 	}
 
 	ndr_err = ndr_push_struct_blob(
-		&blob, talloc_tos(), value,
+		&blob,
+		value,
+		value,
 		(ndr_push_flags_fn_t)ndr_push_leases_db_value);
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-		DEBUG(10, ("%s: ndr_push_struct_blob_failed: %s\n",
-			   __func__, ndr_errstr(ndr_err)));
-		status = ndr_map_error2ntstatus(ndr_err);
-		goto out;
+		DBG_DEBUG("ndr_push_struct_blob_failed: %s\n",
+			  ndr_errstr(ndr_err));
+		state->status = ndr_map_error2ntstatus(ndr_err);
+		goto done;
 	}
 
 	if (DEBUGLEVEL >= 10) {
-		DEBUG(10, ("%s:\n", __func__));
+		DBG_DEBUG("\n");
 		NDR_PRINT_DEBUG(leases_db_value, value);
 	}
 
 	db_value = make_tdb_data(blob.data, blob.length);
 
-	status = dbwrap_record_store(rec, db_value, 0);
+	state->status = dbwrap_record_store(rec, db_value, 0);
+	if (!NT_STATUS_IS_OK(state->status)) {
+		DBG_DEBUG("dbwrap_record_store returned %s\n",
+			  nt_errstr(state->status));
+	}
+
+done:
+	TALLOC_FREE(value);
+}
+
+static NTSTATUS leases_db_do_locked(
+	const struct GUID *client_guid,
+	const struct smb2_lease_key *lease_key,
+	void (*fn)(struct leases_db_value *value,
+		   bool *modified,
+		   void *private_data),
+	void *private_data)
+{
+	struct leases_db_key_buf keybuf;
+	TDB_DATA db_key = leases_db_key(&keybuf, client_guid, lease_key);
+	struct leases_db_do_locked_state state = {
+		.fn = fn, .private_data = private_data,
+	};
+	NTSTATUS status;
+
+	if (!leases_db_init(false)) {
+		return NT_STATUS_INTERNAL_ERROR;
+	}
+
+	status = dbwrap_do_locked(
+		leases_db, db_key, leases_db_do_locked_fn, &state);
 	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(10, ("%s: dbwrap_record_store returned %s\n",
-			   __func__, nt_errstr(status)));
+		return status;
+	}
+	return state.status;
+}
+
+struct leases_db_add_state {
+	const struct file_id *id;
+	uint32_t current_state;
+	uint16_t lease_version;
+	uint16_t epoch;
+	const char *servicepath;
+	const char *base_name;
+	const char *stream_name;
+	NTSTATUS status;
+};
+
+static void leases_db_add_fn(
+	struct leases_db_value *value, bool *modified, void *private_data)
+{
+	struct leases_db_add_state *state = private_data;
+	struct leases_db_file *tmp = NULL;
+	uint32_t i;
+
+	/* id must be unique. */
+	for (i = 0; i < value->num_files; i++) {
+		if (file_id_equal(state->id, &value->files[i].id)) {
+			state->status = NT_STATUS_OBJECT_NAME_COLLISION;
+			return;
+		}
 	}
 
-  out:
-
-	if (value != &new_value) {
-		TALLOC_FREE(value);
+	if (value->num_files == 0) {
+		/* new record */
+		value->current_state = state->current_state;
+		value->lease_version = state->lease_version;
+		value->epoch = state->epoch;
 	}
-	TALLOC_FREE(rec);
-	return status;
+
+	tmp = talloc_realloc(
+		value,
+		value->files,
+		struct leases_db_file,
+		value->num_files + 1);
+	if (tmp == NULL) {
+		state->status = NT_STATUS_NO_MEMORY;
+		return;
+	}
+	value->files = tmp;
+
+	value->files[value->num_files] = (struct leases_db_file) {
+		.id = *state->id,
+		.servicepath = state->servicepath,
+		.base_name = state->base_name,
+		.stream_name = state->stream_name,
+	};
+	value->num_files += 1;
+
+	*modified = true;
+}
+
+NTSTATUS leases_db_add(const struct GUID *client_guid,
+		       const struct smb2_lease_key *lease_key,
+		       const struct file_id *id,
+		       uint32_t current_state,
+		       uint16_t lease_version,
+		       uint16_t epoch,
+		       const char *servicepath,
+		       const char *base_name,
+		       const char *stream_name)
+{
+	struct leases_db_add_state state = {
+		.id = id,
+		.current_state = current_state,
+		.lease_version = lease_version,
+		.epoch = epoch,
+		.servicepath = servicepath,
+		.base_name = base_name,
+		.stream_name = stream_name,
+	};
+	NTSTATUS status;
+
+	status = leases_db_do_locked(
+		client_guid, lease_key, leases_db_add_fn, &state);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("leases_db_do_locked failed: %s\n",
+			  nt_errstr(status));
+		return status;
+	}
+	return state.status;
+}
+
+struct leases_db_del_state {
+	const struct file_id *id;
+	NTSTATUS status;
+};
+
+static void leases_db_del_fn(
+	struct leases_db_value *value, bool *modified, void *private_data)
+{
+	struct leases_db_del_state *state = private_data;
+	uint32_t i;
+
+	for (i = 0; i < value->num_files; i++) {
+		if (file_id_equal(state->id, &value->files[i].id)) {
+			break;
+		}
+	}
+	if (i == value->num_files) {
+		state->status = NT_STATUS_NOT_FOUND;
+		return;
+	}
+
+	value->files[i] = value->files[value->num_files-1];
+	value->num_files -= 1;
+
+	*modified = true;
 }
 
 NTSTATUS leases_db_del(const struct GUID *client_guid,
 		       const struct smb2_lease_key *lease_key,
 		       const struct file_id *id)
 {
-	TDB_DATA db_key, db_value;
-	struct db_record *rec;
+	struct leases_db_del_state state = { .id = id };
 	NTSTATUS status;
-	struct leases_db_value *value;
-	enum ndr_err_code ndr_err;
-	DATA_BLOB blob;
-	uint32_t i;
-	bool ok;
 
-	if (!leases_db_init(false)) {
-		return NT_STATUS_INTERNAL_ERROR;
+	status = leases_db_do_locked(
+		client_guid, lease_key, leases_db_del_fn, &state);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("leases_db_do_locked failed: %s\n",
+			  nt_errstr(status));
+		return status;
 	}
-
-	ok = leases_db_key(talloc_tos(), client_guid, lease_key, &db_key);
-	if (!ok) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	rec = dbwrap_fetch_locked(leases_db, talloc_tos(), db_key);
-	TALLOC_FREE(db_key.dptr);
-	if (rec == NULL) {
-		return NT_STATUS_NOT_FOUND;
-	}
-	db_value = dbwrap_record_get_value(rec);
-	if (db_value.dsize == 0) {
-		status = NT_STATUS_INTERNAL_ERROR;
-		goto out;
-	}
-
-	value = talloc(rec, struct leases_db_value);
-	if (value == NULL) {
-		status = NT_STATUS_NO_MEMORY;
-		goto out;
-	}
-
-	blob.data = db_value.dptr;
-	blob.length = db_value.dsize;
-
-	ndr_err = ndr_pull_struct_blob_all(
-		&blob, value, value,
-		(ndr_pull_flags_fn_t)ndr_pull_leases_db_value);
-	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-		DEBUG(10, ("%s: ndr_pull_struct_blob_failed: %s\n",
-			   __func__, ndr_errstr(ndr_err)));
-		status = ndr_map_error2ntstatus(ndr_err);
-		goto out;
-	}
-
-	/* id must exist. */
-	for (i = 0; i < value->num_files; i++) {
-		if (file_id_equal(id, &value->files[i].id)) {
-			break;
-		}
-	}
-
-	if (i == value->num_files) {
-		status = NT_STATUS_NOT_FOUND;
-		goto out;
-	}
-
-	value->files[i] = value->files[value->num_files-1];
-	value->num_files -= 1;
-
-	if (value->num_files == 0) {
-		DEBUG(10, ("%s: deleting record\n", __func__));
-		status = dbwrap_record_delete(rec);
-	} else {
-		DEBUG(10, ("%s: updating record\n", __func__));
-		ndr_err = ndr_push_struct_blob(
-			&blob, rec, value,
-			(ndr_push_flags_fn_t)ndr_push_leases_db_value);
-		if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-			DEBUG(10, ("%s: ndr_push_struct_blob_failed: %s\n",
-				   __func__, ndr_errstr(ndr_err)));
-			status = ndr_map_error2ntstatus(ndr_err);
-			goto out;
-		}
-
-		if (DEBUGLEVEL >= 10) {
-			DEBUG(10, ("%s:\n", __func__));
-			NDR_PRINT_DEBUG(leases_db_value, value);
-		}
-
-		db_value = make_tdb_data(blob.data, blob.length);
-
-		status = dbwrap_record_store(rec, db_value, 0);
-		if (!NT_STATUS_IS_OK(status)) {
-			DEBUG(10, ("%s: dbwrap_record_store returned %s\n",
-				   __func__, nt_errstr(status)));
-		}
-	}
-
-  out:
-
-	TALLOC_FREE(rec);
-	return status;
+	return state.status;
 }
 
 struct leases_db_fetch_state {
@@ -372,18 +382,13 @@ NTSTATUS leases_db_parse(const struct GUID *client_guid,
 					void *private_data),
 			 void *private_data)
 {
-	TDB_DATA db_key;
+	struct leases_db_key_buf keybuf;
+	TDB_DATA db_key = leases_db_key(&keybuf, client_guid, lease_key);
 	struct leases_db_fetch_state state;
 	NTSTATUS status;
-	bool ok;
 
 	if (!leases_db_init(true)) {
 		return NT_STATUS_INTERNAL_ERROR;
-	}
-
-	ok = leases_db_key(talloc_tos(), client_guid, lease_key, &db_key);
-	if (!ok) {
-		return NT_STATUS_NO_MEMORY;
 	}
 
 	state = (struct leases_db_fetch_state) {
@@ -394,11 +399,44 @@ NTSTATUS leases_db_parse(const struct GUID *client_guid,
 
 	status = dbwrap_parse_record(leases_db, db_key, leases_db_parser,
 				     &state);
-	TALLOC_FREE(db_key.dptr);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
 	return state.status;
+}
+
+struct leases_db_rename_state {
+	const struct file_id *id;
+	const char *servicename_new;
+	const char *filename_new;
+	const char *stream_name_new;
+	NTSTATUS status;
+};
+
+static void leases_db_rename_fn(
+	struct leases_db_value *value, bool *modified, void *private_data)
+{
+	struct leases_db_rename_state *state = private_data;
+	struct leases_db_file *file = NULL;
+	uint32_t i;
+
+	/* id must exist. */
+	for (i = 0; i < value->num_files; i++) {
+		if (file_id_equal(state->id, &value->files[i].id)) {
+			break;
+		}
+	}
+	if (i == value->num_files) {
+		state->status = NT_STATUS_NOT_FOUND;
+		return;
+	}
+
+	file = &value->files[i];
+	file->servicepath = state->servicename_new;
+	file->base_name = state->filename_new;
+	file->stream_name = state->stream_name_new;
+
+	*modified = true;
 }
 
 NTSTATUS leases_db_rename(const struct GUID *client_guid,
@@ -408,21 +446,263 @@ NTSTATUS leases_db_rename(const struct GUID *client_guid,
 		       const char *filename_new,
 		       const char *stream_name_new)
 {
+	struct leases_db_rename_state state = {
+		.id = id,
+		.servicename_new = servicename_new,
+		.filename_new = filename_new,
+		.stream_name_new = stream_name_new,
+	};
 	NTSTATUS status;
 
-	status = leases_db_del(client_guid,
-				lease_key,
-				id);
+	status = leases_db_do_locked(
+		client_guid, lease_key, leases_db_rename_fn, &state);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("leases_db_do_locked failed: %s\n",
+			  nt_errstr(status));
+		return status;
+	}
+	return state.status;
+}
+
+struct leases_db_set_state {
+	uint32_t current_state;
+	bool breaking;
+	uint32_t breaking_to_requested;
+	uint32_t breaking_to_required;
+	uint16_t lease_version;
+	uint16_t epoch;
+};
+
+static void leases_db_set_fn(
+	struct leases_db_value *value, bool *modified, void *private_data)
+{
+	struct leases_db_set_state *state = private_data;
+
+	if (value->num_files == 0) {
+		DBG_WARNING("leases_db_set on new entry\n");
+		return;
+	}
+	value->current_state = state->current_state;
+	value->breaking = state->breaking;
+	value->breaking_to_requested = state->breaking_to_requested;
+	value->breaking_to_required = state->breaking_to_required;
+	value->lease_version = state->lease_version;
+	value->epoch = state->epoch;
+	*modified = true;
+}
+
+NTSTATUS leases_db_set(const struct GUID *client_guid,
+		       const struct smb2_lease_key *lease_key,
+		       uint32_t current_state,
+		       bool breaking,
+		       uint32_t breaking_to_requested,
+		       uint32_t	breaking_to_required,
+		       uint16_t lease_version,
+		       uint16_t epoch)
+{
+	struct leases_db_set_state state = {
+		.current_state = current_state,
+		.breaking = breaking,
+		.breaking_to_requested = breaking_to_requested,
+		.breaking_to_required = breaking_to_required,
+		.lease_version = lease_version,
+		.epoch = epoch,
+	};
+	NTSTATUS status;
+
+	status = leases_db_do_locked(
+		client_guid, lease_key, leases_db_set_fn, &state);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_DEBUG("leases_db_do_locked failed: %s\n",
+			  nt_errstr(status));
+		return status;
+	}
+	return NT_STATUS_OK;
+}
+
+struct leases_db_get_state {
+	const struct file_id *file_id;
+	uint32_t *current_state;
+	bool *breaking;
+	uint32_t *breaking_to_requested;
+	uint32_t *breaking_to_required;
+	uint16_t *lease_version;
+	uint16_t *epoch;
+	NTSTATUS status;
+};
+
+static void leases_db_get_fn(TDB_DATA key, TDB_DATA data, void *private_data)
+{
+	struct leases_db_get_state *state = private_data;
+	DATA_BLOB blob = { .data = data.dptr, .length = data.dsize };
+	enum ndr_err_code ndr_err;
+	struct leases_db_value *value;
+	uint32_t i;
+
+	value = talloc(talloc_tos(), struct leases_db_value);
+	if (value == NULL) {
+		state->status = NT_STATUS_NO_MEMORY;
+		return;
+	}
+
+	ndr_err = ndr_pull_struct_blob_all(
+		&blob, value, value,
+		(ndr_pull_flags_fn_t)ndr_pull_leases_db_value);
+	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		DBG_DEBUG("ndr_pull_struct_blob_failed: %s\n",
+			  ndr_errstr(ndr_err));
+		TALLOC_FREE(value);
+		state->status = ndr_map_error2ntstatus(ndr_err);
+		return;
+	}
+
+	if (DEBUGLEVEL >= 10) {
+		DBG_DEBUG("\n");
+		NDR_PRINT_DEBUG(leases_db_value, value);
+	}
+
+	/* id must exist. */
+	for (i = 0; i < value->num_files; i++) {
+		if (file_id_equal(state->file_id, &value->files[i].id)) {
+			break;
+		}
+	}
+
+	if (i == value->num_files) {
+		state->status = NT_STATUS_NOT_FOUND;
+		TALLOC_FREE(value);
+		return;
+	}
+
+	if (state->current_state != NULL) {
+		*state->current_state = value->current_state;
+	};
+	if (state->breaking != NULL) {
+		*state->breaking = value->breaking;
+	};
+	if (state->breaking_to_requested != NULL) {
+		*state->breaking_to_requested = value->breaking_to_requested;
+	};
+	if (state->breaking_to_required != NULL) {
+		*state->breaking_to_required = value->breaking_to_required;
+	};
+	if (state->lease_version != NULL) {
+		*state->lease_version = value->lease_version;
+	};
+	if (state->epoch != NULL) {
+		*state->epoch = value->epoch;
+	};
+
+	TALLOC_FREE(value);
+	state->status = NT_STATUS_OK;
+}
+
+NTSTATUS leases_db_get(const struct GUID *client_guid,
+		       const struct smb2_lease_key *lease_key,
+		       const struct file_id *file_id,
+		       uint32_t *current_state,
+		       bool *breaking,
+		       uint32_t *breaking_to_requested,
+		       uint32_t	*breaking_to_required,
+		       uint16_t *lease_version,
+		       uint16_t *epoch)
+{
+	struct leases_db_get_state state = {
+		.file_id = file_id,
+		.current_state = current_state,
+		.breaking = breaking,
+		.breaking_to_requested = breaking_to_requested,
+		.breaking_to_required = breaking_to_required,
+		.lease_version = lease_version,
+		.epoch = epoch,
+	};
+	struct leases_db_key_buf keybuf;
+	TDB_DATA db_key = leases_db_key(&keybuf, client_guid, lease_key);
+	NTSTATUS status;
+
+	if (!leases_db_init(true)) {
+		return NT_STATUS_INTERNAL_ERROR;
+	}
+
+	status = dbwrap_parse_record(
+		leases_db, db_key, leases_db_get_fn, &state);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
 	}
+	return state.status;
+}
 
-	return leases_db_add(client_guid,
-				lease_key,
-				id,
-				servicename_new,
-				filename_new,
-				stream_name_new);
+struct leases_db_get_current_state_state {
+	int seqnum;
+	uint32_t current_state;
+	NTSTATUS status;
+};
+
+/*
+ * This function is an optimization that
+ * relies on the fact that the
+ * smb2_lease_state current_state
+ * (which is a uint32_t size)
+ * from struct leases_db_value is the first
+ * entry in the ndr-encoded struct leases_db_value.
+ * Read it without having to ndr decode all
+ * the values in struct leases_db_value.
+ */
+
+static void leases_db_get_current_state_fn(
+	TDB_DATA key, TDB_DATA data, void *private_data)
+{
+	struct leases_db_get_current_state_state *state = private_data;
+	struct ndr_pull ndr;
+	enum ndr_err_code ndr_err;
+
+	if (data.dsize < sizeof(uint32_t)) {
+		state->status = NT_STATUS_INTERNAL_DB_CORRUPTION;
+		return;
+	}
+
+	state->seqnum = dbwrap_get_seqnum(leases_db);
+
+	ndr = (struct ndr_pull) {
+		.data = data.dptr, .data_size = data.dsize,
+	};
+	ndr_err = ndr_pull_uint32(&ndr, NDR_SCALARS, &state->current_state);
+	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		state->status = ndr_map_error2ntstatus(ndr_err);
+	}
+}
+
+NTSTATUS leases_db_get_current_state(
+	const struct GUID *client_guid,
+	const struct smb2_lease_key *lease_key,
+	int *database_seqnum,
+	uint32_t *current_state)
+{
+	struct leases_db_get_current_state_state state = { 0 };
+	struct leases_db_key_buf keybuf;
+	TDB_DATA db_key = { 0 };
+	NTSTATUS status;
+
+	if (!leases_db_init(true)) {
+		return NT_STATUS_INTERNAL_ERROR;
+	}
+
+	state.seqnum = dbwrap_get_seqnum(leases_db);
+	if (*database_seqnum == state.seqnum) {
+		return NT_STATUS_OK;
+	}
+
+	db_key = leases_db_key(&keybuf, client_guid, lease_key);
+
+	status = dbwrap_parse_record(
+		leases_db, db_key, leases_db_get_current_state_fn, &state);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+	*database_seqnum = state.seqnum;
+	*current_state = state.current_state;
+
+	return NT_STATUS_OK;
 }
 
 NTSTATUS leases_db_copy_file_ids(TALLOC_CTX *mem_ctx,

@@ -26,6 +26,7 @@ from samba import dsdb
 from samba.ndr import ndr_unpack, ndr_pack
 from samba.dcerpc import dnsp
 
+
 class ComputerCmdTestCase(SambaToolCmdTest):
     """Tests for samba-tool computer subcommands"""
     computers = []
@@ -64,7 +65,8 @@ class ComputerCmdTestCase(SambaToolCmdTest):
             (result, out, err) = self._create_computer(computer)
 
             self.assertCmdSuccess(result, out, err)
-            self.assertEquals(err, "", "There shouldn't be any error message")
+            self.assertNotIn(
+                "ERROR", err, "There shouldn't be any error message")
             self.assertIn("Computer '%s' created successfully" %
                           computer["name"], out)
 
@@ -81,7 +83,6 @@ class ComputerCmdTestCase(SambaToolCmdTest):
                               expectedsamaccountname)
             self.assertEquals("%s" % found.get("description"),
                               computer["description"])
-
 
     def tearDown(self):
         super(ComputerCmdTestCase, self).tearDown()
@@ -135,7 +136,6 @@ class ComputerCmdTestCase(SambaToolCmdTest):
             self.assertCmdFail(result, "Succeeded to create existing computer")
             self.assertIn("already exists", err)
 
-
         # try to delete all the computers we just created
         for computer in self.computers:
             (result, out, err) = self.runsubcmd("computer", "delete", "%s" %
@@ -179,15 +179,54 @@ class ComputerCmdTestCase(SambaToolCmdTest):
                          dsdb.ATYPE_WORKSTATION_TRUST)
 
         computerlist = self.samdb.search(base=self.samdb.domain_dn(),
-                                      scope=ldb.SCOPE_SUBTREE,
-                                      expression=search_filter,
-                                      attrs=["samaccountname"])
+                                         scope=ldb.SCOPE_SUBTREE,
+                                         expression=search_filter,
+                                         attrs=["samaccountname"])
 
         self.assertTrue(len(computerlist) > 0, "no computers found in samdb")
 
         for computerobj in computerlist:
             name = computerobj.get("samaccountname", idx=0)
-            found = self.assertMatch(out, name,
+            found = self.assertMatch(out, str(name),
+                                     "computer '%s' not found" % name)
+
+    def test_list_full_dn(self):
+        (result, out, err) = self.runsubcmd("computer", "list", "--full-dn")
+        self.assertCmdSuccess(result, out, err, "Error running list")
+
+        search_filter = ("(sAMAccountType=%u)" %
+                         dsdb.ATYPE_WORKSTATION_TRUST)
+
+        computerlist = self.samdb.search(base=self.samdb.domain_dn(),
+                                         scope=ldb.SCOPE_SUBTREE,
+                                         expression=search_filter,
+                                         attrs=[])
+
+        self.assertTrue(len(computerlist) > 0, "no computers found in samdb")
+
+        for computerobj in computerlist:
+            name = computerobj.get("dn", idx=0)
+            found = self.assertMatch(out, str(name),
+                                     "computer '%s' not found" % name)
+
+    def test_list_base_dn(self):
+        base_dn = str(self.samdb.domain_dn())
+        (result, out, err) = self.runsubcmd("computer", "list", "-b", base_dn)
+        self.assertCmdSuccess(result, out, err, "Error running list")
+
+        search_filter = ("(sAMAccountType=%u)" %
+                         dsdb.ATYPE_WORKSTATION_TRUST)
+
+        computerlist = self.samdb.search(base=base_dn,
+                                         scope=ldb.SCOPE_SUBTREE,
+                                         expression=search_filter,
+                                         attrs=["name"])
+
+        self.assertTrue(len(computerlist) > 0, "no computers found in samdb")
+
+        for computerobj in computerlist:
+            name = computerobj.get("name", idx=0)
+            found = self.assertMatch(out, str(name),
                                      "computer '%s' not found" % name)
 
     def test_move(self):
@@ -239,7 +278,7 @@ class ComputerCmdTestCase(SambaToolCmdTest):
         computer = {
             "name": self.randomName(),
             "description": self.randomName(count=100),
-            }
+        }
         computer.update(base)
         return computer
 
@@ -250,19 +289,19 @@ class ComputerCmdTestCase(SambaToolCmdTest):
         ou = {
             "name": self.randomName(),
             "description": self.randomName(count=100),
-            }
+        }
         ou.update(base)
         return ou
 
     def _create_computer(self, computer):
-        args = '{} {} --description={}'.format(
+        args = '{0} {1} --description={2}'.format(
             computer['name'], self.creds, computer["description"])
 
         for ip_address in computer.get('ip_address_list', []):
-            args += ' --ip-address={}'.format(ip_address)
+            args += ' --ip-address={0}'.format(ip_address)
 
         for service_principal_name in computer.get('service_principal_name_list', []):
-            args += ' --service-principal-name={}'.format(service_principal_name)
+            args += ' --service-principal-name={0}'.format(service_principal_name)
 
         args = args.split()
 
@@ -278,11 +317,11 @@ class ComputerCmdTestCase(SambaToolCmdTest):
             samaccountname = "%s$" % name
         search_filter = ("(&(sAMAccountName=%s)(objectCategory=%s,%s))" %
                          (ldb.binary_encode(samaccountname),
-                         "CN=Computer,CN=Schema,CN=Configuration",
-                         self.samdb.domain_dn()))
+                          "CN=Computer,CN=Schema,CN=Configuration",
+                          self.samdb.domain_dn()))
         computerlist = self.samdb.search(base=self.samdb.domain_dn(),
-                                  scope=ldb.SCOPE_SUBTREE,
-                                  expression=search_filter, attrs=[])
+                                         scope=ldb.SCOPE_SUBTREE,
+                                         expression=search_filter)
         if computerlist:
             return computerlist[0]
         else:
@@ -291,9 +330,9 @@ class ComputerCmdTestCase(SambaToolCmdTest):
     def _find_dns_record(self, name, ip_address):
         name = name.rstrip('$')  # computername
         records = self.samdb.search(
-            base="DC=DomainDnsZones,{}".format(self.samdb.get_default_basedn()),
+            base="DC=DomainDnsZones,{0}".format(self.samdb.get_default_basedn()),
             scope=ldb.SCOPE_SUBTREE,
-            expression="(&(objectClass=dnsNode)(name={}))".format(name),
+            expression="(&(objectClass=dnsNode)(name={0}))".format(name),
             attrs=['dnsRecord', 'dNSTombstoned'])
 
         # unpack data and compare
@@ -325,5 +364,5 @@ class ComputerCmdTestCase(SambaToolCmdTest):
         names = set()
         for computer in computer_list:
             for name in computer.get('servicePrincipalName', []):
-                names.add(name)
+                names.add(str(name))
         return names == set(expected_service_principal_names)

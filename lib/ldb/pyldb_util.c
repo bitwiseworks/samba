@@ -29,20 +29,13 @@
 
 static PyObject *ldb_module = NULL;
 
-#if PY_MAJOR_VERSION >= 3
-#define PyStr_Check PyUnicode_Check
-#define PyStr_AsUTF8 PyUnicode_AsUTF8
-#else
-#define PyStr_Check PyString_Check
-#define PyStr_AsUTF8 PyString_AsString
-#endif
-
 /**
  * Find out PyTypeObject in ldb module for a given typename
  */
 static PyTypeObject * PyLdb_GetPyType(const char *typename)
 {
-	PyObject *py_obj = NULL;
+	PyTypeObject *type = NULL;
+	bool ok;
 
 	if (ldb_module == NULL) {
 		ldb_module = PyImport_ImportModule("ldb");
@@ -51,9 +44,37 @@ static PyTypeObject * PyLdb_GetPyType(const char *typename)
 		}
 	}
 
-	py_obj = PyObject_GetAttrString(ldb_module, typename);
+	type = (PyTypeObject *)PyObject_GetAttrString(ldb_module, typename);
 
-	return (PyTypeObject*)py_obj;
+
+	if (type == NULL) {
+		PyErr_Format(PyExc_NameError,
+			     "Unable to find type %s in ldb module",
+			     typename);
+		return NULL;
+	}
+
+	ok = PyType_Check(type);
+	if (! ok) {
+		PyErr_Format(PyExc_TypeError,
+			     "Expected type ldb.%s, not %s",
+			     typename, Py_TYPE(type)->tp_name);
+		Py_DECREF(type);
+		return NULL;
+	}
+
+	return type;
+}
+
+bool pyldb_check_type(PyObject *obj, const char *typename)
+{
+	bool ok = false;
+	PyTypeObject *type = PyLdb_GetPyType(typename);
+	if (type != NULL) {
+		ok = PyObject_TypeCheck(obj, type);
+		Py_DECREF(type);
+	}
+	return ok;
 }
 
 /**
@@ -70,8 +91,8 @@ bool pyldb_Object_AsDn(TALLOC_CTX *mem_ctx, PyObject *object,
 	struct ldb_dn *odn;
 	PyTypeObject *PyLdb_Dn_Type;
 
-	if (ldb_ctx != NULL && (PyStr_Check(object) || PyUnicode_Check(object))) {
-		odn = ldb_dn_new(mem_ctx, ldb_ctx, PyStr_AsUTF8(object));
+	if (ldb_ctx != NULL && (PyUnicode_Check(object))) {
+		odn = ldb_dn_new(mem_ctx, ldb_ctx, PyUnicode_AsUTF8(object));
 		*dn = odn;
 		return true;
 	}
@@ -88,7 +109,7 @@ bool pyldb_Object_AsDn(TALLOC_CTX *mem_ctx, PyObject *object,
 	}
 
 	if (PyObject_TypeCheck(object, PyLdb_Dn_Type)) {
-		*dn = pyldb_Dn_AsDn(object);
+		*dn = pyldb_Dn_AS_DN(object);
 		return true;
 	}
 

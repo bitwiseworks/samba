@@ -115,7 +115,7 @@ static int bsd_statvfs(const char *path, vfs_statvfs_struct *statbuf)
 	return ret;
 }
 #elif defined(STAT_STATVFS) && defined(HAVE_FSID_INT)
-static int linux_statvfs(const char *path, vfs_statvfs_struct *statbuf)
+static int posix_statvfs(const char *path, vfs_statvfs_struct *statbuf)
 {
 	struct statvfs statvfs_buf;
 	int result;
@@ -123,8 +123,10 @@ static int linux_statvfs(const char *path, vfs_statvfs_struct *statbuf)
 	result = statvfs(path, &statvfs_buf);
 
 	if (!result) {
-		statbuf->OptimalTransferSize = statvfs_buf.f_frsize;
-		statbuf->BlockSize = statvfs_buf.f_bsize;
+		/* statvfs bsize is not the statfs bsize, the naming is terrible,
+		 * see bug 11810 */
+		statbuf->OptimalTransferSize = statvfs_buf.f_bsize;
+		statbuf->BlockSize = statvfs_buf.f_frsize;
 		statbuf->TotalBlocks = statvfs_buf.f_blocks;
 		statbuf->BlocksAvail = statvfs_buf.f_bfree;
 		statbuf->UserBlocksAvail = statvfs_buf.f_bavail;
@@ -167,7 +169,7 @@ int sys_statvfs(const char *path, vfs_statvfs_struct *statbuf)
 #if defined(BSD_STYLE_STATVFS)
 	return bsd_statvfs(path, statbuf);
 #elif defined(STAT_STATVFS) && defined(HAVE_FSID_INT)
-	return linux_statvfs(path, statbuf);
+	return posix_statvfs(path, statbuf);
 #else
 	/* BB change this to return invalid level */
 #ifdef EOPNOTSUPP

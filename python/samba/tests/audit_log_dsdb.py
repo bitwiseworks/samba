@@ -40,10 +40,9 @@ class AuditLogDsdbTests(AuditLogTestBase):
 
     def setUp(self):
         self.message_type = MSG_DSDB_LOG
-        self.event_type   = DSDB_EVENT_NAME
+        self.event_type = DSDB_EVENT_NAME
         super(AuditLogDsdbTests, self).setUp()
 
-        self.remoteAddress = os.environ["CLIENT_IP"]
         self.server_ip = os.environ["SERVER_IP"]
 
         host = "ldap://%s" % os.environ["SERVER"]
@@ -132,7 +131,7 @@ class AuditLogDsdbTests(AuditLogTestBase):
         net = Net(creds, lp, server=self.server)
         password = "newPassword!!42"
 
-        net.change_password(newpassword=password.encode('utf-8'),
+        net.change_password(newpassword=password,
                             username=USER_NAME,
                             oldpassword=USER_PASS)
 
@@ -175,7 +174,7 @@ class AuditLogDsdbTests(AuditLogTestBase):
         password = "newPassword!!42"
         domain = lp.get("workgroup")
 
-        net.set_password(newpassword=password.encode('utf-8'),
+        net.set_password(newpassword=password,
                          account_name=USER_NAME,
                          domain_name=domain)
         messages = self.waitForMessages(1, net, dn=dn)
@@ -491,7 +490,6 @@ class AuditLogDsdbTests(AuditLogTestBase):
         # We skip the check for self.get_service_description() as this
         # is subject to a race between smbd and the s4 rpc_server code
         # as to which will set the description as it is DCE/RPC over SMB
-
 
     def test_modify(self):
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Unit tests for dirsync control
 # Copyright (C) Matthieu Patou <mat@matws.net> 2011
@@ -28,10 +28,11 @@ from samba.tests.subunitrun import TestProgram, SubunitOptions
 import samba.getopt as options
 import base64
 
+import ldb
 from ldb import LdbError, SCOPE_BASE
 from ldb import Message, MessageElement, Dn
 from ldb import FLAG_MOD_ADD, FLAG_MOD_DELETE
-from samba.dcerpc import security, misc, drsblobs, security
+from samba.dcerpc import security, misc, drsblobs
 from samba.ndr import ndr_unpack, ndr_pack
 
 from samba.auth import system_session
@@ -58,13 +59,13 @@ if len(args) < 1:
     sys.exit(1)
 
 host = args.pop()
-if not "://" in host:
+if "://" not in host:
     ldaphost = "ldap://%s" % host
     ldapshost = "ldaps://%s" % host
 else:
     ldaphost = host
     start = host.rindex("://")
-    host = host.lstrip(start+3)
+    host = host.lstrip(start + 3)
 
 lp = sambaopts.get_loadparm()
 creds = credopts.get_credentials(lp)
@@ -72,6 +73,7 @@ creds = credopts.get_credentials(lp)
 #
 # Tests start here
 #
+
 
 class DirsyncBaseTests(samba.tests.TestCase):
 
@@ -83,7 +85,7 @@ class DirsyncBaseTests(samba.tests.TestCase):
         self.user_pass = samba.generate_random_password(12, 16)
         self.configuration_dn = self.ldb_admin.get_config_basedn().get_linearized()
         self.sd_utils = sd_utils.SDUtils(self.ldb_admin)
-        #used for anonymous login
+        # used for anonymous login
         print("baseDN: %s" % self.base_dn)
 
     def get_user_dn(self, name):
@@ -98,12 +100,12 @@ class DirsyncBaseTests(samba.tests.TestCase):
         creds_tmp.set_workstation(creds.get_workstation())
         creds_tmp.set_gensec_features(creds_tmp.get_gensec_features()
                                       | gensec.FEATURE_SEAL)
-        creds_tmp.set_kerberos_state(DONT_USE_KERBEROS) # kinit is too expensive to use in a tight loop
+        creds_tmp.set_kerberos_state(DONT_USE_KERBEROS)  # kinit is too expensive to use in a tight loop
         ldb_target = SamDB(url=ldaphost, credentials=creds_tmp, lp=lp)
         return ldb_target
 
 
-#tests on ldap add operations
+# tests on ldap add operations
 class SimpleDirsyncTests(DirsyncBaseTests):
 
     def setUp(self):
@@ -126,7 +128,7 @@ class SimpleDirsyncTests(DirsyncBaseTests):
 
         # add admins to the Domain Admins group
         self.ldb_admin.add_remove_group_members("Domain Admins", [self.admin_user],
-                       add_members_operation=True)
+                                                add_members_operation=True)
 
     def tearDown(self):
         super(SimpleDirsyncTests, self).tearDown()
@@ -141,7 +143,7 @@ class SimpleDirsyncTests(DirsyncBaseTests):
         except Exception:
             pass
 
-    #def test_dirsync_errors(self):
+    # def test_dirsync_errors(self):
 
     def test_dirsync_supported(self):
         """Test the basic of the dirsync is supported"""
@@ -151,24 +153,24 @@ class SimpleDirsyncTests(DirsyncBaseTests):
         res = self.ldb_dirsync.search(self.base_dn, expression="samaccountname=*", controls=["dirsync:1:0:1"])
         try:
             self.ldb_simple.search(self.base_dn,
-                expression="samaccountname=*",
-                controls=["dirsync:1:0:1"])
+                                   expression="samaccountname=*",
+                                   controls=["dirsync:1:0:1"])
         except LdbError as l:
-           self.assertTrue(str(l).find("LDAP_INSUFFICIENT_ACCESS_RIGHTS") != -1)
+            self.assertTrue(str(l).find("LDAP_INSUFFICIENT_ACCESS_RIGHTS") != -1)
 
     def test_parentGUID_referrals(self):
         res2 = self.ldb_admin.search(self.base_dn, scope=SCOPE_BASE, attrs=["objectGUID"])
 
         res = self.ldb_admin.search(self.base_dn,
-                                        expression="name=Configuration",
-                                        controls=["dirsync:1:0:1"])
+                                    expression="name=Configuration",
+                                    controls=["dirsync:1:0:1"])
         self.assertEqual(res2[0].get("objectGUID"), res[0].get("parentGUID"))
 
     def test_ok_not_rootdc(self):
         """Test if it's ok to do dirsync on another NC that is not the root DC"""
         self.ldb_admin.search(self.ldb_admin.get_config_basedn(),
-                                    expression="samaccountname=*",
-                                    controls=["dirsync:1:0:1"])
+                              expression="samaccountname=*",
+                              controls=["dirsync:1:0:1"])
 
     def test_dirsync_errors(self):
         """Test if dirsync returns the correct LDAP errors in case of pb"""
@@ -176,48 +178,48 @@ class SimpleDirsyncTests(DirsyncBaseTests):
         self.ldb_dirsync = self.get_ldb_connection(self.dirsync_user, self.user_pass)
         try:
             self.ldb_simple.search(self.base_dn,
-                expression="samaccountname=*",
-                controls=["dirsync:1:0:1"])
+                                   expression="samaccountname=*",
+                                   controls=["dirsync:1:0:1"])
         except LdbError as l:
             print(l)
             self.assertTrue(str(l).find("LDAP_INSUFFICIENT_ACCESS_RIGHTS") != -1)
 
         try:
             self.ldb_simple.search("CN=Users,%s" % self.base_dn,
-                expression="samaccountname=*",
-                controls=["dirsync:1:0:1"])
+                                   expression="samaccountname=*",
+                                   controls=["dirsync:1:0:1"])
         except LdbError as l:
             print(l)
             self.assertTrue(str(l).find("LDAP_INSUFFICIENT_ACCESS_RIGHTS") != -1)
 
         try:
             self.ldb_simple.search("CN=Users,%s" % self.base_dn,
-                expression="samaccountname=*",
-                controls=["dirsync:1:1:1"])
+                                   expression="samaccountname=*",
+                                   controls=["dirsync:1:1:1"])
         except LdbError as l:
             print(l)
             self.assertTrue(str(l).find("LDAP_UNWILLING_TO_PERFORM") != -1)
 
         try:
             self.ldb_dirsync.search("CN=Users,%s" % self.base_dn,
-                expression="samaccountname=*",
-                controls=["dirsync:1:0:1"])
+                                    expression="samaccountname=*",
+                                    controls=["dirsync:1:0:1"])
         except LdbError as l:
             print(l)
             self.assertTrue(str(l).find("LDAP_INSUFFICIENT_ACCESS_RIGHTS") != -1)
 
         try:
             self.ldb_admin.search("CN=Users,%s" % self.base_dn,
-                expression="samaccountname=*",
-                controls=["dirsync:1:0:1"])
+                                  expression="samaccountname=*",
+                                  controls=["dirsync:1:0:1"])
         except LdbError as l:
             print(l)
             self.assertTrue(str(l).find("LDAP_INSUFFICIENT_ACCESS_RIGHTS") != -1)
 
         try:
             self.ldb_admin.search("CN=Users,%s" % self.base_dn,
-                expression="samaccountname=*",
-                controls=["dirsync:1:1:1"])
+                                  expression="samaccountname=*",
+                                  controls=["dirsync:1:1:1"])
         except LdbError as l:
             print(l)
             self.assertTrue(str(l).find("LDAP_UNWILLING_TO_PERFORM") != -1)
@@ -228,19 +230,19 @@ class SimpleDirsyncTests(DirsyncBaseTests):
                                     expression="samaccountname=*",
                                     controls=["dirsync:1:0:1"])
         # Check that nTSecurityDescriptor is returned as it's the case when doing dirsync
-        self.assertTrue(res.msgs[0].get("ntsecuritydescriptor") != None)
+        self.assertTrue(res.msgs[0].get("ntsecuritydescriptor") is not None)
         # Check that non replicated attributes are not returned
-        self.assertTrue(res.msgs[0].get("badPwdCount") == None)
+        self.assertTrue(res.msgs[0].get("badPwdCount") is None)
         # Check that non forward link are not returned
-        self.assertTrue(res.msgs[0].get("memberof") == None)
+        self.assertTrue(res.msgs[0].get("memberof") is None)
 
         # Asking for instanceType will return also objectGUID
         res = self.ldb_admin.search(self.base_dn,
                                     expression="samaccountname=Administrator",
                                     attrs=["instanceType"],
                                     controls=["dirsync:1:0:1"])
-        self.assertTrue(res.msgs[0].get("objectGUID") != None)
-        self.assertTrue(res.msgs[0].get("instanceType") != None)
+        self.assertTrue(res.msgs[0].get("objectGUID") is not None)
+        self.assertTrue(res.msgs[0].get("instanceType") is not None)
 
         # We don't return an entry if asked for objectGUID
         res = self.ldb_admin.search(self.base_dn,
@@ -254,21 +256,21 @@ class SimpleDirsyncTests(DirsyncBaseTests):
                                     expression="(distinguishedName=%s)" % str(self.base_dn),
                                     attrs=["name"],
                                     controls=["dirsync:1:0:1"])
-        self.assertTrue(res.msgs[0].get("objectGUID") != None)
-        self.assertTrue(res.msgs[0].get("name") != None)
-        self.assertTrue(res.msgs[0].get("parentGUID") == None)
-        self.assertTrue(res.msgs[0].get("instanceType") != None)
+        self.assertTrue(res.msgs[0].get("objectGUID") is not None)
+        self.assertTrue(res.msgs[0].get("name") is not None)
+        self.assertTrue(res.msgs[0].get("parentGUID") is None)
+        self.assertTrue(res.msgs[0].get("instanceType") is not None)
 
-         # Asking for name will return also objectGUID and parentGUID
+        # Asking for name will return also objectGUID and parentGUID
         # and instanceType and of course name
         res = self.ldb_admin.search(self.base_dn,
                                     expression="samaccountname=Administrator",
                                     attrs=["name"],
                                     controls=["dirsync:1:0:1"])
-        self.assertTrue(res.msgs[0].get("objectGUID") != None)
-        self.assertTrue(res.msgs[0].get("name") != None)
-        self.assertTrue(res.msgs[0].get("parentGUID") != None)
-        self.assertTrue(res.msgs[0].get("instanceType") != None)
+        self.assertTrue(res.msgs[0].get("objectGUID") is not None)
+        self.assertTrue(res.msgs[0].get("name") is not None)
+        self.assertTrue(res.msgs[0].get("parentGUID") is not None)
+        self.assertTrue(res.msgs[0].get("instanceType") is not None)
 
         # Asking for dn will not return not only DN but more like if attrs=*
         # parentGUID should be returned
@@ -278,8 +280,8 @@ class SimpleDirsyncTests(DirsyncBaseTests):
                                     controls=["dirsync:1:0:1"])
         count = len(res.msgs[0])
         res2 = self.ldb_admin.search(self.base_dn,
-                                    expression="samaccountname=Administrator",
-                                    controls=["dirsync:1:0:1"])
+                                     expression="samaccountname=Administrator",
+                                     controls=["dirsync:1:0:1"])
         count2 = len(res2.msgs[0])
         self.assertEqual(count, count2)
 
@@ -295,14 +297,14 @@ class SimpleDirsyncTests(DirsyncBaseTests):
                                     attrs=["parentGUID"],
                                     controls=["dirsync:1:0:1"])
         self.assertEqual(len(res.msgs), 0)
-        ouname="OU=testou,%s" % self.base_dn
+        ouname = "OU=testou,%s" % self.base_dn
         self.ouname = ouname
         self.ldb_admin.create_ou(ouname)
         delta = Message()
         delta.dn = Dn(self.ldb_admin, str(ouname))
         delta["cn"] = MessageElement("test ou",
-                                        FLAG_MOD_ADD,
-                                        "cn" )
+                                     FLAG_MOD_ADD,
+                                     "cn")
         self.ldb_admin.modify(delta)
         res = self.ldb_admin.search(self.base_dn,
                                     expression="name=testou",
@@ -314,14 +316,14 @@ class SimpleDirsyncTests(DirsyncBaseTests):
         delete_force(self.ldb_admin, ouname)
 
     def test_dirsync_with_controls(self):
-        """Check that dirsync return correct informations when dealing with the NC"""
+        """Check that dirsync return correct information when dealing with the NC"""
         res = self.ldb_admin.search(self.base_dn,
                                     expression="(distinguishedName=%s)" % str(self.base_dn),
                                     attrs=["name"],
                                     controls=["dirsync:1:0:10000", "extended_dn:1", "show_deleted:1"])
 
     def test_dirsync_basenc(self):
-        """Check that dirsync return correct informations when dealing with the NC"""
+        """Check that dirsync return correct information when dealing with the NC"""
         res = self.ldb_admin.search(self.base_dn,
                                     expression="(distinguishedName=%s)" % str(self.base_dn),
                                     attrs=["name"],
@@ -365,13 +367,12 @@ class SimpleDirsyncTests(DirsyncBaseTests):
                                     controls=["dirsync:1:0:0"])
         self.assertEqual(len(res.msgs), nb - 1)
         if nb > 1:
-            self.assertTrue(res.msgs[0].get("objectGUID") != None)
+            self.assertTrue(res.msgs[0].get("objectGUID") is not None)
         else:
             res = self.ldb_admin.search(self.base_dn,
                                         expression="(objectclass=configuration)",
                                         attrs=["objectGUID"],
                                         controls=["dirsync:1:0:0"])
-
 
     def test_dirsync_send_delta(self):
         """Check that dirsync return correct delta when sending the last cookie"""
@@ -399,7 +400,7 @@ class SimpleDirsyncTests(DirsyncBaseTests):
         control2 = str(":".join(ctl))
 
         # Let's create an OU
-        ouname="OU=testou2,%s" % self.base_dn
+        ouname = "OU=testou2,%s" % self.base_dn
         self.ouname = ouname
         self.ldb_admin.create_ou(ouname)
         res = self.ldb_admin.search(self.base_dn,
@@ -416,8 +417,8 @@ class SimpleDirsyncTests(DirsyncBaseTests):
         delta.dn = Dn(self.ldb_admin, str(ouname))
 
         delta["cn"] = MessageElement("test ou",
-                                        FLAG_MOD_ADD,
-                                        "cn" )
+                                     FLAG_MOD_ADD,
+                                     "cn")
         self.ldb_admin.modify(delta)
         res = self.ldb_admin.search(self.base_dn,
                                     expression="(&(objectClass=organizationalUnit)(!(isDeleted=*)))",
@@ -430,8 +431,8 @@ class SimpleDirsyncTests(DirsyncBaseTests):
         delta = Message()
         delta.dn = Dn(self.ldb_admin, str(ouname))
         delta["cn"] = MessageElement([],
-                                        FLAG_MOD_DELETE,
-                                        "cn" )
+                                     FLAG_MOD_DELETE,
+                                     "cn")
         self.ldb_admin.modify(delta)
         res = self.ldb_admin.search(self.base_dn,
                                     expression="(&(objectClass=organizationalUnit)(!(isDeleted=*)))",
@@ -454,8 +455,8 @@ class SimpleDirsyncTests(DirsyncBaseTests):
                                     expression="(&(objectClass=organizationalUnit)(!(isDeleted=*)))",
                                     controls=[control3])
 
-        self.assertTrue(res[0].get("parentGUID") != None)
-        self.assertTrue(res[0].get("name") != None)
+        self.assertTrue(res[0].get("parentGUID") is not None)
+        self.assertTrue(res[0].get("name") is not None)
         delete_force(self.ldb_admin, ouname)
 
     def test_dirsync_linkedattributes(self):
@@ -463,8 +464,8 @@ class SimpleDirsyncTests(DirsyncBaseTests):
         # Let's search for members
         self.ldb_simple = self.get_ldb_connection(self.simple_user, self.user_pass)
         res = self.ldb_simple.search(self.base_dn,
-                                    expression="(name=Administrators)",
-                                    controls=["dirsync:1:1:1"])
+                                     expression="(name=Administrators)",
+                                     controls=["dirsync:1:1:1"])
 
         self.assertTrue(len(res[0].get("member")) > 0)
         size = len(res[0].get("member"))
@@ -475,11 +476,11 @@ class SimpleDirsyncTests(DirsyncBaseTests):
         ctl[3] = "10000"
         control1 = str(":".join(ctl))
         self.ldb_admin.add_remove_group_members("Administrators", [self.simple_user],
-                       add_members_operation=True)
+                                                add_members_operation=True)
 
         res = self.ldb_simple.search(self.base_dn,
-                                    expression="(name=Administrators)",
-                                    controls=[control1])
+                                     expression="(name=Administrators)",
+                                     controls=[control1])
 
         self.assertEqual(len(res[0].get("member")), size + 1)
         ctl = str(res.controls[0]).split(":")
@@ -490,24 +491,24 @@ class SimpleDirsyncTests(DirsyncBaseTests):
 
         # remove the user from the group
         self.ldb_admin.add_remove_group_members("Administrators", [self.simple_user],
-                       add_members_operation=False)
+                                                add_members_operation=False)
 
         res = self.ldb_simple.search(self.base_dn,
-                                    expression="(name=Administrators)",
-                                    controls=[control1])
+                                     expression="(name=Administrators)",
+                                     controls=[control1])
 
-        self.assertEqual(len(res[0].get("member")), size )
+        self.assertEqual(len(res[0].get("member")), size)
 
         self.ldb_admin.newgroup("testgroup")
         self.ldb_admin.add_remove_group_members("testgroup", [self.simple_user],
-                       add_members_operation=True)
+                                                add_members_operation=True)
 
         res = self.ldb_admin.search(self.base_dn,
                                     expression="(name=testgroup)",
                                     controls=["dirsync:1:0:1"])
 
         self.assertEqual(len(res[0].get("member")), 1)
-        self.assertTrue(res[0].get("member") != "" )
+        self.assertTrue(res[0].get("member") != "")
 
         ctl = str(res.controls[0]).split(":")
         ctl[1] = "1"
@@ -530,7 +531,7 @@ class SimpleDirsyncTests(DirsyncBaseTests):
         control1 = str(":".join(ctl))
 
         self.ldb_admin.add_remove_group_members("testgroup", [self.simple_user],
-                       add_members_operation=False)
+                                                add_members_operation=False)
 
         res = self.ldb_admin.search(self.base_dn,
                                     expression="(name=testgroup)",
@@ -540,12 +541,10 @@ class SimpleDirsyncTests(DirsyncBaseTests):
         self.ldb_admin.deletegroup("testgroup")
         self.assertEqual(len(res[0].get("member")), 0)
 
-
-
     def test_dirsync_deleted_items(self):
         """Check that dirsync returnd deleted objects too"""
         # Let's create an OU
-        ouname="OU=testou3,%s" % self.base_dn
+        ouname = "OU=testou3,%s" % self.base_dn
         self.ouname = ouname
         self.ldb_admin.create_ou(ouname)
         res = self.ldb_admin.search(self.base_dn,
@@ -554,7 +553,7 @@ class SimpleDirsyncTests(DirsyncBaseTests):
         guid = None
         for e in res:
             if str(e["name"]) == "testou3":
-                guid = str(ndr_unpack(misc.GUID,e.get("objectGUID")[0]))
+                guid = str(ndr_unpack(misc.GUID, e.get("objectGUID")[0]))
 
         ctl = str(res.controls[0]).split(":")
         ctl[1] = "1"
@@ -570,10 +569,10 @@ class SimpleDirsyncTests(DirsyncBaseTests):
                                     expression="(objectClass=organizationalUnit)",
                                     controls=[control1])
         self.assertEqual(len(res), 1)
-        guid2 = str(ndr_unpack(misc.GUID,res[0].get("objectGUID")[0]))
+        guid2 = str(ndr_unpack(misc.GUID, res[0].get("objectGUID")[0]))
         self.assertEqual(guid2, guid)
         self.assertTrue(res[0].get("isDeleted"))
-        self.assertTrue(res[0].get("name") != None)
+        self.assertTrue(res[0].get("name") is not None)
 
     def test_cookie_from_others(self):
         res = self.ldb_admin.search(self.base_dn,
@@ -582,13 +581,38 @@ class SimpleDirsyncTests(DirsyncBaseTests):
         ctl = str(res.controls[0]).split(":")
         cookie = ndr_unpack(drsblobs.ldapControlDirSyncCookie, base64.b64decode(str(ctl[4])))
         cookie.blob.guid1 = misc.GUID("128a99bf-abcd-1234-abcd-1fb625e530db")
-        controls=["dirsync:1:0:0:%s" % base64.b64encode(ndr_pack(cookie)).decode('utf8')]
+        controls = ["dirsync:1:0:0:%s" % base64.b64encode(ndr_pack(cookie)).decode('utf8')]
         res = self.ldb_admin.search(self.base_dn,
                                     expression="(&(objectClass=organizationalUnit)(!(isDeleted=*)))",
                                     controls=controls)
 
 
 class ExtendedDirsyncTests(SimpleDirsyncTests):
+
+    def test_dirsync_linkedattributes_range(self):
+        self.ldb_simple = self.get_ldb_connection(self.simple_user, self.user_pass)
+        res = self.ldb_admin.search(self.base_dn,
+                                    attrs=["member;range=1-1"],
+                                    expression="(name=Administrators)",
+                                    controls=["dirsync:1:0:0"])
+
+        self.assertTrue(len(res) > 0)
+        self.assertTrue(res[0].get("member;range=1-1") is None)
+        self.assertTrue(res[0].get("member") is not None)
+        self.assertTrue(len(res[0].get("member")) > 0)
+
+    def test_dirsync_linkedattributes_range_user(self):
+        self.ldb_simple = self.get_ldb_connection(self.simple_user, self.user_pass)
+        try:
+            res = self.ldb_simple.search(self.base_dn,
+                                         attrs=["member;range=1-1"],
+                                         expression="(name=Administrators)",
+                                        controls=["dirsync:1:0:0"])
+        except LdbError as e:
+            (num, _) = e.args
+            self.assertEquals(num, ldb.ERR_INSUFFICIENT_ACCESS_RIGHTS)
+        else:
+            self.fail()
 
     def test_dirsync_linkedattributes(self):
         flag_incr_linked = 2147483648
@@ -598,7 +622,7 @@ class ExtendedDirsyncTests(SimpleDirsyncTests):
                                     expression="(name=Administrators)",
                                     controls=["dirsync:1:%d:1" % flag_incr_linked])
 
-        self.assertTrue(res[0].get("member;range=1-1") != None )
+        self.assertTrue(res[0].get("member;range=1-1") is not None)
         self.assertTrue(len(res[0].get("member;range=1-1")) > 0)
         size = len(res[0].get("member;range=1-1"))
 
@@ -608,10 +632,9 @@ class ExtendedDirsyncTests(SimpleDirsyncTests):
         ctl[3] = "10000"
         control1 = str(":".join(ctl))
         self.ldb_admin.add_remove_group_members("Administrators", [self.simple_user],
-                       add_members_operation=True)
+                                                add_members_operation=True)
         self.ldb_admin.add_remove_group_members("Administrators", [self.dirsync_user],
-                       add_members_operation=True)
-
+                                                add_members_operation=True)
 
         res = self.ldb_admin.search(self.base_dn,
                                     expression="(name=Administrators)",
@@ -626,13 +649,13 @@ class ExtendedDirsyncTests(SimpleDirsyncTests):
 
         # remove the user from the group
         self.ldb_admin.add_remove_group_members("Administrators", [self.simple_user],
-                       add_members_operation=False)
+                                                add_members_operation=False)
 
         res = self.ldb_admin.search(self.base_dn,
                                     expression="(name=Administrators)",
                                     controls=[control1])
 
-        self.assertEqual(res[0].get("member;range=1-1"), None )
+        self.assertEqual(res[0].get("member;range=1-1"), None)
         self.assertEqual(len(res[0].get("member;range=0-0")), 1)
 
         ctl = str(res.controls[0]).split(":")
@@ -642,41 +665,72 @@ class ExtendedDirsyncTests(SimpleDirsyncTests):
         control2 = str(":".join(ctl))
 
         self.ldb_admin.add_remove_group_members("Administrators", [self.dirsync_user],
-                       add_members_operation=False)
+                                                add_members_operation=False)
 
         res = self.ldb_admin.search(self.base_dn,
                                     expression="(name=Administrators)",
                                     controls=[control2])
 
-        self.assertEqual(res[0].get("member;range=1-1"), None )
+        self.assertEqual(res[0].get("member;range=1-1"), None)
         self.assertEqual(len(res[0].get("member;range=0-0")), 1)
 
         res = self.ldb_admin.search(self.base_dn,
                                     expression="(name=Administrators)",
                                     controls=[control1])
 
-        self.assertEqual(res[0].get("member;range=1-1"), None )
+        self.assertEqual(res[0].get("member;range=1-1"), None)
         self.assertEqual(len(res[0].get("member;range=0-0")), 2)
+
+    def test_dirsync_extended_dn(self):
+        """Check that dirsync works together with the extended_dn control"""
+        # Let's search for members
+        self.ldb_simple = self.get_ldb_connection(self.simple_user, self.user_pass)
+        res = self.ldb_simple.search(self.base_dn,
+                                     expression="(name=Administrators)",
+                                     controls=["dirsync:1:1:1"])
+
+        self.assertTrue(len(res[0].get("member")) > 0)
+        size = len(res[0].get("member"))
+
+        resEX1 = self.ldb_simple.search(self.base_dn,
+                                        expression="(name=Administrators)",
+                                        controls=["dirsync:1:1:1","extended_dn:1:1"])
+        self.assertTrue(len(resEX1[0].get("member")) > 0)
+        sizeEX1 = len(resEX1[0].get("member"))
+        self.assertEqual(sizeEX1, size)
+        self.assertIn(res[0]["member"][0], resEX1[0]["member"][0])
+        self.assertIn(b"<GUID=", resEX1[0]["member"][0])
+        self.assertIn(b">;<SID=S-1-5-21-", resEX1[0]["member"][0])
+
+        resEX0 = self.ldb_simple.search(self.base_dn,
+                                        expression="(name=Administrators)",
+                                        controls=["dirsync:1:1:1","extended_dn:1:0"])
+        self.assertTrue(len(resEX0[0].get("member")) > 0)
+        sizeEX0 = len(resEX0[0].get("member"))
+        self.assertEqual(sizeEX0, size)
+        self.assertIn(res[0]["member"][0], resEX0[0]["member"][0])
+        self.assertIn(b"<GUID=", resEX0[0]["member"][0])
+        self.assertIn(b">;<SID=010500000000000515", resEX0[0]["member"][0])
 
     def test_dirsync_deleted_items(self):
         """Check that dirsync returnd deleted objects too"""
         # Let's create an OU
         self.ldb_simple = self.get_ldb_connection(self.simple_user, self.user_pass)
-        ouname="OU=testou3,%s" % self.base_dn
+        ouname = "OU=testou3,%s" % self.base_dn
         self.ouname = ouname
         self.ldb_admin.create_ou(ouname)
 
         # Specify LDAP_DIRSYNC_OBJECT_SECURITY
         res = self.ldb_simple.search(self.base_dn,
-                                    expression="(&(objectClass=organizationalUnit)(!(isDeleted=*)))",
-                                    controls=["dirsync:1:1:1"])
+                                     expression="(&(objectClass=organizationalUnit)(!(isDeleted=*)))",
+                                     controls=["dirsync:1:1:1"])
 
         guid = None
         for e in res:
             if str(e["name"]) == "testou3":
-                guid = str(ndr_unpack(misc.GUID,e.get("objectGUID")[0]))
+                guid = str(ndr_unpack(misc.GUID, e.get("objectGUID")[0]))
 
-        self.assertTrue(guid != None)
+        self.assertTrue(guid is not None)
         ctl = str(res.controls[0]).split(":")
         ctl[1] = "1"
         ctl[2] = "1"
@@ -689,10 +743,10 @@ class ExtendedDirsyncTests(SimpleDirsyncTests):
         delete_force(self.ldb_admin, ouname)
 
         res = self.ldb_simple.search(self.base_dn,
-                                    expression="(objectClass=organizationalUnit)",
-                                    controls=[control1])
+                                     expression="(objectClass=organizationalUnit)",
+                                     controls=[control1])
         self.assertEqual(len(res), 1)
-        guid2 = str(ndr_unpack(misc.GUID,res[0].get("objectGUID")[0]))
+        guid2 = str(ndr_unpack(misc.GUID, res[0].get("objectGUID")[0]))
         self.assertEqual(guid2, guid)
         self.assertEqual(str(res[0].dn), "")
 

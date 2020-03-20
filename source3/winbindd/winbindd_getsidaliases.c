@@ -49,7 +49,10 @@ struct tevent_req *winbindd_getsidaliases_send(TALLOC_CTX *mem_ctx,
 	/* Ensure null termination */
 	request->data.sid[sizeof(request->data.sid)-1]='\0';
 
-	DEBUG(3, ("getsidaliases %s\n", request->data.sid));
+	DBG_NOTICE("[%s (%u)] getsidaliases %s\n",
+		   cli->client_name,
+		   (unsigned int)cli->pid,
+		   request->data.sid);
 
 	if (!string_to_sid(&state->sid, request->data.sid)) {
 		DEBUG(1, ("Could not get convert sid %s from string\n",
@@ -87,9 +90,8 @@ struct tevent_req *winbindd_getsidaliases_send(TALLOC_CTX *mem_ctx,
 	if (DEBUGLEVEL >= 10) {
 		size_t i;
 		for (i=0; i<num_sids; i++) {
-			fstring sidstr;
-			sid_to_fstring(sidstr, &sids[i]);
-			DEBUGADD(10, ("%s\n", sidstr));
+			struct dom_sid_buf sidstr;
+			DBG_DEBUG("%s\n", dom_sid_str_buf(&sids[i], &sidstr));
 		}
 	}
 
@@ -137,11 +139,11 @@ NTSTATUS winbindd_getsidaliases_recv(struct tevent_req *req,
 	}
 	for (i=0; i<state->num_aliases; i++) {
 		struct dom_sid sid;
-		fstring tmp;
+		struct dom_sid_buf tmp;
 		sid_compose(&sid, &state->sid, state->aliases[i]);
 
 		sidlist = talloc_asprintf_append_buffer(
-			sidlist, "%s\n", sid_to_fstring(tmp, &sid));
+			sidlist, "%s\n", dom_sid_str_buf(&sid, &tmp));
 		if (sidlist == NULL) {
 			return NT_STATUS_NO_MEMORY;
 		}

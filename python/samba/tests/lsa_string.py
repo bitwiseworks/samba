@@ -24,20 +24,12 @@ Tests for the C helper functions in source4/librpc/ndr/py_lsa.c
 for samba.dcerpc.lsa.String
 """
 
+
 class LsaStringTests(TestCase):
 
     def test_default_constructor(self):
         s = lsa.String()
         self.assertEqual(None, s.string)
-        self.assertEqual(0, s.size)
-        self.assertEqual(0, s.length)
-
-    def test_string_constructor(self):
-        CONTENT = "The content string"
-        s = lsa.String(CONTENT)
-        self.assertEqual(CONTENT, s.string)
-
-        # These should be zero, are set by ndr_pack and ndr_unpack
         self.assertEqual(0, s.size)
         self.assertEqual(0, s.length)
 
@@ -74,6 +66,3 @@ class LsaStringTests(TestCase):
         # and one with contents
         self.assertEqual("Hello world",
                          str(lsa.String("Hello world")))
-
-
-

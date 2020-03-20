@@ -171,32 +171,6 @@ bool trim_char(char *s,char cfront,char cback)
 }
 
 /**
- Like strncpy but always null terminates. Make sure there is room!
- The variable n should always be one less than the available size.
-**/
-char *StrnCpy(char *dest,const char *src,size_t n)
-{
-	char *d = dest;
-
-	if (!dest) {
-		smb_panic("ERROR: NULL dest in StrnCpy");
-	}
-
-	if (!src) {
-		*dest = 0;
-		return(dest);
-	}
-
-	while (n-- && (*d = *src)) {
-		d++;
-		src++;
-	}
-
-	*d = 0;
-	return(dest);
-}
-
-/**
  Check if a string is part of a list.
 **/
 
@@ -596,80 +570,6 @@ int fstr_sprintf(fstring s, const char *fmt, ...)
 	return ret;
 }
 
-/**
- List of Strings manipulation functions
-**/
-
-#define S_LIST_ABS 16 /* List Allocation Block Size */
-
-/******************************************************************************
- substitute a specific pattern in a string list
- *****************************************************************************/
-
-bool str_list_substitute(char **list, const char *pattern, const char *insert)
-{
-	TALLOC_CTX *ctx = list;
-	char *p, *s, *t;
-	ssize_t ls, lp, li, ld, i, d;
-
-	if (!list)
-		return false;
-	if (!pattern)
-		return false;
-	if (!insert)
-		return false;
-
-	lp = (ssize_t)strlen(pattern);
-	li = (ssize_t)strlen(insert);
-	ld = li -lp;
-
-	while (*list) {
-		s = *list;
-		ls = (ssize_t)strlen(s);
-
-		while ((p = strstr_m(s, pattern))) {
-			t = *list;
-			d = p -t;
-			if (ld) {
-				t = talloc_array(ctx, char, ls +ld +1);
-				if (!t) {
-					DEBUG(0,("str_list_substitute: "
-						"Unable to allocate memory"));
-					return false;
-				}
-				memcpy(t, *list, d);
-				memcpy(t +d +li, p +lp, ls -d -lp +1);
-				TALLOC_FREE(*list);
-				*list = t;
-				ls += ld;
-				s = t +d +li;
-			}
-
-			for (i = 0; i < li; i++) {
-				switch (insert[i]) {
-					case '`':
-					case '"':
-					case '\'':
-					case ';':
-					case '$':
-					case '%':
-					case '\r':
-					case '\n':
-						t[d +i] = '_';
-						break;
-					default:
-						t[d +i] = insert[i];
-				}
-			}
-		}
-
-		list++;
-	}
-
-	return true;
-}
-
-
 #define IPSTR_LIST_SEP	","
 #define IPSTR_LIST_CHAR	','
 
@@ -876,19 +776,20 @@ uint64_t STR_TO_SMB_BIG_UINT(const char *nptr, const char **entptr)
 uint64_t conv_str_size(const char * str)
 {
         uint64_t lval;
-	char * end;
+        char *end;
+	int error = 0;
 
         if (str == NULL || *str == '\0') {
                 return 0;
         }
 
-	lval = strtoull(str, &end, 10 /* base */);
+	lval = smb_strtoull(str, &end, 10, &error, SMB_STR_STANDARD);
 
-        if (end == NULL || end == str) {
+        if (error != 0) {
                 return 0;
         }
 
-        if (*end == '\0') {
+	if (*end == '\0') {
 		return lval;
 	}
 

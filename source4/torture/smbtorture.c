@@ -34,7 +34,7 @@
 #include "param/param.h"
 #include "lib/util/samba_modules.h"
 
-#if HAVE_READLINE_HISTORY_H
+#ifdef HAVE_READLINE_HISTORY_H
 #include <readline/history.h>
 #endif
 
@@ -528,8 +528,6 @@ int main(int argc, const char *argv[])
 		lpcfg_set_cmdline(cmdline_lp_ctx, "torture:w2k12", "true");
 	} else if (strcmp(target, "win7") == 0) {
 		lpcfg_set_cmdline(cmdline_lp_ctx, "torture:win7", "true");
-		lpcfg_set_cmdline(cmdline_lp_ctx, "torture:cn_max_buffer_size",
-		    "0x00010000");
 		lpcfg_set_cmdline(cmdline_lp_ctx, "torture:resume_key_support", "false");
 		lpcfg_set_cmdline(cmdline_lp_ctx, "torture:rewind_support", "false");
 
@@ -589,6 +587,7 @@ int main(int argc, const char *argv[])
 
 	if (list_testsuites) {
 		print_testsuite_list();
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		popt_free_cmdline_credentials();
 		return 0;
@@ -612,6 +611,7 @@ int main(int argc, const char *argv[])
 				print_test_list(torture_root, NULL, argv_new[i]);
 			}
 		}
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		popt_free_cmdline_credentials();
 		return 0;
@@ -640,6 +640,7 @@ int main(int argc, const char *argv[])
 	if (basedir != NULL) {
 		if (basedir[0] != '/') {
 			fprintf(stderr, "Please specify an absolute path to --basedir\n");
+			poptFreeContext(pc);
 			talloc_free(mem_ctx);
 			return 1;
 		}
@@ -648,6 +649,7 @@ int main(int argc, const char *argv[])
 		char *pwd = talloc_size(torture, PATH_MAX);
 		if (!getcwd(pwd, PATH_MAX)) {
 			fprintf(stderr, "Unable to determine current working directory\n");
+			poptFreeContext(pc);
 			talloc_free(mem_ctx);
 			return 1;
 		}
@@ -655,12 +657,14 @@ int main(int argc, const char *argv[])
 	}
 	if (!outputdir) {
 		fprintf(stderr, "Could not allocate per-run output dir\n");
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		return 1;
 	}
 	torture->outputdir = mkdtemp(outputdir);
 	if (!torture->outputdir) {
 		perror("Failed to make temp output dir");
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		return 1;
 	}
@@ -702,10 +706,12 @@ int main(int argc, const char *argv[])
 	torture_deltree_outputdir(torture);
 
 	if (torture->results->returncode && correct) {
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		popt_free_cmdline_credentials();
 		return(0);
 	} else {
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		return(1);
 	}

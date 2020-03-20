@@ -13,12 +13,12 @@ bld.SAMBA_SUBSYSTEM('MSRPC_PARSE',
 
 bld.SAMBA_SUBSYSTEM('NTLM_CHECK',
                     source='ntlm_check.c',
-                    deps = 'talloc'
+                    deps = 'talloc LIBCLI_AUTH'
                     )
 
 bld.SAMBA_SUBSYSTEM('LIBCLI_AUTH',
 	source='credentials.c session.c smbencrypt.c smbdes.c',
-	public_deps='MSRPC_PARSE',
+	public_deps='MSRPC_PARSE gnutls GNUTLS_HELPERS',
 	public_headers='credentials.h:domain_credentials.h'
 	)
 
@@ -52,5 +52,32 @@ bld.SAMBA_BINARY(
              cmocka
              talloc
         ''',
-        install=False
+        for_selftest=True
     )
+
+bld.SAMBA_BINARY('test_rc4_passwd_buffer',
+                 source='tests/test_rc4_passwd_buffer.c',
+                 deps='''
+                      INIT_SAMR
+                      LIBCLI_AUTH
+                      cmocka
+                      ''',
+                 for_selftest=True)
+
+bld.SAMBA_BINARY('test_schannel',
+                 source='tests/test_schannel.c',
+                 deps='''
+                      gensec
+                      cmocka
+                      ''',
+                 for_selftest=True)
+
+bld.SAMBA_BINARY('test_gnutls',
+                 source='tests/test_gnutls.c',
+                 deps='''
+                      gnutls
+                      LIBCLI_AUTH
+                      cmocka
+                      samba-util
+                      ''',
+                 for_selftest=True)

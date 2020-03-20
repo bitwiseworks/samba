@@ -21,6 +21,7 @@
 #include <Python.h>
 #include "python/py3compat.h"
 #include "includes.h"
+#include "python/modules.h"
 #include "libcli/util/pyerrors.h"
 #include "lib/registry/registry.h"
 #include <pytalloc.h>
@@ -120,7 +121,7 @@ static PyObject *py_mount_hive(PyObject *self, PyObject *args)
 		int i;
 		elements = talloc_array(NULL, const char *, PyList_Size(py_elements));
 		for (i = 0; i < PyList_Size(py_elements); i++)
-			elements[i] = PyStr_AsString(PyList_GetItem(py_elements, i));
+			elements[i] = PyUnicode_AsUTF8(PyList_GetItem(py_elements, i));
 	}
 
 	SMB_ASSERT(ctx != NULL);
@@ -178,7 +179,8 @@ static PyObject *py_hive_key_del(PyObject *self, PyObject *args)
 	Py_RETURN_NONE; 
 }
 
-static PyObject *py_hive_key_flush(PyObject *self)
+static PyObject *py_hive_key_flush(PyObject *self,
+		PyObject *Py_UNUSED(ignored))
 {
 	WERROR result;
 	struct hive_key *key = PyHiveKey_AsHiveKey(self);
@@ -214,7 +216,7 @@ static PyObject *py_hive_key_set_value(PyObject *self, PyObject *args)
 	WERROR result;
 	struct hive_key *key = PyHiveKey_AsHiveKey(self);
 
-	if (!PyArg_ParseTuple(args, "siz#", &name, &type, &value.data, &value_length)) {
+	if (!PyArg_ParseTuple(args, "sIz#", &name, &type, &value.data, &value_length)) {
 		return NULL;
 	}
 	value.length = value_length;
@@ -415,7 +417,7 @@ static PyObject *py_str_regtype(PyObject *self, PyObject *args)
 	if (!PyArg_ParseTuple(args, "i", &regtype))
 		return NULL;
 	
-	return PyStr_FromString(str_regtype(regtype));
+	return PyUnicode_FromString(str_regtype(regtype));
 }
 
 static PyObject *py_get_predef_name(PyObject *self, PyObject *args)
@@ -429,13 +431,16 @@ static PyObject *py_get_predef_name(PyObject *self, PyObject *args)
 	str = reg_get_predef_name(hkey);
 	if (str == NULL)
 		Py_RETURN_NONE;
-	return PyStr_FromString(str);
+	return PyUnicode_FromString(str);
 }
 
 static PyMethodDef py_registry_methods[] = {
-	{ "open_samba", (PyCFunction)py_open_samba, METH_VARARGS|METH_KEYWORDS, "open_samba() -> reg" },
-	{ "open_ldb", (PyCFunction)py_open_ldb_file, METH_VARARGS|METH_KEYWORDS, "open_ldb(location, session_info=None, credentials=None, loadparm_context=None) -> key" },
-	{ "open_hive", (PyCFunction)py_open_hive, METH_VARARGS|METH_KEYWORDS, "open_hive(location, session_info=None, credentials=None, loadparm_context=None) -> key" },
+	{ "open_samba", PY_DISCARD_FUNC_SIG(PyCFunction, py_open_samba),
+		METH_VARARGS|METH_KEYWORDS, "open_samba() -> reg" },
+	{ "open_ldb", PY_DISCARD_FUNC_SIG(PyCFunction, py_open_ldb_file),
+		METH_VARARGS|METH_KEYWORDS, "open_ldb(location, session_info=None, credentials=None, loadparm_context=None) -> key" },
+	{ "open_hive", PY_DISCARD_FUNC_SIG(PyCFunction, py_open_hive),
+		METH_VARARGS|METH_KEYWORDS, "open_hive(location, session_info=None, credentials=None, loadparm_context=None) -> key" },
 	{ "str_regtype", py_str_regtype, METH_VARARGS, "str_regtype(int) -> str" },
 	{ "get_predef_name", py_get_predef_name, METH_VARARGS, "get_predef_name(hkey) -> str" },
 	{ NULL }

@@ -33,7 +33,7 @@
 /* change this when we change something in our schema code that
  * requires a re-index of the database
  */
-#define SAMDB_INDEXING_VERSION "2"
+#define SAMDB_INDEXING_VERSION "3"
 
 /*
   override the name to attribute handler function
@@ -73,11 +73,46 @@ int dsdb_schema_set_indices_and_attributes(struct ldb_context *ldb,
 	struct loadparm_context *lp_ctx =
 		talloc_get_type(ldb_get_opaque(ldb, "loadparm"),
 				struct loadparm_context);
+	bool guid_indexing = true;
+	bool declare_ordered_integer_in_attributes = true;
+	uint32_t pack_format_override;
+	if (lp_ctx != NULL) {
+		/*
+		 * GUID indexing is wanted by Samba by default.  This allows
+		 * an override in a specific case for downgrades.
+		 */
+		guid_indexing = lpcfg_parm_bool(lp_ctx,
+						NULL,
+						"dsdb",
+						"guid index",
+						true);
+		/*
+		 * If the pack format has been overridden to a previous
+		 * version, then act like ORDERED_INTEGER doesn't exist,
+		 * because it's a new type and we don't want to deal with
+		 * possible issues with databases containing version 1 pack
+		 * format and ordered types.
+		 *
+		 * This approach means that the @ATTRIBUTES will be
+		 * incorrect for integers.  Many other @ATTRIBUTES
+		 * values are gross simplifications, but the presence
+		 * of the ORDERED_INTEGER keyword prevents the old
+		 * Samba from starting and then forcing a reindex.
+		 *
+		 * It is too difficult to override the actual index
+		 * formatter, but this doesn't matter in practice.
+		 */
+		pack_format_override =
+			(intptr_t)ldb_get_opaque(ldb, "pack_format_override");
+		if (pack_format_override == LDB_PACKING_FORMAT ||
+		    pack_format_override == LDB_PACKING_FORMAT_NODN) {
+			declare_ordered_integer_in_attributes = false;
+		}
+	}
 	/* setup our own attribute name to schema handler */
 	ldb_schema_attribute_set_override_handler(ldb, dsdb_attribute_handler_override, schema);
 	ldb_schema_set_override_indexlist(ldb, true);
-	if (lp_ctx == NULL ||
-	    lpcfg_parm_bool(lp_ctx, NULL, "dsdb", "guid index", true)) {
+	if (guid_indexing) {
 		ldb_schema_set_override_GUID_index(ldb, "objectGUID", "GUID");
 	}
 
@@ -116,8 +151,7 @@ int dsdb_schema_set_indices_and_attributes(struct ldb_context *ldb,
 		goto op_error;
 	}
 
-	if (lp_ctx == NULL ||
-	    lpcfg_parm_bool(lp_ctx, NULL, "dsdb", "guid index", true)) {
+	if (guid_indexing) {
 		ret = ldb_msg_add_string(msg_idx, "@IDXGUID", "objectGUID");
 		if (ret != LDB_SUCCESS) {
 			goto op_error;
@@ -148,21 +182,66 @@ int dsdb_schema_set_indices_and_attributes(struct ldb_context *ldb,
 
 		/*
 		 * Write out a rough approximation of the schema
-		 * as an @ATTRIBUTES value, for bootstrapping
+		 * as an @ATTRIBUTES value, for bootstrapping.
+		 * Only write ORDERED_INTEGER if we're using GUID indexes,
 		 */
 		if (strcmp(syntax, LDB_SYNTAX_INTEGER) == 0) {
 			ret = ldb_msg_add_string(msg, attr->lDAPDisplayName, "INTEGER");
+		} else if (strcmp(syntax, LDB_SYNTAX_ORDERED_INTEGER) == 0) {
+			if (declare_ordered_integer_in_attributes &&
+			    guid_indexing) {
+				/*
+				 * The normal production case
+				 */
+				ret = ldb_msg_add_string(msg,
+							 attr->lDAPDisplayName,
+							 "ORDERED_INTEGER");
+			} else {
+				/*
+				 * For this mode, we are going back to
+				 * before GUID indexing so we write it out
+				 * as INTEGER
+				 *
+				 * Down in LDB, the special handler
+				 * (index_format_fn) that made
+				 * ORDERED_INTEGER and INTEGER
+				 * different has been disabled.
+				 */
+				ret = ldb_msg_add_string(msg,
+							 attr->lDAPDisplayName,
+							 "INTEGER");
+			}
 		} else if (strcmp(syntax, LDB_SYNTAX_DIRECTORY_STRING) == 0) {
-			ret = ldb_msg_add_string(msg, attr->lDAPDisplayName, "CASE_INSENSITIVE");
+			ret = ldb_msg_add_string(msg, attr->lDAPDisplayName,
+						 "CASE_INSENSITIVE");
 		}
 		if (ret != LDB_SUCCESS) {
 			break;
 		}
 
 		if (attr->searchFlags & SEARCH_FLAG_ATTINDEX) {
-			ret = ldb_msg_add_string(msg_idx, "@IDXATTR", attr->lDAPDisplayName);
-			if (ret != LDB_SUCCESS) {
-				break;
+			/*
+			 * When preparing to downgrade Samba, we need to write
+			 * out an LDB without the new key word ORDERED_INTEGER.
+			 */
+			if (strcmp(syntax, LDB_SYNTAX_ORDERED_INTEGER) == 0
+			    && !declare_ordered_integer_in_attributes) {
+				/*
+				 * Ugly, but do nothing, the best
+				 * thing is to omit the reference
+				 * entirely, the next transaction will
+				 * spot this and rewrite everything.
+				 *
+				 * This way nothing will look at the
+				 * index for this attribute until
+				 * Samba starts and this is all
+				 * rewritten.
+				 */
+			} else {
+				ret = ldb_msg_add_string(msg_idx, "@IDXATTR", attr->lDAPDisplayName);
+				if (ret != LDB_SUCCESS) {
+					break;
+				}
 			}
 		}
 	}
@@ -192,7 +271,6 @@ int dsdb_schema_set_indices_and_attributes(struct ldb_context *ldb,
 		}
 		ret = ldb_add(ldb, msg);
 	} else {
-		ret = LDB_SUCCESS;
 		/* Annoyingly added to our search results */
 		ldb_msg_remove_attr(res->msgs[0], "distinguishedName");
 
@@ -245,7 +323,6 @@ int dsdb_schema_set_indices_and_attributes(struct ldb_context *ldb,
 		}
 		ret = ldb_add(ldb, msg_idx);
 	} else {
-		ret = LDB_SUCCESS;
 		/* Annoyingly added to our search results */
 		ldb_msg_remove_attr(res_idx->msgs[0], "distinguishedName");
 
@@ -618,6 +695,7 @@ int dsdb_reference_schema(struct ldb_context *ldb, struct dsdb_schema *schema,
 			  enum schema_set_enum write_indices_and_attributes)
 {
 	int ret;
+	void *ptr;
 	struct dsdb_schema *old_schema;
 	old_schema = ldb_get_opaque(ldb, "dsdb_schema");
 	ret = ldb_set_opaque(ldb, "dsdb_schema", schema);
@@ -629,8 +707,13 @@ int dsdb_reference_schema(struct ldb_context *ldb, struct dsdb_schema *schema,
 	 * none, NULL is harmless here */
 	talloc_unlink(ldb, old_schema);
 
-	if (talloc_reference(ldb, schema) == NULL) {
-		return ldb_oom(ldb);
+	/* Reference schema on ldb if it wasn't done already */
+	ret = talloc_is_parent(ldb, schema);
+	if (ret == 0) {
+		ptr = talloc_reference(ldb, schema);
+		if (ptr == NULL) {
+			return ldb_oom(ldb);
+		}
 	}
 
 	/* Make this ldb use local schema preferably */
@@ -664,6 +747,7 @@ int dsdb_set_global_schema(struct ldb_context *ldb)
 {
 	int ret;
 	void *use_global_schema = (void *)1;
+	void *ptr;
 	struct dsdb_schema *old_schema = ldb_get_opaque(ldb, "dsdb_schema");
 
 	ret = ldb_set_opaque(ldb, "dsdb_use_global_schema", use_global_schema);
@@ -689,9 +773,15 @@ int dsdb_set_global_schema(struct ldb_context *ldb)
 	/* Don't write indices and attributes, it's expensive */
 	ret = dsdb_schema_set_indices_and_attributes(ldb, global_schema, SCHEMA_MEMORY_ONLY);
 	if (ret == LDB_SUCCESS) {
-		/* Keep a reference to this schema, just in case the original copy is replaced */
-		if (talloc_reference(ldb, global_schema) == NULL) {
-			return ldb_oom(ldb);
+		/* If ldb doesn't have a reference to the schema, make one,
+		 * just in case the original copy is replaced */
+		ret = talloc_is_parent(ldb, global_schema);
+		if (ret == 0) {
+			ptr = talloc_reference(ldb, global_schema);
+			if (ptr == NULL) {
+				return ldb_oom(ldb);
+			}
+			ret = ldb_set_opaque(ldb, "dsdb_schema", global_schema);
 		}
 	}
 
@@ -717,6 +807,7 @@ struct dsdb_schema *dsdb_get_schema(struct ldb_context *ldb, TALLOC_CTX *referen
 	dsdb_schema_refresh_fn refresh_fn;
 	struct ldb_module *loaded_from_module;
 	bool use_global_schema;
+	int ret;
 	TALLOC_CTX *tmp_ctx = talloc_new(reference_ctx);
 	if (tmp_ctx == NULL) {
 		return NULL;
@@ -741,7 +832,7 @@ struct dsdb_schema *dsdb_get_schema(struct ldb_context *ldb, TALLOC_CTX *referen
 	}
 
 	if (refresh_fn) {
-		/* We need to guard against recurisve calls here */
+		/* We need to guard against recursive calls here */
 		if (ldb_set_opaque(ldb, "dsdb_schema_refresh_fn", NULL) != LDB_SUCCESS) {
 			ldb_debug_set(ldb, LDB_DEBUG_FATAL,
 				      "dsdb_get_schema: clearing dsdb_schema_refresh_fn failed");
@@ -766,7 +857,11 @@ struct dsdb_schema *dsdb_get_schema(struct ldb_context *ldb, TALLOC_CTX *referen
 
 	/* This removes the extra reference above */
 	talloc_free(tmp_ctx);
-	if (!reference_ctx) {
+
+	/* If ref ctx exists and doesn't already reference schema, then add
+	 * a reference.  Otherwise, just return schema.*/
+	ret = talloc_is_parent(reference_ctx, schema_out);
+	if ((ret == 1) || (!reference_ctx)) {
 		return schema_out;
 	} else {
 		return talloc_reference(reference_ctx, schema_out);
@@ -809,6 +904,7 @@ int dsdb_schema_fill_extended_dn(struct ldb_context *ldb, struct dsdb_schema *sc
 		const struct ldb_val *rdn;
 		struct ldb_val guid;
 		NTSTATUS status;
+		int ret;
 		struct ldb_dn *dn = ldb_dn_new(NULL, ldb, cur->defaultObjectCategory);
 
 		if (!dn) {
@@ -830,7 +926,12 @@ int dsdb_schema_fill_extended_dn(struct ldb_context *ldb, struct dsdb_schema *sc
 			talloc_free(dn);
 			return ldb_operr(ldb);
 		}
-		ldb_dn_set_extended_component(dn, "GUID", &guid);
+		ret = ldb_dn_set_extended_component(dn, "GUID", &guid);
+		if (ret != LDB_SUCCESS) {
+			ret = ldb_error(ldb, ret, "Could not set GUID");
+			talloc_free(dn);
+			return ret;
+		}
 
 		cur->defaultObjectCategory = ldb_dn_get_extended_linearized(cur, dn, 1);
 		talloc_free(dn);

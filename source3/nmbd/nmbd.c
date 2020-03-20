@@ -27,6 +27,7 @@
 #include "messages.h"
 #include "../lib/util/pidfile.h"
 #include "util_cluster.h"
+#include "lib/gencache.h"
 
 int ClientNMB       = -1;
 int ClientDGRAM     = -1;
@@ -46,7 +47,7 @@ time_t StartupTime = 0;
 
 struct tevent_context *nmbd_event_context(void)
 {
-	return server_event_context();
+	return global_event_context();
 }
 
 /**************************************************************************** **
@@ -68,8 +69,6 @@ static void terminate(struct messaging_context *msg)
 
 	/* If there was an async dns child - kill it. */
 	kill_async_dns_child();
-
-	gencache_stabilize();
 
 	pidfile_unlink(lp_pid_directory(), "nmbd");
 
@@ -390,12 +389,14 @@ static void reload_interfaces(time_t t)
 
 static bool reload_nmbd_services(bool test)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	bool ret;
 
 	set_remote_machine_name("nmbd", False);
 
 	if ( lp_loaded() ) {
-		char *fname = lp_next_configfile(talloc_tos());
+		char *fname = lp_next_configfile(talloc_tos(), lp_sub);
 		if (file_exist(fname) && !strcsequal(fname,get_dyn_CONFIGFILE())) {
 			set_dyn_CONFIGFILE(fname);
 			test = False;
@@ -789,17 +790,69 @@ static bool open_sockets(bool isdaemon, int port)
 		OPT_LOG_STDOUT
 	};
 	struct poptOption long_options[] = {
-	POPT_AUTOHELP
-	{"daemon", 'D', POPT_ARG_NONE, NULL, OPT_DAEMON, "Become a daemon(default)" },
-	{"interactive", 'i', POPT_ARG_NONE, NULL, OPT_INTERACTIVE, "Run interactive (not a daemon)" },
-	{"foreground", 'F', POPT_ARG_NONE, NULL, OPT_FORK, "Run daemon in foreground (for daemontools & etc)" },
-	{"no-process-group", 0, POPT_ARG_NONE, NULL, OPT_NO_PROCESS_GROUP, "Don't create a new process group" },
-	{"log-stdout", 'S', POPT_ARG_NONE, NULL, OPT_LOG_STDOUT, "Log to stdout" },
-	{"hosts", 'H', POPT_ARG_STRING, &p_lmhosts, 0, "Load a netbios hosts file"},
-	{"port", 'p', POPT_ARG_INT, &global_nmb_port, 0, "Listen on the specified port" },
-	POPT_COMMON_SAMBA
-	{ NULL }
+		POPT_AUTOHELP
+		{
+			.longName   = "daemon",
+			.shortName  = 'D',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = OPT_DAEMON,
+			.descrip    = "Become a daemon (default)",
+		},
+		{
+			.longName   = "interactive",
+			.shortName  = 'i',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = OPT_INTERACTIVE,
+			.descrip    = "Run interactive (not a daemon)",
+		},
+		{
+			.longName   = "foreground",
+			.shortName  = 'F',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = OPT_FORK,
+			.descrip    = "Run daemon in foreground "
+				      "(for daemontools, etc.)",
+		},
+		{
+			.longName   = "no-process-group",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = OPT_NO_PROCESS_GROUP,
+			.descrip    = "Don't create a new process group",
+		},
+		{
+			.longName   = "log-stdout",
+			.shortName  = 'S',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = OPT_LOG_STDOUT,
+			.descrip    = "Log to stdout",
+		},
+		{
+			.longName   = "hosts",
+			.shortName  = 'H',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &p_lmhosts,
+			.val        = 0,
+			.descrip    = "Load a netbios hosts file",
+		},
+		{
+			.longName   = "port",
+			.shortName  = 'p',
+			.argInfo    = POPT_ARG_INT,
+			.arg        = &global_nmb_port,
+			.val        = 0,
+			.descrip    = "Listen on the specified port",
+		},
+		POPT_COMMON_SAMBA
+		POPT_TABLEEND
 	};
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	TALLOC_CTX *frame;
 	NTSTATUS status;
 	bool ok;
@@ -865,7 +918,7 @@ static bool open_sockets(bool isdaemon, int port)
 	}
 
 	fault_setup();
-	dump_core_setup("nmbd", lp_logfile(talloc_tos()));
+	dump_core_setup("nmbd", lp_logfile(talloc_tos(), lp_sub));
 
 	/* POSIX demands that signals are inherited. If the invoking process has
 	 * these signals masked, we will have problems, as we won't receive them. */
@@ -931,7 +984,7 @@ static bool open_sockets(bool isdaemon, int port)
 		exit(1);
 	}
 
-	msg = messaging_init(NULL, server_event_context());
+	msg = messaging_init(NULL, global_event_context());
 	if (msg == NULL) {
 		return 1;
 	}
@@ -961,7 +1014,7 @@ static bool open_sockets(bool isdaemon, int port)
 		become_daemon(Fork, no_process_group, log_stdout);
 	}
 
-#if HAVE_SETPGID
+#ifdef HAVE_SETPGID
 	/*
 	 * If we're interactive we want to set our own process group for 
 	 * signal management.

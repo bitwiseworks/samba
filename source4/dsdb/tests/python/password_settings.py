@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Tests for Password Settings Objects.
@@ -26,29 +26,29 @@
 # Usage:
 #  export SERVER_IP=target_dc
 #  export SUBUNITRUN=$samba4srcdir/scripting/bin/subunitrun
-#  PYTHONPATH="$PYTHONPATH:$samba4srcdir/dsdb/tests/python" $SUBUNITRUN password_settings -U"$DOMAIN/$DC_USERNAME"%"$DC_PASSWORD"
+#  PYTHONPATH="$PYTHONPATH:$samba4srcdir/dsdb/tests/python" $SUBUNITRUN \
+#       password_settings -U"$DOMAIN/$DC_USERNAME"%"$DC_PASSWORD"
 #
 
 import samba.tests
 import ldb
-from ldb import SCOPE_BASE, FLAG_MOD_DELETE, FLAG_MOD_ADD, FLAG_MOD_REPLACE
+from ldb import FLAG_MOD_DELETE, FLAG_MOD_ADD, FLAG_MOD_REPLACE
 from samba import dsdb
 import time
 from samba.tests.password_test import PasswordTestCase
 from samba.tests.pso import TestUser
 from samba.tests.pso import PasswordSettings
+from samba.tests import env_get_var_value
 from samba.credentials import Credentials
-from samba.samdb import SamDB
 from samba import gensec
-from samba.dcerpc.samr import DOMAIN_PASSWORD_STORE_CLEARTEXT
-from samba.auth import system_session
 import base64
+
 
 class PasswordSettingsTestCase(PasswordTestCase):
     def setUp(self):
         super(PasswordSettingsTestCase, self).setUp()
 
-        self.host_url = "ldap://%s" % samba.tests.env_get_var_value("SERVER_IP")
+        self.host_url = "ldap://%s" % env_get_var_value("SERVER_IP")
         self.ldb = samba.tests.connect_samdb(self.host_url)
 
         # create a temp OU to put this test's users into
@@ -67,7 +67,7 @@ class PasswordSettingsTestCase(PasswordTestCase):
         # remove all objects under the top-level OU
         self.ldb.delete(self.ou, ["tree_delete:1"])
 
-        # PSOs can't reside within an OU so they need to be cleaned up separately
+        # PSOs can't reside within an OU so they get cleaned up separately
         for obj in self.test_objs:
             self.ldb.delete(obj)
 
@@ -77,11 +77,12 @@ class PasswordSettingsTestCase(PasswordTestCase):
 
     def add_group(self, group_name):
         """Creates a new group"""
-        dn = "CN=%s,%s" %(group_name, self.ou)
+        dn = "CN=%s,%s" % (group_name, self.ou)
         self.ldb.add({"dn": dn, "objectclass": "group"})
         return dn
 
-    def set_attribute(self, dn, attr, value, operation=FLAG_MOD_ADD, samdb=None):
+    def set_attribute(self, dn, attr, value, operation=FLAG_MOD_ADD,
+                      samdb=None):
         """Modifies an attribute for an object"""
         if samdb is None:
             samdb = self.ldb
@@ -116,7 +117,8 @@ class PasswordSettingsTestCase(PasswordTestCase):
         except ldb.LdbError as e:
             (num, msg) = e.args
             # fail the test (rather than throw an error)
-            self.fail("Password '%s' unexpectedly rejected: %s" %(password, msg))
+            self.fail("Password '%s' unexpectedly rejected: %s" % (password,
+                                                                   msg))
 
     def assert_PSO_applied(self, user, pso):
         """
@@ -126,8 +128,8 @@ class PasswordSettingsTestCase(PasswordTestCase):
         """
         resultant_pso = user.get_resultant_PSO()
         self.assertTrue(resultant_pso == pso.dn,
-                        "Expected PSO %s, not %s" %(pso.name,
-                                                    str(resultant_pso)))
+                        "Expected PSO %s, not %s" % (pso.name,
+                                                     str(resultant_pso)))
 
         # we're mirroring the pwd_history for the user, so make sure this is
         # up-to-date, before we start making password changes
@@ -193,7 +195,7 @@ class PasswordSettingsTestCase(PasswordTestCase):
                 self.assert_password_valid(user, password)
 
     def test_pso_basics(self):
-        """Simple tests that a PSO takes effect when applied to a group or user"""
+        """Simple tests that a PSO takes effect when applied to a group/user"""
 
         # create some PSOs that vary in priority and basic password-len
         best_pso = PasswordSettings("highest-priority-PSO", self.ldb,
@@ -239,7 +241,8 @@ class PasswordSettingsTestCase(PasswordTestCase):
         self.assert_PSO_applied(user, best_pso)
 
         # delete a group membership and check the PSO changes
-        self.set_attribute(group3, "member", user.dn, operation=FLAG_MOD_DELETE)
+        self.set_attribute(group3, "member", user.dn,
+                           operation=FLAG_MOD_DELETE)
         self.assert_PSO_applied(user, medium_pso)
 
         # apply the low-precedence PSO directly to the user
@@ -313,7 +316,8 @@ class PasswordSettingsTestCase(PasswordTestCase):
         self.assert_PSO_applied(user, group2_pso)
 
     def get_guid(self, dn):
-        res = self.ldb.search(base=dn, attrs=["objectGUID"], scope=ldb.SCOPE_BASE)
+        res = self.ldb.search(base=dn, attrs=["objectGUID"],
+                              scope=ldb.SCOPE_BASE)
         return res[0]['objectGUID'][0]
 
     def guid_string(self, guid):
@@ -335,7 +339,8 @@ class PasswordSettingsTestCase(PasswordTestCase):
         best_guid = guid_list[0]
 
         # sanity-check the mapping between GUID and DN is correct
-        self.assertEqual(self.guid_string(self.get_guid(mapping[best_guid].dn)),
+        best_pso_dn = mapping[best_guid].dn
+        self.assertEqual(self.guid_string(self.get_guid(best_pso_dn)),
                          self.guid_string(best_guid))
 
         # return the PSO that this GUID corresponds to
@@ -459,7 +464,8 @@ class PasswordSettingsTestCase(PasswordTestCase):
         pso.apply_to(user.dn)
         self.assertTrue(user.get_resultant_PSO() == pso.dn)
 
-        # changing the password immediately should fail, even if password is valid
+        # changing the password immediately should fail, even if the password
+        # is valid
         valid_password = "min-age-passwd"
         self.assert_password_invalid(user, valid_password)
         # then trying the same password later should succeed
@@ -483,9 +489,10 @@ class PasswordSettingsTestCase(PasswordTestCase):
 
         user = self.add_user("testuser")
 
-        # we can't wait around long enough for the max-age to expire, so instead
-        # just check the msDS-UserPasswordExpiryTimeComputed for the user
-        attrs=['msDS-UserPasswordExpiryTimeComputed']
+        # we can't wait around long enough for the max-age to expire, so
+        # instead just check the msDS-UserPasswordExpiryTimeComputed for
+        # the user
+        attrs = ['msDS-UserPasswordExpiryTimeComputed']
         res = self.ldb.search(user.dn, attrs=attrs)
         domain_expiry = int(res[0]['msDS-UserPasswordExpiryTimeComputed'][0])
 
@@ -521,9 +528,10 @@ class PasswordSettingsTestCase(PasswordTestCase):
                                      precedence=2, password_len=10)
         self.add_obj_cleanup([default_pso.dn, guest_pso.dn, admin_pso.dn,
                               builtin_pso.dn])
-        domain_users = "CN=Domain Users,CN=Users,%s" % self.ldb.domain_dn()
-        domain_guests = "CN=Domain Guests,CN=Users,%s" % self.ldb.domain_dn()
-        admin_users = "CN=Domain Admins,CN=Users,%s" % self.ldb.domain_dn()
+        base_dn = self.ldb.domain_dn()
+        domain_users = "CN=Domain Users,CN=Users,%s" % base_dn
+        domain_guests = "CN=Domain Guests,CN=Users,%s" % base_dn
+        admin_users = "CN=Domain Admins,CN=Users,%s" % base_dn
 
         # if we apply a PSO to Domain Users (which all users are a member of)
         # then that PSO should take effect on a new user
@@ -534,8 +542,8 @@ class PasswordSettingsTestCase(PasswordTestCase):
         # Apply a PSO to a builtin group. 'Domain Users' should be a member of
         # Builtin/Users, but builtin groups should be excluded from the PSO
         # calculation, so this should have no effect
-        builtin_pso.apply_to("CN=Users,CN=Builtin,%s" % self.ldb.domain_dn())
-        builtin_pso.apply_to("CN=Administrators,CN=Builtin,%s" % self.ldb.domain_dn())
+        builtin_pso.apply_to("CN=Users,CN=Builtin,%s" % base_dn)
+        builtin_pso.apply_to("CN=Administrators,CN=Builtin,%s" % base_dn)
         self.assert_PSO_applied(user, default_pso)
 
         # change the user's primary group to another group (the primaryGroupID
@@ -593,7 +601,7 @@ class PasswordSettingsTestCase(PasswordTestCase):
         self.set_attribute(user.dn, "userAccountControl",
                            str(dsdb.UF_WORKSTATION_TRUST_ACCOUNT),
                            operation=FLAG_MOD_REPLACE)
-        self.assertTrue(user.get_resultant_PSO() == None)
+        self.assertIsNone(user.get_resultant_PSO())
 
         # reset it back to a normal user account
         self.set_attribute(user.dn, "userAccountControl",
@@ -617,8 +625,8 @@ class PasswordSettingsTestCase(PasswordTestCase):
         creds_tmp.set_domain(creds.get_domain())
         creds_tmp.set_realm(creds.get_realm())
         creds_tmp.set_workstation(creds.get_workstation())
-        creds_tmp.set_gensec_features(creds_tmp.get_gensec_features()
-                                      | gensec.FEATURE_SEAL)
+        features = creds_tmp.get_gensec_features() | gensec.FEATURE_SEAL
+        creds_tmp.set_gensec_features(features)
         return samba.tests.connect_samdb(ldaphost, credentials=creds_tmp)
 
     def test_pso_permissions(self):
@@ -686,7 +694,7 @@ class PasswordSettingsTestCase(PasswordTestCase):
             self.assertTrue(attr in res[0])
 
         # check replace/delete operations can't be performed by regular users
-        operations = [ FLAG_MOD_REPLACE, FLAG_MOD_DELETE ]
+        operations = [FLAG_MOD_REPLACE, FLAG_MOD_DELETE]
 
         for oper in operations:
             try:
@@ -701,6 +709,11 @@ class PasswordSettingsTestCase(PasswordTestCase):
             # ...but can be performed by the admin user
             self.set_attribute(priv_pso.dn, "msDS-PSOAppliesTo", user.dn,
                                samdb=self.ldb, operation=oper)
+
+    def format_password_for_ldif(self, password):
+        """Encodes/decodes the password so that it's accepted in an LDIF"""
+        pwd = '"{0}"'.format(password)
+        return base64.b64encode(pwd.encode('utf-16-le')).decode('utf8')
 
     # The 'user add' case is a bit more complicated as you can't really query
     # the msDS-ResultantPSO attribute on a user that doesn't exist yet (it
@@ -727,7 +740,7 @@ class PasswordSettingsTestCase(PasswordTestCase):
         # defaults, to prove that the DC will reject bad passwords during a
         # user add
         userdn = "CN=testuser,%s" % self.ou
-        password = base64.b64encode("\"abcdef\"".encode('utf-16-le'))
+        password = self.format_password_for_ldif('abcdef')
 
         # Note we use an LDIF operation to ensure that the password gets set
         # as part of the 'add' operation (whereas self.add_user() adds the user
@@ -751,7 +764,7 @@ unicodePwd:: %s
         # now use a password that meets the domain defaults, but doesn't meet
         # the PSO requirements. Note that Windows allows this, i.e. it doesn't
         # honour the PSO during the add operation
-        password = base64.b64encode("\"abcde12#\"".encode('utf-16-le'))
+        password = self.format_password_for_ldif('abcde12#')
         ldif = """
 dn: %s
 objectClass: user
@@ -787,7 +800,7 @@ unicodePwd:: %s
                 self.assertTrue('0000052D' in msg, msg)
 
         # check setting a password that meets the PSO settings works
-        password = base64.b64encode("\"abcdefghijkl\"".encode('utf-16-le'))
+        password = self.format_password_for_ldif('abcdefghijkl')
         ldif = """
 dn: %s
 changetype: modify
@@ -800,7 +813,9 @@ unicodePwd:: %s
     def set_domain_pwdHistoryLength(self, value):
         m = ldb.Message()
         m.dn = ldb.Dn(self.ldb, self.ldb.domain_dn())
-        m["pwdHistoryLength"] = ldb.MessageElement(value, ldb.FLAG_MOD_REPLACE, "pwdHistoryLength")
+        m["pwdHistoryLength"] = ldb.MessageElement(value,
+                                                   ldb.FLAG_MOD_REPLACE,
+                                                   "pwdHistoryLength")
         self.ldb.modify(m)
 
     def test_domain_pwd_history(self):
@@ -842,7 +857,6 @@ unicodePwd:: %s
         self.set_domain_pwdHistoryLength("0")
         user = self.add_user("testuser")
 
-        initial_pwd = user.get_password()
         self.assert_password_valid(user, "NewPwd12#")
         # we can set the exact same password again because there's no history
         self.assert_password_valid(user, "NewPwd12#")
@@ -855,8 +869,3 @@ unicodePwd:: %s
         # *next* time the user's password changes.
         self.set_domain_pwdHistoryLength("1")
         self.assert_password_invalid(user, "NewPwd12#")
-
-
-
-
-

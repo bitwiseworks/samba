@@ -22,6 +22,7 @@
 #include "libads/ldap_schema.h"
 #include "../libcli/security/secace.h"
 #include "../librpc/ndr/libndr.h"
+#include "libcli/security/dom_sid.h"
 
 /* for ADS */
 #define SEC_RIGHTS_FULL_CTRL		0xf01ff
@@ -72,7 +73,7 @@ static void ads_disp_perms(uint32_t type)
 	}
 
 	for (i = 0; i < 32; i++) {
-		if (type & (1 << i)) {
+		if (type & ((uint32_t)1 << i)) {
 			for (j = 1; perms[j].str; j ++) {
 				if (perms[j].mask == (((unsigned) 1) << i)) {
 					printf("\n\t%s (0x%08x)", perms[j].str, perms[j].mask);
@@ -139,6 +140,7 @@ static void ads_disp_sec_ace_object(ADS_STRUCT *ads,
 static void ads_disp_ace(ADS_STRUCT *ads, TALLOC_CTX *mem_ctx, struct security_ace *sec_ace)
 {
 	const char *access_type = "UNKNOWN";
+	struct dom_sid_buf sidbuf;
 
 	if (!sec_ace_object(sec_ace->type)) {
 		printf("------- ACE (type: 0x%02x, flags: 0x%02x, size: 0x%02x, mask: 0x%x)\n", 
@@ -169,8 +171,9 @@ static void ads_disp_ace(ADS_STRUCT *ads, TALLOC_CTX *mem_ctx, struct security_a
 		access_type = "AUDIT OBJECT";
 	}
 
-	printf("access SID:  %s\naccess type: %s\n", 
-               sid_string_talloc(mem_ctx, &sec_ace->trustee), access_type);
+	printf("access SID:  %s\naccess type: %s\n",
+	       dom_sid_str_buf(&sec_ace->trustee, &sidbuf),
+	       access_type);
 
 	if (sec_ace_object(sec_ace->type)) {
 		ads_disp_sec_ace_object(ads, mem_ctx, &sec_ace->object.object);
@@ -196,8 +199,9 @@ static void ads_disp_acl(struct security_acl *sec_acl, const char *type)
 /* display SD */
 void ads_disp_sd(ADS_STRUCT *ads, TALLOC_CTX *mem_ctx, struct security_descriptor *sd)
 {
-	int i;
+	uint32_t i;
 	char *tmp_path = NULL;
+	struct dom_sid_buf buf;
 
 	if (!sd) {
 		return;
@@ -220,9 +224,9 @@ void ads_disp_sd(ADS_STRUCT *ads, TALLOC_CTX *mem_ctx, struct security_descripto
                sd->type);
 
 	printf("owner SID: %s\n", sd->owner_sid ? 
-		sid_string_talloc(mem_ctx, sd->owner_sid) : "(null)");
+	       dom_sid_str_buf(sd->owner_sid, &buf) : "(null)");
 	printf("group SID: %s\n", sd->group_sid ?
-		sid_string_talloc(mem_ctx, sd->group_sid) : "(null)");
+	       dom_sid_str_buf(sd->group_sid, &buf) : "(null)");
 
 	ads_disp_acl(sd->sacl, "system");
 	if (sd->sacl) {

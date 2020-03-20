@@ -557,7 +557,7 @@ _PUBLIC_ const struct socket_ops *socket_ipv4_ops(enum socket_type type)
 	return &ipv4_ops;
 }
 
-#if HAVE_IPV6
+#ifdef HAVE_IPV6
 
 static struct in6_addr interpret_addr6(const char *name)
 {
@@ -999,7 +999,7 @@ static struct socket_address *ipv6_tcp_get_my_addr(struct socket_context *sock, 
 		return NULL;
 	}
 	
-	local->addr = talloc_strdup(mem_ctx, addrstring);
+	local->addr = talloc_strdup(local, addrstring);
 	if (!local->addr) {
 		talloc_free(local);
 		return NULL;

@@ -19,6 +19,7 @@
 #include <Python.h>
 #include "python/py3compat.h"
 #include "includes.h"
+#include "python/modules.h"
 #include "pycredentials.h"
 #include "param/param.h"
 #include "lib/cmdline/credentials.h"
@@ -36,13 +37,6 @@
 
 void initcredentials(void);
 
-static PyObject *PyString_FromStringOrNULL(const char *str)
-{
-	if (str == NULL)
-		Py_RETURN_NONE;
-	return PyStr_FromString(str);
-}
-
 static PyObject *py_creds_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
 {
 	return pytalloc_steal(type, cli_credentials_init(NULL));
@@ -50,7 +44,12 @@ static PyObject *py_creds_new(PyTypeObject *type, PyObject *args, PyObject *kwar
 
 static PyObject *py_creds_get_username(PyObject *self, PyObject *unused)
 {
-	return PyString_FromStringOrNULL(cli_credentials_get_username(PyCredentials_AsCliCredentials(self)));
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	return PyString_FromStringOrNULL(cli_credentials_get_username(creds));
 }
 
 static PyObject *py_creds_set_username(PyObject *self, PyObject *args)
@@ -58,13 +57,18 @@ static PyObject *py_creds_set_username(PyObject *self, PyObject *args)
 	char *newval;
 	enum credentials_obtained obt = CRED_SPECIFIED;
 	int _obt = obt;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "s|i", &newval, &_obt)) {
 		return NULL;
 	}
 	obt = _obt;
 
-	return PyBool_FromLong(cli_credentials_set_username(PyCredentials_AsCliCredentials(self), newval, obt));
+	return PyBool_FromLong(cli_credentials_set_username(creds, newval, obt));
 }
 
 static PyObject *py_creds_get_ntlm_username_domain(PyObject *self, PyObject *unused)
@@ -73,11 +77,17 @@ static PyObject *py_creds_get_ntlm_username_domain(PyObject *self, PyObject *unu
 	const char *user = NULL;
 	const char *domain = NULL;
 	PyObject *ret = NULL;
-	cli_credentials_get_ntlm_username_domain(PyCredentials_AsCliCredentials(self),
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	cli_credentials_get_ntlm_username_domain(creds,
 						 frame, &user, &domain);
-	ret = Py_BuildValue("(OO)",
-			    PyString_FromStringOrNULL(user),
-			    PyString_FromStringOrNULL(domain));
+	ret = Py_BuildValue("(ss)",
+			    user,
+			    domain);
+
 	TALLOC_FREE(frame);
 	return ret;
 }
@@ -99,6 +109,11 @@ static PyObject *py_creds_get_ntlm_response(PyObject *self, PyObject *args, PyOb
 	const char *kwnames[] = { "flags", "challenge",
 				  "target_info",
 				  NULL };
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	tv_now = timeval_current();
 	server_timestamp = timeval_to_nttime(&tv_now);
@@ -113,7 +128,7 @@ static PyObject *py_creds_get_ntlm_response(PyObject *self, PyObject *args, PyOb
 		return NULL;
 	}
 
-	status = cli_credentials_get_ntlm_response(PyCredentials_AsCliCredentials(self),
+	status = cli_credentials_get_ntlm_response(creds,
 						   frame, &flags,
 						   challenge,
 						   &server_timestamp,
@@ -145,7 +160,13 @@ static PyObject *py_creds_get_ntlm_response(PyObject *self, PyObject *args, PyOb
 static PyObject *py_creds_get_principal(PyObject *self, PyObject *unused)
 {
 	TALLOC_CTX *frame = talloc_stackframe();
-	PyObject *ret = PyString_FromStringOrNULL(cli_credentials_get_principal(PyCredentials_AsCliCredentials(self), frame));
+	PyObject *ret = NULL;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	ret = PyString_FromStringOrNULL(cli_credentials_get_principal(creds, frame));
 	TALLOC_FREE(frame);
 	return ret;
 }
@@ -155,32 +176,50 @@ static PyObject *py_creds_set_principal(PyObject *self, PyObject *args)
 	char *newval;
 	enum credentials_obtained obt = CRED_SPECIFIED;
 	int _obt = obt;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "s|i", &newval, &_obt)) {
 		return NULL;
 	}
 	obt = _obt;
 
-	return PyBool_FromLong(cli_credentials_set_principal(PyCredentials_AsCliCredentials(self), newval, obt));
+	return PyBool_FromLong(cli_credentials_set_principal(creds, newval, obt));
 }
 
 static PyObject *py_creds_get_password(PyObject *self, PyObject *unused)
 {
-	return PyString_FromStringOrNULL(cli_credentials_get_password(PyCredentials_AsCliCredentials(self)));
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	return PyString_FromStringOrNULL(cli_credentials_get_password(creds));
 }
 
 static PyObject *py_creds_set_password(PyObject *self, PyObject *args)
 {
-	char *newval;
+	const char *newval = NULL;
 	enum credentials_obtained obt = CRED_SPECIFIED;
 	int _obt = obt;
+	PyObject *result = NULL;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
-	if (!PyArg_ParseTuple(args, "s|i", &newval, &_obt)) {
+	if (!PyArg_ParseTuple(args, PYARG_STR_UNI"|i", "utf8", &newval, &_obt)) {
 		return NULL;
 	}
 	obt = _obt;
 
-	return PyBool_FromLong(cli_credentials_set_password(PyCredentials_AsCliCredentials(self), newval, obt));
+	result = PyBool_FromLong(cli_credentials_set_password(creds, newval, obt));
+	PyMem_Free(discard_const_p(void*, newval));
+	return result;
 }
 
 static PyObject *py_creds_set_utf16_password(PyObject *self, PyObject *args)
@@ -192,6 +231,11 @@ static PyObject *py_creds_set_utf16_password(PyObject *self, PyObject *args)
 	Py_ssize_t size =  0;
 	int result;
 	bool ok;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "O|i", &newval, &_obt)) {
 		return NULL;
@@ -205,7 +249,7 @@ static PyObject *py_creds_set_utf16_password(PyObject *self, PyObject *args)
 	}
 	blob.length = size;
 
-	ok = cli_credentials_set_utf16_password(PyCredentials_AsCliCredentials(self),
+	ok = cli_credentials_set_utf16_password(creds,
 						&blob, obt);
 
 	return PyBool_FromLong(ok);
@@ -213,7 +257,12 @@ static PyObject *py_creds_set_utf16_password(PyObject *self, PyObject *args)
 
 static PyObject *py_creds_get_old_password(PyObject *self, PyObject *unused)
 {
-	return PyString_FromStringOrNULL(cli_credentials_get_old_password(PyCredentials_AsCliCredentials(self)));
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	return PyString_FromStringOrNULL(cli_credentials_get_old_password(creds));
 }
 
 static PyObject *py_creds_set_old_password(PyObject *self, PyObject *args)
@@ -221,13 +270,18 @@ static PyObject *py_creds_set_old_password(PyObject *self, PyObject *args)
 	char *oldval;
 	enum credentials_obtained obt = CRED_SPECIFIED;
 	int _obt = obt;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "s|i", &oldval, &_obt)) {
 		return NULL;
 	}
 	obt = _obt;
 
-	return PyBool_FromLong(cli_credentials_set_old_password(PyCredentials_AsCliCredentials(self), oldval, obt));
+	return PyBool_FromLong(cli_credentials_set_old_password(creds, oldval, obt));
 }
 
 static PyObject *py_creds_set_old_utf16_password(PyObject *self, PyObject *args)
@@ -237,6 +291,11 @@ static PyObject *py_creds_set_old_utf16_password(PyObject *self, PyObject *args)
 	Py_ssize_t size =  0;
 	int result;
 	bool ok;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "O", &oldval)) {
 		return NULL;
@@ -249,7 +308,7 @@ static PyObject *py_creds_set_old_utf16_password(PyObject *self, PyObject *args)
 	}
 	blob.length = size;
 
-	ok = cli_credentials_set_old_utf16_password(PyCredentials_AsCliCredentials(self),
+	ok = cli_credentials_set_old_utf16_password(creds,
 						    &blob);
 
 	return PyBool_FromLong(ok);
@@ -257,7 +316,12 @@ static PyObject *py_creds_set_old_utf16_password(PyObject *self, PyObject *args)
 
 static PyObject *py_creds_get_domain(PyObject *self, PyObject *unused)
 {
-	return PyString_FromStringOrNULL(cli_credentials_get_domain(PyCredentials_AsCliCredentials(self)));
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	return PyString_FromStringOrNULL(cli_credentials_get_domain(creds));
 }
 
 static PyObject *py_creds_set_domain(PyObject *self, PyObject *args)
@@ -265,18 +329,28 @@ static PyObject *py_creds_set_domain(PyObject *self, PyObject *args)
 	char *newval;
 	enum credentials_obtained obt = CRED_SPECIFIED;
 	int _obt = obt;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "s|i", &newval, &_obt)) {
 		return NULL;
 	}
 	obt = _obt;
 
-	return PyBool_FromLong(cli_credentials_set_domain(PyCredentials_AsCliCredentials(self), newval, obt));
+	return PyBool_FromLong(cli_credentials_set_domain(creds, newval, obt));
 }
 
 static PyObject *py_creds_get_realm(PyObject *self, PyObject *unused)
 {
-	return PyString_FromStringOrNULL(cli_credentials_get_realm(PyCredentials_AsCliCredentials(self)));
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	return PyString_FromStringOrNULL(cli_credentials_get_realm(creds));
 }
 
 static PyObject *py_creds_set_realm(PyObject *self, PyObject *args)
@@ -284,32 +358,52 @@ static PyObject *py_creds_set_realm(PyObject *self, PyObject *args)
 	char *newval;
 	enum credentials_obtained obt = CRED_SPECIFIED;
 	int _obt = obt;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "s|i", &newval, &_obt)) {
 		return NULL;
 	}
 	obt = _obt;
 
-	return PyBool_FromLong(cli_credentials_set_realm(PyCredentials_AsCliCredentials(self), newval, obt));
+	return PyBool_FromLong(cli_credentials_set_realm(creds, newval, obt));
 }
 
 static PyObject *py_creds_get_bind_dn(PyObject *self, PyObject *unused)
 {
-	return PyString_FromStringOrNULL(cli_credentials_get_bind_dn(PyCredentials_AsCliCredentials(self)));
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	return PyString_FromStringOrNULL(cli_credentials_get_bind_dn(creds));
 }
 
 static PyObject *py_creds_set_bind_dn(PyObject *self, PyObject *args)
 {
 	char *newval;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 	if (!PyArg_ParseTuple(args, "s", &newval))
 		return NULL;
 
-	return PyBool_FromLong(cli_credentials_set_bind_dn(PyCredentials_AsCliCredentials(self), newval));
+	return PyBool_FromLong(cli_credentials_set_bind_dn(creds, newval));
 }
 
 static PyObject *py_creds_get_workstation(PyObject *self, PyObject *unused)
 {
-	return PyString_FromStringOrNULL(cli_credentials_get_workstation(PyCredentials_AsCliCredentials(self)));
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	return PyString_FromStringOrNULL(cli_credentials_get_workstation(creds));
 }
 
 static PyObject *py_creds_set_workstation(PyObject *self, PyObject *args)
@@ -317,39 +411,69 @@ static PyObject *py_creds_set_workstation(PyObject *self, PyObject *args)
 	char *newval;
 	enum credentials_obtained obt = CRED_SPECIFIED;
 	int _obt = obt;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "s|i", &newval, &_obt)) {
 		return NULL;
 	}
 	obt = _obt;
 
-	return PyBool_FromLong(cli_credentials_set_workstation(PyCredentials_AsCliCredentials(self), newval, obt));
+	return PyBool_FromLong(cli_credentials_set_workstation(creds, newval, obt));
 }
 
 static PyObject *py_creds_is_anonymous(PyObject *self, PyObject *unused)
 {
-	return PyBool_FromLong(cli_credentials_is_anonymous(PyCredentials_AsCliCredentials(self)));
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	return PyBool_FromLong(cli_credentials_is_anonymous(creds));
 }
 
 static PyObject *py_creds_set_anonymous(PyObject *self, PyObject *unused)
 {
-	cli_credentials_set_anonymous(PyCredentials_AsCliCredentials(self));
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	cli_credentials_set_anonymous(creds);
 	Py_RETURN_NONE;
 }
 
 static PyObject *py_creds_authentication_requested(PyObject *self, PyObject *unused)
 {
-        return PyBool_FromLong(cli_credentials_authentication_requested(PyCredentials_AsCliCredentials(self)));
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+        return PyBool_FromLong(cli_credentials_authentication_requested(creds));
 }
 
 static PyObject *py_creds_wrong_password(PyObject *self, PyObject *unused)
 {
-        return PyBool_FromLong(cli_credentials_wrong_password(PyCredentials_AsCliCredentials(self)));
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+         return PyBool_FromLong(cli_credentials_wrong_password(creds));
 }
 
 static PyObject *py_creds_set_cmdline_callbacks(PyObject *self, PyObject *unused)
 {
-        return PyBool_FromLong(cli_credentials_set_cmdline_callbacks(PyCredentials_AsCliCredentials(self)));
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+        return PyBool_FromLong(cli_credentials_set_cmdline_callbacks(creds));
 }
 
 static PyObject *py_creds_parse_string(PyObject *self, PyObject *args)
@@ -357,13 +481,18 @@ static PyObject *py_creds_parse_string(PyObject *self, PyObject *args)
 	char *newval;
 	enum credentials_obtained obt = CRED_SPECIFIED;
 	int _obt = obt;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "s|i", &newval, &_obt)) {
 		return NULL;
 	}
 	obt = _obt;
 
-	cli_credentials_parse_string(PyCredentials_AsCliCredentials(self), newval, obt);
+	cli_credentials_parse_string(creds, newval, obt);
 	Py_RETURN_NONE;
 }
 
@@ -372,13 +501,18 @@ static PyObject *py_creds_parse_file(PyObject *self, PyObject *args)
 	char *newval;
 	enum credentials_obtained obt = CRED_SPECIFIED;
 	int _obt = obt;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "s|i", &newval, &_obt)) {
 		return NULL;
 	}
 	obt = _obt;
 
-	cli_credentials_parse_file(PyCredentials_AsCliCredentials(self), newval, obt);
+	cli_credentials_parse_file(creds, newval, obt);
 	Py_RETURN_NONE;
 }
 
@@ -400,8 +534,13 @@ static PyObject *py_cli_credentials_set_password_will_be_nt_hash(PyObject *self,
 static PyObject *py_creds_get_nt_hash(PyObject *self, PyObject *unused)
 {
 	PyObject *ret;
+	struct samr_Password *ntpw = NULL;
 	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
-	struct samr_Password *ntpw = cli_credentials_get_nt_hash(creds, creds);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	ntpw = cli_credentials_get_nt_hash(creds, creds);
 
 	ret = PyBytes_FromStringAndSize(discard_const_p(char, ntpw->hash), 16);
 	TALLOC_FREE(ntpw);
@@ -410,34 +549,55 @@ static PyObject *py_creds_get_nt_hash(PyObject *self, PyObject *unused)
 
 static PyObject *py_creds_get_kerberos_state(PyObject *self, PyObject *unused)
 {
-	int state = cli_credentials_get_kerberos_state(PyCredentials_AsCliCredentials(self));
+	int state;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	state = cli_credentials_get_kerberos_state(creds);
 	return PyInt_FromLong(state);
 }
 
 static PyObject *py_creds_set_kerberos_state(PyObject *self, PyObject *args)
 {
 	int state;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 	if (!PyArg_ParseTuple(args, "i", &state))
 		return NULL;
 
-	cli_credentials_set_kerberos_state(PyCredentials_AsCliCredentials(self), state);
+	cli_credentials_set_kerberos_state(creds, state);
 	Py_RETURN_NONE;
 }
 
 static PyObject *py_creds_set_krb_forwardable(PyObject *self, PyObject *args)
 {
 	int state;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 	if (!PyArg_ParseTuple(args, "i", &state))
 		return NULL;
 
-	cli_credentials_set_krb_forwardable(PyCredentials_AsCliCredentials(self), state);
+	cli_credentials_set_krb_forwardable(creds, state);
 	Py_RETURN_NONE;
 }
 
 
 static PyObject *py_creds_get_forced_sasl_mech(PyObject *self, PyObject *unused)
 {
-	return PyString_FromStringOrNULL(cli_credentials_get_forced_sasl_mech(PyCredentials_AsCliCredentials(self)));
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
+	return PyString_FromStringOrNULL(cli_credentials_get_forced_sasl_mech(creds));
 }
 
 static PyObject *py_creds_set_forced_sasl_mech(PyObject *self, PyObject *args)
@@ -445,13 +605,18 @@ static PyObject *py_creds_set_forced_sasl_mech(PyObject *self, PyObject *args)
 	char *newval;
 	enum credentials_obtained obt = CRED_SPECIFIED;
 	int _obt = obt;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "s", &newval)) {
 		return NULL;
 	}
 	obt = _obt;
 
-	cli_credentials_set_forced_sasl_mech(PyCredentials_AsCliCredentials(self), newval);
+	cli_credentials_set_forced_sasl_mech(creds, newval);
 	Py_RETURN_NONE;
 }
 
@@ -463,6 +628,10 @@ static PyObject *py_creds_guess(PyObject *self, PyObject *args)
 	struct cli_credentials *creds;
 
 	creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "|O", &py_lp_ctx))
 		return NULL;
@@ -495,6 +664,10 @@ static PyObject *py_creds_set_machine_account(PyObject *self, PyObject *args)
 	TALLOC_CTX *mem_ctx;
 
 	creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "|O", &py_lp_ctx))
 		return NULL;
@@ -538,6 +711,10 @@ static PyObject *py_creds_get_named_ccache(PyObject *self, PyObject *args)
 	TALLOC_CTX *mem_ctx;
 
 	creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "|Os", &py_lp_ctx, &ccache_name))
 		return NULL;
@@ -581,6 +758,11 @@ static PyObject *py_creds_set_named_ccache(PyObject *self, PyObject *args)
 	PyObject *py_lp_ctx = Py_None;
 	int _obt = obt;
 	int ret;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "s|iO", &newval, &_obt, &py_lp_ctx))
 		return NULL;
@@ -597,7 +779,7 @@ static PyObject *py_creds_set_named_ccache(PyObject *self, PyObject *args)
 		return NULL;
 	}
 
-	ret = cli_credentials_set_ccache(PyCredentials_AsCliCredentials(self),
+	ret = cli_credentials_set_ccache(creds,
 					 lp_ctx,
 					 newval, CRED_SPECIFIED,
 					 &error_string);
@@ -616,11 +798,16 @@ static PyObject *py_creds_set_named_ccache(PyObject *self, PyObject *args)
 static PyObject *py_creds_set_gensec_features(PyObject *self, PyObject *args)
 {
 	unsigned int gensec_features;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "I", &gensec_features))
 		return NULL;
 
-	cli_credentials_set_gensec_features(PyCredentials_AsCliCredentials(self), gensec_features);
+	cli_credentials_set_gensec_features(creds, gensec_features);
 
 	Py_RETURN_NONE;
 }
@@ -628,8 +815,13 @@ static PyObject *py_creds_set_gensec_features(PyObject *self, PyObject *args)
 static PyObject *py_creds_get_gensec_features(PyObject *self, PyObject *args)
 {
 	unsigned int gensec_features;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
-	gensec_features = cli_credentials_get_gensec_features(PyCredentials_AsCliCredentials(self));
+	gensec_features = cli_credentials_get_gensec_features(creds);
 	return PyInt_FromLong(gensec_features);
 }
 
@@ -640,6 +832,7 @@ static PyObject *py_creds_new_client_authenticator(PyObject *self,
 	struct cli_credentials *creds = NULL;
 	struct netlogon_creds_CredentialState *nc = NULL;
 	PyObject *ret = NULL;
+	NTSTATUS status;
 
 	creds = PyCredentials_AsCliCredentials(self);
 	if (creds == NULL) {
@@ -656,10 +849,14 @@ static PyObject *py_creds_new_client_authenticator(PyObject *self,
 		return NULL;
 	}
 
-	netlogon_creds_client_authenticator(
-		nc,
-		&auth);
-	ret = Py_BuildValue("{ss#si}",
+	status = netlogon_creds_client_authenticator(nc, &auth);
+	if (!NT_STATUS_IS_OK(status)) {
+		PyErr_SetString(PyExc_ValueError,
+				"Failed to create client authenticator");
+		return NULL;
+	}
+
+	ret = Py_BuildValue("{s"PYARG_BYTES_LEN"si}",
 			    "credential",
 			    (const char *) &auth.cred, sizeof(auth.cred),
 			    "timestamp", auth.timestamp);
@@ -669,12 +866,17 @@ static PyObject *py_creds_new_client_authenticator(PyObject *self,
 static PyObject *py_creds_set_secure_channel_type(PyObject *self, PyObject *args)
 {
 	unsigned int channel_type;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
 	if (!PyArg_ParseTuple(args, "I", &channel_type))
 		return NULL;
 
 	cli_credentials_set_secure_channel_type(
-		PyCredentials_AsCliCredentials(self),
+		creds,
 		channel_type);
 
 	Py_RETURN_NONE;
@@ -683,9 +885,13 @@ static PyObject *py_creds_set_secure_channel_type(PyObject *self, PyObject *args
 static PyObject *py_creds_get_secure_channel_type(PyObject *self, PyObject *args)
 {
 	enum netr_SchannelType channel_type = SEC_CHAN_NULL;
+	struct cli_credentials *creds = PyCredentials_AsCliCredentials(self);
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
+		return NULL;
+	}
 
-	channel_type = cli_credentials_get_secure_channel_type(
-		PyCredentials_AsCliCredentials(self));
+	channel_type = cli_credentials_get_secure_channel_type(creds);
 
 	return PyInt_FromLong(channel_type);
 }
@@ -700,11 +906,20 @@ static PyObject *py_creds_encrypt_netr_crypt_password(PyObject *self,
 	PyObject *py_cp = Py_None;
 
 	creds = PyCredentials_AsCliCredentials(self);
-
-	if (!PyArg_ParseTuple(args, "|O", &py_cp)) {
+	if (creds == NULL) {
+		PyErr_Format(PyExc_TypeError, "Credentials expected");
 		return NULL;
 	}
+
+	if (!PyArg_ParseTuple(args, "O", &py_cp)) {
+		return NULL;
+	}
+
 	pwd = pytalloc_get_type(py_cp, struct netr_CryptPassword);
+	if (pwd == NULL) {
+		/* pytalloc_get_type sets TypeError */
+		return NULL;
+	}
 	data.length = sizeof(struct netr_CryptPassword);
 	data.data   = (uint8_t *)pwd;
 	status = netlogon_creds_session_encrypt(creds->netlogon_creds, data);
@@ -715,126 +930,286 @@ static PyObject *py_creds_encrypt_netr_crypt_password(PyObject *self,
 }
 
 static PyMethodDef py_creds_methods[] = {
-	{ "get_username", py_creds_get_username, METH_NOARGS,
-		"S.get_username() -> username\nObtain username." },
-	{ "set_username", py_creds_set_username, METH_VARARGS,
-		"S.set_username(name[, credentials.SPECIFIED]) -> None\n"
-		"Change username." },
-	{ "get_principal", py_creds_get_principal, METH_NOARGS,
-		"S.get_principal() -> user@realm\nObtain user principal." },
-	{ "set_principal", py_creds_set_principal, METH_VARARGS,
-		"S.set_principal(name[, credentials.SPECIFIED]) -> None\n"
-		"Change principal." },
-	{ "get_password", py_creds_get_password, METH_NOARGS,
-		"S.get_password() -> password\n"
-		"Obtain password." },
-	{ "get_ntlm_username_domain", py_creds_get_ntlm_username_domain, METH_NOARGS,
-		"S.get_ntlm_username_domain() -> (domain, username)\n"
-		"Obtain NTLM username and domain, split up either as (DOMAIN, user) or (\"\", \"user@realm\")." },
-	{ "get_ntlm_response", (PyCFunction)py_creds_get_ntlm_response, METH_VARARGS | METH_KEYWORDS,
-		"S.get_ntlm_response"
-	        "(flags, challenge[, target_info]) -> "
-	        "(flags, lm_response, nt_response, lm_session_key, nt_session_key)\n"
-		"Obtain LM or NTLM response." },
-	{ "set_password", py_creds_set_password, METH_VARARGS,
-		"S.set_password(password[, credentials.SPECIFIED]) -> None\n"
-		"Change password." },
-	{ "set_utf16_password", py_creds_set_utf16_password, METH_VARARGS,
-		"S.set_utf16_password(password[, credentials.SPECIFIED]) -> None\n"
-		"Change password." },
-	{ "get_old_password", py_creds_get_old_password, METH_NOARGS,
-		"S.get_old_password() -> password\n"
-		"Obtain old password." },
-	{ "set_old_password", py_creds_set_old_password, METH_VARARGS,
-		"S.set_old_password(password[, credentials.SPECIFIED]) -> None\n"
-		"Change old password." },
-	{ "set_old_utf16_password", py_creds_set_old_utf16_password, METH_VARARGS,
-		"S.set_old_utf16_password(password[, credentials.SPECIFIED]) -> None\n"
-		"Change old password." },
-	{ "get_domain", py_creds_get_domain, METH_NOARGS,
-		"S.get_domain() -> domain\n"
-		"Obtain domain name." },
-	{ "set_domain", py_creds_set_domain, METH_VARARGS,
-		"S.set_domain(domain[, credentials.SPECIFIED]) -> None\n"
-		"Change domain name." },
-	{ "get_realm", py_creds_get_realm, METH_NOARGS,
-		"S.get_realm() -> realm\n"
-		"Obtain realm name." },
-	{ "set_realm", py_creds_set_realm, METH_VARARGS,
-		"S.set_realm(realm[, credentials.SPECIFIED]) -> None\n"
-		"Change realm name." },
-	{ "get_bind_dn", py_creds_get_bind_dn, METH_NOARGS,
-		"S.get_bind_dn() -> bind dn\n"
-		"Obtain bind DN." },
-	{ "set_bind_dn", py_creds_set_bind_dn, METH_VARARGS,
-		"S.set_bind_dn(bind_dn) -> None\n"
-		"Change bind DN." },
-	{ "is_anonymous", py_creds_is_anonymous, METH_NOARGS,
-		NULL },
-	{ "set_anonymous", py_creds_set_anonymous, METH_NOARGS,
-        	"S.set_anonymous() -> None\n"
-		"Use anonymous credentials." },
-	{ "get_workstation", py_creds_get_workstation, METH_NOARGS,
-		NULL },
-	{ "set_workstation", py_creds_set_workstation, METH_VARARGS,
-		NULL },
-	{ "authentication_requested", py_creds_authentication_requested, METH_NOARGS,
-		NULL },
-	{ "wrong_password", py_creds_wrong_password, METH_NOARGS,
-		"S.wrong_password() -> bool\n"
-		"Indicate the returned password was incorrect." },
-	{ "set_cmdline_callbacks", py_creds_set_cmdline_callbacks, METH_NOARGS,
-		"S.set_cmdline_callbacks() -> bool\n"
-		"Use command-line to obtain credentials not explicitly set." },
-	{ "parse_string", py_creds_parse_string, METH_VARARGS,
-		"S.parse_string(text[, credentials.SPECIFIED]) -> None\n"
-		"Parse credentials string." },
-	{ "parse_file", py_creds_parse_file, METH_VARARGS,
-		"S.parse_file(filename[, credentials.SPECIFIED]) -> None\n"
-		"Parse credentials file." },
-	{ "set_password_will_be_nt_hash",
-		py_cli_credentials_set_password_will_be_nt_hash, METH_VARARGS,
-		"S.set_password_will_be_nt_hash(bool) -> None\n"
-		"Alters the behaviour of S.set_password() "
-		"to expect the NTHASH as hexstring." },
-	{ "get_nt_hash", py_creds_get_nt_hash, METH_NOARGS,
-		NULL },
-	{ "get_kerberos_state", py_creds_get_kerberos_state, METH_NOARGS,
-		NULL },
-	{ "set_kerberos_state", py_creds_set_kerberos_state, METH_VARARGS,
-		NULL },
-	{ "set_krb_forwardable", py_creds_set_krb_forwardable, METH_VARARGS,
-		NULL },
-	{ "guess", py_creds_guess, METH_VARARGS, NULL },
-	{ "set_machine_account", py_creds_set_machine_account, METH_VARARGS, NULL },
-	{ "get_named_ccache", py_creds_get_named_ccache, METH_VARARGS, NULL },
-	{ "set_named_ccache", py_creds_set_named_ccache, METH_VARARGS,
-		"S.set_named_ccache(krb5_ccache_name, obtained, lp) -> None\n"
-		"Set credentials to KRB5 Credentials Cache (by name)." },
-	{ "set_gensec_features", py_creds_set_gensec_features, METH_VARARGS, NULL },
-	{ "get_gensec_features", py_creds_get_gensec_features, METH_NOARGS, NULL },
-	{ "get_forced_sasl_mech", py_creds_get_forced_sasl_mech, METH_NOARGS,
-		"S.get_forced_sasl_mech() -> SASL mechanism\nObtain forced SASL mechanism." },
-	{ "set_forced_sasl_mech", py_creds_set_forced_sasl_mech, METH_VARARGS,
-		"S.set_forced_sasl_mech(name) -> None\n"
-		"Set forced SASL mechanism." },
-	{ "new_client_authenticator",
-		py_creds_new_client_authenticator,
-		METH_NOARGS,
-		"S.new_client_authenticator() -> Authenticator\n"
-		"Get a new client NETLOGON_AUTHENTICATOR"},
-	{ "set_secure_channel_type", py_creds_set_secure_channel_type,
-	  METH_VARARGS, NULL },
-	{ "get_secure_channel_type", py_creds_get_secure_channel_type,
-	  METH_VARARGS },
-	{ "encrypt_netr_crypt_password",
-		py_creds_encrypt_netr_crypt_password,
-		METH_VARARGS,
-		"S.encrypt_netr_crypt_password(password) -> NTSTATUS\n"
-		"Encrypt the supplied password using the session key and\n"
-		"the negotiated encryption algorithm in place\n"
-		"i.e. it overwrites the original data"},
-	{ NULL }
+	{
+		.ml_name  = "get_username",
+		.ml_meth  = py_creds_get_username,
+		.ml_flags = METH_NOARGS,
+		.ml_doc   = "S.get_username() -> username\nObtain username.",
+	},
+	{
+		.ml_name  = "set_username",
+		.ml_meth  = py_creds_set_username,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.set_username(name[, credentials.SPECIFIED]) -> None\n"
+			    "Change username.",
+	},
+	{
+		.ml_name  = "get_principal",
+		.ml_meth  = py_creds_get_principal,
+		.ml_flags = METH_NOARGS,
+		.ml_doc   = "S.get_principal() -> user@realm\nObtain user principal.",
+	},
+	{
+		.ml_name  = "set_principal",
+		.ml_meth  = py_creds_set_principal,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.set_principal(name[, credentials.SPECIFIED]) -> None\n"
+			    "Change principal.",
+	},
+	{
+		.ml_name  = "get_password",
+		.ml_meth  = py_creds_get_password,
+		.ml_flags = METH_NOARGS,
+		.ml_doc   = "S.get_password() -> password\n"
+			    "Obtain password.",
+	},
+	{
+		.ml_name  = "get_ntlm_username_domain",
+		.ml_meth  = py_creds_get_ntlm_username_domain,
+		.ml_flags = METH_NOARGS,
+		.ml_doc   = "S.get_ntlm_username_domain() -> (domain, username)\n"
+			    "Obtain NTLM username and domain, split up either as (DOMAIN, user) or (\"\", \"user@realm\").",
+	},
+	{
+		.ml_name  = "get_ntlm_response",
+		.ml_meth  = PY_DISCARD_FUNC_SIG(PyCFunction,
+						py_creds_get_ntlm_response),
+		.ml_flags = METH_VARARGS | METH_KEYWORDS,
+		.ml_doc   = "S.get_ntlm_response"
+		            "(flags, challenge[, target_info]) -> "
+			    "(flags, lm_response, nt_response, lm_session_key, nt_session_key)\n"
+			    "Obtain LM or NTLM response.",
+	},
+	{
+		.ml_name  = "set_password",
+		.ml_meth  = py_creds_set_password,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.set_password(password[, credentials.SPECIFIED]) -> None\n"
+			    "Change password.",
+	},
+	{
+		.ml_name  = "set_utf16_password",
+		.ml_meth  = py_creds_set_utf16_password,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.set_utf16_password(password[, credentials.SPECIFIED]) -> None\n"
+			    "Change password.",
+	},
+	{
+		.ml_name  = "get_old_password",
+		.ml_meth  = py_creds_get_old_password,
+		.ml_flags = METH_NOARGS,
+		.ml_doc   = "S.get_old_password() -> password\n"
+			    "Obtain old password.",
+	},
+	{
+		.ml_name  = "set_old_password",
+		.ml_meth  = py_creds_set_old_password,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.set_old_password(password[, credentials.SPECIFIED]) -> None\n"
+			    "Change old password.",
+	},
+	{
+		.ml_name  = "set_old_utf16_password",
+		.ml_meth  = py_creds_set_old_utf16_password,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.set_old_utf16_password(password[, credentials.SPECIFIED]) -> None\n"
+			    "Change old password.",
+	},
+	{
+		.ml_name  = "get_domain",
+		.ml_meth  = py_creds_get_domain,
+		.ml_flags = METH_NOARGS,
+		.ml_doc   = "S.get_domain() -> domain\n"
+			    "Obtain domain name.",
+	},
+	{
+		.ml_name  = "set_domain",
+		.ml_meth  = py_creds_set_domain,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.set_domain(domain[, credentials.SPECIFIED]) -> None\n"
+			    "Change domain name.",
+	},
+	{
+		.ml_name  = "get_realm",
+		.ml_meth  = py_creds_get_realm,
+		.ml_flags = METH_NOARGS,
+		.ml_doc   = "S.get_realm() -> realm\n"
+			    "Obtain realm name.",
+	},
+	{
+		.ml_name  = "set_realm",
+		.ml_meth  = py_creds_set_realm,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.set_realm(realm[, credentials.SPECIFIED]) -> None\n"
+			    "Change realm name.",
+	},
+	{
+		.ml_name  = "get_bind_dn",
+		.ml_meth  = py_creds_get_bind_dn,
+		.ml_flags = METH_NOARGS,
+		.ml_doc   = "S.get_bind_dn() -> bind dn\n"
+			    "Obtain bind DN.",
+	},
+	{
+		.ml_name  = "set_bind_dn",
+		.ml_meth  = py_creds_set_bind_dn,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.set_bind_dn(bind_dn) -> None\n"
+			    "Change bind DN.",
+	},
+	{
+		.ml_name  = "is_anonymous",
+		.ml_meth  = py_creds_is_anonymous,
+		.ml_flags = METH_NOARGS,
+	},
+	{
+		.ml_name  = "set_anonymous",
+		.ml_meth  = py_creds_set_anonymous,
+		.ml_flags = METH_NOARGS,
+		.ml_doc   = "S.set_anonymous() -> None\n"
+			    "Use anonymous credentials.",
+	},
+	{
+		.ml_name  = "get_workstation",
+		.ml_meth  = py_creds_get_workstation,
+		.ml_flags = METH_NOARGS,
+	},
+	{
+		.ml_name  = "set_workstation",
+		.ml_meth  = py_creds_set_workstation,
+		.ml_flags = METH_VARARGS,
+	},
+	{
+		.ml_name  = "authentication_requested",
+		.ml_meth  = py_creds_authentication_requested,
+		.ml_flags = METH_NOARGS,
+	},
+	{
+		.ml_name  = "wrong_password",
+		.ml_meth  = py_creds_wrong_password,
+		.ml_flags = METH_NOARGS,
+		.ml_doc   = "S.wrong_password() -> bool\n"
+			    "Indicate the returned password was incorrect.",
+	},
+	{
+		.ml_name  = "set_cmdline_callbacks",
+		.ml_meth  = py_creds_set_cmdline_callbacks,
+		.ml_flags = METH_NOARGS,
+		.ml_doc   = "S.set_cmdline_callbacks() -> bool\n"
+			    "Use command-line to obtain credentials not explicitly set.",
+	},
+	{
+		.ml_name  = "parse_string",
+		.ml_meth  = py_creds_parse_string,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.parse_string(text[, credentials.SPECIFIED]) -> None\n"
+			    "Parse credentials string.",
+	},
+	{
+		.ml_name  = "parse_file",
+		.ml_meth  = py_creds_parse_file,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.parse_file(filename[, credentials.SPECIFIED]) -> None\n"
+			    "Parse credentials file.",
+	},
+	{
+		.ml_name  = "set_password_will_be_nt_hash",
+		.ml_meth  = py_cli_credentials_set_password_will_be_nt_hash,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.set_password_will_be_nt_hash(bool) -> None\n"
+			    "Alters the behaviour of S.set_password() "
+			    "to expect the NTHASH as hexstring.",
+	},
+	{
+		.ml_name  = "get_nt_hash",
+		.ml_meth  = py_creds_get_nt_hash,
+		.ml_flags = METH_NOARGS,
+	},
+	{
+		.ml_name  = "get_kerberos_state",
+		.ml_meth  = py_creds_get_kerberos_state,
+		.ml_flags = METH_NOARGS,
+	},
+	{
+		.ml_name  = "set_kerberos_state",
+		.ml_meth  = py_creds_set_kerberos_state,
+		.ml_flags = METH_VARARGS,
+	},
+	{
+		.ml_name  = "set_krb_forwardable",
+		.ml_meth  = py_creds_set_krb_forwardable,
+		.ml_flags = METH_VARARGS,
+	},
+	{
+		.ml_name  = "guess",
+		.ml_meth  = py_creds_guess,
+		.ml_flags = METH_VARARGS,
+	},
+	{
+		.ml_name  = "set_machine_account",
+		.ml_meth  = py_creds_set_machine_account,
+		.ml_flags = METH_VARARGS,
+	},
+	{
+		.ml_name  = "get_named_ccache",
+		.ml_meth  = py_creds_get_named_ccache,
+		.ml_flags = METH_VARARGS,
+	},
+	{
+		.ml_name  = "set_named_ccache",
+		.ml_meth  = py_creds_set_named_ccache,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.set_named_ccache(krb5_ccache_name, obtained, lp) -> None\n"
+			    "Set credentials to KRB5 Credentials Cache (by name).",
+	},
+	{
+		.ml_name  = "set_gensec_features",
+		.ml_meth  = py_creds_set_gensec_features,
+		.ml_flags = METH_VARARGS,
+	},
+	{
+		.ml_name  = "get_gensec_features",
+		.ml_meth  = py_creds_get_gensec_features,
+		.ml_flags = METH_NOARGS,
+	},
+	{
+		.ml_name  = "get_forced_sasl_mech",
+		.ml_meth  = py_creds_get_forced_sasl_mech,
+		.ml_flags = METH_NOARGS,
+		.ml_doc   = "S.get_forced_sasl_mech() -> SASL mechanism\nObtain forced SASL mechanism.",
+	},
+	{
+		.ml_name  = "set_forced_sasl_mech",
+		.ml_meth  = py_creds_set_forced_sasl_mech,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.set_forced_sasl_mech(name) -> None\n"
+			    "Set forced SASL mechanism.",
+	},
+	{
+		.ml_name  = "new_client_authenticator",
+		.ml_meth  = py_creds_new_client_authenticator,
+		.ml_flags = METH_NOARGS,
+		.ml_doc   = "S.new_client_authenticator() -> Authenticator\n"
+			    "Get a new client NETLOGON_AUTHENTICATOR"},
+	{
+		.ml_name  = "set_secure_channel_type",
+		.ml_meth  = py_creds_set_secure_channel_type,
+		.ml_flags = METH_VARARGS,
+	},
+	{
+		.ml_name  = "get_secure_channel_type",
+		.ml_meth  = py_creds_get_secure_channel_type,
+		.ml_flags = METH_VARARGS,
+	},
+	{
+		.ml_name  = "encrypt_netr_crypt_password",
+		.ml_meth  = py_creds_encrypt_netr_crypt_password,
+		.ml_flags = METH_VARARGS,
+		.ml_doc   = "S.encrypt_netr_crypt_password(password) -> NTSTATUS\n"
+			    "Encrypt the supplied password using the session key and\n"
+			    "the negotiated encryption algorithm in place\n"
+			    "i.e. it overwrites the original data"},
+	{ .ml_name = NULL }
 };
 
 static struct PyModuleDef moduledef = {

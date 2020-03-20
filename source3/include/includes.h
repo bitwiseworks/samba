@@ -76,7 +76,7 @@
 #undef HAVE_LDAP
 #endif
 
-#if HAVE_SYS_ATTRIBUTES_H
+#ifdef HAVE_SYS_ATTRIBUTES_H
 #include <sys/attributes.h>
 #endif
 
@@ -92,20 +92,20 @@
 #include <sys/uio.h>
 #endif
 
-#if HAVE_LANGINFO_H
+#ifdef HAVE_LANGINFO_H
 #include <langinfo.h>
 #endif
 
-#if HAVE_NETGROUP_H
+#ifdef HAVE_NETGROUP_H
 #include <netgroup.h>
 #endif
 
 /* Special macros that are no-ops except when run under Valgrind on
  * x86.  They've moved a little bit from valgrind 1.0.4 to 1.9.4 */
-#if HAVE_VALGRIND_MEMCHECK_H
+#ifdef HAVE_VALGRIND_MEMCHECK_H
         /* memcheck.h includes valgrind.h */
 #include <valgrind/memcheck.h>
-#elif HAVE_VALGRIND_H
+#elif defined(HAVE_VALGRIND_H)
 #include <valgrind.h>
 #endif
 
@@ -190,6 +190,11 @@ typedef uint64_t br_off;
 #define SOFF_T_R(p, ofs, v) (SIVAL(p,(ofs)+4,(v)&0xFFFFFFFF), SIVAL(p,ofs,(v)>>32))
 #define IVAL_TO_SMB_OFF_T(buf,off) ((off_t)(( ((uint64_t)(IVAL((buf),(off)))) & ((uint64_t)0xFFFFFFFF) )))
 
+/* Is birthtime real, or was it calculated ? */
+#define ST_EX_IFLAG_CALCULATED_BTIME		(1 << 0)
+#define ST_EX_IFLAG_CALCULATED_ITIME		(1 << 1)
+#define ST_EX_IFLAG_CALCULATED_FILE_ID		(1 << 2)
+
 /*
  * Type for stat structure.
  */
@@ -197,6 +202,7 @@ typedef uint64_t br_off;
 struct stat_ex {
 	dev_t		st_ex_dev;
 	ino_t		st_ex_ino;
+	uint64_t	st_ex_file_id;
 	mode_t		st_ex_mode;
 	nlink_t		st_ex_nlink;
 	uid_t		st_ex_uid;
@@ -207,13 +213,17 @@ struct stat_ex {
 	struct timespec st_ex_mtime;
 	struct timespec st_ex_ctime;
 	struct timespec st_ex_btime; /* birthtime */
-	/* Is birthtime real, or was it calculated ? */
-	bool		st_ex_calculated_birthtime;
+	/*
+	 * Immutable original birth time aka instantiation time. Set when a file
+	 * is created, never changes thereafter. May not be set by the client.
+	 */
+	struct timespec st_ex_itime; /* instantiation time */
+
 	blksize_t	st_ex_blksize;
 	blkcnt_t	st_ex_blocks;
 
 	uint32_t	st_ex_flags;
-	uint32_t	st_ex_mask;
+	uint32_t	st_ex_iflags;
 };
 
 typedef struct stat_ex SMB_STRUCT_STAT;
@@ -329,8 +339,6 @@ typedef char fstring[FSTRING_LEN];
 
 
 /* add varargs prototypes with printf checking */
-/*PRINTFLIKE2 */
-int fdprintf(int , const char *, ...) PRINTF_ATTRIBUTE(2,3);
 /*PRINTFLIKE1 */
 int d_printf(const char *, ...) PRINTF_ATTRIBUTE(1,2);
 /*PRINTFLIKE2 */
@@ -338,8 +346,6 @@ int d_fprintf(FILE *f, const char *, ...) PRINTF_ATTRIBUTE(2,3);
 
 /* PRINTFLIKE2 */
 int fstr_sprintf(fstring s, const char *fmt, ...) PRINTF_ATTRIBUTE(2,3);
-
-int smb_xvasprintf(char **ptr, const char *format, va_list ap) PRINTF_ATTRIBUTE(2,0);
 
 int asprintf_strupper_m(char **strp, const char *fmt, ...) PRINTF_ATTRIBUTE(2,3);
 char *talloc_asprintf_strupper_m(TALLOC_CTX *t, const char *fmt, ...) PRINTF_ATTRIBUTE(2,3);
@@ -361,13 +367,6 @@ char *talloc_asprintf_strupper_m(TALLOC_CTX *t, const char *fmt, ...) PRINTF_ATT
 #undef FALSE
 #endif
 #define FALSE __ERROR__XX__DONT_USE_FALSE
-
-/* If we have blacklisted mmap() try to avoid using it accidentally by
-   undefining the HAVE_MMAP symbol. */
-
-#ifdef MMAP_BLACKLIST
-#undef HAVE_MMAP
-#endif
 
 void dump_core(void) _NORETURN_;
 void exit_server(const char *const reason) _NORETURN_;

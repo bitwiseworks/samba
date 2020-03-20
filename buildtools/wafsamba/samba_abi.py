@@ -1,7 +1,13 @@
 # functions for handling ABI checking of libraries
 
-import Options, Utils, os, Logs, samba_utils, sys, Task, fnmatch, re, Build
-from TaskGen import feature, before, after
+import os
+import sys
+import re
+import fnmatch
+
+from waflib import Options, Utils, Logs, Task, Build, Errors
+from waflib.TaskGen import feature, before, after
+from wafsamba import samba_utils
 
 # these type maps cope with platform specific names for common types
 # please add new type mappings into the list below
@@ -10,7 +16,7 @@ abi_type_maps = {
     'struct __va_list_tag *' : 'va_list'
     }
 
-version_key = lambda x: map(int, x.split("."))
+version_key = lambda x: list(map(int, x.split(".")))
 
 def normalise_signature(sig):
     '''normalise a signature from gdb'''
@@ -66,9 +72,7 @@ def parse_sigs(sigs, abi_match):
 
 def save_sigs(sig_file, parsed_sigs):
     '''save ABI signatures to a file'''
-    sigs = ''
-    for s in sorted(parsed_sigs.keys()):
-        sigs += '%s: %s\n' % (s, parsed_sigs[s])
+    sigs = "".join('%s: %s\n' % (s, parsed_sigs[s]) for s in sorted(parsed_sigs.keys()))
     return samba_utils.save_file(sig_file, sigs, create_dir=True)
 
 
@@ -79,7 +83,7 @@ def abi_check_task(self):
     libpath = self.inputs[0].abspath(self.env)
     libname = os.path.basename(libpath)
 
-    sigs = Utils.cmd_output([abi_gen, libpath])
+    sigs = samba_utils.get_string(Utils.cmd_output([abi_gen, libpath]))
     parsed_sigs = parse_sigs(sigs, self.ABI_MATCH)
 
     sig_file = self.ABI_FILE
@@ -87,7 +91,7 @@ def abi_check_task(self):
     old_sigs = samba_utils.load_file(sig_file)
     if old_sigs is None or Options.options.ABI_UPDATE:
         if not save_sigs(sig_file, parsed_sigs):
-            raise Utils.WafError('Failed to save ABI file "%s"' % sig_file)
+            raise Errors.WafError('Failed to save ABI file "%s"' % sig_file)
         Logs.warn('Generated ABI signatures %s' % sig_file)
         return
 
@@ -112,14 +116,14 @@ def abi_check_task(self):
             got_error = True
 
     if got_error:
-        raise Utils.WafError('ABI for %s has changed - please fix library version then build with --abi-update\nSee http://wiki.samba.org/index.php/Waf#ABI_Checking for more information\nIf you have not changed any ABI, and your platform always gives this error, please configure with --abi-check-disable to skip this check' % libname)
+        raise Errors.WafError('ABI for %s has changed - please fix library version then build with --abi-update\nSee http://wiki.samba.org/index.php/Waf#ABI_Checking for more information\nIf you have not changed any ABI, and your platform always gives this error, please configure with --abi-check-disable to skip this check' % libname)
 
 
-t = Task.task_type_from_func('abi_check', abi_check_task, color='BLUE', ext_in='.bin')
+t = Task.task_factory('abi_check', abi_check_task, color='BLUE', ext_in='.bin')
 t.quiet = True
 # allow "waf --abi-check" to force re-checking the ABI
 if '--abi-check' in sys.argv:
-    Task.always_run(t)
+    t.always_run = True
 
 @after('apply_link')
 @feature('abi_check')
@@ -184,8 +188,8 @@ def abi_write_vscript(f, libname, current_version, versions, symmap, abi_match):
         f.write("}%s;\n\n" % last_key)
         last_key = " %s" % symver
     f.write("%s {\n" % current_version)
-    local_abi = filter(lambda x: x[0] == '!', abi_match)
-    global_abi = filter(lambda x: x[0] != '!', abi_match)
+    local_abi = list(filter(lambda x: x[0] == '!', abi_match))
+    global_abi = list(filter(lambda x: x[0] != '!', abi_match))
     f.write("\tglobal:\n")
     if len(global_abi) > 0:
         for x in global_abi:

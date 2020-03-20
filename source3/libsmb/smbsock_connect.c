@@ -376,6 +376,11 @@ struct tevent_req *smbsock_connect_send(TALLOC_CTX *mem_ctx,
 	tevent_req_set_cleanup_fn(req, smbsock_connect_cleanup);
 
 	if (port == NBT_SMB_PORT) {
+		if (lp_disable_netbios()) {
+			tevent_req_nterror(req, NT_STATUS_NOT_SUPPORTED);
+			return tevent_req_post(req, ev);
+		}
+
 		state->req_139 = nb_connect_send(state, state->ev, state->addr,
 						 state->called_name,
 						 state->called_type,
@@ -409,6 +414,13 @@ struct tevent_req *smbsock_connect_send(TALLOC_CTX *mem_ctx,
 	}
 	tevent_req_set_callback(state->req_445, smbsock_connect_connected,
 				req);
+
+	/*
+	 * Check for disable_netbios
+	 */
+	if (lp_disable_netbios()) {
+		return req;
+	}
 
 	/*
 	 * After 5 msecs, fire the 139 (NBT) request
@@ -745,8 +757,8 @@ static void smbsock_any_connect_connected(struct tevent_req *subreq)
 	struct smbsock_any_connect_state *state = tevent_req_data(
 		req, struct smbsock_any_connect_state);
 	NTSTATUS status;
-	int fd;
-	uint16_t chosen_port;
+	int fd = 0;
+	uint16_t chosen_port = 0;
 	size_t i;
 	size_t chosen_index = 0;
 

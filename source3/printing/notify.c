@@ -91,19 +91,23 @@ again:
 
 	/* Pack header */
 
-	len += tdb_pack(buf + len, buflen - len, "f", msg->printer);
+	len += tdb_pack(buf ? buf + len : NULL,
+			buf ? buflen - len : 0, "f", msg->printer);
 
-	len += tdb_pack(buf + len, buflen - len, "ddddddd",
+	len += tdb_pack(buf ? buf + len : NULL,
+			buf ? buflen - len : 0, "ddddddd",
 			(uint32_t)q->tv.tv_sec, (uint32_t)q->tv.tv_usec,
 			msg->type, msg->field, msg->id, msg->len, msg->flags);
 
 	/* Pack data */
 
 	if (msg->len == 0)
-		len += tdb_pack(buf + len, buflen - len, "dd",
+		len += tdb_pack(buf ? buf + len : NULL,
+				buf ? buflen - len : 0, "dd",
 				msg->notify.value[0], msg->notify.value[1]);
 	else
-		len += tdb_pack(buf + len, buflen - len, "B",
+		len += tdb_pack(buf ? buf + len : NULL,
+				buf ? buflen - len : 0, "B",
 				msg->len, msg->notify.data);
 
 	if (buflen != len) {
@@ -419,7 +423,9 @@ void notify_printer_status(struct tevent_context *ev,
 			   struct messaging_context *msg_ctx,
 			   int snum, uint32_t status)
 {
-	const char *sharename = lp_servicename(talloc_tos(), snum);
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+	const char *sharename = lp_servicename(talloc_tos(), lp_sub, snum);
 
 	if (sharename)
 		notify_printer_status_byname(ev, msg_ctx, sharename, status);
@@ -507,7 +513,9 @@ void notify_printer_driver(struct tevent_context *ev,
 			   struct messaging_context *msg_ctx,
 			   int snum, const char *driver_name)
 {
-	const char *sharename = lp_servicename(talloc_tos(), snum);
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+	const char *sharename = lp_servicename(talloc_tos(), lp_sub, snum);
 
 	send_notify_field_buffer(
 		ev, msg_ctx,
@@ -519,7 +527,9 @@ void notify_printer_comment(struct tevent_context *ev,
 			    struct messaging_context *msg_ctx,
 			    int snum, const char *comment)
 {
-	const char *sharename = lp_servicename(talloc_tos(), snum);
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+	const char *sharename = lp_servicename(talloc_tos(), lp_sub, snum);
 
 	send_notify_field_buffer(
 		ev, msg_ctx,
@@ -531,7 +541,9 @@ void notify_printer_sharename(struct tevent_context *ev,
 			      struct messaging_context *msg_ctx,
 			      int snum, const char *share_name)
 {
-	const char *sharename = lp_servicename(talloc_tos(), snum);
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+	const char *sharename = lp_servicename(talloc_tos(), lp_sub, snum);
 
 	send_notify_field_buffer(
 		ev, msg_ctx,
@@ -543,7 +555,9 @@ void notify_printer_printername(struct tevent_context *ev,
 				struct messaging_context *msg_ctx,
 				int snum, const char *printername)
 {
-	const char *sharename = lp_servicename(talloc_tos(), snum);
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+	const char *sharename = lp_servicename(talloc_tos(), lp_sub, snum);
 
 	send_notify_field_buffer(
 		ev, msg_ctx,
@@ -555,7 +569,9 @@ void notify_printer_port(struct tevent_context *ev,
 			 struct messaging_context *msg_ctx,
 			 int snum, const char *port_name)
 {
-	const char *sharename = lp_servicename(talloc_tos(), snum);
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+	const char *sharename = lp_servicename(talloc_tos(), lp_sub, snum);
 
 	send_notify_field_buffer(
 		ev, msg_ctx,
@@ -567,7 +583,9 @@ void notify_printer_location(struct tevent_context *ev,
 			     struct messaging_context *msg_ctx,
 			     int snum, const char *location)
 {
-	const char *sharename = lp_servicename(talloc_tos(), snum);
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+	const char *sharename = lp_servicename(talloc_tos(), lp_sub, snum);
 
 	send_notify_field_buffer(
 		ev, msg_ctx,
@@ -579,7 +597,9 @@ void notify_printer_sepfile(struct tevent_context *ev,
 			    struct messaging_context *msg_ctx,
 			    int snum, const char *sepfile)
 {
-	const char *sharename = lp_servicename(talloc_tos(), snum);
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+	const char *sharename = lp_servicename(talloc_tos(), lp_sub, snum);
 
 	send_notify_field_buffer(
 		ev, msg_ctx,

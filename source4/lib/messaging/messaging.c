@@ -35,7 +35,7 @@
 #include "../lib/util/tevent_ntstatus.h"
 #include "lib/param/param.h"
 #include "lib/util/server_id_db.h"
-#include "lib/util/talloc_report.h"
+#include "lib/util/talloc_report_printf.h"
 #include "../source3/lib/messages_dgm.h"
 #include "../source3/lib/messages_dgm_ref.h"
 #include "../source3/lib/messages_util.h"
@@ -67,48 +67,80 @@ struct dispatch_fn {
 
 /* an individual message */
 
-static void irpc_handler(struct imessaging_context *, void *,
-			 uint32_t, struct server_id, DATA_BLOB *);
+static void irpc_handler(struct imessaging_context *,
+			 void *,
+			 uint32_t,
+			 struct server_id,
+			 size_t,
+			 int *,
+			 DATA_BLOB *);
 
 
 /*
  A useful function for testing the message system.
 */
-static void ping_message(struct imessaging_context *msg, void *private_data,
-			 uint32_t msg_type, struct server_id src, DATA_BLOB *data)
+static void ping_message(struct imessaging_context *msg,
+			 void *private_data,
+			 uint32_t msg_type,
+			 struct server_id src,
+			 size_t num_fds,
+			 int *fds,
+			 DATA_BLOB *data)
 {
 	struct server_id_buf idbuf;
+
+	if (num_fds != 0) {
+		DBG_WARNING("Received %zu fds, ignoring message\n", num_fds);
+		return;
+	}
+
 	DEBUG(1,("INFO: Received PING message from server %s [%.*s]\n",
 		 server_id_str_buf(src, &idbuf), (int)data->length,
 		 data->data?(const char *)data->data:""));
 	imessaging_send(msg, src, MSG_PONG, data);
 }
 
-static void pool_message(struct imessaging_context *msg, void *private_data,
-			 uint32_t msg_type, struct server_id src,
+static void pool_message(struct imessaging_context *msg,
+			 void *private_data,
+			 uint32_t msg_type,
+			 struct server_id src,
+			 size_t num_fds,
+			 int *fds,
 			 DATA_BLOB *data)
 {
-	char *report;
+	FILE *f = NULL;
 
-	report = talloc_report_str(msg, NULL);
-
-	if (report != NULL) {
-		DATA_BLOB blob = { .data = (uint8_t *)report,
-				   .length = talloc_get_size(report) - 1};
-		imessaging_send(msg, src, MSG_POOL_USAGE, &blob);
+	if (num_fds != 1) {
+		DBG_WARNING("Received %zu fds, ignoring message\n", num_fds);
+		return;
 	}
-	talloc_free(report);
+
+	f = fdopen(fds[0], "w");
+	if (f == NULL) {
+		DBG_DEBUG("fopen failed: %s\n", strerror(errno));
+		return;
+	}
+
+	talloc_full_report_printf(NULL, f);
+	fclose(f);
 }
 
 static void ringbuf_log_msg(struct imessaging_context *msg,
 			    void *private_data,
 			    uint32_t msg_type,
 			    struct server_id src,
+			    size_t num_fds,
+			    int *fds,
 			    DATA_BLOB *data)
 {
 	char *log = debug_get_ringbuf();
 	size_t logsize = debug_get_ringbuf_size();
 	DATA_BLOB blob;
+
+	if (num_fds != 0) {
+		DBG_WARNING("Received %zu fds, ignoring message\n", num_fds);
+		return;
+	}
 
 	if (log == NULL) {
 		log = discard_const_p(char, "*disabled*\n");
@@ -119,6 +151,82 @@ static void ringbuf_log_msg(struct imessaging_context *msg,
 	blob.length = logsize;
 
 	imessaging_send(msg, src, MSG_RINGBUF_LOG, &blob);
+}
+
+/****************************************************************************
+ Receive a "set debug level" message.
+****************************************************************************/
+
+static void debug_imessage(struct imessaging_context *msg_ctx,
+			   void *private_data,
+			   uint32_t msg_type,
+			   struct server_id src,
+			   size_t num_fds,
+			   int *fds,
+			   DATA_BLOB *data)
+{
+	const char *params_str = (const char *)data->data;
+	struct server_id_buf src_buf;
+	struct server_id dst = imessaging_get_server_id(msg_ctx);
+	struct server_id_buf dst_buf;
+
+	if (num_fds != 0) {
+		DBG_WARNING("Received %zu fds, ignoring message\n", num_fds);
+		return;
+	}
+
+	/* Check, it's a proper string! */
+	if (params_str[(data->length)-1] != '\0') {
+		DBG_ERR("Invalid debug message from pid %s to pid %s\n",
+			server_id_str_buf(src, &src_buf),
+			server_id_str_buf(dst, &dst_buf));
+		return;
+	}
+
+	DBG_ERR("INFO: Remote set of debug to `%s' (pid %s from pid %s)\n",
+		params_str,
+		server_id_str_buf(dst, &dst_buf),
+		server_id_str_buf(src, &src_buf));
+
+	debug_parse_levels(params_str);
+}
+
+/****************************************************************************
+ Return current debug level.
+****************************************************************************/
+
+static void debuglevel_imessage(struct imessaging_context *msg_ctx,
+				void *private_data,
+				uint32_t msg_type,
+				struct server_id src,
+				size_t num_fds,
+				int *fds,
+				DATA_BLOB *data)
+{
+	char *message = debug_list_class_names_and_levels();
+	DATA_BLOB blob = data_blob_null;
+	struct server_id_buf src_buf;
+	struct server_id dst = imessaging_get_server_id(msg_ctx);
+	struct server_id_buf dst_buf;
+
+	if (num_fds != 0) {
+		DBG_WARNING("Received %zu fds, ignoring message\n", num_fds);
+		return;
+	}
+
+	DBG_DEBUG("Received REQ_DEBUGLEVEL message (pid %s from pid %s)\n",
+		  server_id_str_buf(dst, &dst_buf),
+		  server_id_str_buf(src, &src_buf));
+
+	if (message == NULL) {
+		DBG_ERR("debug_list_class_names_and_levels returned NULL\n");
+		return;
+	}
+
+	blob = data_blob_string_const_null(message);
+	imessaging_send(msg_ctx, src, MSG_DEBUGLEVEL, &blob);
+
+	TALLOC_FREE(message);
 }
 
 /*
@@ -248,6 +356,48 @@ static void imessaging_dgm_recv(struct tevent_context *ev,
 /* Keep a list of imessaging contexts */
 static struct imessaging_context *msg_ctxs;
 
+/*
+ * A process has terminated, clean-up any names it has registered.
+ */
+NTSTATUS imessaging_process_cleanup(
+	struct imessaging_context *msg_ctx,
+	pid_t pid)
+{
+	struct irpc_name_records *names = NULL;
+	uint32_t i = 0;
+	uint32_t j = 0;
+	TALLOC_CTX *mem_ctx = talloc_new(NULL);
+
+	if (mem_ctx == NULL) {
+		DBG_ERR("OOM unable to clean up messaging for process (%d)\n",
+			pid);
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	names = irpc_all_servers(msg_ctx, mem_ctx);
+	if (names == NULL) {
+		TALLOC_FREE(mem_ctx);
+		return NT_STATUS_OK;
+	}
+	for (i = 0; i < names->num_records; i++) {
+		for (j = 0; j < names->names[i]->count; j++) {
+			if (names->names[i]->ids[j].pid == pid) {
+				int ret = server_id_db_prune_name(
+					msg_ctx->names,
+					names->names[i]->name,
+					names->names[i]->ids[j]);
+				if (ret != 0 && ret != ENOENT) {
+					TALLOC_FREE(mem_ctx);
+					return map_nt_error_from_unix_common(
+					    ret);
+				}
+			}
+		}
+	}
+	TALLOC_FREE(mem_ctx);
+	return NT_STATUS_OK;
+}
+
 static int imessaging_context_destructor(struct imessaging_context *msg)
 {
 	DLIST_REMOVE(msg_ctxs, msg);
@@ -319,7 +469,7 @@ NTSTATUS imessaging_reinit_all(void)
 /*
   create the listening socket and setup the dispatcher
 */
-static struct imessaging_context *imessaging_init_internal(TALLOC_CTX *mem_ctx,
+struct imessaging_context *imessaging_init(TALLOC_CTX *mem_ctx,
 					   struct loadparm_context *lp_ctx,
 					   struct server_id server_id,
 					   struct tevent_context *ev)
@@ -418,10 +568,30 @@ static struct imessaging_context *imessaging_init_internal(TALLOC_CTX *mem_ctx,
 	if (!NT_STATUS_IS_OK(status)) {
 		goto fail;
 	}
+	status = imessaging_register(msg, NULL, MSG_DEBUG,
+				     debug_imessage);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto fail;
+	}
+	status = imessaging_register(msg, NULL, MSG_REQ_DEBUGLEVEL,
+				     debuglevel_imessage);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto fail;
+	}
 	status = IRPC_REGISTER(msg, irpc, IRPC_UPTIME, irpc_uptime, msg);
 	if (!NT_STATUS_IS_OK(status)) {
 		goto fail;
 	}
+#if defined(DEVELOPER) || defined(ENABLE_SELFTEST)
+	/*
+	 * Register handlers for messages specific to developer and
+	 * self test builds
+	 */
+	status = imessaging_register_extra_handlers(msg);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto fail;
+	}
+#endif /* defined(DEVELOPER) || defined(ENABLE_SELFTEST) */
 
 	DLIST_ADD(msg_ctxs, msg);
 
@@ -454,6 +624,10 @@ static void imessaging_post_handler(struct tevent_context *ev,
 	struct imessaging_post_state *state = talloc_get_type_abort(
 		private_data, struct imessaging_post_state);
 
+	if (state == NULL) {
+		return;
+	}
+
 	/*
 	 * In usecases like using messaging_client_init() with irpc processing
 	 * we may free the imessaging_context during the messaging handler.
@@ -469,10 +643,6 @@ static void imessaging_post_handler(struct tevent_context *ev,
 
 	imessaging_dgm_recv(ev, state->buf, state->buf_len, NULL, 0,
 			    state->msg_ctx);
-
-	if (state == NULL) {
-		return;
-	}
 
 	state->busy_ref = NULL;
 	TALLOC_FREE(state);
@@ -527,13 +697,6 @@ static void imessaging_dgm_recv(struct tevent_context *ev,
 		return;
 	}
 
-	if (num_fds != 0) {
-		/*
-		 * Source4 based messaging does not expect fd's yet
-		 */
-		return;
-	}
-
 	if (ev != msg->ev) {
 		int ret;
 		ret = imessaging_post_self(msg, buf, buf_len);
@@ -563,7 +726,13 @@ static void imessaging_dgm_recv(struct tevent_context *ev,
 
 		for (; d; d = next) {
 			next = d->next;
-			d->fn(msg, d->private_data, d->msg_type, src, &data);
+			d->fn(msg,
+			      d->private_data,
+			      d->msg_type,
+			      src,
+			      num_fds,
+			      fds,
+			      &data);
 		}
 	} else {
 		DEBUG(10, ("%s: Ignoring type=0x%x dst %s, I am %s, \n",
@@ -571,30 +740,6 @@ static void imessaging_dgm_recv(struct tevent_context *ev,
 			   server_id_str_buf(dst, &dstbuf),
 			   server_id_str_buf(msg->server_id, &srcbuf)));
 	}
-}
-
-struct imessaging_context *imessaging_init(TALLOC_CTX *mem_ctx,
-					   struct loadparm_context *lp_ctx,
-					   struct server_id server_id,
-					   struct tevent_context *ev)
-{
-	if (ev == NULL) {
-		return NULL;
-	}
-
-	if (tevent_context_is_wrapper(ev)) {
-		/*
-		 * This is really a programmer error!
-		 *
-		 * The main/raw tevent context should
-		 * have been registered first!
-		 */
-		DBG_ERR("Should not be used with a wrapper tevent context\n");
-		errno = EINVAL;
-		return NULL;
-	}
-
-	return imessaging_init_internal(mem_ctx, lp_ctx, server_id, ev);
 }
 
 /*
@@ -613,7 +758,7 @@ struct imessaging_context *imessaging_client_init(TALLOC_CTX *mem_ctx,
 	/* This is because we are not in the s3 serverid database */
 	id.unique_id = SERVERID_UNIQUE_ID_NOT_TO_VERIFY;
 
-	return imessaging_init_internal(mem_ctx, lp_ctx, id, ev);
+	return imessaging_init(mem_ctx, lp_ctx, id, ev);
 }
 /*
   a list of registered irpc server functions
@@ -782,11 +927,21 @@ failed:
 /*
   handle an incoming irpc message
 */
-static void irpc_handler(struct imessaging_context *msg_ctx, void *private_data,
-			 uint32_t msg_type, struct server_id src, DATA_BLOB *packet)
+static void irpc_handler(struct imessaging_context *msg_ctx,
+			 void *private_data,
+			 uint32_t msg_type,
+			 struct server_id src,
+			 size_t num_fds,
+			 int *fds,
+			 DATA_BLOB *packet)
 {
 	struct irpc_message *m;
 	enum ndr_err_code ndr_err;
+
+	if (num_fds != 0) {
+		DBG_WARNING("Received %zu fds, ignoring message\n", num_fds);
+		return;
+	}
 
 	m = talloc(msg_ctx, struct irpc_message);
 	if (m == NULL) goto failed;

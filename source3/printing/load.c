@@ -27,6 +27,8 @@ auto-load some homes and printer services
 ***************************************************************************/
 static void add_auto_printers(void)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	const char *p;
 	int pnum = lp_servicenumber(PRINTERS_NAME);
 	char *str;
@@ -40,7 +42,7 @@ static void add_auto_printers(void)
 	if (pnum < 0)
 		return;
 
-	auto_serv = lp_auto_services(talloc_tos());
+	auto_serv = lp_auto_services(talloc_tos(), lp_sub);
 	str = SMB_STRDUP(auto_serv);
 	TALLOC_FREE(auto_serv);
 	if (str == NULL) {
@@ -64,7 +66,9 @@ load automatic printer services from pre-populated pcap cache
 ***************************************************************************/
 void load_printers(void)
 {
-	SMB_ASSERT(pcap_cache_loaded(NULL));
+	if (!pcap_cache_loaded(NULL)) {
+		return;
+	}
 
 	add_auto_printers();
 

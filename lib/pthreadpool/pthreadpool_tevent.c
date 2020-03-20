@@ -18,6 +18,7 @@
  */
 
 #include "replace.h"
+#include "system/filesys.h"
 #include "pthreadpool_tevent.h"
 #include "pthreadpool.h"
 #include "lib/util/tevent_unix.h"
@@ -102,17 +103,34 @@ int pthreadpool_tevent_init(TALLOC_CTX *mem_ctx, unsigned max_threads,
 	return 0;
 }
 
+size_t pthreadpool_tevent_max_threads(struct pthreadpool_tevent *pool)
+{
+	if (pool->pool == NULL) {
+		return 0;
+	}
+
+	return pthreadpool_max_threads(pool->pool);
+}
+
+size_t pthreadpool_tevent_queued_jobs(struct pthreadpool_tevent *pool)
+{
+	if (pool->pool == NULL) {
+		return 0;
+	}
+
+	return pthreadpool_queued_jobs(pool->pool);
+}
+
 static int pthreadpool_tevent_destructor(struct pthreadpool_tevent *pool)
 {
 	struct pthreadpool_tevent_job_state *state, *next;
 	struct pthreadpool_tevent_glue *glue = NULL;
 	int ret;
 
-	ret = pthreadpool_destroy(pool->pool);
+	ret = pthreadpool_stop(pool->pool);
 	if (ret != 0) {
 		return ret;
 	}
-	pool->pool = NULL;
 
 	for (state = pool->jobs; state != NULL; state = next) {
 		next = state->next;
@@ -130,6 +148,12 @@ static int pthreadpool_tevent_destructor(struct pthreadpool_tevent *pool)
 		TALLOC_FREE(glue);
 	}
 	pool->glue_list = NULL;
+
+	ret = pthreadpool_destroy(pool->pool);
+	if (ret != 0) {
+		return ret;
+	}
+	pool->pool = NULL;
 
 	return 0;
 }
@@ -223,7 +247,7 @@ static int pthreadpool_tevent_register_ev(struct pthreadpool_tevent *pool,
 	glue->ev_link = ev_link;
 
 #ifdef HAVE_PTHREAD
-	glue->tctx = tevent_threaded_context_create(pool, ev);
+	glue->tctx = tevent_threaded_context_create(glue, ev);
 	if (glue->tctx == NULL) {
 		TALLOC_FREE(ev_link);
 		TALLOC_FREE(glue);
@@ -283,14 +307,22 @@ struct tevent_req *pthreadpool_tevent_job_send(
 	state->fn = fn;
 	state->private_data = private_data;
 
+	if (pool == NULL) {
+		tevent_req_error(req, EINVAL);
+		return tevent_req_post(req, ev);
+	}
+	if (pool->pool == NULL) {
+		tevent_req_error(req, EINVAL);
+		return tevent_req_post(req, ev);
+	}
+
 	state->im = tevent_create_immediate(state);
 	if (tevent_req_nomem(state->im, req)) {
 		return tevent_req_post(req, ev);
 	}
 
 	ret = pthreadpool_tevent_register_ev(pool, ev);
-	if (ret != 0) {
-		tevent_req_error(req, errno);
+	if (tevent_req_error(req, ret)) {
 		return tevent_req_post(req, ev);
 	}
 

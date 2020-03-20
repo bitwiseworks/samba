@@ -330,7 +330,7 @@ static int transaction_write_existing(struct tdb_context *tdb, tdb_off_t off,
 		}
 	}
 
-	if (len == 0) {
+	if (len == 0 || buf == NULL) {
 		return 0;
 	}
 
@@ -378,6 +378,11 @@ static void transaction_next_hash_chain(struct tdb_context *tdb, uint32_t *chain
 static int transaction_oob(struct tdb_context *tdb, tdb_off_t off,
 			   tdb_len_t len, int probe)
 {
+	/*
+	 * This duplicates functionality from tdb_oob(). Don't remove:
+	 * we still have direct callers of tdb->methods->tdb_oob()
+	 * inside transaction.c.
+	 */
 	if (off + len >= off && off + len <= tdb->map_size) {
 		return 0;
 	}
@@ -524,7 +529,7 @@ static int _tdb_transaction_start(struct tdb_context *tdb,
 
 	/* make sure we know about any file expansions already done by
 	   anyone else */
-	tdb->methods->tdb_oob(tdb, tdb->map_size, 1, 1);
+	tdb_oob(tdb, tdb->map_size, 1, 1);
 	tdb->transaction->old_map_size = tdb->map_size;
 
 	/* finally hook the io methods, replacing them with
@@ -610,7 +615,8 @@ static int _tdb_transaction_cancel(struct tdb_context *tdb)
 
 	/* free all the transaction blocks */
 	for (i=0;i<tdb->transaction->num_blocks;i++) {
-		if (tdb->transaction->blocks[i] != NULL) {
+		if ((tdb->transaction->blocks != NULL) &&
+		    tdb->transaction->blocks[i] != NULL) {
 			free(tdb->transaction->blocks[i]);
 		}
 	}
@@ -1209,7 +1215,29 @@ _PUBLIC_ int tdb_transaction_commit(struct tdb_context *tdb)
 	_tdb_transaction_cancel(tdb);
 
 	if (need_repack) {
-		return tdb_repack(tdb);
+		int ret = tdb_repack(tdb);
+		if (ret != 0) {
+			TDB_LOG((tdb, TDB_DEBUG_FATAL,
+				 __location__ " Failed to repack database (not fatal)\n"));
+		}
+		/*
+		 * Ignore the error.
+		 *
+		 * Why?
+		 *
+		 * We just committed to the DB above, so anything
+		 * written during the transaction is committed, the
+		 * caller needs to know that the long-term state was
+		 * successfully modified.
+		 *
+		 * tdb_repack is an optimization that can fail for
+		 * reasons like lock ordering and we cannot recover
+		 * the transaction lock at this point, having released
+		 * it above.
+		 *
+		 * If we return a failure the caller thinks the
+		 * transaction was rolled back.
+		 */
 	}
 
 	return 0;

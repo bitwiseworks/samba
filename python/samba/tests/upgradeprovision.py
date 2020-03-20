@@ -29,6 +29,7 @@ from ldb import SCOPE_BASE
 import samba.tests
 from samba.dcerpc import security
 
+
 def dummymessage(a=None, b=None):
     pass
 
@@ -56,9 +57,9 @@ class UpgradeProvisionTestCase(TestCaseInTempDir):
         self.assertEquals(dn_sort("dc=tata,dc=toto", "dc=toto"), 1)
         self.assertEquals(dn_sort("dc=zata", "dc=tata"), 1)
         self.assertEquals(dn_sort("dc=toto,dc=tata",
-                                    "cn=foo,dc=toto,dc=tata"), -1)
+                                  "cn=foo,dc=toto,dc=tata"), -1)
         self.assertEquals(dn_sort("cn=bar, dc=toto,dc=tata",
-                                    "cn=foo, dc=toto,dc=tata"), -1)
+                                  "cn=foo, dc=toto,dc=tata"), -1)
 
     def test_get_diff_sds(self):
         domsid = security.dom_sid('S-1-5-21')
@@ -137,7 +138,7 @@ class UpdateSecretsTests(samba.tests.TestCaseInTempDir):
         # Test that updating an already up-to-date secretsdb works fine
         self.secretsdb = self._getCurrentFormatDb()
         self.assertEquals(None,
-            update_secrets(self.referencedb, self.secretsdb, dummymessage))
+                          update_secrets(self.referencedb, self.secretsdb, dummymessage))
 
     def test_update_modules(self):
         empty_db = self._getEmptyDb()
@@ -152,5 +153,3 @@ class UpdateSecretsTests(samba.tests.TestCaseInTempDir):
             if os.path.exists(path):
                 os.unlink(path)
         super(UpdateSecretsTests, self).tearDown()
-
-

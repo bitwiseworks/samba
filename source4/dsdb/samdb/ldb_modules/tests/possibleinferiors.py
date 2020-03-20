@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Unix SMB/CIFS implementation.
 # Copyright (C) Andrew Tridgell 2009
@@ -50,10 +50,11 @@ if (len(args) > 1):
 else:
     objectclass = None
 
+
 def uniq_list(alist):
     """return a unique list"""
     set = {}
-    return [set.setdefault(e,e) for e in alist if e not in set]
+    return [set.setdefault(e, e) for e in alist if e not in set]
 
 
 lp_ctx = sambaopts.get_loadparm()
@@ -75,13 +76,14 @@ rootDse = res[0]
 
 schema_base = rootDse["schemaNamingContext"][0]
 
+
 def possible_inferiors_search(db, oc):
     """return the possible inferiors via a search for the possibleInferiors attribute"""
     res = db.search(base=schema_base,
                     expression=("ldapDisplayName=%s" % oc),
                     attrs=["possibleInferiors"])
 
-    poss=[]
+    poss = []
     if len(res) == 0 or res[0].get("possibleInferiors") is None:
         return poss
     for item in res[0]["possibleInferiors"]:
@@ -89,7 +91,6 @@ def possible_inferiors_search(db, oc):
     poss = uniq_list(poss)
     poss.sort()
     return poss
-
 
 
 # see [MS-ADTS] section 3.1.1.4.5.21
@@ -108,9 +109,10 @@ def supclasses(classinfo, oc):
     res = classinfo[oc]["subClassOf"]
     for r in res:
         list.append(r)
-        list.extend(supclasses(classinfo,r))
+        list.extend(supclasses(classinfo, r))
     classinfo[oc]["SUPCLASSES"] = list
     return list
+
 
 def auxclasses(classinfo, oclist):
     list = []
@@ -130,11 +132,13 @@ def auxclasses(classinfo, oclist):
             list.extend(list2)
     return list
 
+
 def subclasses(classinfo, oclist):
     list = []
     for oc in oclist:
         list.extend(classinfo[oc]["SUBCLASSES"])
     return list
+
 
 def posssuperiors(classinfo, oclist):
     list = []
@@ -156,6 +160,7 @@ def posssuperiors(classinfo, oclist):
             list.extend(list2)
     return list
 
+
 def pull_classinfo(db):
     """At startup we build a classinfo[] dictionary that holds all the information needed to construct the possible inferiors"""
     classinfo = {}
@@ -175,9 +180,9 @@ def pull_classinfo(db):
             classinfo[name]["objectClassCategory"] = int(r["objectClassCategory"][0])
         else:
             classinfo[name]["objectClassCategory"] = 0
-        for a in [ "possSuperiors", "systemPossSuperiors",
-                   "auxiliaryClass", "systemAuxiliaryClass",
-                   "subClassOf" ]:
+        for a in ["possSuperiors", "systemPossSuperiors",
+                  "auxiliaryClass", "systemAuxiliaryClass",
+                  "subClassOf"]:
             classinfo[name][a] = []
             if r.get(a):
                 for i in r[a]:
@@ -202,11 +207,13 @@ def pull_classinfo(db):
 
     return classinfo
 
+
 def is_in_list(list, c):
     for a in list:
         if c == a:
             return True
     return False
+
 
 def possible_inferiors_constructed(db, classinfo, c):
     list = []
@@ -221,6 +228,7 @@ def possible_inferiors_constructed(db, classinfo, c):
     list.sort()
     return list
 
+
 def test_class(db, classinfo, oc):
     """test to see if one objectclass returns the correct possibleInferiors"""
     print("test: objectClass.%s" % oc)
@@ -231,26 +239,28 @@ def test_class(db, classinfo, oc):
         print("Returned incorrect list for objectclass %s" % oc)
         print("search:      %s" % poss1)
         print("constructed: %s" % poss2)
-        for i in range(0,min(len(poss1),len(poss2))):
+        for i in range(0, min(len(poss1), len(poss2))):
             print("%30s %30s" % (poss1[i], poss2[i]))
         print("]")
         sys.exit(1)
     else:
         print("success: objectClass.%s" % oc)
 
+
 def get_object_classes(db):
     """return a list of all object classes"""
-    list=[]
+    list = []
     for item in classinfo:
         list.append(item)
     return list
+
 
 classinfo = pull_classinfo(db)
 
 if objectclass is None:
     for oc in get_object_classes(db):
-        test_class(db,classinfo,oc)
+        test_class(db, classinfo, oc)
 else:
-    test_class(db,classinfo,objectclass)
+    test_class(db, classinfo, objectclass)
 
 print("Lists match OK")

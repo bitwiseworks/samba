@@ -733,7 +733,7 @@ WERROR regdb_init(void)
 		return WERR_OK;
 	}
 
-	db_path = state_path("registry.tdb");
+	db_path = state_path(talloc_tos(), "registry.tdb");
 	if (db_path == NULL) {
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
@@ -772,9 +772,9 @@ WERROR regdb_init(void)
 	status = dbwrap_fetch_int32_bystring(regdb, REGDB_VERSION_KEYNAME,
 					     &vers_id);
 	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(10, ("regdb_init: registry version uninitialized "
-			   "(got %d), initializing to version %d\n",
-			   vers_id, REGDB_VERSION_V1));
+		DBG_DEBUG("Reading registry version failed: %s, "
+			  "initializing to version %d\n",
+			  nt_errstr(status), REGDB_VERSION_V1);
 
 		/*
 		 * There was a regdb format version prior to version 1
@@ -850,20 +850,22 @@ WERROR regdb_init(void)
 
 WERROR regdb_open( void )
 {
-	WERROR result = WERR_OK;
-	char *db_path;
+	WERROR result;
+	char *db_path = NULL;
 	int saved_errno;
 
 	if ( regdb ) {
 		DEBUG(10, ("regdb_open: incrementing refcount (%d->%d)\n",
 			   regdb_refcount, regdb_refcount+1));
 		regdb_refcount++;
-		return WERR_OK;
+		result = WERR_OK;
+		goto done;
 	}
 
-	db_path = state_path("registry.tdb");
+	db_path = state_path(talloc_tos(), "registry.tdb");
 	if (db_path == NULL) {
-		return WERR_NOT_ENOUGH_MEMORY;
+		result = WERR_NOT_ENOUGH_MEMORY;
+		goto done;
 	}
 
 	become_root();
@@ -877,16 +879,17 @@ WERROR regdb_open( void )
 		result = ntstatus_to_werror(map_nt_error_from_unix(saved_errno));
 		DEBUG(0,("regdb_open: Failed to open %s! (%s)\n",
 			 db_path, strerror(saved_errno)));
-		TALLOC_FREE(db_path);
-		return result;
+		goto done;
 	}
-	TALLOC_FREE(db_path);
 
 	regdb_refcount = 1;
 	DEBUG(10, ("regdb_open: registry db opened. refcount reset (%d)\n",
 		   regdb_refcount));
 
-	return WERR_OK;
+	result = WERR_OK;
+done:
+	TALLOC_FREE(db_path);
+	return result;
 }
 
 /***********************************************************************
@@ -1674,8 +1677,6 @@ static bool regdb_key_exists(struct db_context *db, const char *key)
 	buflen = value.dsize - len;
 	buf = (const char *)value.dptr + len;
 
-	len = 0;
-
 	for (i = 0; i < num_items; i++) {
 		if (buflen == 0) {
 			break;
@@ -1784,7 +1785,23 @@ static WERROR regdb_fetch_keys_internal(struct db_context *db, const char *key,
 	}
 
 	for (i=0; i<num_items; i++) {
-		len += tdb_unpack(buf+len, buflen-len, "f", subkeyname);
+		int this_len;
+
+		this_len = tdb_unpack(buf+len, buflen-len, "f", subkeyname);
+		if (this_len == -1) {
+			DBG_WARNING("Invalid registry data, "
+				    "tdb_unpack failed\n");
+			werr = WERR_INTERNAL_DB_CORRUPTION;
+			goto done;
+		}
+		len += this_len;
+		if (len < this_len) {
+			DBG_WARNING("Invalid registry data, "
+				    "integer overflow\n");
+			werr = WERR_INTERNAL_DB_CORRUPTION;
+			goto done;
+		}
+
 		werr = regsubkey_ctr_addkey(ctr, subkeyname);
 		if (!W_ERROR_IS_OK(werr)) {
 			DEBUG(5, ("regdb_fetch_keys: regsubkey_ctr_addkey "
@@ -1817,9 +1834,12 @@ static int regdb_fetch_keys(const char *key, struct regsubkey_ctr *ctr)
  Unpack a list of registry values frem the TDB
  ***************************************************************************/
 
-static int regdb_unpack_values(struct regval_ctr *values, uint8_t *buf, int buflen)
+static int regdb_unpack_values(struct regval_ctr *values,
+			       uint8_t *buf,
+			       size_t buflen)
 {
-	int 		len = 0;
+	int this_len;
+	size_t 		len = 0;
 	uint32_t	type;
 	fstring valuename;
 	uint32_t	size;
@@ -1829,7 +1849,13 @@ static int regdb_unpack_values(struct regval_ctr *values, uint8_t *buf, int bufl
 
 	/* loop and unpack the rest of the registry values */
 
-	len += tdb_unpack(buf+len, buflen-len, "d", &num_values);
+	this_len = tdb_unpack(buf, buflen, "d", &num_values);
+	if (this_len == -1) {
+		DBG_WARNING("Invalid registry data, "
+			    "tdb_unpack failed\n");
+		return -1;
+	}
+	len = this_len;
 
 	for ( i=0; i<num_values; i++ ) {
 		/* unpack the next regval */
@@ -1838,11 +1864,22 @@ static int regdb_unpack_values(struct regval_ctr *values, uint8_t *buf, int bufl
 		size = 0;
 		data_p = NULL;
 		valuename[0] = '\0';
-		len += tdb_unpack(buf+len, buflen-len, "fdB",
-				  valuename,
-				  &type,
-				  &size,
-				  &data_p);
+		this_len = tdb_unpack(buf+len, buflen-len, "fdB",
+				      valuename,
+				      &type,
+				      &size,
+				      &data_p);
+		if (this_len == -1) {
+			DBG_WARNING("Invalid registry data, "
+				    "tdb_unpack failed\n");
+			return -1;
+		}
+		len += this_len;
+		if (len < (size_t)this_len) {
+			DBG_WARNING("Invalid registry data, "
+				    "integer overflow\n");
+			return -1;
+		}
 
 		regval_ctr_addvalue(values, valuename, type,
 				(uint8_t *)data_p, size);
@@ -1945,7 +1982,11 @@ static int regdb_fetch_values_internal(struct db_context *db, const char* key,
 		goto done;
 	}
 
-	regdb_unpack_values(values, value.dptr, value.dsize);
+	ret = regdb_unpack_values(values, value.dptr, value.dsize);
+	if (ret == -1) {
+		DBG_WARNING("regdb_unpack_values failed\n");
+	}
+
 	ret = regval_ctr_numvals(values);
 
 done:

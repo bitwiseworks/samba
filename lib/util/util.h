@@ -3,6 +3,7 @@
    Utility functions for Samba
    Copyright (C) Andrew Tridgell 1992-1999
    Copyright (C) Jelmer Vernooij 2005
+   Copyright (C) Swen Schillig 2019
     
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -20,6 +21,19 @@
 
 #ifndef __UTIL_SAMBA_UTIL_H__
 #define __UTIL_SAMBA_UTIL_H__
+
+#define SMB_STR_STANDARD  0x00
+#define SMB_STR_ALLOW_NEGATIVE 0x01
+#define SMB_STR_FULL_STR_CONV  0x02
+#define SMB_STR_ALLOW_NO_CONVERSION 0x04
+#define SMB_STR_GLIBC_STANDARD (SMB_STR_ALLOW_NO_CONVERSION | \
+				SMB_STR_ALLOW_NEGATIVE)
+
+unsigned long int
+smb_strtoul(const char *nptr, char **endptr, int base, int *err, int flags);
+
+unsigned long long int
+smb_strtoull(const char *nptr, char **endptr, int base, int *err, int flags);
 
 /**
  * Write dump of binary data to a callback

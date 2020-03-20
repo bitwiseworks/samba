@@ -19,18 +19,19 @@
 """Tests for samba ntacls backup"""
 import os
 
-from samba import smb
+from samba.samba3 import libsmb_samba_internal as libsmb
 from samba.samba3 import smbd
 from samba import samdb
 from samba import ntacls
 
 from samba.auth import system_session
-from samba.param import LoadParm
+from samba.auth_util import system_session_unix
 from samba.dcerpc import security
-from samba.tests import TestCaseInTempDir
+from samba.tests import env_loadparm
+from samba.tests.smbd_base import SmbdBaseTests
 
 
-class NtaclsBackupRestoreTests(TestCaseInTempDir):
+class NtaclsBackupRestoreTests(SmbdBaseTests):
     """
     Tests for NTACLs backup and restore.
     """
@@ -39,7 +40,7 @@ class NtaclsBackupRestoreTests(TestCaseInTempDir):
         super(NtaclsBackupRestoreTests, self).setUp()
 
         self.server = os.environ["SERVER"]  # addc
-        samdb_url='ldap://' + self.server
+        samdb_url = 'ldap://' + self.server
 
         self.service = 'test1'  # service/share to test
         # root path for service
@@ -47,22 +48,21 @@ class NtaclsBackupRestoreTests(TestCaseInTempDir):
             os.environ["LOCAL_PATH"], self.service)
 
         self.smb_conf_path = os.environ['SMB_CONF_PATH']
-        self.dom_sid = security.dom_sid(os.environ['DOMSID'])
-
         self.creds = self.insta_creds(template=self.get_credentials())
+
+        self.samdb_conn = samdb.SamDB(
+            url=samdb_url, session_info=system_session(),
+            credentials=self.creds, lp=env_loadparm())
+
+        self.dom_sid = security.dom_sid(self.samdb_conn.get_domain_sid())
 
         # helper will load conf into lp, that's how smbd can find services.
         self.ntacls_helper = ntacls.NtaclsHelper(self.service,
                                                  self.smb_conf_path,
                                                  self.dom_sid)
-
         self.lp = self.ntacls_helper.lp
 
-        self.samdb_conn = samdb.SamDB(
-            url=samdb_url, session_info=system_session(),
-            credentials=self.creds, lp=self.lp)
-
-        self.smb_conn = smb.SMB(
+        self.smb_conn = libsmb.Conn(
             self.server, self.service, lp=self.lp, creds=self.creds)
 
         self.smb_helper = ntacls.SMBHelper(self.smb_conn, self.dom_sid)
@@ -111,7 +111,13 @@ class NtaclsBackupRestoreTests(TestCaseInTempDir):
         """
 
         dirpath = os.path.join(self.service_root, 'a-dir')
-        smbd.mkdir(dirpath, self.service)
+        smbd.mkdir(dirpath, system_session_unix(), self.service)
+        mode = os.stat(dirpath).st_mode
+
+        # This works in conjunction with the TEST_UMASK in smbd_base
+        # to ensure that permissions are not related to the umask
+        # but instead the smb.conf settings
+        self.assertEquals(mode & 0o777, 0o755)
         self.assertTrue(os.path.isdir(dirpath))
 
     def test_smbd_create_file(self):
@@ -120,12 +126,19 @@ class NtaclsBackupRestoreTests(TestCaseInTempDir):
         """
 
         filepath = os.path.join(self.service_root, 'a-file')
-        smbd.create_file(filepath, self.service)
+        smbd.create_file(filepath, system_session_unix(), self.service)
         self.assertTrue(os.path.isfile(filepath))
+
+        mode = os.stat(filepath).st_mode
+
+        # This works in conjunction with the TEST_UMASK in smbd_base
+        # to ensure that permissions are not related to the umask
+        # but instead the smb.conf settings
+        self.assertEquals(mode & 0o777, 0o644)
 
         # As well as checking that unlink works, this removes the
         # fake xattrs from the dev/inode based DB
-        smbd.unlink(filepath, self.service)
+        smbd.unlink(filepath, system_session_unix(), self.service)
         self.assertFalse(os.path.isfile(filepath))
 
     def test_compare_getntacl(self):
@@ -139,10 +152,10 @@ class NtaclsBackupRestoreTests(TestCaseInTempDir):
         sd0 = self.smb_helper.get_acl(file_name, as_sddl=True)
 
         sd1 = self.ntacls_helper.getntacl(
-            file_path, as_sddl=True, direct_db_access=False)
+            file_path, system_session_unix(), as_sddl=True, direct_db_access=False)
 
         sd2 = self.ntacls_helper.getntacl(
-            file_path, as_sddl=True, direct_db_access=True)
+            file_path, system_session_unix(), as_sddl=True, direct_db_access=True)
 
         self.assertEquals(sd0, sd1)
         self.assertEquals(sd1, sd2)

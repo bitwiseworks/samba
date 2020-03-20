@@ -33,6 +33,8 @@
 #include "ctdb_private.h"
 #include "ctdb_client.h"
 
+#include "protocol/protocol_private.h"
+
 #include "common/reqid.h"
 #include "common/common.h"
 #include "common/logging.h"
@@ -100,6 +102,7 @@ static int32_t ctdb_control_dispatch(struct ctdb_context *ctdb,
 	uint32_t opcode = c->opcode;
 	uint64_t srvid = c->srvid;
 	uint32_t client_id = c->client_id;
+	static int level = DEBUG_ERR;
 
 	switch (opcode) {
 	case CTDB_CONTROL_PROCESS_EXISTS: {
@@ -108,14 +111,20 @@ static int32_t ctdb_control_dispatch(struct ctdb_context *ctdb,
 	}
 
 	case CTDB_CONTROL_SET_DEBUG: {
+		union {
+			uint8_t *ptr;
+			int32_t *level;
+		} debug;
 		CHECK_CONTROL_DATA_SIZE(sizeof(int32_t));
-		DEBUGLEVEL = *(int32_t *)indata.dptr;
+		debug.ptr = indata.dptr;
+		debuglevel_set(*debug.level);
 		return 0;
 	}
 
 	case CTDB_CONTROL_GET_DEBUG: {
 		CHECK_CONTROL_DATA_SIZE(0);
-		outdata->dptr = (uint8_t *)&(DEBUGLEVEL);
+		level = debuglevel_get();
+		outdata->dptr = (uint8_t *)&(level);
 		outdata->dsize = sizeof(DEBUGLEVEL);
 		return 0;
 	}
@@ -650,7 +659,7 @@ static int32_t ctdb_control_dispatch(struct ctdb_context *ctdb,
 		return ctdb_control_reload_public_ips(ctdb, c, async_reply);
 
 	case CTDB_CONTROL_RECEIVE_RECORDS:
-		return ctdb_control_receive_records(ctdb, indata, outdata);
+		return control_not_implemented("RECEIVE_RECORDS", NULL);
 
 	case CTDB_CONTROL_DB_DETACH:
 		return ctdb_control_db_detach(ctdb, indata, client_id);
@@ -721,6 +730,16 @@ static int32_t ctdb_control_dispatch(struct ctdb_context *ctdb,
 
 	case CTDB_CONTROL_TUNNEL_DEREGISTER:
 		return ctdb_control_tunnel_deregister(ctdb, client_id, srvid);
+
+	case CTDB_CONTROL_VACUUM_FETCH:
+		return ctdb_control_vacuum_fetch(ctdb, indata);
+
+	case CTDB_CONTROL_DB_VACUUM: {
+		struct ctdb_db_vacuum db_vacuum;
+
+		CHECK_CONTROL_DATA_SIZE(ctdb_db_vacuum_len(&db_vacuum));
+		return ctdb_control_db_vacuum(ctdb, c, indata, async_reply);
+	}
 
 	default:
 		DEBUG(DEBUG_CRIT,(__location__ " Unknown CTDB control opcode %u\n", opcode));

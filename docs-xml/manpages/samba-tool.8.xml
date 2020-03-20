@@ -110,6 +110,11 @@
 <refsect1>
 <title>COMMANDS</title>
 
+<refsect2>
+	<title>computer</title>
+	<para>Manage computer accounts.</para>
+</refsect2>
+
 <refsect3>
 	<title>computer create <replaceable>computername</replaceable> [options]</title>
 	<para>Create a new computer in the Active Directory Domain.</para>
@@ -165,6 +170,23 @@
 </refsect3>
 
 <refsect3>
+	<title>computer edit <replaceable>computername</replaceable></title>
+	<para>Edit a computer AD object.</para>
+	<para>The computer name specified on the command is the
+	sAMAccountName, with or without the trailing dollar sign.</para>
+
+	<variablelist>
+	<varlistentry>
+	<term>--editor=EDITOR</term>
+	<listitem><para>
+	Specifies the editor to use instead of the system default, or 'vi' if no
+	system default is set.
+	</para></listitem>
+	</varlistentry>
+	</variablelist>
+</refsect3>
+
+<refsect3>
 	<title>computer list</title>
 	<para>List all computers.</para>
 </refsect3>
@@ -188,6 +210,192 @@
 	<variablelist>
 	<varlistentry>
 	<term>--attributes=USER_ATTRS</term>
+	<listitem><para>
+	Comma separated list of attributes, which will be printed.
+	</para></listitem>
+	</varlistentry>
+	</variablelist>
+</refsect3>
+
+<refsect2>
+	<title>contact</title>
+	<para>Manage contacts.</para>
+</refsect2>
+
+<refsect3>
+	<title>contact create [<replaceable>contactname</replaceable>] [options]</title>
+	<para>Create a new contact in the Active Directory Domain.</para>
+	<para>The name of the new contact can be specified by the first
+	argument 'contactname' or the --given-name, --initial and --surname
+	arguments. If no 'contactname' is given, contact's name will be made
+	up of the given arguments by combining the given-name, initials and
+	surname. Each argument is optional. A dot ('.') will be appended to
+	the initials automatically.</para>
+
+	<variablelist>
+	<varlistentry>
+	<term>--ou=OU</term>
+	<listitem><para>
+	DN of alternative location (with or without domainDN counterpart) in
+	which the new contact will be created.
+	E.g. 'OU=OUname'.
+	Default is the domain base.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--description=DESCRIPTION</term>
+	<listitem><para>
+	The new contacts's description.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--surname=SURNAME</term>
+	<listitem><para>
+	Contact's surname.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--given-name=GIVEN_NAME</term>
+	<listitem><para>
+	Contact's given name.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--initials=INITIALS</term>
+	<listitem><para>
+	Contact's initials.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--display-name=DISPLAY_NAME</term>
+	<listitem><para>
+	Contact's display name.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--job-title=JOB_TITLE</term>
+	<listitem><para>
+	Contact's job title.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--department=DEPARTMENT</term>
+	<listitem><para>
+	Contact's department.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--company=COMPANY</term>
+	<listitem><para>
+	Contact's company.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--mail-address=MAIL_ADDRESS</term>
+	<listitem><para>
+	Contact's email address.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--internet-address=INTERNET_ADDRESS</term>
+	<listitem><para>
+	Contact's home page.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--telephone-number=TELEPHONE_NUMBER</term>
+	<listitem><para>
+	Contact's phone number.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--mobile-number=MOBILE_NUMBER</term>
+	<listitem><para>
+	Contact's mobile phone number.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--physical-delivery-office=PHYSICAL_DELIVERY_OFFICE</term>
+	<listitem><para>
+	Contact's office location.
+	</para></listitem>
+	</varlistentry>
+
+	</variablelist>
+</refsect3>
+
+<refsect3>
+	<title>contact delete <replaceable>contactname</replaceable> [options]</title>
+	<para>Delete an existing contact.</para>
+	<para>The contactname specified on the command is the common name or the
+        distinguished name of the contact object. The distinguished name of the
+        contact can be specified with or without the domainDN component.</para>
+</refsect3>
+
+<refsect3>
+	<title>contact edit <replaceable>contactname</replaceable></title>
+	<para>Modify a contact AD object.</para>
+	<para>The contactname specified on the command is the common name or the
+        distinguished name of the contact object. The distinguished name of the
+        contact can be specified with or without the domainDN component.</para>
+
+	<variablelist>
+	<varlistentry>
+	<term>--editor=EDITOR</term>
+	<listitem><para>
+	Specifies the editor to use instead of the system default, or 'vi' if no
+	system default is set.
+	</para></listitem>
+	</varlistentry>
+	</variablelist>
+</refsect3>
+
+<refsect3>
+	<title>contact list [options]</title>
+	<para>List all contacts.</para>
+
+	<variablelist>
+	<varlistentry>
+	<term>--full-dn</term>
+	<listitem><para>
+	Display contact's full DN instead of the name.
+	</para></listitem>
+	</varlistentry>
+	</variablelist>
+</refsect3>
+
+<refsect3>
+	<title>contact move <replaceable>contactname</replaceable> <replaceable>new_parent_dn</replaceable> [options]</title>
+	<para>This command moves a contact into the specified organizational
+	unit or container.</para>
+	<para>The contactname specified on the command is the common name or the
+        distinguished name of the contact object. The distinguished name of the
+        contact can be specified with or without the domainDN component.</para>
+</refsect3>
+
+<refsect3>
+	<title>contact show <replaceable>contactname</replaceable> [options]</title>
+	<para>Display a contact AD object.</para>
+	<para>The contactname specified on the command is the common name or the
+        distinguished name of the contact object. The distinguished name of the
+        contact can be specified with or without the domainDN component.</para>
+
+	<variablelist>
+	<varlistentry>
+	<term>--attributes=CONTACT_ATTRS</term>
 	<listitem><para>
 	Comma separated list of attributes, which will be printed.
 	</para></listitem>
@@ -294,6 +502,11 @@
 <refsect3>
 	<title>domain backup</title>
 	<para>Create or restore a backup of the domain.</para>
+</refsect3>
+
+<refsect3>
+	<title>domain backup offline</title>
+	<para>Backup (with proper locking) local domain directories into a tar file.</para>
 </refsect3>
 
 <refsect3>
@@ -609,6 +822,21 @@
 </refsect3>
 
 <refsect3>
+	<title>group edit <replaceable>groupname</replaceable></title>
+	<para>Edit a group AD object.</para>
+
+	<variablelist>
+	<varlistentry>
+	<term>--editor=EDITOR</term>
+	<listitem><para>
+	Specifies the editor to use instead of the system default, or 'vi' if no
+	system default is set.
+	</para></listitem>
+	</varlistentry>
+	</variablelist>
+</refsect3>
+
+<refsect3>
 	<title>group list</title>
 	<para>List all groups.</para>
 </refsect3>
@@ -639,6 +867,11 @@
 	<para>Show group object and it's attributes.</para>
 </refsect3>
 
+<refsect3>
+	<title>group stats [options]</title>
+	<para>Show statistics for overall groups and group memberships.</para>
+</refsect3>
+
 <refsect2>
 	<title>ldapcmp <replaceable>URL1</replaceable> <replaceable>URL2</replaceable> <replaceable>domain|configuration|schema|dnsdomain|dnsforest</replaceable> [options] </title>
 	<para>Compare two LDAP databases.</para>
@@ -648,6 +881,77 @@
 	<title>ntacl</title>
 	<para>Manage NT ACLs.</para>
 </refsect2>
+
+<refsect3>
+	<title>ntacl changedomsid <replaceable>original-domain-SID</replaceable> <replaceable>new-domain-SID</replaceable> <replaceable>file</replaceable> [options]</title>
+	<para>Change the domain SID for ACLs.
+	Can be used to change all entries in acl_xattr when the machine's SID
+	has accidentally changed or the data set has been copied
+	to another machine either via backup/restore or rsync.</para>
+
+	<variablelist>
+	<varlistentry>
+	<term>--use-ntvfs</term>
+	<listitem><para>
+	Set the ACLs directly to the TDB or xattr. The POSIX permissions will
+	NOT be changed, only the NT ACL will be stored.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--service=SERVICE</term>
+	<listitem><para>
+	Specify the name of the smb.conf service to use. This option is
+	required in combination with the --use-s3fs option.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--use-s3fs</term>
+	<listitem><para>
+	Set the ACLs for use with the default s3fs file server via the VFS
+	layer. This option requires a smb.conf service, specified by the
+	--service=SERVICE option.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--xattr-backend=[native|tdb]</term>
+	<listitem><para>
+	Specify the xattr backend type (native fs or tdb).
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--eadb-file=EADB_FILE</term>
+	<listitem><para>
+	Name of the tdb file where attributes are stored.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--recursive</term>
+	<listitem><para>
+	Set the ACLs for directories and their contents recursively.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--follow-symlinks</term>
+	<listitem><para>
+	Follow symlinks when --recursive is specified.
+	</para></listitem>
+	</varlistentry>
+
+	<varlistentry>
+	<term>--verbose</term>
+	<listitem><para>
+	Verbosely list files and ACLs which are being processed.
+	</para></listitem>
+	</varlistentry>
+	</variablelist>
+</refsect3>
+
 
 <refsect3>
 	<title>ntacl get <replaceable>file</replaceable> [options]</title>
@@ -668,6 +972,11 @@
 	<title>ntacl sysvolreset</title>
 	<para>Reset sysvol ACLs to defaults (including correct ACLs on GPOs).</para>
 </refsect3>
+
+<refsect2>
+	<title>ou</title>
+	<para>Manage organizational units (OUs).</para>
+</refsect2>
 
 <refsect3>
 	<title>ou create <replaceable>ou_dn</replaceable> [options]</title>
@@ -855,17 +1164,42 @@
 
 <refsect3>
 	<title>user disable <replaceable>username</replaceable></title>
-	<para>Disable an user account.</para>
+	<para>Disable a user account.</para>
+</refsect3>
+
+<refsect3>
+	<title>user edit <replaceable>username</replaceable></title>
+	<para>Edit a user account AD object.</para>
+
+	<variablelist>
+	<varlistentry>
+	<term>--editor=EDITOR</term>
+	<listitem><para>
+	Specifies the editor to use instead of the system default, or 'vi' if no
+	system default is set.
+	</para></listitem>
+	</varlistentry>
+	</variablelist>
 </refsect3>
 
 <refsect3>
 	<title>user enable <replaceable>username</replaceable></title>
-	<para>Enable an user account.</para>
+	<para>Enable a user account.</para>
 </refsect3>
 
 <refsect3>
 	<title>user list</title>
 	<para>List all users.</para>
+</refsect3>
+
+<refsect3>
+	<title>user setprimarygroup <replaceable>username</replaceable> <replaceable>primarygroupname</replaceable></title>
+	<para>Set the primary group a user account.</para>
+</refsect3>
+
+<refsect3>
+	<title>user getgroups <replaceable>username</replaceable></title>
+	<para>Get the direct group memberships of a user account.</para>
 </refsect3>
 
 <refsect3>
@@ -894,23 +1228,23 @@
 
 <refsect3>
 	<title>user password [options]</title>
-	<para>Change password for an user account (the one provided in
+	<para>Change password for a user account (the one provided in
 	authentication).</para>
 </refsect3>
 
 <refsect3>
 	<title>user setexpiry <replaceable>username</replaceable> [options]</title>
-	<para>Set the expiration of an user account.</para>
+	<para>Set the expiration of a user account.</para>
 </refsect3>
 
 <refsect3>
 	<title>user setpassword <replaceable>username</replaceable> [options]</title>
-	<para>Sets or resets the password of an user account.</para>
+	<para>Sets or resets the password of a user account.</para>
 </refsect3>
 
 <refsect3>
 	<title>user getpassword <replaceable>username</replaceable> [options]</title>
-	<para>Gets the password of an user account.</para>
+	<para>Gets the password of a user account.</para>
 </refsect3>
 
 <refsect3>

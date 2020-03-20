@@ -33,6 +33,8 @@
 #include "lib/util/sys_rw.h"
 #include "lib/util/util_process.h"
 
+#include "protocol/protocol_util.h"
+
 #include "ctdb_private.h"
 #include "ctdb_client.h"
 
@@ -73,9 +75,11 @@ struct ctdb_vnn {
 	ctdb_sock_addr public_address;
 	uint8_t public_netmask_bits;
 
-	/* the node number that is serving this public address, if any.
-	   If no node serves this ip it is set to -1 */
-	int32_t pnn;
+	/*
+	 * The node number that is serving this public address - set
+	 * to CTDB_UNKNOWN_PNN if node is serving it
+	 */
+	uint32_t pnn;
 
 	/* List of clients to tickle for this public address */
 	struct ctdb_tcp_array *tcp_array;
@@ -294,7 +298,7 @@ static void ctdb_vnn_unassign_iface(struct ctdb_context *ctdb,
 	}
 	vnn->iface = NULL;
 	if (vnn->pnn == ctdb->pnn) {
-		vnn->pnn = -1;
+		vnn->pnn = CTDB_UNKNOWN_PNN;
 	}
 }
 
@@ -368,18 +372,20 @@ static void ctdb_control_send_arp(struct tevent_context *ev,
 {
 	struct ctdb_takeover_arp *arp = talloc_get_type(private_data, 
 							struct ctdb_takeover_arp);
-	int i, ret;
+	int ret;
 	struct ctdb_tcp_array *tcparray;
 	const char *iface = ctdb_vnn_iface_string(arp->vnn);
 
 	ret = ctdb_sys_send_arp(&arp->addr, iface);
 	if (ret != 0) {
-		DEBUG(DEBUG_CRIT,(__location__ " sending of arp failed on iface '%s' (%s)\n",
-				  iface, strerror(errno)));
+		DBG_ERR("Failed to send ARP on interface %s: %s\n",
+			iface, strerror(ret));
 	}
 
 	tcparray = arp->tcparray;
 	if (tcparray) {
+		unsigned int i;
+
 		for (i=0;i<tcparray->num;i++) {
 			struct ctdb_connection *tcon;
 
@@ -766,7 +772,7 @@ int32_t ctdb_control_takeover_ip(struct ctdb_context *ctdb,
 		return -1;
 	}
 
-	if (vnn->pnn != ctdb->pnn && have_ip && vnn->pnn != -1) {
+	if (vnn->pnn != ctdb->pnn && have_ip && vnn->pnn != CTDB_UNKNOWN_PNN) {
 		DEBUG(DEBUG_CRIT,(__location__ " takeoverip of IP %s is known to the kernel, "
 				  "and we have it on iface[%s], but it was assigned to node %d"
 				  "and we are node %d, banning ourself\n",
@@ -776,7 +782,7 @@ int32_t ctdb_control_takeover_ip(struct ctdb_context *ctdb,
 		return -1;
 	}
 
-	if (vnn->pnn == -1 && have_ip) {
+	if (vnn->pnn == CTDB_UNKNOWN_PNN && have_ip) {
 		/* This will cause connections to be reset and
 		 * reestablished.  However, this is a very unusual
 		 * situation and doing this will completely repair the
@@ -1158,6 +1164,7 @@ int ctdb_set_public_addresses(struct ctdb_context *ctdb, bool check_addresses)
 		const char *addrstr;
 		const char *ifaces;
 		char *tok, *line;
+		int ret;
 
 		line = lines[i];
 		while ((*line == ' ') || (*line == '\t')) {
@@ -1181,11 +1188,21 @@ int ctdb_set_public_addresses(struct ctdb_context *ctdb, bool check_addresses)
 		}
 		ifaces = tok;
 
-		if (!addrstr || !parse_ip_mask(addrstr, ifaces, &addr, &mask)) {
-			DEBUG(DEBUG_CRIT,("Badly formed line %u in public address list\n", i+1));
+		if (addrstr == NULL) {
+			D_ERR("Badly formed line %u in public address list\n",
+			      i+1);
 			talloc_free(lines);
 			return -1;
 		}
+
+		ret = ctdb_sock_addr_mask_from_string(addrstr, &addr, &mask);
+		if (ret != 0) {
+			D_ERR("Badly formed line %u in public address list\n",
+			      i+1);
+			talloc_free(lines);
+			return -1;
+		}
+
 		if (ctdb_add_public_address(ctdb, &addr, mask, ifaces, check_addresses)) {
 			DEBUG(DEBUG_CRIT,("Failed to add line %u to the public address list\n", i+1));
 			talloc_free(lines);
@@ -1230,7 +1247,8 @@ int32_t ctdb_control_tcp_client(struct ctdb_context *ctdb, uint32_t client_id,
 	TDB_DATA data;
 	struct ctdb_client_ip *ip;
 	struct ctdb_vnn *vnn;
-	ctdb_sock_addr addr;
+	ctdb_sock_addr src_addr;
+	ctdb_sock_addr dst_addr;
 
 	/* If we don't have public IPs, tickles are useless */
 	if (ctdb->vnn == NULL) {
@@ -1239,36 +1257,54 @@ int32_t ctdb_control_tcp_client(struct ctdb_context *ctdb, uint32_t client_id,
 
 	tcp_sock = (struct ctdb_connection *)indata.dptr;
 
-	addr = tcp_sock->src;
-	ctdb_canonicalize_ip(&addr,  &tcp_sock->src);
-	addr = tcp_sock->dst;
-	ctdb_canonicalize_ip(&addr, &tcp_sock->dst);
+	src_addr = tcp_sock->src;
+	ctdb_canonicalize_ip(&src_addr,  &tcp_sock->src);
+	ZERO_STRUCT(src_addr);
+	memcpy(&src_addr, &tcp_sock->src, sizeof(src_addr));
 
-	ZERO_STRUCT(addr);
-	memcpy(&addr, &tcp_sock->dst, sizeof(addr));
-	vnn = find_public_ip_vnn(ctdb, &addr);
+	dst_addr = tcp_sock->dst;
+	ctdb_canonicalize_ip(&dst_addr, &tcp_sock->dst);
+	ZERO_STRUCT(dst_addr);
+	memcpy(&dst_addr, &tcp_sock->dst, sizeof(dst_addr));
+
+	vnn = find_public_ip_vnn(ctdb, &dst_addr);
 	if (vnn == NULL) {
-		switch (addr.sa.sa_family) {
+		char *src_addr_str = NULL;
+		char *dst_addr_str = NULL;
+
+		switch (dst_addr.sa.sa_family) {
 		case AF_INET:
-			if (ntohl(addr.ip.sin_addr.s_addr) != INADDR_LOOPBACK) {
-				DEBUG(DEBUG_ERR,("Could not add client IP %s. This is not a public address.\n", 
-					ctdb_addr_to_str(&addr)));
+			if (ntohl(dst_addr.ip.sin_addr.s_addr) == INADDR_LOOPBACK) {
+				/* ignore ... */
+				return 0;
 			}
 			break;
 		case AF_INET6:
-			DEBUG(DEBUG_ERR,("Could not add client IP %s. This is not a public ipv6 address.\n", 
-				ctdb_addr_to_str(&addr)));
 			break;
 		default:
-			DEBUG(DEBUG_ERR,(__location__ " Unknown family type %d\n", addr.sa.sa_family));
+			DEBUG(DEBUG_ERR,(__location__ " Unknown family type %d\n",
+			      dst_addr.sa.sa_family));
+			return 0;
 		}
 
+		src_addr_str = ctdb_sock_addr_to_string(client, &src_addr, false);
+		dst_addr_str = ctdb_sock_addr_to_string(client, &dst_addr, false);
+		DEBUG(DEBUG_ERR,(
+		      "Could not register TCP connection from "
+		      "%s to %s (not a public address) (port %u) "
+		      "(client_id %u pid %u).\n",
+		      src_addr_str,
+		      dst_addr_str,
+		      ctdb_sock_addr_port(&dst_addr),
+		      client_id, client->pid));
+		TALLOC_FREE(src_addr_str);
+		TALLOC_FREE(dst_addr_str);
 		return 0;
 	}
 
 	if (vnn->pnn != ctdb->pnn) {
 		DEBUG(DEBUG_ERR,("Attempt to register tcp client for IP %s we don't hold - failing (client_id %u pid %u)\n",
-			ctdb_addr_to_str(&addr),
+			ctdb_addr_to_str(&dst_addr),
 			client_id, client->pid));
 		/* failing this call will tell smbd to die */
 		return -1;
@@ -1278,7 +1314,7 @@ int32_t ctdb_control_tcp_client(struct ctdb_context *ctdb, uint32_t client_id,
 	CTDB_NO_MEMORY(ctdb, ip);
 
 	ip->ctdb      = ctdb;
-	ip->addr      = addr;
+	ip->addr      = dst_addr;
 	ip->client_id = client_id;
 	talloc_set_destructor(ip, ctdb_client_ip_destructor);
 	DLIST_ADD(ctdb->client_ip_list, ip);
@@ -1297,7 +1333,7 @@ int32_t ctdb_control_tcp_client(struct ctdb_context *ctdb, uint32_t client_id,
 	data.dptr = (uint8_t *)&t;
 	data.dsize = sizeof(t);
 
-	switch (addr.sa.sa_family) {
+	switch (dst_addr.sa.sa_family) {
 	case AF_INET:
 		DEBUG(DEBUG_INFO,("registered tcp client for %u->%s:%u (client_id %u pid %u)\n",
 			(unsigned)ntohs(tcp_sock->dst.ip.sin_port),
@@ -1311,7 +1347,8 @@ int32_t ctdb_control_tcp_client(struct ctdb_context *ctdb, uint32_t client_id,
 			(unsigned)ntohs(tcp_sock->src.ip6.sin6_port), client_id, client->pid));
 		break;
 	default:
-		DEBUG(DEBUG_ERR,(__location__ " Unknown family %d\n", addr.sa.sa_family));
+		DEBUG(DEBUG_ERR,(__location__ " Unknown family %d\n",
+		      dst_addr.sa.sa_family));
 	}
 
 
@@ -1333,7 +1370,7 @@ int32_t ctdb_control_tcp_client(struct ctdb_context *ctdb, uint32_t client_id,
 static struct ctdb_connection *ctdb_tcp_find(struct ctdb_tcp_array *array,
 					   struct ctdb_connection *tcp)
 {
-	int i;
+	unsigned int i;
 
 	if (array == NULL) {
 		return NULL;
@@ -1453,7 +1490,7 @@ static void ctdb_remove_connection(struct ctdb_vnn *vnn, struct ctdb_connection 
 
 
 	/* See if we know this connection
-	   if we don't know this connection  then we dont need to do anything
+	   if we don't know this connection  then we don't need to do anything
 	 */
 	tcpp = ctdb_tcp_find(vnn->tcp_array, conn);
 	if (tcpp == NULL) {
@@ -1916,7 +1953,7 @@ int32_t ctdb_control_get_tcp_tickle_list(struct ctdb_context *ctdb, TDB_DATA ind
 	ctdb_sock_addr *addr = (ctdb_sock_addr *)indata.dptr;
 	struct ctdb_tickle_list_old *list;
 	struct ctdb_tcp_array *tcparray;
-	int num, i;
+	unsigned int num, i;
 	struct ctdb_vnn *vnn;
 	unsigned port;
 
@@ -2102,8 +2139,8 @@ static void send_gratious_arp(struct tevent_context *ev,
 
 	ret = ctdb_sys_send_arp(&arp->addr, arp->iface);
 	if (ret != 0) {
-		DEBUG(DEBUG_ERR,(__location__ " sending of gratious arp on iface '%s' failed (%s)\n",
-				 arp->iface, strerror(errno)));
+		DBG_ERR("Failed to send gratuitous ARP on iface %s: %s\n",
+			arp->iface, strerror(ret));
 	}
 
 
@@ -2360,7 +2397,8 @@ static int ctdb_reloadips_child(struct ctdb_context *ctdb)
 	TDB_DATA data;
 	struct ctdb_client_control_state *state;
 	bool first_add;
-	int i, ret;
+	unsigned int i;
+	int ret;
 
 	CTDB_NO_MEMORY(ctdb, mem_ctx);
 

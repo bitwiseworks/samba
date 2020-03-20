@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 
-import os, Utils
+import os
+from waflib import Context
 from samba_utils import SET_TARGET_TYPE
 from samba_autoconf import CURRENT_CFLAGS
+from samba_utils import LOAD_ENVIRONMENT
 
 def to_list(str):
     '''Split a list, preserving quoted strings and existing lists'''
@@ -16,7 +18,7 @@ def heimdal_path(p, absolute=False):
     hpath = os.path.join("../heimdal", p)
     if not absolute:
         return hpath
-    return os.path.normpath(os.path.join(bld.curdir, hpath))
+    return os.path.normpath(os.path.join(bld.path.abspath(), hpath))
 
 def heimdal_paths(ps):
     return [heimdal_path(p) for p in to_list(ps)]
@@ -55,8 +57,16 @@ def HEIMDAL_ASN1(name, source,
     # SRC[0].abspath(env) gives the absolute path to the source directory for the first
     # source file. Note that in the case of a option_file, we have more than
     # one source file
-    cd_rule = 'cd "${TGT[0].parent.abspath(env)}"'
-    asn1_rule = cd_rule + ' && "${ASN1_COMPILE}" ${OPTION_FILE} ${ASN1OPTIONS} --one-code-file "${SRC[0].abspath(env)}" ${ASN1NAME}'
+    cd_rule = 'cd "${TGT[0].parent.abspath(env)}" &&'
+    env = LOAD_ENVIRONMENT()
+    if env.ADDRESS_SANITIZER:
+        # If address sanitizer is enabled, we need to suppress leak checking
+        # in the asn1 tool.
+        no_leak_check = " ASAN_OPTIONS=detect_leaks=0"
+    else:
+        no_leak_check = ""
+
+    asn1_rule = cd_rule + no_leak_check + ' "${ASN1_COMPILE}" ${OPTION_FILE} ${ASN1OPTIONS} --one-code-file "${SRC[0].abspath(env)}" ${ASN1NAME}'
 
     source = to_list(source)
 
@@ -81,7 +91,8 @@ def HEIMDAL_ASN1(name, source,
     t.env.ASN1OPTIONS  = options
     t.env.BLDBIN       = os.path.normpath(os.path.join(bld.srcnode.abspath(bld.env), '..'))
     if option_file is not None:
-        t.env.OPTION_FILE = "--option-file='%s'" % os.path.normpath(os.path.join(bld.curdir, option_file))
+        t.env.OPTION_FILE = "--option-file='%s'" % \
+            os.path.normpath(os.path.join(bld.path.abspath(), option_file))
 
     cfile = out_files[0][0:-2] + '.c'
     hfile = out_files[1][0:-3] + '.h'
@@ -129,7 +140,7 @@ def HEIMDAL_ASN1(name, source,
             samba_cflags   = CURRENT_CFLAGS(bld, name, ''),
             depends_on     = '',
             samba_deps     = to_list('roken replace'),
-            samba_includes = includes + ["/usr/include/heimdal"],
+            samba_includes = includes,
             local_include  = True)
 
     if (os.name == 'os2'):
@@ -160,7 +171,7 @@ def HEIMDAL_ERRTABLE(name, source):
 
     t = bld(rule='"${SRC[1].abspath(env)}" "${TGT[0].parent.abspath(env)}" "${COMPILE_ET}" "${SRC[0].abspath(env)}" ${TGT[0].bldpath(env)}',
             ext_out = '.c',
-            before  = 'cc',
+            before  = 'c',
             update_outputs = True,
             shell   = True,
             source  = sources,
@@ -181,7 +192,7 @@ def HEIMDAL_AUTOPROTO(header, source, options=None, group='prototypes'):
             target=header,
             update_outputs=True,
             ext_out='.c',
-            before='cc')
+            before='c')
     t.env.HEIMDAL = os.path.join(bld.srcnode.abspath(), 'source4/heimdal')
     t.env.OPTIONS = options
 
@@ -205,7 +216,7 @@ def HEIMDAL_GENERATOR(name, rule, source='', target='',
         target=target,
         shell=isinstance(rule, str),
         update_outputs=True,
-        before='cc',
+        before='c',
         ext_out='.c',
         vars=[rule],
         samba_type='GENERATOR',
@@ -242,7 +253,7 @@ def HEIMDAL_LIBRARY(libname, source, deps, vnum, version_script, includes=''):
         bundled_name = libname + '-samba4'
     else:
         bundled_name = libname
-    version = "%s_%s" % (Utils.g_module.APPNAME, Utils.g_module.VERSION)
+    version = "%s_%s" % (Context.g_module.APPNAME, Context.g_module.VERSION)
 
     features = 'c cshlib symlink_lib install_lib'
 
@@ -306,47 +317,19 @@ def HEIMDAL_BINARY(binname, source,
                  install_path=None):
     '''define a Samba binary'''
 
-    if not SET_TARGET_TYPE(bld, binname, 'BINARY'):
-        return
+    source = heimdal_paths(source)
 
-    features = 'c cprogram symlink_bin install_bin'
-
-    obj_target = binname + '.objlist'
-
-    if group == 'binaries':
-        subsystem_group = 'main'
-    else:
-        subsystem_group = group
-
-    # first create a target for building the object files for this binary
-    # by separating in this way, we avoid recompiling the C files
-    # separately for the install binary and the build binary
-    HEIMDAL_SUBSYSTEM(obj_target,
-                        source         = source,
-                        deps           = deps,
-                        includes       = includes,
-                        cflags         = cflags,
-                        group          = subsystem_group,
-                        use_hostcc     = use_hostcc,
-                        use_global_deps= use_global_deps)
-
-    bld.set_group(group)
-
-    # the binary itself will depend on that object target
-    deps = to_list(deps)
-    deps.append(obj_target)
-
-    t = bld(
-        features       = features,
-        source         = [],
-        target         = binname,
-        samba_deps     = deps,
-        samba_includes = includes,
-        local_include  = True,
-        top            = True,
-        install_path   = None,
-        samba_install  = install
-        )
+    bld.SAMBA_BINARY(binname,
+                     source         = source,
+                     deps           = deps,
+                     includes       = includes,
+                     cflags         = cflags,
+                     group          = group,
+                     use_hostcc     = use_hostcc,
+                     use_global_deps= use_global_deps,
+                     install_path   = None,
+                     install        = install,
+                     allow_warnings = True)
 
 
 if not bld.CONFIG_SET('USING_SYSTEM_ROKEN'):
@@ -368,7 +351,7 @@ if not bld.CONFIG_SET('USING_SYSTEM_ROKEN'):
             target = '../heimdal/lib/roken/err.h',
             )
 
-    ROKEN_HOSTCC_SOURCE = '''
+    ROKEN_COMMON_SOURCE = '''
         lib/roken/base64.c
         lib/roken/ct.c
         lib/roken/hex.c
@@ -403,11 +386,13 @@ if not bld.CONFIG_SET('USING_SYSTEM_ROKEN'):
     '''
 
     if not bld.CONFIG_SET('HAVE_CLOSEFROM'):
-        ROKEN_HOSTCC_SOURCE += '''
-            lib/roken/closefrom.c
+        ROKEN_HOSTCC_SOURCE = ROKEN_COMMON_SOURCE + '''
+            ../../lib/replace/closefrom.c
         '''
+    else:
+        ROKEN_HOSTCC_SOURCE = ROKEN_COMMON_SOURCE
 
-    ROKEN_SOURCE = ROKEN_HOSTCC_SOURCE + '''
+    ROKEN_SOURCE = ROKEN_COMMON_SOURCE + '''
         lib/roken/resolve.c
         lib/roken/socket.c
         lib/roken/roken_gethostby.c
@@ -415,7 +400,7 @@ if not bld.CONFIG_SET('USING_SYSTEM_ROKEN'):
 
     HEIMDAL_LIBRARY('roken',
         ROKEN_SOURCE,
-        includes='../heimdal/lib/roken ../heimdal/include',
+        includes='../heimdal/lib/roken ../heimdal/include ../heimdal_build/include',
         deps='resolv util replace',
         vnum='19.0.1',
         version_script='lib/roken/version-script.map',
@@ -425,7 +410,7 @@ if not bld.CONFIG_SET('USING_SYSTEM_ROKEN'):
         ROKEN_HOSTCC_SOURCE,
         use_hostcc=True,
         use_global_deps=False,
-        includes='../heimdal/lib/roken',
+        includes='../heimdal/lib/roken ../heimdal/include ../heimdal_build/include',
         cflags='-DSOCKET_WRAPPER_DISABLE=1 -D_SAMBA_HOSTCC_',
         group='compiler_libraries',
         deps='LIBREPLACE_HOSTCC',
@@ -700,9 +685,14 @@ if not bld.CONFIG_SET("USING_SYSTEM_ASN1"):
 
     HEIMDAL_ERRTABLE('HEIMDAL_ASN1_ERR_ET', 'lib/asn1/asn1_err.et')
 
+    heimdal_heim_asn1_cflags = ''
+    if bld.CONFIG_SET('HAVE_WNO_FORMAT_TRUNCATION'):
+        heimdal_heim_asn1_cflags = '-Wno-format-truncation'
+
     HEIMDAL_SUBSYSTEM('HEIMDAL_HEIM_ASN1',
         HEIMDAL_HEIM_ASN1_DER_SOURCE + 'lib/asn1/extra.c lib/asn1/timegm.c lib/asn1/asn1_err.c',
         includes='../heimdal/lib/asn1',
+        cflags=heimdal_heim_asn1_cflags,
         deps='roken com_err'
         )
 
@@ -912,8 +902,12 @@ HEIMDAL_SUBSYSTEM('HEIMDAL_VERS',
 if not bld.CONFIG_SET('USING_SYSTEM_ASN1_COMPILE'):
     # here is the asn1 compiler build rule
     HEIMDAL_BINARY('asn1_compile',
-    'lib/asn1/main.c lib/asn1/gen.c lib/asn1/gen_copy.c lib/asn1/gen_decode.c lib/asn1/gen_encode.c lib/asn1/gen_free.c lib/asn1/gen_glue.c lib/asn1/gen_length.c lib/asn1/gen_seq.c lib/asn1/gen_template.c lib/asn1/hash.c lib/asn1/symbol.c lib/asn1/asn1parse.c lib/asn1/lex.c',
-    use_hostcc=True,
+        'lib/asn1/gen.c lib/asn1/gen_copy.c '
+        'lib/asn1/gen_decode.c lib/asn1/gen_encode.c lib/asn1/gen_free.c '
+        'lib/asn1/gen_glue.c lib/asn1/gen_length.c lib/asn1/gen_seq.c '
+        'lib/asn1/gen_template.c lib/asn1/hash.c lib/asn1/symbol.c '
+        'lib/asn1/asn1parse.c lib/asn1/lex.c lib/asn1/main.c',
+        use_hostcc=True,
         use_global_deps=False,
         cflags='-DSOCKET_WRAPPER_DISABLE=1 -D_SAMBA_HOSTCC_',
         includes='../heimdal/lib/asn1',
@@ -921,7 +915,7 @@ if not bld.CONFIG_SET('USING_SYSTEM_ASN1_COMPILE'):
         deps='ROKEN_HOSTCC LIBREPLACE_HOSTCC HEIMDAL_VERS_HOSTCC',
         install=False
     )
-    bld.env['ASN1_COMPILE'] = os.path.join(bld.env['BUILD_DIRECTORY'], 'asn1_compile')
+    bld.env['ASN1_COMPILE'] = os.path.join(bld.bldnode.parent.abspath(), 'asn1_compile')
 
 
 if not bld.CONFIG_SET('USING_SYSTEM_COMPILE_ET'):
@@ -935,7 +929,7 @@ if not bld.CONFIG_SET('USING_SYSTEM_COMPILE_ET'):
         deps='ROKEN_HOSTCC LIBREPLACE_HOSTCC HEIMDAL_VERS_HOSTCC',
         install=False
         )
-    bld.env['COMPILE_ET'] = os.path.join(bld.env['BUILD_DIRECTORY'], 'compile_et')
+    bld.env['COMPILE_ET'] = os.path.join(bld.bldnode.parent.abspath(), 'compile_et')
 
 HEIMDAL_BINARY('samba4kinit',
     'kuser/kinit.c',

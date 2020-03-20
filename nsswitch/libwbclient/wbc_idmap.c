@@ -24,6 +24,7 @@
 #include "replace.h"
 #include "libwbclient.h"
 #include "../winbind_client.h"
+#include "lib/util/util.h"
 
 /* Convert a Windows SID to a Unix uid, allocating an uid if needed */
 wbcErr wbcCtxSidToUid(struct wbcContext *ctx, const struct wbcDomainSid *sid,
@@ -374,26 +375,39 @@ wbcErr wbcCtxSidsToUnixIds(struct wbcContext *ctx,
 	for (i=0; i<num_sids; i++) {
 		struct wbcUnixId *id = &ids[i];
 		char *q;
+		int error = 0;
 
 		switch (p[0]) {
 		case 'U':
 			id->type = WBC_ID_TYPE_UID;
-			id->id.uid = strtoul(p+1, &q, 10);
+			id->id.uid = smb_strtoul(p+1,
+						 &q,
+						 10,
+						 &error,
+						 SMB_STR_STANDARD);
 			break;
 		case 'G':
 			id->type = WBC_ID_TYPE_GID;
-			id->id.gid = strtoul(p+1, &q, 10);
+			id->id.gid = smb_strtoul(p+1,
+						 &q,
+						 10,
+						 &error,
+						 SMB_STR_STANDARD);
 			break;
 		case 'B':
 			id->type = WBC_ID_TYPE_BOTH;
-			id->id.uid = strtoul(p+1, &q, 10);
+			id->id.uid = smb_strtoul(p+1,
+						 &q,
+						 10,
+						 &error,
+						 SMB_STR_STANDARD);
 			break;
 		default:
 			id->type = WBC_ID_TYPE_NOT_SPECIFIED;
 			q = strchr(p, '\n');
 			break;
 		};
-		if (q == NULL || q[0] != '\n') {
+		if (q == NULL || q[0] != '\n' || error != 0) {
 			goto wbc_err_invalid;
 		}
 		p = q+1;
@@ -423,10 +437,20 @@ wbcErr wbcCtxUnixIdsToSids(struct wbcContext *ctx,
 	wbcErr wbc_status;
 	char *buf;
 	char *s;
+	const size_t sidlen = (1 /* U/G */ + 10 /* 2^32 */ + 1 /* \n */);
 	size_t ofs, buflen;
 	uint32_t i;
 
-	buflen = num_ids * (1 /* U/G */ + 10 /* 2^32 */ + 1 /* \n */) + 1;
+	if (num_ids > SIZE_MAX / sidlen) {
+		return WBC_ERR_NO_MEMORY; /* overflow */
+	}
+	buflen = num_ids * sidlen;
+
+	buflen += 1;		/* trailing \0 */
+	if (buflen < 1) {
+		return WBC_ERR_NO_MEMORY; /* overflow */
+	}
+
 	buf = malloc(buflen);
 	if (buf == NULL) {
 		return WBC_ERR_NO_MEMORY;

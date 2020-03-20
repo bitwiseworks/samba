@@ -34,7 +34,6 @@ Usage: onnode [OPTION] ... <NODES> <COMMAND> ...
     -f          Specify nodes file, overriding default.
     -i          Keep standard input open - the default is to close it.
     -n          Allow nodes to be specified by name.
-    -o <prefix> Save standard output from each node to file <prefix>.<ip>
     -p          Run command in parallel on specified nodes.
     -P          Push given files to nodes instead of running commands.
     -q          Do not print node addresses (overrides -v).
@@ -61,7 +60,6 @@ ctdb_nodes_file=""
 parallel=false
 verbose=false
 quiet=false
-prefix=""
 names_ok=false
 push=false
 stdin=false
@@ -74,12 +72,11 @@ parse_options ()
 {
 	local opt
 
-	while getopts "cf:hno:pqvPi?" opt ; do
+	while getopts "cf:hnpqvPi?" opt ; do
 		case "$opt" in
 		c) current=true ;;
 		f) ctdb_nodes_file="$OPTARG" ;;
 		n) names_ok=true ;;
-		o) prefix="$OPTARG" ;;
 		p) parallel=true ;;
 		q) quiet=true ;;
 		v) verbose=true ;;
@@ -102,10 +99,14 @@ echo_nth ()
 {
     local n="$1" ; shift
 
-    shift "$n"
-    local node="$1"
+    # Note that this is 0-based
+    local node=""
+    if [ "$n" -le $# ] ; then
+	    shift "$n"
+	    node="$1"
+    fi
 
-    if [ -n "$node" -a "$node" != "#DEAD" ] ; then
+    if [ -n "$node" ] && [ "$node" != "#DEAD" ] ; then
 	echo "$node"
     else
 	echo "${prog}: \"node ${n}\" does not exist" >&2
@@ -212,7 +213,7 @@ get_nodes ()
 	local f="${CTDB_BASE}/nodes"
 	if [ -n "$ctdb_nodes_file" ] ; then
 		f="$ctdb_nodes_file"
-		if [ ! -e "$f" -a "${f#/}" = "$f" ] ; then
+		if [ ! -e "$f" ] && [ "${f#/}" = "$f" ] ; then
 			# $f is relative, try in $CTDB_BASE
 			f="${CTDB_BASE}/${f}"
 		fi
@@ -268,26 +269,6 @@ push()
     done
 }
 
-stdout_filter ()
-{
-    if [ -n "$prefix" ] ; then
-	cat >"${prefix}.${n//\//_}"
-    elif $verbose && $parallel ; then
-	sed -e "s@^@[$n] @"
-    else
-	cat
-    fi
-}
-
-stderr_filter ()
-{
-    if $verbose && $parallel ; then
-	sed -e "s@^@[$n] @"
-    else
-	cat
-    fi
-}
-
 ######################################################################
 
 parse_options "$@"
@@ -302,12 +283,9 @@ else
 	# Could "2>/dev/null || true" but want to see errors from typos in file.
 	[ -r "${CTDB_BASE}/onnode.conf" ] && . "${CTDB_BASE}/onnode.conf"
 	[ -n "$ONNODE_SSH" ] || ONNODE_SSH=ssh
-	if [ "$ONNODE_SSH" = "ssh" ] ; then
-		if $parallel || ! $stdin ; then
-			ssh_opts="-n"
-		fi
-	else
-		: # rsh? All bets are off!
+	# $ONNODE_SSH must accept the -n option - it can be ignored!
+	if $parallel || ! $stdin ; then
+		ssh_opts="-n"
 	fi
 fi
 
@@ -335,28 +313,20 @@ retcode=0
 for n in $nodes ; do
 	set -o pipefail 2>/dev/null
 
-	# The following code applies stdout_filter and stderr_filter to
-	# the relevant streams.  Both filters are at the end of pipes so
-	# they read from stdin and (by default) write to stdout.  To allow
-	# the filters to operate independently, the output of
-	# stdout_filter is sent to a temporary file descriptor (3), which
-	# is redirected back to stdout at the outermost level.
 	ssh_cmd="$ONNODE_SSH $ssh_opts $ONNODE_SSH_OPTS"
 	if $parallel ; then
-		{
-			exec 3>&1
-			{
-				$ssh_cmd "$n" "$command" 3>&- |
-					stdout_filter >&3
-			} 2>&1 | stderr_filter
-		} &
+		if $verbose ; then
+			$ssh_cmd "$n" "$command" 2>&1 | sed -e "s@^@[$n] @"
+		else
+			$ssh_cmd "$n" "$command"
+		fi &
 		pids="${pids} $!"
 	else
 		if $verbose ; then
 			echo >&2 ; echo ">> NODE: $n <<" >&2
 		fi
 		{
-			$ssh_cmd "$n" "$command" | stdout_filter
+			$ssh_cmd "$n" "$command"
 		} || retcode=$?
 	fi
 done

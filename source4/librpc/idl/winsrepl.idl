@@ -15,7 +15,7 @@ import "nbt.idl";
 	uuid("915f5653-bac1-431c-97ee-9ffb34526921"),
 	helpstring("WINS Replication PDUs"),
 	helper("../libcli/nbt/libnbt.h")
-] interface wrepl
+] interface winsrepl
 {
 	const int WINS_REPLICATION_PORT = 42;
 
@@ -171,9 +171,4 @@ import "nbt.idl";
 		[value(ndr_size_wrepl_packet(&packet, ndr->flags))] uint32 size;
 		wrepl_packet    packet;
 	} wrepl_wrap;
-
-	void decode_winsrepl(
-		[in] wrepl_wrap p
-		);
-
 }

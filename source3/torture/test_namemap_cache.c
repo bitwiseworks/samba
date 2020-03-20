@@ -21,13 +21,16 @@
 #include "torture/proto.h"
 #include "lib/namemap_cache.h"
 #include "libcli/security/dom_sid.h"
+#include "lib/gencache.h"
 
 static const struct dom_sid domsid = {
 	1, 4, {0,0,0,0,0,5}, {21, 123, 456, 789}
 };
 
-static void namemap_cache1_fn1(const char *domain, const char *name,
-			       enum lsa_SidType type, time_t timeout,
+static void namemap_cache1_fn1(const char *domain,
+			       const char *name,
+			       enum lsa_SidType type,
+			       bool expired,
 			       void *private_data)
 {
 	bool *p_ok = private_data;
@@ -41,7 +44,8 @@ static void namemap_cache1_fn1(const char *domain, const char *name,
 }
 
 static void namemap_cache1_fn2(const struct dom_sid *sid,
-			       enum lsa_SidType type, time_t timeout,
+			       enum lsa_SidType type,
+			       bool expired,
 			       void *private_data)
 {
 	bool *p_ok = private_data;
@@ -53,8 +57,10 @@ static void namemap_cache1_fn2(const struct dom_sid *sid,
 	*p_ok = ok;
 }
 
-static void namemap_cache1_fn3(const char *domain, const char *name,
-			       enum lsa_SidType type, time_t timeout,
+static void namemap_cache1_fn3(const char *domain,
+			       const char *name,
+			       enum lsa_SidType type,
+			       bool expired,
 			       void *private_data)
 {
 	bool *p_ok = private_data;
@@ -68,7 +74,8 @@ static void namemap_cache1_fn3(const char *domain, const char *name,
 }
 
 static void namemap_cache1_fn4(const struct dom_sid *sid,
-			       enum lsa_SidType type, time_t timeout,
+			       enum lsa_SidType type,
+			       bool expired,
 			       void *private_data)
 {
 	bool *p_ok = private_data;
@@ -80,8 +87,10 @@ static void namemap_cache1_fn4(const struct dom_sid *sid,
 	*p_ok = ok;
 }
 
-static void namemap_cache1_fn5(const char *domain, const char *name,
-			       enum lsa_SidType type, time_t timeout,
+static void namemap_cache1_fn5(const char *domain,
+			       const char *name,
+			       enum lsa_SidType type,
+			       bool expired,
 			       void *private_data)
 {
 	bool *p_ok = private_data;
@@ -95,7 +104,8 @@ static void namemap_cache1_fn5(const char *domain, const char *name,
 }
 
 static void namemap_cache1_fn6(const struct dom_sid *sid,
-			       enum lsa_SidType type, time_t timeout,
+			       enum lsa_SidType type,
+			       bool expired,
 			       void *private_data)
 {
 	bool *p_ok = private_data;
@@ -255,8 +265,6 @@ bool run_local_namemap_cache1(int dummy)
 		fprintf(stderr, "wrong values found\n");
 		return false;
 	}
-
-	gencache_stabilize();
 
 	return true;
 }

@@ -68,6 +68,44 @@ static uint8_t map_samba_oplock_levels_to_smb2(int oplock_type)
 	}
 }
 
+/*
+ MS-FSA 2.1.5.1 Server Requests an Open of a File
+ Trailing '/' or '\\' checker.
+ Must be done before the filename parser removes any
+ trailing characters. If we decide to add this to SMB1
+ NTCreate processing we can make this public.
+
+ Note this is Windows pathname processing only. When
+ POSIX pathnames are added to SMB2 this will not apply.
+*/
+
+static NTSTATUS windows_name_trailing_check(const char *name,
+			uint32_t create_options)
+{
+	size_t name_len = strlen(name);
+	char trail_c;
+
+	if (name_len <= 1) {
+		return NT_STATUS_OK;
+	}
+
+	trail_c = name[name_len-1];
+
+	/*
+	 * Trailing '/' is always invalid.
+	 */
+	if (trail_c == '/') {
+		return NT_STATUS_OBJECT_NAME_INVALID;
+	}
+
+	if (create_options & FILE_NON_DIRECTORY_FILE) {
+		if (trail_c == '\\') {
+			return NT_STATUS_OBJECT_NAME_INVALID;
+		}
+	}
+	return NT_STATUS_OK;
+}
+
 static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 			struct tevent_context *ev,
 			struct smbd_smb2_request *smb2req,
@@ -228,7 +266,7 @@ NTSTATUS smbd_smb2_request_process_create(struct smbd_smb2_request *smb2req)
 	}
 
 	tsubreq = smbd_smb2_create_send(smb2req,
-				       smb2req->ev_ctx,
+				       smb2req->sconn->ev_ctx,
 				       smb2req,
 				       in_oplock_level,
 				       in_impersonation_level,
@@ -334,18 +372,18 @@ static void smbd_smb2_request_create_done(struct tevent_req *tsubreq)
 	SCVAL(outbody.data, 0x03, 0);		/* reserved */
 	SIVAL(outbody.data, 0x04,
 	      out_create_action);		/* create action */
-	put_long_date_timespec(conn->ts_res,
+	put_long_date_full_timespec(conn->ts_res,
 	      (char *)outbody.data + 0x08,
-	      out_creation_ts);			/* creation time */
-	put_long_date_timespec(conn->ts_res,
+	      &out_creation_ts);		/* creation time */
+	put_long_date_full_timespec(conn->ts_res,
 	      (char *)outbody.data + 0x10,
-	      out_last_access_ts);		/* last access time */
-	put_long_date_timespec(conn->ts_res,
+	      &out_last_access_ts);		/* last access time */
+	put_long_date_full_timespec(conn->ts_res,
 	      (char *)outbody.data + 0x18,
-	      out_last_write_ts);		/* last write time */
-	put_long_date_timespec(conn->ts_res,
+	      &out_last_write_ts);		/* last write time */
+	put_long_date_full_timespec(conn->ts_res,
 	      (char *)outbody.data + 0x20,
-	      out_change_ts);			/* change time */
+	      &out_change_ts);			/* change time */
 	SBVAL(outbody.data, 0x28,
 	      out_allocation_size);		/* allocation size */
 	SBVAL(outbody.data, 0x30,
@@ -423,7 +461,7 @@ static NTSTATUS smbd_smb2_create_durable_lease_check(struct smb_request *smb1req
 	ucf_flags = filename_create_ucf_flags(smb1req, FILE_OPEN);
 	status = filename_convert(talloc_tos(), fsp->conn,
 				  filename, ucf_flags,
-				  NULL, &smb_fname);
+				  NULL, NULL, &smb_fname);
 	TALLOC_FREE(filename);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(10, ("filename_convert returned %s\n",
@@ -476,6 +514,8 @@ struct smbd_smb2_create_state {
 	ssize_t lease_len;
 	bool need_replay_cache;
 	struct smbXsrv_open *op;
+	time_t twrp_time;
+	time_t *twrp_timep;
 
 	struct smb2_create_blob *dhnc;
 	struct smb2_create_blob *dh2c;
@@ -756,6 +796,13 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 		return req;
 	}
 
+	/* Check for trailing slash specific directory handling. */
+	status = windows_name_trailing_check(state->fname, in_create_options);
+	if (!NT_STATUS_IS_OK(status)) {
+		tevent_req_nterror(req, status);
+		return tevent_req_post(req, state->ev);
+	}
+
 	smbd_smb2_create_before_exec(req);
 	if (!tevent_req_is_in_progress(req)) {
 		return tevent_req_post(req, state->ev);
@@ -891,6 +938,7 @@ static struct tevent_req *smbd_smb2_create_send(TALLOC_CTX *mem_ctx,
 				  smb1req->conn,
 				  state->fname,
 				  ucf_flags,
+				  state->twrp_timep,
 				  NULL, /* ppath_contains_wcards */
 				  &smb_fname);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -1178,9 +1226,6 @@ static void smbd_smb2_create_before_exec(struct tevent_req *req)
 
 	if (state->twrp != NULL) {
 		NTTIME nttime;
-		time_t t;
-		struct tm *tm;
-		char *tmpname = state->fname;
 
 		if (state->twrp->data.length != 8) {
 			tevent_req_nterror(req, NT_STATUS_INVALID_PARAMETER);
@@ -1188,27 +1233,9 @@ static void smbd_smb2_create_before_exec(struct tevent_req *req)
 		}
 
 		nttime = BVAL(state->twrp->data.data, 0);
-		t = nt_time_to_unix(nttime);
-		tm = gmtime(&t);
+		state->twrp_time = nt_time_to_unix(nttime);
+		state->twrp_timep = &state->twrp_time;
 
-		state->fname = talloc_asprintf(
-			state,
-			"%s\\@GMT-%04u.%02u.%02u-%02u.%02u.%02u",
-			state->fname,
-			tm->tm_year + 1900,
-			tm->tm_mon + 1,
-			tm->tm_mday,
-			tm->tm_hour,
-			tm->tm_min,
-			tm->tm_sec);
-		if (tevent_req_nomem(state->fname, req)) {
-			return;
-		}
-		TALLOC_FREE(tmpname);
-		/*
-		 * Tell filename_create_ucf_flags() this
-		 * is an @GMT path.
-		 */
 		smb1req->flags2 |= FLAGS2_REPARSE_PATH;
 	}
 
@@ -1276,8 +1303,6 @@ static void smbd_smb2_create_before_exec(struct tevent_req *req)
 			}
 		}
 	}
-
-	return;
 }
 
 static void smbd_smb2_create_after_exec(struct tevent_req *req)
@@ -1294,11 +1319,14 @@ static void smbd_smb2_create_after_exec(struct tevent_req *req)
 	DEBUG(10, ("smbd_smb2_create_send: "
 		   "response construction phase\n"));
 
+	state->out_file_attributes = dos_mode(state->result->conn,
+					      state->result->fsp_name);
+
 	if (state->mxac != NULL) {
 		NTTIME last_write_time;
 
-		last_write_time = unix_timespec_to_nt_time(
-			state->result->fsp_name->st.st_ex_mtime);
+		last_write_time = full_timespec_to_nt_time(
+			&state->result->fsp_name->st.st_ex_mtime);
 		if (last_write_time != state->max_access_time) {
 			uint8_t p[8];
 			uint32_t max_access_granted;
@@ -1409,8 +1437,9 @@ static void smbd_smb2_create_after_exec(struct tevent_req *req)
 
 	if (state->qfid != NULL) {
 		uint8_t p[32];
-		uint64_t file_index = get_FileIndex(state->result->conn,
-						    &state->result->fsp_name->st);
+		uint64_t file_id = SMB_VFS_FS_FILE_ID(
+			state->result->conn,
+			&state->result->fsp_name->st);
 		DATA_BLOB blob = data_blob_const(p, sizeof(p));
 
 		ZERO_STRUCT(p);
@@ -1419,7 +1448,7 @@ static void smbd_smb2_create_after_exec(struct tevent_req *req)
 		   the MS plugfest. The first 8 bytes are the "volume index"
 		   == inode, the second 8 bytes are the "volume id",
 		   == dev. This will be updated in the SMB2 doc. */
-		SBVAL(p, 0, file_index);
+		SBVAL(p, 0, file_id);
 		SIVAL(p, 8, state->result->fsp_name->st.st_ex_dev);/* FileIndexHigh */
 
 		status = smb2_create_blob_add(state->out_context_blobs,
@@ -1491,8 +1520,6 @@ static void smbd_smb2_create_finish(struct tevent_req *req)
 		state->out_create_action = state->info;
 	}
 	result->op->create_action = state->out_create_action;
-	state->out_file_attributes = dos_mode(result->conn,
-					   result->fsp_name);
 
 	state->out_creation_ts = get_create_timespec(smb1req->conn,
 					result, result->fsp_name);
@@ -1522,7 +1549,6 @@ static void smbd_smb2_create_finish(struct tevent_req *req)
 
 	tevent_req_done(req);
 	tevent_req_post(req, state->ev);
-	return;
 }
 
 static NTSTATUS smbd_smb2_create_recv(struct tevent_req *req,
@@ -1777,7 +1803,7 @@ bool schedule_deferred_open_message_smb2(
 		(unsigned long long)mid ));
 
 	tevent_schedule_immediate(state->im,
-			smb2req->ev_ctx,
+			smb2req->sconn->ev_ctx,
 			smbd_smb2_create_request_dispatch_immediate,
 			smb2req);
 
@@ -1809,7 +1835,7 @@ static bool smbd_smb2_create_cancel(struct tevent_req *req)
 
 	remove_deferred_open_message_smb2_internal(smb2req, mid);
 
-	tevent_req_defer_callback(req, smb2req->ev_ctx);
+	tevent_req_defer_callback(req, smb2req->sconn->ev_ctx);
 	tevent_req_nterror(req, NT_STATUS_CANCELLED);
 	return true;
 }

@@ -32,6 +32,12 @@
 #ifndef _LIBADS_ADS_PROTO_H_
 #define _LIBADS_ADS_PROTO_H_
 
+enum ads_sasl_state_e {
+	ADS_SASL_PLAIN = 0,
+	ADS_SASL_SIGN,
+	ADS_SASL_SEAL,
+};
+
 /* The following definitions come from libads/ads_struct.c  */
 
 char *ads_build_path(const char *realm, const char *sep, const char *field, int reverse);
@@ -39,7 +45,8 @@ char *ads_build_dn(const char *realm);
 char *ads_build_domain(const char *dn);
 ADS_STRUCT *ads_init(const char *realm,
 		     const char *workgroup,
-		     const char *ldap_server);
+		     const char *ldap_server,
+		     enum ads_sasl_state_e sasl_state);
 bool ads_set_sasl_wrap_flags(ADS_STRUCT *ads, int flags);
 void ads_destroy(ADS_STRUCT **ads);
 
@@ -107,8 +114,10 @@ ADS_STATUS ads_add_service_principal_names(ADS_STRUCT *ads, const char *machine_
                                           const char **spns);
 ADS_STATUS ads_create_machine_acct(ADS_STRUCT *ads,
 				   const char *machine_name,
+				   const char *machine_password,
 				   const char *org_unit,
-				   uint32_t etype_list);
+				   uint32_t etype_list,
+				   const char *dns_domain_name);
 ADS_STATUS ads_move_machine_acct(ADS_STRUCT *ads, const char *machine_name,
                                  const char *org_unit, bool *moved);
 int ads_count_replies(ADS_STRUCT *ads, void *res);

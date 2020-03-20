@@ -23,13 +23,13 @@
 #include "replace.h"
 #include <tevent.h>
 
-struct tevent_req *file_pload_send(TALLOC_CTX *mem_ctx,
+struct tevent_req *file_ploadv_send(TALLOC_CTX *mem_ctx,
 				   struct tevent_context *ev,
-				   const char *syscmd, size_t maxsize);
-int file_pload_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
+				   char * const argl[], size_t maxsize);
+int file_ploadv_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
 		    uint8_t **buf);
-
-char **file_lines_pload(TALLOC_CTX *mem_ctx, const char *syscmd,
+char **file_lines_ploadv(TALLOC_CTX *mem_ctx,
+			char * const argl[],
 			int *numlines);
 
 #endif

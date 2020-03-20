@@ -38,8 +38,6 @@
 		torture_assert_int_equal(tctx, (__io)->out.create_action,	\
 						NTCREATEX_ACTION_ ## __created,	\
 						"out.create_action incorrect");	\
-		torture_assert_int_equal(tctx, (__io)->out.alloc_size, 0,	\
-						"out.alloc_size incorrect");	\
 		torture_assert_int_equal(tctx, (__io)->out.size, 0,		\
 						"out.size incorrect");		\
 		torture_assert_int_equal(tctx, (__io)->out.file_attr,		\
@@ -1046,7 +1044,9 @@ done:
 }
 
 
-static bool test_session_expire1(struct torture_context *tctx)
+static bool test_session_expire1i(struct torture_context *tctx,
+				  bool force_signing,
+				  bool force_encryption)
 {
 	NTSTATUS status;
 	bool ret = false;
@@ -1072,9 +1072,14 @@ static bool test_session_expire1(struct torture_context *tctx)
 	torture_assert_int_equal(tctx, use_kerberos, CRED_MUST_USE_KERBEROS,
 				 "please use -k yes");
 
+	cli_credentials_invalidate_ccache(credentials, CRED_SPECIFIED);
+
 	lpcfg_set_option(tctx->lp_ctx, "gensec_gssapi:requested_life_time=4");
 
 	lpcfg_smbcli_options(tctx->lp_ctx, &options);
+	if (force_signing) {
+		options.signing = SMB_SIGNING_REQUIRED;
+	}
 
 	status = smb2_connect(tctx,
 			      host,
@@ -1090,6 +1095,12 @@ static bool test_session_expire1(struct torture_context *tctx)
 			      );
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 					"smb2_connect failed");
+
+	if (force_encryption) {
+		status = smb2cli_session_encryption_on(tree->session->smbXcli);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2cli_session_encryption_on failed");
+	}
 
 	/* Add some random component to the file name. */
 	snprintf(fname, sizeof(fname), "session_expire1_%s.dat",
@@ -1144,12 +1155,20 @@ static bool test_session_expire1(struct torture_context *tctx)
 		 */
 		cli_credentials_invalidate_ccache(credentials, CRED_SPECIFIED);
 
+		if (!force_encryption) {
+			smb2cli_session_require_signed_response(
+				tree->session->smbXcli, true);
+		}
+
 		torture_comment(tctx, "reauth => OK\n");
 		status = smb2_session_setup_spnego(tree->session,
 						   credentials,
 						   0 /* previous_session_id */);
 		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 					"smb2_session_setup_spnego failed");
+
+		smb2cli_session_require_signed_response(
+			tree->session->smbXcli, false);
 	}
 
 	ZERO_STRUCT(qfinfo.access_information.out);
@@ -1159,6 +1178,8 @@ static bool test_session_expire1(struct torture_context *tctx)
 
 	ret = true;
 done:
+	cli_credentials_invalidate_ccache(credentials, CRED_SPECIFIED);
+
 	if (h1 != NULL) {
 		smb2_util_close(tree, *h1);
 	}
@@ -1168,7 +1189,29 @@ done:
 	return ret;
 }
 
-static bool test_session_expire2(struct torture_context *tctx)
+static bool test_session_expire1n(struct torture_context *tctx)
+{
+	return test_session_expire1i(tctx,
+				     false,   /* force_signing */
+				     false); /* force_encryption */
+}
+
+static bool test_session_expire1s(struct torture_context *tctx)
+{
+	return test_session_expire1i(tctx,
+				     true,   /* force_signing */
+				     false); /* force_encryption */
+}
+
+static bool test_session_expire1e(struct torture_context *tctx)
+{
+	return test_session_expire1i(tctx,
+				     true,   /* force_signing */
+				     true); /* force_encryption */
+}
+
+static bool test_session_expire2i(struct torture_context *tctx,
+				  bool force_encryption)
 {
 	NTSTATUS status;
 	bool ret = false;
@@ -1215,9 +1258,12 @@ static bool test_session_expire2(struct torture_context *tctx)
 	torture_assert_int_equal(tctx, use_kerberos, CRED_MUST_USE_KERBEROS,
 				 "please use -k yes");
 
+	cli_credentials_invalidate_ccache(credentials, CRED_SPECIFIED);
+
 	lpcfg_set_option(tctx->lp_ctx, "gensec_gssapi:requested_life_time=4");
 
 	lpcfg_smbcli_options(tctx->lp_ctx, &options);
+	options.signing = SMB_SIGNING_REQUIRED;
 
 	unc = talloc_asprintf(tctx, "\\\\%s\\%s", host, share);
 	torture_assert(tctx, unc != NULL, "talloc_asprintf");
@@ -1236,6 +1282,12 @@ static bool test_session_expire2(struct torture_context *tctx)
 			      );
 	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 					"smb2_connect failed");
+
+	if (force_encryption) {
+		status = smb2cli_session_encryption_on(tree->session->smbXcli);
+		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2cli_session_encryption_on failed");
+	}
 
 	caps = smb2cli_conn_server_capabilities(tree->session->transport->conn);
 
@@ -1365,7 +1417,7 @@ static bool test_session_expire2(struct torture_context *tctx)
 	ZERO_STRUCT(ctl);
 	ctl.in.file.handle = *h1;
 	ctl.in.function = FSCTL_SRV_ENUM_SNAPS;
-	ctl.in.max_response_size = 16;
+	ctl.in.max_output_response = 16;
 	ctl.in.flags = SMB2_IOCTL_FLAG_IS_FSCTL;
 	status = smb2_ioctl(tree, tctx, &ctl);
 	torture_assert_ntstatus_equal_goto(tctx, status,
@@ -1519,6 +1571,128 @@ static bool test_session_expire2(struct torture_context *tctx)
 
 	ret = true;
 done:
+	cli_credentials_invalidate_ccache(credentials, CRED_SPECIFIED);
+
+	if (h1 != NULL) {
+		smb2_util_close(tree, *h1);
+	}
+
+	talloc_free(tree);
+	lpcfg_set_option(tctx->lp_ctx, "gensec_gssapi:requested_life_time=0");
+	return ret;
+}
+
+static bool test_session_expire2s(struct torture_context *tctx)
+{
+	return test_session_expire2i(tctx,
+				     false); /* force_encryption */
+}
+
+static bool test_session_expire2e(struct torture_context *tctx)
+{
+	return test_session_expire2i(tctx,
+				     true); /* force_encryption */
+}
+
+static bool test_session_expire_disconnect(struct torture_context *tctx)
+{
+	NTSTATUS status;
+	bool ret = false;
+	struct smbcli_options options;
+	const char *host = torture_setting_string(tctx, "host", NULL);
+	const char *share = torture_setting_string(tctx, "share", NULL);
+	struct cli_credentials *credentials = popt_get_cmdline_credentials();
+	struct smb2_tree *tree = NULL;
+	enum credentials_use_kerberos use_kerberos;
+	char fname[256];
+	struct smb2_handle _h1;
+	struct smb2_handle *h1 = NULL;
+	struct smb2_create io1;
+	union smb_fileinfo qfinfo;
+	bool connected;
+
+	use_kerberos = cli_credentials_get_kerberos_state(credentials);
+	if (use_kerberos != CRED_MUST_USE_KERBEROS) {
+		torture_warning(tctx, "smb2.session.expire1 requires -k yes!");
+		torture_skip(tctx, "smb2.session.expire1 requires -k yes!");
+	}
+
+	cli_credentials_invalidate_ccache(credentials, CRED_SPECIFIED);
+
+	lpcfg_set_option(tctx->lp_ctx, "gensec_gssapi:requested_life_time=4");
+	lpcfg_smbcli_options(tctx->lp_ctx, &options);
+	options.signing = SMB_SIGNING_REQUIRED;
+
+	status = smb2_connect(tctx,
+			      host,
+			      lpcfg_smb_ports(tctx->lp_ctx),
+			      share,
+			      lpcfg_resolve_context(tctx->lp_ctx),
+			      credentials,
+			      &tree,
+			      tctx->ev,
+			      &options,
+			      lpcfg_socket_options(tctx->lp_ctx),
+			      lpcfg_gensec_settings(tctx, tctx->lp_ctx)
+			      );
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_connect failed");
+
+	smbXcli_session_set_disconnect_expired(tree->session->smbXcli);
+
+	/* Add some random component to the file name. */
+	snprintf(fname, sizeof(fname), "session_expire1_%s.dat",
+		 generate_random_str(tctx, 8));
+
+	smb2_util_unlink(tree, fname);
+
+	smb2_oplock_create_share(&io1, fname,
+				 smb2_util_share_access(""),
+				 smb2_util_oplock_level("b"));
+	io1.in.create_options |= NTCREATEX_OPTIONS_DELETE_ON_CLOSE;
+
+	status = smb2_create(tree, tctx, &io1);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_create failed");
+	_h1 = io1.out.file.handle;
+	h1 = &_h1;
+	CHECK_CREATED(tctx, &io1, CREATED, FILE_ATTRIBUTE_ARCHIVE);
+	torture_assert_int_equal(tctx, io1.out.oplock_level,
+					smb2_util_oplock_level("b"),
+					"oplock_level incorrect");
+
+	/* get the security descriptor */
+
+	ZERO_STRUCT(qfinfo);
+
+	qfinfo.access_information.level = RAW_FILEINFO_ACCESS_INFORMATION;
+	qfinfo.access_information.in.file.handle = _h1;
+
+	torture_comment(tctx, "query info => OK\n");
+
+	ZERO_STRUCT(qfinfo.access_information.out);
+	status = smb2_getinfo_file(tree, tctx, &qfinfo);
+	torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
+					"smb2_getinfo_file failed");
+
+	torture_comment(tctx, "sleep 10 seconds\n");
+	smb_msleep(10*1000);
+
+	torture_comment(tctx, "query info => EXPIRED\n");
+	ZERO_STRUCT(qfinfo.access_information.out);
+	status = smb2_getinfo_file(tree, tctx, &qfinfo);
+	torture_assert_ntstatus_equal_goto(tctx, status,
+					   NT_STATUS_NETWORK_SESSION_EXPIRED,
+					   ret, done, "smb2_getinfo_file "
+					   "returned unexpected status");
+
+	connected = smbXcli_conn_is_connected(tree->session->transport->conn);
+	torture_assert_goto(tctx, !connected, ret, done, "connected\n");
+
+	ret = true;
+done:
+	cli_credentials_invalidate_ccache(credentials, CRED_SPECIFIED);
+
 	if (h1 != NULL) {
 		smb2_util_close(tree, *h1);
 	}
@@ -1543,6 +1717,7 @@ bool test_session_bind1(struct torture_context *tctx, struct smb2_tree *tree1)
 	bool ret = false;
 	struct smb2_tree *tree2 = NULL;
 	struct smb2_transport *transport1 = tree1->session->transport;
+	struct smbcli_options options2;
 	struct smb2_transport *transport2 = NULL;
 	struct smb2_session *session1_1 = tree1->session;
 	struct smb2_session *session1_2 = NULL;
@@ -1554,6 +1729,13 @@ bool test_session_bind1(struct torture_context *tctx, struct smb2_tree *tree1)
 	if (!(caps & SMB2_CAP_MULTI_CHANNEL)) {
 		torture_skip(tctx, "server doesn't support SMB2_CAP_MULTI_CHANNEL\n");
 	}
+
+	/*
+	 * We always want signing for this test!
+	 */
+	smb2cli_tcon_should_sign(tree1->smbXcli, true);
+	options2 = transport1->options;
+	options2.signing = SMB_SIGNING_REQUIRED;
 
 	/* Add some random component to the file name. */
 	snprintf(fname, sizeof(fname), "session_bind1_%s.dat",
@@ -1583,7 +1765,7 @@ bool test_session_bind1(struct torture_context *tctx, struct smb2_tree *tree1)
 			      credentials,
 			      &tree2,
 			      tctx->ev,
-			      &transport1->options,
+			      &options2,
 			      lpcfg_socket_options(tctx->lp_ctx),
 			      lpcfg_gensec_settings(tctx, tctx->lp_ctx)
 			      );
@@ -1681,8 +1863,13 @@ struct torture_suite *torture_smb2_session_init(TALLOC_CTX *ctx)
 	torture_suite_add_1smb2_test(suite, "reauth4", test_session_reauth4);
 	torture_suite_add_1smb2_test(suite, "reauth5", test_session_reauth5);
 	torture_suite_add_1smb2_test(suite, "reauth6", test_session_reauth6);
-	torture_suite_add_simple_test(suite, "expire1", test_session_expire1);
-	torture_suite_add_simple_test(suite, "expire2", test_session_expire2);
+	torture_suite_add_simple_test(suite, "expire1n", test_session_expire1n);
+	torture_suite_add_simple_test(suite, "expire1s", test_session_expire1s);
+	torture_suite_add_simple_test(suite, "expire1e", test_session_expire1e);
+	torture_suite_add_simple_test(suite, "expire2s", test_session_expire2s);
+	torture_suite_add_simple_test(suite, "expire2e", test_session_expire2e);
+	torture_suite_add_simple_test(suite, "expire_disconnect",
+				      test_session_expire_disconnect);
 	torture_suite_add_1smb2_test(suite, "bind1", test_session_bind1);
 
 	suite->description = talloc_strdup(suite, "SMB2-SESSION tests");

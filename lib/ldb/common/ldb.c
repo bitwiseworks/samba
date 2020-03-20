@@ -257,6 +257,15 @@ int ldb_connect(struct ldb_context *ldb, const char *url,
 		return ret;
 	}
 
+	/*
+	 * Take a copy of the options.
+	 */
+	ldb->options = ldb_options_copy(ldb, options);
+	if (ldb->options == NULL && options != NULL) {
+		ldb_oom(ldb);
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+
 	ret = ldb_module_connect_backend(ldb, url, options, &ldb->modules);
 	if (ret != LDB_SUCCESS) {
 		return ret;
@@ -498,9 +507,6 @@ int ldb_transaction_commit(struct ldb_context *ldb)
 			ldb_debug(next_module->ldb, LDB_DEBUG_TRACE, "commit ldb transaction error: %s",
 				  ldb_errstring(next_module->ldb));
 		}
-		/* cancel the transaction */
-		FIRST_OP(ldb, del_transaction);
-		next_module->ops->del_transaction(next_module);
 	}
 	return status;
 }
@@ -1091,7 +1097,6 @@ static int lock_search(struct ldb_module *lock_module, struct ldb_request *req)
 	if (ret == LDB_ERR_UNSUPPORTED_CRITICAL_EXTENSION) {
 		/* We might be talking LDAP */
 		ldb_reset_err_string(ldb);
-		ret = 0;
 		TALLOC_FREE(lock_context);
 
 		return ldb_next_request(lock_module, req);
@@ -1387,8 +1392,8 @@ int ldb_op_default_callback(struct ldb_request *req, struct ldb_reply *ares)
 	}
 
 	if (ares->type != LDB_REPLY_DONE) {
-		talloc_free(ares);
 		ldb_asprintf_errstring(req->handle->ldb, "Invalid LDB reply type %d", ares->type);
+		TALLOC_FREE(ares);
 		return ldb_request_done(req, LDB_ERR_OPERATIONS_ERROR);
 	}
 

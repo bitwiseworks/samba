@@ -300,7 +300,7 @@ void sid_copy(struct dom_sid *dst, const struct dom_sid *src)
  Parse a on-the-wire SID to a struct dom_sid.
 *****************************************************************/
 
-bool sid_parse(const uint8_t *inbuf, size_t len, struct dom_sid *sid)
+ssize_t sid_parse(const uint8_t *inbuf, size_t len, struct dom_sid *sid)
 {
 	DATA_BLOB in = data_blob_const(inbuf, len);
 	enum ndr_err_code ndr_err;
@@ -308,9 +308,9 @@ bool sid_parse(const uint8_t *inbuf, size_t len, struct dom_sid *sid)
 	ndr_err = ndr_pull_struct_blob_all(
 		&in, NULL, sid, (ndr_pull_flags_fn_t)ndr_pull_dom_sid);
 	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
-		return false;
+		return -1;
 	}
-	return true;
+	return ndr_size_dom_sid(sid, 0);
 }
 
 /*****************************************************************
@@ -877,6 +877,39 @@ NTSTATUS dom_sid_lookup_predefined_name(const char *name,
 	}
 
 	return NT_STATUS_NONE_MAPPED;
+}
+
+bool dom_sid_lookup_is_predefined_domain(const char *domain)
+{
+	size_t di;
+	bool match;
+
+	if (domain == NULL) {
+		domain = "";
+	}
+
+	match = strequal(domain, "");
+	if (match) {
+		/*
+		 * Strange, but that's what W2012R2 does.
+		 */
+		domain = "BUILTIN";
+	}
+
+	for (di = 0; di < ARRAY_SIZE(predefined_domains); di++) {
+		const struct predefined_domain_mapping *d =
+			&predefined_domains[di];
+		int cmp;
+
+		cmp = strcasecmp(d->domain, domain);
+		if (cmp != 0) {
+			continue;
+		}
+
+		return true;
+	}
+
+	return false;
 }
 
 NTSTATUS dom_sid_lookup_predefined_sid(const struct dom_sid *sid,

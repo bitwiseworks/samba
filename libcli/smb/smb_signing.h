@@ -36,9 +36,9 @@ struct smb_signing_state *smb_signing_init_ex(TALLOC_CTX *mem_ctx,
 					      void (*free_fn)(TALLOC_CTX *, void *));
 uint32_t smb_signing_next_seqnum(struct smb_signing_state *si, bool oneway);
 void smb_signing_cancel_reply(struct smb_signing_state *si, bool oneway);
-void smb_signing_sign_pdu(struct smb_signing_state *si,
-			  uint8_t *outhdr, size_t len,
-			  uint32_t seqnum);
+NTSTATUS smb_signing_sign_pdu(struct smb_signing_state *si,
+			      uint8_t *outhdr, size_t len,
+			      uint32_t seqnum);
 bool smb_signing_check_pdu(struct smb_signing_state *si,
 			   const uint8_t *inhdr, size_t len,
 			   uint32_t seqnum);
@@ -52,7 +52,8 @@ bool smb_signing_is_mandatory(struct smb_signing_state *si);
 bool smb_signing_set_negotiated(struct smb_signing_state *si,
 				bool allowed, bool mandatory);
 bool smb_signing_is_negotiated(struct smb_signing_state *si);
-void smb_key_derivation(const uint8_t *KI, size_t KI_len,
-			uint8_t KO[16]);
+NTSTATUS smb_key_derivation(const uint8_t *KI,
+			    size_t KI_len,
+			    uint8_t KO[16]);
 
 #endif /* _SMB_SIGNING_H_ */

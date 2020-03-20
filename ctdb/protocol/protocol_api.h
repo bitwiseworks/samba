@@ -530,12 +530,6 @@ int ctdb_reply_control_set_db_sticky(struct ctdb_reply_control *reply);
 void ctdb_req_control_reload_public_ips(struct ctdb_req_control *request);
 int ctdb_reply_control_reload_public_ips(struct ctdb_reply_control *reply);
 
-void ctdb_req_control_receive_records(struct ctdb_req_control *request,
-				      struct ctdb_rec_buffer *recbuf);
-int ctdb_reply_control_receive_records(struct ctdb_reply_control *reply,
-				       TALLOC_CTX *mem_ctx,
-				       struct ctdb_rec_buffer **recbuf);
-
 void ctdb_req_control_ipreallocated(struct ctdb_req_control *request);
 int ctdb_reply_control_ipreallocated(struct ctdb_reply_control *reply);
 
@@ -608,6 +602,14 @@ int ctdb_reply_control_tunnel_register(struct ctdb_reply_control *reply);
 void ctdb_req_control_tunnel_deregister(struct ctdb_req_control *request,
 					uint64_t tunnel_id);
 int ctdb_reply_control_tunnel_deregister(struct ctdb_reply_control *reply);
+
+void ctdb_req_control_vacuum_fetch(struct ctdb_req_control *request,
+				   struct ctdb_rec_buffer *recbuf);
+int ctdb_reply_control_vacuum_fetch(struct ctdb_reply_control *reply);
+
+void ctdb_req_control_db_vacuum(struct ctdb_req_control *request,
+				struct ctdb_db_vacuum *db_vacuum);
+int ctdb_reply_control_db_vacuum(struct ctdb_reply_control *reply);
 
 /* From protocol/protocol_debug.c */
 

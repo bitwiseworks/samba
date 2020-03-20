@@ -244,6 +244,11 @@ static int ldb_wildcard_compare(struct ldb_context *ldb,
 	uint8_t *save_p = NULL;
 	unsigned int c = 0;
 
+	if (tree->operation != LDB_OP_SUBSTRING) {
+		*matched = false;
+		return LDB_ERR_INAPPROPRIATE_MATCHING;
+	}
+
 	a = ldb_schema_attribute_by_name(ldb, tree->u.substring.attr);
 	if (!a) {
 		return LDB_ERR_INVALID_ATTRIBUTE_SYNTAX;
@@ -306,14 +311,38 @@ static int ldb_wildcard_compare(struct ldb_context *ldb,
 		p = memmem((const void *)val.data,val.length,
 			   (const void *)cnk.data, cnk.length);
 		if (p == NULL) goto mismatch;
+
+		/*
+		 * At this point we know cnk.length <= val.length as
+		 * otherwise there could be no match
+		 */
+
 		if ( (! tree->u.substring.chunks[c + 1]) && (! tree->u.substring.end_with_wildcard) ) {
 			uint8_t *g;
+			uint8_t *end = val.data + val.length;
 			do { /* greedy */
-				g = memmem(p + cnk.length,
-					val.length - (p - val.data),
-					(const uint8_t *)cnk.data,
-					cnk.length);
-				if (g) p = g;
+
+				/*
+				 * haystack is a valid pointer in val
+				 * because the memmem() can only
+				 * succeed if the needle (cnk.length)
+				 * is <= haystacklen
+				 *
+				 * p will be a pointer at least
+				 * cnk.length from the end of haystack
+				 */
+				uint8_t *haystack
+					= p + cnk.length;
+				size_t haystacklen
+					= end - (haystack);
+
+				g = memmem(haystack,
+					   haystacklen,
+					   (const uint8_t *)cnk.data,
+					   cnk.length);
+				if (g) {
+					p = g;
+				}
 			} while(g);
 		}
 		val.length = val.length - (p - (uint8_t *)(val.data)) - cnk.length;
@@ -324,7 +353,7 @@ static int ldb_wildcard_compare(struct ldb_context *ldb,
 	}
 
 	/* last chunk may not have reached end of string */
-	if ( (! tree->u.substring.end_with_wildcard) && (*(val.data) != 0) ) goto mismatch;
+	if ( (! tree->u.substring.end_with_wildcard) && (val.length != 0) ) goto mismatch;
 	talloc_free(save_p);
 	*matched = true;
 	return LDB_SUCCESS;

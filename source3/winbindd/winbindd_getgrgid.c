@@ -49,7 +49,10 @@ struct tevent_req *winbindd_getgrgid_send(TALLOC_CTX *mem_ctx,
 	}
 	state->ev = ev;
 
-	DEBUG(3, ("getgrgid %d\n", (int)request->data.gid));
+	DBG_NOTICE("[%s (%u)] getgrgid %d\n",
+		   cli->client_name,
+		   (unsigned int)cli->pid,
+		   (int)request->data.gid);
 
 	state->xid = (struct unixid) {
 		.id = request->data.uid, .type = ID_TYPE_GID };
@@ -74,6 +77,10 @@ static void winbindd_getgrgid_gid2sid_done(struct tevent_req *subreq)
 	status = wb_xids2sids_recv(subreq, state, &state->sid);
 	TALLOC_FREE(subreq);
 	if (tevent_req_nterror(req, status)) {
+		return;
+	}
+	if (is_null_sid(state->sid)) {
+		tevent_req_nterror(req, NT_STATUS_NO_SUCH_GROUP);
 		return;
 	}
 
@@ -112,8 +119,10 @@ NTSTATUS winbindd_getgrgid_recv(struct tevent_req *req,
 	char *buf;
 
 	if (tevent_req_is_nterror(req, &status)) {
+		struct dom_sid_buf sidbuf;
 		DEBUG(5, ("Could not convert sid %s: %s\n",
-			  sid_string_dbg(state->sid), nt_errstr(status)));
+			  dom_sid_str_buf(state->sid, &sidbuf),
+			  nt_errstr(status)));
 		return status;
 	}
 

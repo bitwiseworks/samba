@@ -169,13 +169,13 @@ interface dnsp
 
 	typedef struct {
 		uint32  addrCount;
-		[size_is(addrCount)] uint32 *addr;
+		uint32 addrArray[addrCount];
 	} dnsp_ip4_array;
 
 	typedef struct {
 		uint16 	family;
-		uint16	port;
-		ipv4address ipv4;
+		[flag(NDR_BIG_ENDIAN)] uint16	port;
+		[flag(NDR_BIG_ENDIAN)] ipv4address ipv4;
 		ipv6address ipv6;
 		uint8	pad[8];
 		uint32	unused[8];
@@ -187,6 +187,7 @@ interface dnsp
 		uint32	Tag;
 		uint16	Family;
 		uint16	Reserved0;
+		uint32	Flags;
 		uint32	MatchFlag;
 		uint32	Reserved1;
 		uint32	Reserved2;
@@ -238,7 +239,7 @@ interface dnsp
 		[case(DSPROPERTY_ZONE_AGING_STATE)]             uint32 aging_enabled;
 		[case(DSPROPERTY_ZONE_SCAVENGING_SERVERS)]      dnsp_ip4_array servers;
 		[case(DSPROPERTY_ZONE_AGING_ENABLED_TIME)]      uint32 next_scavenging_cycle_hours;
-		[case(DSPROPERTY_ZONE_DELETED_FROM_HOSTNAME)]   utf8string deleted_by_hostname;
+		[case(DSPROPERTY_ZONE_DELETED_FROM_HOSTNAME)]   nstring deleted_by_hostname;
 		[case(DSPROPERTY_ZONE_MASTER_SERVERS)]          dnsp_ip4_array master_servers;
 		[case(DSPROPERTY_ZONE_AUTO_NS_SERVERS)]         dnsp_ip4_array ns_servers;
 		[case(DSPROPERTY_ZONE_DCPROMO_CONVERT)]         dns_dcpromo_flag dcpromo_flag;
@@ -256,18 +257,7 @@ interface dnsp
 		[value(0)] uint32   flag;
 		[value(1)] uint32   version;
 		dns_property_id     id;
-		[switch_is(wDataLength?id:DSPROPERTY_ZONE_EMPTY)]     dnsPropertyData data;
+		[switch_is(id)]     dnsPropertyData data;
 		uint32              name;
 	} dnsp_DnsProperty;
-
-	/*
-	  these are convenience hooks for ndrdump
-	 */
-	[nopython] void decode_DnssrvRpcRecord(
-		[in] dnsp_DnssrvRpcRecord blob
-		);
-
-	[nopython] void decode_DnsProperty(
-		[in] dnsp_DnsProperty blob
-		);
 }

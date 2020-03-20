@@ -22,7 +22,7 @@
 #include "replace.h"
 #include <krb5/localauth_plugin.h>
 #include <wbclient.h>
-#if HAVE_COM_ERR_H
+#ifdef HAVE_COM_ERR_H
 #include <com_err.h>
 #endif
 
@@ -51,6 +51,8 @@ static krb5_error_code winbind_init(krb5_context context,
 		free(d);
 		return ENOMEM;
 	}
+
+	wbcSetClientProcessName("krb5_localauth_plugin");
 
 	*data = d;
 
@@ -96,14 +98,12 @@ static krb5_error_code winbind_userok(krb5_context context,
 
 	cmp = strcasecmp(princ_str, lname);
 	if (cmp == 0) {
-		krb5_free_unparsed_name(context, princ_str);
-		return 0;
+		goto out;
 	}
 
 	wbc_status = wbcCtxGetpwnam(data->wbc_ctx,
 				    princ_str,
 				    &pwd);
-	krb5_free_unparsed_name(context, princ_str);
 	switch (wbc_status) {
 	case WBC_ERR_SUCCESS:
 		princ_uid = pwd->pw_uid;
@@ -121,7 +121,7 @@ static krb5_error_code winbind_userok(krb5_context context,
 	}
 	wbcFreeMemory(pwd);
 	if (code != 0) {
-		return code;
+		goto out;
 	}
 
 	wbc_status = wbcCtxGetpwnam(data->wbc_ctx,
@@ -143,12 +143,25 @@ static krb5_error_code winbind_userok(krb5_context context,
 	}
 	wbcFreeMemory(pwd);
 	if (code != 0) {
-		return code;
+		goto out;
 	}
 
 	if (princ_uid != lname_uid) {
 		code = EPERM;
 	}
+
+	com_err("winbind_localauth",
+		code,
+		"Access %s: %s (uid=%u) %sequal to %s (uid=%u)",
+		code == 0 ? "granted" : "denied",
+		princ_str,
+		(unsigned int)princ_uid,
+		code == 0 ? "" : "not ",
+		lname,
+		(unsigned int)lname_uid);
+
+out:
+	krb5_free_unparsed_name(context, princ_str);
 
 	return code;
 }

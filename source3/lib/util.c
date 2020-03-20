@@ -36,6 +36,7 @@
 #include "lib/util/sys_rw_data.h"
 #include "lib/util/util_process.h"
 #include "lib/dbwrap/dbwrap_ctdb.h"
+#include "lib/gencache.h"
 
 #ifdef HAVE_SYS_PRCTL_H
 #include <sys/prctl.h>
@@ -456,6 +457,13 @@ NTSTATUS reinit_after_fork(struct messaging_context *msg_ctx,
 	NTSTATUS status = NT_STATUS_OK;
 	int ret;
 
+	/*
+	 * The main process thread should never
+	 * allow per_thread_cwd_enable() to be
+	 * called.
+	 */
+	per_thread_cwd_disable();
+
 	if (reinit_after_fork_pipe[1] != -1) {
 		close(reinit_after_fork_pipe[1]);
 		reinit_after_fork_pipe[1] = -1;
@@ -626,9 +634,11 @@ static char *strip_mount_options(TALLOC_CTX *ctx, const char *str)
 #ifdef WITH_NISPLUS_HOME
 char *automount_lookup(TALLOC_CTX *ctx, const char *user_name)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	char *value = NULL;
 
-	char *nis_map = (char *)lp_homedir_map();
+	char *nis_map = (char *)lp_homedir_map(talloc_tos(), lp_sub);
 
 	char buffer[NIS_MAXATTRVAL + 1];
 	nis_result *result;
@@ -674,13 +684,15 @@ char *automount_lookup(TALLOC_CTX *ctx, const char *user_name)
 
 char *automount_lookup(TALLOC_CTX *ctx, const char *user_name)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	char *value = NULL;
 
 	int nis_error;        /* returned by yp all functions */
 	char *nis_result;     /* yp_match inits this */
 	int nis_result_len;  /* and set this */
 	char *nis_domain;     /* yp_get_default_domain inits this */
-	char *nis_map = lp_homedir_map(talloc_tos());
+	char *nis_map = lp_homedir_map(talloc_tos(), lp_sub);
 
 	if ((nis_error = yp_get_default_domain(&nis_domain)) != 0) {
 		DEBUG(3, ("YP Error: %s\n", yperr_string(nis_error)));
@@ -813,6 +825,8 @@ gid_t nametogid(const char *name)
 
 void smb_panic_s3(const char *why)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	char *cmd;
 	int result;
 
@@ -827,7 +841,7 @@ void smb_panic_s3(const char *why)
 	prctl(PR_SET_PTRACER, getpid(), 0, 0, 0);
 #endif
 
-	cmd = lp_panic_action(talloc_tos());
+	cmd = lp_panic_action(talloc_tos(), lp_sub);
 	if (cmd && *cmd) {
 		DEBUG(0, ("smb_panic(): calling panic action [%s]\n", cmd));
 		result = system(cmd);
@@ -1075,7 +1089,7 @@ bool fcntl_getlock(int fd, int op, off_t *poffset, off_t *pcount, int *ptype, pi
 }
 
 #if defined(HAVE_OFD_LOCKS)
-int map_process_lock_to_ofd_lock(int op, bool *use_ofd_locks)
+int map_process_lock_to_ofd_lock(int op)
 {
 	switch (op) {
 	case F_GETLK:
@@ -1091,16 +1105,13 @@ int map_process_lock_to_ofd_lock(int op, bool *use_ofd_locks)
 		op = F_OFD_SETLKW;
 		break;
 	default:
-		*use_ofd_locks = false;
 		return -1;
 	}
-	*use_ofd_locks = true;
 	return op;
 }
 #else /* HAVE_OFD_LOCKS */
-int map_process_lock_to_ofd_lock(int op, bool *use_ofd_locks)
+int map_process_lock_to_ofd_lock(int op)
 {
-	*use_ofd_locks = false;
 	return op;
 }
 #endif /* HAVE_OFD_LOCKS */
@@ -1246,12 +1257,14 @@ struct ra_parser_state {
 	enum remote_arch_types ra;
 };
 
-static void ra_parser(time_t timeout, DATA_BLOB blob, void *priv_data)
+static void ra_parser(const struct gencache_timeout *t,
+		      DATA_BLOB blob,
+		      void *priv_data)
 {
 	struct ra_parser_state *state = (struct ra_parser_state *)priv_data;
 	const char *ra_str = NULL;
 
-	if (timeout <= time(NULL)) {
+	if (gencache_timeout_expired(t)) {
 		return;
 	}
 
@@ -1505,25 +1518,6 @@ void *smb_xmalloc_array(size_t size, unsigned int count)
 		smb_panic("smb_xmalloc_array: malloc failed");
 	}
 	return p;
-}
-
-/*
-  vasprintf that aborts on malloc fail
-*/
-
- int smb_xvasprintf(char **ptr, const char *format, va_list ap)
-{
-	int n;
-	va_list ap2;
-
-	va_copy(ap2, ap);
-
-	n = vasprintf(ptr, format, ap2);
-	va_end(ap2);
-	if (n == -1 || ! *ptr) {
-		smb_panic("smb_xvasprintf: out of memory");
-	}
-	return n;
 }
 
 /*****************************************************************
@@ -2142,6 +2136,61 @@ struct security_unix_token *copy_unix_token(TALLOC_CTX *ctx, const struct securi
 		cpy->groups = NULL;
 	}
 	return cpy;
+}
+
+/****************************************************************************
+ Return a root token
+****************************************************************************/
+
+struct security_unix_token *root_unix_token(TALLOC_CTX *mem_ctx)
+{
+	struct security_unix_token *t = NULL;
+
+	t = talloc_zero(mem_ctx, struct security_unix_token);
+	if (t == NULL) {
+		return NULL;
+	}
+
+	/*
+	 * This is not needed, but lets make it explicit, not implicit.
+	 */
+	*t = (struct security_unix_token) {
+		.uid = 0,
+		.gid = 0,
+		.ngroups = 0,
+		.groups = NULL
+	};
+
+	return t;
+}
+
+char *utok_string(TALLOC_CTX *mem_ctx, const struct security_unix_token *tok)
+{
+	char *str;
+	uint32_t i;
+
+	str = talloc_asprintf(
+		mem_ctx,
+		"uid=%ju, gid=%ju, %"PRIu32" groups:",
+		(uintmax_t)(tok->uid),
+		(uintmax_t)(tok->gid),
+		tok->ngroups);
+	if (str == NULL) {
+		return NULL;
+	}
+
+	for (i=0; i<tok->ngroups; i++) {
+		char *tmp;
+		tmp = talloc_asprintf_append_buffer(
+			str, " %ju", (uintmax_t)tok->groups[i]);
+		if (tmp == NULL) {
+			TALLOC_FREE(str);
+			return NULL;
+		}
+		str = tmp;
+	}
+
+	return str;
 }
 
 /****************************************************************************

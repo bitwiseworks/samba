@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Unix SMB/CIFS implementation.
@@ -38,7 +38,9 @@ from ldb import (
     SCOPE_BASE,
     Message,
     FLAG_MOD_REPLACE,
-    )
+)
+from samba.compat import cmp_fn
+from samba.compat import get_string
 
 
 class DrsBaseTestCase(SambaToolCmdTest):
@@ -54,23 +56,23 @@ class DrsBaseTestCase(SambaToolCmdTest):
         creds.set_gensec_features(creds.get_gensec_features() | gensec.FEATURE_SEAL)
 
         # connect to DCs
-        url_dc = samba.tests.env_get_var_value("DC1")
-        (self.ldb_dc1, self.info_dc1) = samba.tests.connect_samdb_ex(url_dc,
+        self.url_dc1 = samba.tests.env_get_var_value("DC1")
+        (self.ldb_dc1, self.info_dc1) = samba.tests.connect_samdb_ex(self.url_dc1,
                                                                      ldap_only=True)
-        url_dc = samba.tests.env_get_var_value("DC2")
-        (self.ldb_dc2, self.info_dc2) = samba.tests.connect_samdb_ex(url_dc,
+        self.url_dc2 = samba.tests.env_get_var_value("DC2")
+        (self.ldb_dc2, self.info_dc2) = samba.tests.connect_samdb_ex(self.url_dc2,
                                                                      ldap_only=True)
         self.test_ldb_dc = self.ldb_dc1
 
         # cache some of RootDSE props
-        self.schema_dn = self.info_dc1["schemaNamingContext"][0]
-        self.domain_dn = self.info_dc1["defaultNamingContext"][0]
-        self.config_dn = self.info_dc1["configurationNamingContext"][0]
+        self.schema_dn = str(self.info_dc1["schemaNamingContext"][0])
+        self.domain_dn = str(self.info_dc1["defaultNamingContext"][0])
+        self.config_dn = str(self.info_dc1["configurationNamingContext"][0])
         self.forest_level = int(self.info_dc1["forestFunctionality"][0])
 
         # we will need DCs DNS names for 'samba-tool drs' command
-        self.dnsname_dc1 = self.info_dc1["dnsHostName"][0]
-        self.dnsname_dc2 = self.info_dc2["dnsHostName"][0]
+        self.dnsname_dc1 = str(self.info_dc1["dnsHostName"][0])
+        self.dnsname_dc2 = str(self.info_dc2["dnsHostName"][0])
 
         # for debugging the test code
         self._debug = False
@@ -83,7 +85,7 @@ class DrsBaseTestCase(SambaToolCmdTest):
         self.test_ldb_dc = ldb_dc
 
     def _GUID_string(self, guid):
-        return self.test_ldb_dc.schema_format_value("objectGUID", guid)
+        return get_string(self.test_ldb_dc.schema_format_value("objectGUID", guid))
 
     def _ldap_schemaUpdateNow(self, sam_db):
         rec = {"dn": "",
@@ -112,11 +114,15 @@ class DrsBaseTestCase(SambaToolCmdTest):
     def _samba_tool_cmd_list(self, drs_command):
         # make command line credentials string
 
-        ccache_name = self.get_creds_ccache_name()
+        # If test runs on windows then it can provide its own auth string
+        if hasattr(self, 'cmdline_auth'):
+            cmdline_auth = self.cmdline_auth
+        else:
+            ccache_name = self.get_creds_ccache_name()
 
-        # Tunnel the command line credentials down to the
-        # subcommand to avoid a new kinit
-        cmdline_auth = "--krb5-ccache=%s" % ccache_name
+            # Tunnel the command line credentials down to the
+            # subcommand to avoid a new kinit
+            cmdline_auth = "--krb5-ccache=%s" % ccache_name
 
         # bin/samba-tool drs <drs_command> <cmdline_auth>
         return ["drs", drs_command, cmdline_auth]
@@ -141,7 +147,7 @@ class DrsBaseTestCase(SambaToolCmdTest):
 
         (result, out, err) = self.runsubcmd(*samba_tool_cmdline)
         self.assertCmdSuccess(result, out, err)
-        self.assertEquals(err,"","Shouldn't be any error messages")
+        self.assertEquals(err, "", "Shouldn't be any error messages")
 
     def _enable_inbound_repl(self, DC):
         # make base command line
@@ -150,7 +156,7 @@ class DrsBaseTestCase(SambaToolCmdTest):
         samba_tool_cmd += [DC, "--dsa-option=-DISABLE_INBOUND_REPL"]
         (result, out, err) = self.runsubcmd(*samba_tool_cmd)
         self.assertCmdSuccess(result, out, err)
-        self.assertEquals(err,"","Shouldn't be any error messages")
+        self.assertEquals(err, "", "Shouldn't be any error messages")
 
     def _disable_inbound_repl(self, DC):
         # make base command line
@@ -159,7 +165,7 @@ class DrsBaseTestCase(SambaToolCmdTest):
         samba_tool_cmd += [DC, "--dsa-option=+DISABLE_INBOUND_REPL"]
         (result, out, err) = self.runsubcmd(*samba_tool_cmd)
         self.assertCmdSuccess(result, out, err)
-        self.assertEquals(err,"","Shouldn't be any error messages")
+        self.assertEquals(err, "", "Shouldn't be any error messages")
 
     def _enable_all_repl(self, DC):
         self._enable_inbound_repl(DC)
@@ -169,7 +175,7 @@ class DrsBaseTestCase(SambaToolCmdTest):
         samba_tool_cmd += [DC, "--dsa-option=-DISABLE_OUTBOUND_REPL"]
         (result, out, err) = self.runsubcmd(*samba_tool_cmd)
         self.assertCmdSuccess(result, out, err)
-        self.assertEquals(err,"","Shouldn't be any error messages")
+        self.assertEquals(err, "", "Shouldn't be any error messages")
 
     def _disable_all_repl(self, DC):
         self._disable_inbound_repl(DC)
@@ -179,12 +185,12 @@ class DrsBaseTestCase(SambaToolCmdTest):
         samba_tool_cmd += [DC, "--dsa-option=+DISABLE_OUTBOUND_REPL"]
         (result, out, err) = self.runsubcmd(*samba_tool_cmd)
         self.assertCmdSuccess(result, out, err)
-        self.assertEquals(err,"","Shouldn't be any error messages")
+        self.assertEquals(err, "", "Shouldn't be any error messages")
 
     def _get_highest_hwm_utdv(self, ldb_conn):
         res = ldb_conn.search("", scope=ldb.SCOPE_BASE, attrs=["highestCommittedUSN"])
         hwm = drsuapi.DsReplicaHighWaterMark()
-        hwm.tmp_highest_usn = long(res[0]["highestCommittedUSN"][0])
+        hwm.tmp_highest_usn = int(res[0]["highestCommittedUSN"][0])
         hwm.reserved_usn = 0
         hwm.highest_usn = hwm.tmp_highest_usn
 
@@ -200,7 +206,7 @@ class DrsBaseTestCase(SambaToolCmdTest):
 
     def _get_identifier(self, ldb_conn, dn):
         res = ldb_conn.search(dn, scope=ldb.SCOPE_BASE,
-                attrs=["objectGUID", "objectSid"])
+                              attrs=["objectGUID", "objectSid"])
         id = drsuapi.DsReplicaObjectIdentifier()
         id.guid = ndr_unpack(misc.GUID, res[0]['objectGUID'][0])
         if "objectSid" in res[0]:
@@ -252,8 +258,8 @@ class DrsBaseTestCase(SambaToolCmdTest):
 
             next_object = ctr6.first_object
             for i in range(0, ctr6.object_count):
-                print("Obj %d: %s %s" %(i, next_object.object.identifier.dn[:25],
-                                        next_object.object.identifier.guid))
+                print("Obj %d: %s %s" % (i, next_object.object.identifier.dn[:25],
+                                         next_object.object.identifier.guid))
                 next_object = next_object.next_object
 
             print("Linked Attributes: %d" % ctr6.linked_attributes_count)
@@ -267,23 +273,23 @@ class DrsBaseTestCase(SambaToolCmdTest):
                                         l.value.blob)
 
                 print("Link Tgt %s... <-- Src %s"
-                      %(target.dn[:25], l.identifier.guid))
-		state = "Del"
-		if l.flags & drsuapi.DRSUAPI_DS_LINKED_ATTRIBUTE_FLAG_ACTIVE:
-		    state = "Act"
-		print("  v%u %s changed %u" %(l.meta_data.version, state,
-		      l.meta_data.originating_change_time))
+                      % (target.dn[:25], l.identifier.guid))
+                state = "Del"
+                if l.flags & drsuapi.DRSUAPI_DS_LINKED_ATTRIBUTE_FLAG_ACTIVE:
+                    state = "Act"
+                print("  v%u %s changed %u" % (l.meta_data.version, state,
+                                               l.meta_data.originating_change_time))
 
-            print("HWM:     %d" %(ctr6.new_highwatermark.highest_usn))
-            print("Tmp HWM: %d" %(ctr6.new_highwatermark.tmp_highest_usn))
-            print("More data: %d" %(ctr6.more_data))
+            print("HWM:     %d" % (ctr6.new_highwatermark.highest_usn))
+            print("Tmp HWM: %d" % (ctr6.new_highwatermark.tmp_highest_usn))
+            print("More data: %d" % (ctr6.more_data))
 
     def _get_replication(self, replica_flags,
-                          drs_error=drsuapi.DRSUAPI_EXOP_ERR_NONE, drs=None, drs_handle=None,
-                          highwatermark=None, uptodateness_vector=None,
-                          more_flags=0, max_objects=133, exop=0,
-                          dest_dsa=drsuapi.DRSUAPI_DS_BIND_GUID_W2K3,
-                          source_dsa=None, invocation_id=None, nc_dn_str=None):
+                         drs_error=drsuapi.DRSUAPI_EXOP_ERR_NONE, drs=None, drs_handle=None,
+                         highwatermark=None, uptodateness_vector=None,
+                         more_flags=0, max_objects=133, exop=0,
+                         dest_dsa=drsuapi.DRSUAPI_DS_BIND_GUID_W2K3,
+                         source_dsa=None, invocation_id=None, nc_dn_str=None):
         """
         Builds a DsGetNCChanges request based on the information provided
         and returns the response received from the DC.
@@ -317,7 +323,7 @@ class DrsBaseTestCase(SambaToolCmdTest):
         if uptodateness_vector is not None:
             uptodateness_vector_v1 = drsuapi.DsReplicaCursorCtrEx()
             cursors = []
-            for i in xrange(0, uptodateness_vector.count):
+            for i in range(0, uptodateness_vector.count):
                 c = uptodateness_vector.cursors[i]
                 c1 = drsuapi.DsReplicaCursor()
                 c1.source_dsa_invocation_id = c.source_dsa_invocation_id
@@ -362,7 +368,6 @@ class DrsBaseTestCase(SambaToolCmdTest):
                          dn_ordered=dn_ordered)
         return (ctr6.new_highwatermark, ctr6.uptodateness_vector)
 
-
     def _get_ctr6_dn_list(self, ctr6):
         """
         Returns the DNs contained in a DsGetNCChanges response.
@@ -376,7 +381,6 @@ class DrsBaseTestCase(SambaToolCmdTest):
 
         return dn_list
 
-
     def _check_ctr6(self, ctr6, expected_dns=[], expected_links=[],
                     dn_ordered=True, links_ordered=True,
                     more_data=False, nc_object_count=0,
@@ -384,14 +388,25 @@ class DrsBaseTestCase(SambaToolCmdTest):
         """
         Check that a ctr6 matches the specified parameters.
         """
-        self.assertEqual(ctr6.object_count, len(expected_dns))
+        ctr6_raw_dns = self._get_ctr6_dn_list(ctr6)
+
+        # filter out changes to the RID Set objects, as these can happen
+        # intermittently and mess up the test assertions
+        ctr6_dns = []
+        for dn in ctr6_raw_dns:
+            if "CN=RID Set," in dn or "CN=RID Manager$," in dn:
+                print("Removing {0} from GetNCChanges reply".format(dn))
+            else:
+                ctr6_dns.append(dn)
+
+        self.assertEqual(len(ctr6_dns), len(expected_dns),
+                         "Received unexpected objects (%s)" % ctr6_dns)
+        self.assertEqual(ctr6.object_count, len(ctr6_raw_dns))
         self.assertEqual(ctr6.linked_attributes_count, len(expected_links))
         self.assertEqual(ctr6.more_data, more_data)
         self.assertEqual(ctr6.nc_object_count, nc_object_count)
         self.assertEqual(ctr6.nc_linked_attributes_count, nc_linked_attributes_count)
         self.assertEqual(ctr6.drs_error[0], drs_error)
-
-        ctr6_dns = self._get_ctr6_dn_list(ctr6)
 
         i = 0
         for dn in expected_dns:
@@ -424,7 +439,7 @@ class DrsBaseTestCase(SambaToolCmdTest):
         req8.destination_dsa_guid = misc.GUID(dest_dsa) if dest_dsa else misc.GUID()
         req8.source_dsa_invocation_id = misc.GUID(invocation_id)
         req8.naming_context = drsuapi.DsReplicaObjectIdentifier()
-        req8.naming_context.dn = unicode(nc_dn_str)
+        req8.naming_context.dn = str(nc_dn_str)
         req8.highwatermark = drsuapi.DsReplicaHighWaterMark()
         req8.highwatermark.tmp_highest_usn = 0
         req8.highwatermark.reserved_usn = 0
@@ -454,7 +469,7 @@ class DrsBaseTestCase(SambaToolCmdTest):
         req10.destination_dsa_guid = misc.GUID(dest_dsa) if dest_dsa else misc.GUID()
         req10.source_dsa_invocation_id = misc.GUID(invocation_id)
         req10.naming_context = drsuapi.DsReplicaObjectIdentifier()
-        req10.naming_context.dn = unicode(nc_dn_str)
+        req10.naming_context.dn = str(nc_dn_str)
         req10.highwatermark = drsuapi.DsReplicaHighWaterMark()
         req10.highwatermark.tmp_highest_usn = 0
         req10.highwatermark.reserved_usn = 0
@@ -492,7 +507,6 @@ class DrsBaseTestCase(SambaToolCmdTest):
         return partial_attribute_set
 
 
-
 class AbstractLink:
     def __init__(self, attid, flags, identifier, targetGUID,
                  targetDN=""):
@@ -515,7 +529,7 @@ class AbstractLink:
                 print("AbstractLink.__internal_cmp__(%r, %r) => wrong type" % (self, other))
             return NotImplemented
 
-        c = cmp(self.selfGUID_blob, other.selfGUID_blob)
+        c = cmp_fn(self.selfGUID_blob, other.selfGUID_blob)
         if c != 0:
             if verbose:
                 print("AbstractLink.__internal_cmp__(%r, %r) => %d different identifier" % (self, other, c))
@@ -536,7 +550,7 @@ class AbstractLink:
                 print("AbstractLink.__internal_cmp__(%r, %r) => %d different FLAG_ACTIVE" % (self, other, c))
             return c
 
-        c = cmp(self.targetGUID_blob, other.targetGUID_blob)
+        c = cmp_fn(self.targetGUID_blob, other.targetGUID_blob)
         if c != 0:
             if verbose:
                 print("AbstractLink.__internal_cmp__(%r, %r) => %d different target" % (self, other, c))

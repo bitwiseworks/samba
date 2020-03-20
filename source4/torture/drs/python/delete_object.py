@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Unix SMB/CIFS implementation.
@@ -32,9 +32,10 @@ import time
 
 from ldb import (
     SCOPE_SUBTREE,
-    )
+)
 
-import drs_base, ldb
+import drs_base
+import ldb
 
 
 class DrsDeleteObjectTestCase(drs_base.DrsBaseTestCase):
@@ -69,12 +70,12 @@ class DrsDeleteObjectTestCase(drs_base.DrsBaseTestCase):
         # Deleted Object base DN
         dodn = self._deleted_objects_dn(sam_ldb)
         # now check properties of the user
-        cn_orig = obj_orig["cn"][0]
-        cn_cur  = user_cur["cn"][0]
-        name_orig = obj_orig["name"][0]
-        name_cur  = user_cur["name"][0]
+        cn_orig = str(obj_orig["cn"][0])
+        cn_cur  = str(user_cur["cn"][0])
+        name_orig = str(obj_orig["name"][0])
+        name_cur  = str(user_cur["name"][0])
         if is_deleted:
-            self.assertEquals(user_cur["isDeleted"][0],"TRUE")
+            self.assertEquals(str(user_cur["isDeleted"][0]), "TRUE")
             self.assertFalse("objectCategory" in user_cur)
             self.assertFalse("sAMAccountType" in user_cur)
             self.assertFalse("description" in user_cur)
@@ -160,7 +161,7 @@ class DrsDeleteObjectTestCase(drs_base.DrsBaseTestCase):
         m = ldb.Message()
         m.dn = group_dn
         m["member"] = ldb.MessageElement(str(user_dn),
-                                           ldb.FLAG_MOD_ADD, "member")
+                                         ldb.FLAG_MOD_ADD, "member")
         self.ldb_dc2.modify(m)
 
         ldb_res = self.ldb_dc2.search(base=self.domain_dn,
@@ -316,7 +317,7 @@ class DrsDeleteObjectTestCase(drs_base.DrsBaseTestCase):
         m = ldb.Message()
         m.dn = group_dn
         m["member"] = ldb.MessageElement(str(user_dn),
-                                           ldb.FLAG_MOD_ADD, "member")
+                                         ldb.FLAG_MOD_ADD, "member")
         self.ldb_dc2.modify(m)
 
         ldb_res = self.ldb_dc2.search(base=self.domain_dn,
@@ -376,4 +377,3 @@ class DrsDeleteObjectTestCase(drs_base.DrsBaseTestCase):
 
         # trigger replication from DC1 to DC2, for cleanup
         self._net_drs_replicate(DC=self.dnsname_dc2, fromDC=self.dnsname_dc1, forced=True)
-

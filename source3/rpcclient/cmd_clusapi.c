@@ -501,20 +501,253 @@ static WERROR cmd_clusapi_get_cluster_version2(struct rpc_pipe_client *cli,
 	return WERR_OK;
 }
 
+static WERROR cmd_clusapi_pause_node(struct rpc_pipe_client *cli,
+				     TALLOC_CTX *mem_ctx,
+				     int argc,
+				     const char **argv)
+{
+	struct dcerpc_binding_handle *b = cli->binding_handle;
+	NTSTATUS status;
+	const char *lpszNodeName = "CTDB_NODE_0";
+	WERROR Status;
+	struct policy_handle hNode;
+	WERROR rpc_status;
+	WERROR result, ignore;
+
+	if (argc >= 2) {
+		lpszNodeName = argv[1];
+	}
+
+	status = dcerpc_clusapi_OpenNode(b, mem_ctx,
+					 lpszNodeName,
+					 &Status,
+					 &rpc_status,
+					 &hNode);
+	if (!NT_STATUS_IS_OK(status)) {
+		return ntstatus_to_werror(status);
+	}
+
+	if (!W_ERROR_IS_OK(Status)) {
+		printf("Failed to open node %s\n", lpszNodeName);
+		printf("Status: %s\n", win_errstr(Status));
+		return Status;
+	}
+
+	status = dcerpc_clusapi_PauseNode(b, mem_ctx,
+					  hNode,
+					  &rpc_status,
+					  &result);
+	if (!NT_STATUS_IS_OK(status)) {
+		return ntstatus_to_werror(status);
+	}
+	if (!W_ERROR_IS_OK(result)) {
+		printf("Failed to pause node %s\n", lpszNodeName);
+		printf("Status: %s\n", win_errstr(result));
+		return result;
+	}
+
+	dcerpc_clusapi_CloseNode(b, mem_ctx,
+				 &hNode,
+				 &ignore);
+
+	printf("Cluster node %s has been paused\n", lpszNodeName);
+	printf("rpc_status: %s\n", win_errstr(rpc_status));
+
+	return WERR_OK;
+}
+
+static WERROR cmd_clusapi_resume_node(struct rpc_pipe_client *cli,
+				      TALLOC_CTX *mem_ctx,
+				      int argc,
+				      const char **argv)
+{
+	struct dcerpc_binding_handle *b = cli->binding_handle;
+	NTSTATUS status;
+	const char *lpszNodeName = "CTDB_NODE_0";
+	WERROR Status;
+	struct policy_handle hNode;
+	WERROR rpc_status;
+	WERROR result, ignore;
+
+	if (argc >= 2) {
+		lpszNodeName = argv[1];
+	}
+
+	status = dcerpc_clusapi_OpenNode(b, mem_ctx,
+					 lpszNodeName,
+					 &Status,
+					 &rpc_status,
+					 &hNode);
+	if (!NT_STATUS_IS_OK(status)) {
+		return ntstatus_to_werror(status);
+	}
+
+	if (!W_ERROR_IS_OK(Status)) {
+		printf("Failed to open node %s\n", lpszNodeName);
+		printf("Status: %s\n", win_errstr(Status));
+		return Status;
+	}
+
+	status = dcerpc_clusapi_ResumeNode(b, mem_ctx,
+					   hNode,
+					   &rpc_status,
+					   &result);
+	if (!NT_STATUS_IS_OK(status)) {
+		return ntstatus_to_werror(status);
+	}
+	if (!W_ERROR_IS_OK(result)) {
+		printf("Failed to resume node %s\n", lpszNodeName);
+		printf("Status: %s\n", win_errstr(result));
+		return result;
+	}
+
+	dcerpc_clusapi_CloseNode(b, mem_ctx,
+				 &hNode,
+				 &ignore);
+
+	printf("Cluster node %s has been resumed\n", lpszNodeName);
+	printf("rpc_status: %s\n", win_errstr(rpc_status));
+
+	return WERR_OK;
+}
+
 
 struct cmd_set clusapi_commands[] = {
 
-	{ "CLUSAPI" },
-	{ "clusapi_open_cluster", RPC_RTYPE_WERROR, NULL, cmd_clusapi_open_cluster, &ndr_table_clusapi, NULL, "bla", "" },
-	{ "clusapi_get_cluster_name", RPC_RTYPE_WERROR, NULL, cmd_clusapi_get_cluster_name, &ndr_table_clusapi, NULL, "bla", "" },
-	{ "clusapi_get_cluster_version", RPC_RTYPE_WERROR, NULL, cmd_clusapi_get_cluster_version, &ndr_table_clusapi, NULL, "bla", "" },
-	{ "clusapi_get_quorum_resource", RPC_RTYPE_WERROR, NULL, cmd_clusapi_get_quorum_resource, &ndr_table_clusapi, NULL, "bla", "" },
-	{ "clusapi_create_enum", RPC_RTYPE_WERROR, NULL, cmd_clusapi_create_enum, &ndr_table_clusapi, NULL, "bla", "" },
-	{ "clusapi_create_enumex", RPC_RTYPE_WERROR, NULL, cmd_clusapi_create_enumex, &ndr_table_clusapi, NULL, "bla", "" },
-	{ "clusapi_open_resource", RPC_RTYPE_WERROR, NULL, cmd_clusapi_open_resource, &ndr_table_clusapi, NULL, "bla", "" },
-	{ "clusapi_online_resource", RPC_RTYPE_WERROR, NULL, cmd_clusapi_online_resource, &ndr_table_clusapi, NULL, "bla", "" },
-	{ "clusapi_offline_resource", RPC_RTYPE_WERROR, NULL, cmd_clusapi_offline_resource, &ndr_table_clusapi, NULL, "bla", "" },
-	{ "clusapi_get_resource_state", RPC_RTYPE_WERROR, NULL, cmd_clusapi_get_resource_state, &ndr_table_clusapi, NULL, "bla", "" },
-	{ "clusapi_get_cluster_version2", RPC_RTYPE_WERROR, NULL, cmd_clusapi_get_cluster_version2, &ndr_table_clusapi, NULL, "bla", "" },
-	{ NULL }
+	{
+		.name = "CLUSAPI",
+	},
+	{
+		.name               = "clusapi_open_cluster",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_clusapi_open_cluster,
+		.table              = &ndr_table_clusapi,
+		.rpc_pipe           = NULL,
+		.description        = "Open cluster",
+		.usage              = "",
+	},
+	{
+		.name               = "clusapi_get_cluster_name",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_clusapi_get_cluster_name,
+		.table              = &ndr_table_clusapi,
+		.rpc_pipe           = NULL,
+		.description        = "Get cluster name",
+		.usage              = "",
+	},
+	{
+		.name               = "clusapi_get_cluster_version",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_clusapi_get_cluster_version,
+		.table              = &ndr_table_clusapi,
+		.rpc_pipe           = NULL,
+		.description        = "Get cluster version",
+		.usage              = "",
+	},
+	{
+		.name               = "clusapi_get_quorum_resource",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_clusapi_get_quorum_resource,
+		.table              = &ndr_table_clusapi,
+		.rpc_pipe           = NULL,
+		.description        = "Get quorum resource",
+		.usage              = "",
+	},
+	{
+		.name               = "clusapi_create_enum",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_clusapi_create_enum,
+		.table              = &ndr_table_clusapi,
+		.rpc_pipe           = NULL,
+		.description        = "Create enum query",
+		.usage              = "",
+	},
+	{
+		.name               = "clusapi_create_enumex",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_clusapi_create_enumex,
+		.table              = &ndr_table_clusapi,
+		.rpc_pipe           = NULL,
+		.description        = "Create enumex query",
+		.usage              = "",
+	},
+	{
+		.name               = "clusapi_open_resource",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_clusapi_open_resource,
+		.table              = &ndr_table_clusapi,
+		.rpc_pipe           = NULL,
+		.description        = "Open cluster resource",
+		.usage              = "",
+	},
+	{
+		.name               = "clusapi_online_resource",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_clusapi_online_resource,
+		.table              = &ndr_table_clusapi,
+		.rpc_pipe           = NULL,
+		.description        = "Set cluster resource online",
+		.usage              = "",
+	},
+	{
+		.name               = "clusapi_offline_resource",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_clusapi_offline_resource,
+		.table              = &ndr_table_clusapi,
+		.rpc_pipe           = NULL,
+		.description        = "Set cluster resource offline",
+		.usage              = "",
+	},
+	{
+		.name               = "clusapi_get_resource_state",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_clusapi_get_resource_state,
+		.table              = &ndr_table_clusapi,
+		.rpc_pipe           = NULL,
+		.description        = "Get cluster resource state",
+		.usage              = "",
+	},
+	{
+		.name               = "clusapi_get_cluster_version2",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_clusapi_get_cluster_version2,
+		.table              = &ndr_table_clusapi,
+		.rpc_pipe           = NULL,
+		.description        = "Get cluster version2",
+		.usage              = "",
+	},
+	{
+		.name               = "clusapi_pause_node",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_clusapi_pause_node,
+		.table              = &ndr_table_clusapi,
+		.rpc_pipe           = NULL,
+		.description        = "Pause cluster node",
+		.usage              = "",
+	},
+	{
+		.name               = "clusapi_resume_node",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_clusapi_resume_node,
+		.table              = &ndr_table_clusapi,
+		.rpc_pipe           = NULL,
+		.description        = "Resume cluster node",
+		.usage              = "",
+	},
+	{
+		.name = NULL,
+	},
 };

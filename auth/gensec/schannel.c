@@ -33,8 +33,15 @@
 #include "librpc/gen_ndr/dcerpc.h"
 #include "param/param.h"
 #include "auth/gensec/gensec_toplevel_proto.h"
-#include "lib/crypto/crypto.h"
 #include "libds/common/roles.h"
+
+#ifndef HAVE_GNUTLS_AES_CFB8
+#include "lib/crypto/aes.h"
+#endif
+
+#include "lib/crypto/gnutls_helpers.h"
+#include <gnutls/gnutls.h>
+#include <gnutls/crypto.h>
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_AUTH
@@ -137,12 +144,49 @@ static void netsec_offset_and_sizes(struct schannel_state *state,
 /*******************************************************************
  Encode or Decode the sequence number (which is symmetric)
  ********************************************************************/
-static void netsec_do_seq_num(struct schannel_state *state,
-			      const uint8_t *checksum,
-			      uint32_t checksum_length,
-			      uint8_t seq_num[8])
+static NTSTATUS netsec_do_seq_num(struct schannel_state *state,
+				  const uint8_t *checksum,
+				  uint32_t checksum_length,
+				  uint8_t seq_num[8])
 {
 	if (state->creds->negotiate_flags & NETLOGON_NEG_SUPPORTS_AES) {
+#ifdef HAVE_GNUTLS_AES_CFB8
+		gnutls_cipher_hd_t cipher_hnd = NULL;
+		gnutls_datum_t key = {
+			.data = state->creds->session_key,
+			.size = sizeof(state->creds->session_key),
+		};
+		uint32_t iv_size =
+			gnutls_cipher_get_iv_size(GNUTLS_CIPHER_AES_128_CFB8);
+		uint8_t _iv[iv_size];
+		gnutls_datum_t iv = {
+			.data = _iv,
+			.size = iv_size,
+		};
+		int rc;
+
+		ZERO_ARRAY(_iv);
+
+		memcpy(iv.data + 0, checksum, 8);
+		memcpy(iv.data + 8, checksum, 8);
+
+		rc = gnutls_cipher_init(&cipher_hnd,
+					GNUTLS_CIPHER_AES_128_CFB8,
+					&key,
+					&iv);
+		if (rc < 0) {
+			return gnutls_error_to_ntstatus(rc,
+							NT_STATUS_CRYPTO_SYSTEM_INVALID);
+		}
+
+		rc = gnutls_cipher_encrypt(cipher_hnd, seq_num, 8);
+		gnutls_cipher_deinit(cipher_hnd);
+		if (rc < 0) {
+			return gnutls_error_to_ntstatus(rc,
+							NT_STATUS_CRYPTO_SYSTEM_INVALID);
+		}
+
+#else /* NOT HAVE_GNUTLS_AES_CFB8 */
 		AES_KEY key;
 		uint8_t iv[AES_BLOCK_SIZE];
 
@@ -152,26 +196,165 @@ static void netsec_do_seq_num(struct schannel_state *state,
 		memcpy(iv+8, checksum, 8);
 
 		aes_cfb8_encrypt(seq_num, seq_num, 8, &key, iv, AES_ENCRYPT);
+#endif /* HAVE_GNUTLS_AES_CFB8 */
 	} else {
 		static const uint8_t zeros[4];
-		uint8_t sequence_key[16];
+		uint8_t _sequence_key[16];
+		gnutls_cipher_hd_t cipher_hnd;
+		gnutls_datum_t sequence_key = {
+			.data = _sequence_key,
+			.size = sizeof(_sequence_key),
+		};
 		uint8_t digest1[16];
+		int rc;
 
-		hmac_md5(state->creds->session_key, zeros, sizeof(zeros), digest1);
-		hmac_md5(digest1, checksum, checksum_length, sequence_key);
-		arcfour_crypt(seq_num, sequence_key, 8);
+		rc = gnutls_hmac_fast(GNUTLS_MAC_MD5,
+				      state->creds->session_key,
+				      sizeof(state->creds->session_key),
+				      zeros,
+				      sizeof(zeros),
+				      digest1);
+		if (rc < 0) {
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+		}
+
+		rc = gnutls_hmac_fast(GNUTLS_MAC_MD5,
+				      digest1,
+				      sizeof(digest1),
+				      checksum,
+				      checksum_length,
+				      _sequence_key);
+		if (rc < 0) {
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+		}
+
+		ZERO_ARRAY(digest1);
+
+		rc = gnutls_cipher_init(&cipher_hnd,
+					GNUTLS_CIPHER_ARCFOUR_128,
+					&sequence_key,
+					NULL);
+		if (rc < 0) {
+			ZERO_ARRAY(_sequence_key);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+		}
+
+		rc = gnutls_cipher_encrypt(cipher_hnd,
+					   seq_num,
+					   8);
+		gnutls_cipher_deinit(cipher_hnd);
+		ZERO_ARRAY(_sequence_key);
+		if (rc < 0) {
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+		}
 	}
 
 	state->seq_num++;
+
+	return NT_STATUS_OK;
 }
 
-static void netsec_do_seal(struct schannel_state *state,
-			   const uint8_t seq_num[8],
-			   uint8_t confounder[8],
-			   uint8_t *data, uint32_t length,
-			   bool forward)
+static NTSTATUS netsec_do_seal(struct schannel_state *state,
+			       const uint8_t seq_num[8],
+			       uint8_t confounder[8],
+			       uint8_t *data, uint32_t length,
+			       bool forward)
 {
 	if (state->creds->negotiate_flags & NETLOGON_NEG_SUPPORTS_AES) {
+#ifdef HAVE_GNUTLS_AES_CFB8
+		gnutls_cipher_hd_t cipher_hnd = NULL;
+		uint8_t sess_kf0[16] = {0};
+		gnutls_datum_t key = {
+			.data = sess_kf0,
+			.size = sizeof(sess_kf0),
+		};
+		uint32_t iv_size =
+			gnutls_cipher_get_iv_size(GNUTLS_CIPHER_AES_128_CFB8);
+		uint8_t _iv[iv_size];
+		gnutls_datum_t iv = {
+			.data = _iv,
+			.size = iv_size,
+		};
+		uint32_t i;
+		int rc;
+
+		for (i = 0; i < key.size; i++) {
+			key.data[i] = state->creds->session_key[i] ^ 0xf0;
+		}
+
+		ZERO_ARRAY(_iv);
+
+		memcpy(iv.data + 0, seq_num, 8);
+		memcpy(iv.data + 8, seq_num, 8);
+
+		rc = gnutls_cipher_init(&cipher_hnd,
+					GNUTLS_CIPHER_AES_128_CFB8,
+					&key,
+					&iv);
+		if (rc < 0) {
+			DBG_ERR("ERROR: gnutls_cipher_init: %s\n",
+				gnutls_strerror(rc));
+			return NT_STATUS_NO_MEMORY;
+		}
+
+		if (forward) {
+			rc = gnutls_cipher_encrypt(cipher_hnd,
+						   confounder,
+						   8);
+			if (rc < 0) {
+				gnutls_cipher_deinit(cipher_hnd);
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+			}
+
+			rc = gnutls_cipher_encrypt(cipher_hnd,
+						   data,
+						   length);
+			if (rc < 0) {
+				gnutls_cipher_deinit(cipher_hnd);
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+			}
+		} else {
+
+			/*
+			 * Workaround bug present in gnutls 3.6.8:
+			 *
+			 * gnutls_cipher_decrypt() uses an optimization
+			 * internally that breaks decryption when processing
+			 * buffers with their length not being a multiple
+			 * of the blocksize.
+			 */
+
+			uint8_t tmp[16] = { 0, };
+			uint32_t tmp_dlength = MIN(length, sizeof(tmp) - 8);
+
+			memcpy(tmp, confounder, 8);
+			memcpy(tmp + 8, data, tmp_dlength);
+
+			rc = gnutls_cipher_decrypt(cipher_hnd,
+						   tmp,
+						   8 + tmp_dlength);
+			if (rc < 0) {
+				ZERO_STRUCT(tmp);
+				gnutls_cipher_deinit(cipher_hnd);
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+			}
+
+			memcpy(confounder, tmp, 8);
+			memcpy(data, tmp + 8, tmp_dlength);
+			ZERO_STRUCT(tmp);
+
+			if (length > tmp_dlength) {
+				rc = gnutls_cipher_decrypt(cipher_hnd,
+							   data + tmp_dlength,
+							   length - tmp_dlength);
+				if (rc < 0) {
+					gnutls_cipher_deinit(cipher_hnd);
+					return gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+				}
+			}
+		}
+		gnutls_cipher_deinit(cipher_hnd);
+#else /* NOT HAVE_GNUTLS_AES_CFB8 */
 		AES_KEY key;
 		uint8_t iv[AES_BLOCK_SIZE];
 		uint8_t sess_kf0[16];
@@ -193,41 +376,105 @@ static void netsec_do_seal(struct schannel_state *state,
 			aes_cfb8_encrypt(confounder, confounder, 8, &key, iv, AES_DECRYPT);
 			aes_cfb8_encrypt(data, data, length, &key, iv, AES_DECRYPT);
 		}
+#endif /* HAVE_GNUTLS_AES_CFB8 */
 	} else {
-		uint8_t sealing_key[16];
+		gnutls_cipher_hd_t cipher_hnd;
+		uint8_t _sealing_key[16];
+		gnutls_datum_t sealing_key = {
+			.data = _sealing_key,
+			.size = sizeof(_sealing_key),
+		};
 		static const uint8_t zeros[4];
 		uint8_t digest2[16];
 		uint8_t sess_kf0[16];
+		int rc;
 		int i;
 
 		for (i = 0; i < 16; i++) {
 			sess_kf0[i] = state->creds->session_key[i] ^ 0xf0;
 		}
 
-		hmac_md5(sess_kf0, zeros, 4, digest2);
-		hmac_md5(digest2, seq_num, 8, sealing_key);
+		rc = gnutls_hmac_fast(GNUTLS_MAC_MD5,
+				      sess_kf0,
+				      sizeof(sess_kf0),
+				      zeros,
+				      4,
+				      digest2);
+		if (rc < 0) {
+			ZERO_ARRAY(digest2);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+		}
 
-		arcfour_crypt(confounder, sealing_key, 8);
-		arcfour_crypt(data, sealing_key, length);
+		rc = gnutls_hmac_fast(GNUTLS_MAC_MD5,
+				      digest2,
+				      sizeof(digest2),
+				      seq_num,
+				      8,
+				      _sealing_key);
+
+		ZERO_ARRAY(digest2);
+		if (rc < 0) {
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+		}
+
+		rc = gnutls_cipher_init(&cipher_hnd,
+					GNUTLS_CIPHER_ARCFOUR_128,
+					&sealing_key,
+					NULL);
+		if (rc < 0) {
+			ZERO_ARRAY(_sealing_key);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+		}
+		rc = gnutls_cipher_encrypt(cipher_hnd,
+					   confounder,
+					   8);
+		if (rc < 0) {
+			ZERO_ARRAY(_sealing_key);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+		}
+		gnutls_cipher_deinit(cipher_hnd);
+		rc = gnutls_cipher_init(&cipher_hnd,
+					GNUTLS_CIPHER_ARCFOUR_128,
+					&sealing_key,
+					NULL);
+		if (rc < 0) {
+			ZERO_ARRAY(_sealing_key);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+		}
+		rc = gnutls_cipher_encrypt(cipher_hnd,
+					   data,
+					   length);
+		gnutls_cipher_deinit(cipher_hnd);
+		ZERO_ARRAY(_sealing_key);
+		if (rc < 0) {
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+		}
 	}
+
+	return NT_STATUS_OK;
 }
 
 /*******************************************************************
  Create a digest over the entire packet (including the data), and
  MD5 it with the session key.
  ********************************************************************/
-static void netsec_do_sign(struct schannel_state *state,
-			   const uint8_t *confounder,
-			   const uint8_t *data, size_t length,
-			   uint8_t header[8],
-			   uint8_t *checksum)
+static NTSTATUS netsec_do_sign(struct schannel_state *state,
+			       const uint8_t *confounder,
+			       const uint8_t *data, size_t length,
+			       uint8_t header[8],
+			       uint8_t *checksum)
 {
 	if (state->creds->negotiate_flags & NETLOGON_NEG_SUPPORTS_AES) {
-		struct HMACSHA256Context ctx;
+		gnutls_hmac_hd_t hmac_hnd = NULL;
+		int rc;
 
-		hmac_sha256_init(state->creds->session_key,
-				 sizeof(state->creds->session_key),
-				 &ctx);
+		rc = gnutls_hmac_init(&hmac_hnd,
+				      GNUTLS_MAC_SHA256,
+				      state->creds->session_key,
+				      sizeof(state->creds->session_key));
+		if (rc < 0) {
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+		}
 
 		if (confounder) {
 			SSVAL(header, 0, NL_SIGN_HMAC_SHA256);
@@ -235,50 +482,100 @@ static void netsec_do_sign(struct schannel_state *state,
 			SSVAL(header, 4, 0xFFFF);
 			SSVAL(header, 6, 0x0000);
 
-			hmac_sha256_update(header, 8, &ctx);
-			hmac_sha256_update(confounder, 8, &ctx);
+			rc = gnutls_hmac(hmac_hnd, header, 8);
+			if (rc < 0) {
+				gnutls_hmac_deinit(hmac_hnd, NULL);
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+			}
+			rc = gnutls_hmac(hmac_hnd, confounder, 8);
+			if (rc < 0) {
+				gnutls_hmac_deinit(hmac_hnd, NULL);
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+			}
 		} else {
 			SSVAL(header, 0, NL_SIGN_HMAC_SHA256);
 			SSVAL(header, 2, NL_SEAL_NONE);
 			SSVAL(header, 4, 0xFFFF);
 			SSVAL(header, 6, 0x0000);
 
-			hmac_sha256_update(header, 8, &ctx);
+			rc = gnutls_hmac(hmac_hnd, header, 8);
+			if (rc < 0) {
+				gnutls_hmac_deinit(hmac_hnd, NULL);
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+			}
 		}
 
-		hmac_sha256_update(data, length, &ctx);
+		rc = gnutls_hmac(hmac_hnd, data, length);
+		if (rc < 0) {
+			gnutls_hmac_deinit(hmac_hnd, NULL);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+		}
 
-		hmac_sha256_final(checksum, &ctx);
+		gnutls_hmac_deinit(hmac_hnd, checksum);
 	} else {
 		uint8_t packet_digest[16];
 		static const uint8_t zeros[4];
-		MD5_CTX ctx;
+		gnutls_hash_hd_t hash_hnd = NULL;
+		int rc;
 
-		MD5Init(&ctx);
-		MD5Update(&ctx, zeros, 4);
+		rc = gnutls_hash_init(&hash_hnd, GNUTLS_DIG_MD5);
+		if (rc < 0) {
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+		}
+
+		rc = gnutls_hash(hash_hnd, zeros, sizeof(zeros));
+		if (rc < 0) {
+			gnutls_hash_deinit(hash_hnd, NULL);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+		}
 		if (confounder) {
 			SSVAL(header, 0, NL_SIGN_HMAC_MD5);
 			SSVAL(header, 2, NL_SEAL_RC4);
 			SSVAL(header, 4, 0xFFFF);
 			SSVAL(header, 6, 0x0000);
 
-			MD5Update(&ctx, header, 8);
-			MD5Update(&ctx, confounder, 8);
+			rc = gnutls_hash(hash_hnd, header, 8);
+			if (rc < 0) {
+				gnutls_hash_deinit(hash_hnd, NULL);
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+			}
+			rc = gnutls_hash(hash_hnd, confounder, 8);
+			if (rc < 0) {
+				gnutls_hash_deinit(hash_hnd, NULL);
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+			}
 		} else {
 			SSVAL(header, 0, NL_SIGN_HMAC_MD5);
 			SSVAL(header, 2, NL_SEAL_NONE);
 			SSVAL(header, 4, 0xFFFF);
 			SSVAL(header, 6, 0x0000);
 
-			MD5Update(&ctx, header, 8);
+			rc = gnutls_hash(hash_hnd, header, 8);
+			if (rc < 0) {
+				gnutls_hash_deinit(hash_hnd, NULL);
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+			}
 		}
-		MD5Update(&ctx, data, length);
-		MD5Final(packet_digest, &ctx);
+		rc = gnutls_hash(hash_hnd, data, length);
+		if (rc < 0) {
+			gnutls_hash_deinit(hash_hnd, NULL);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+		}
+		gnutls_hash_deinit(hash_hnd, packet_digest);
 
-		hmac_md5(state->creds->session_key,
-			 packet_digest, sizeof(packet_digest),
-			 checksum);
+		rc = gnutls_hmac_fast(GNUTLS_MAC_MD5,
+				      state->creds->session_key,
+				      sizeof(state->creds->session_key),
+				      packet_digest,
+				      sizeof(packet_digest),
+				      checksum);
+		ZERO_ARRAY(packet_digest);
+		if (rc < 0) {
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HMAC_NOT_SUPPORTED);
+		}
 	}
+
+	return NT_STATUS_OK;
 }
 
 static NTSTATUS netsec_incoming_packet(struct schannel_state *state,
@@ -298,6 +595,7 @@ static NTSTATUS netsec_incoming_packet(struct schannel_state *state,
 	int ret;
 	const uint8_t *sign_data = NULL;
 	size_t sign_length = 0;
+	NTSTATUS status;
 
 	netsec_offset_and_sizes(state,
 				do_unseal,
@@ -320,10 +618,16 @@ static NTSTATUS netsec_incoming_packet(struct schannel_state *state,
 	SETUP_SEQNUM(state, seq_num, !state->initiator);
 
 	if (do_unseal) {
-		netsec_do_seal(state, seq_num,
-			       confounder,
-			       data, length,
-			       false);
+		status = netsec_do_seal(state,
+					seq_num,
+					confounder,
+					data,
+					length,
+					false);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_WARNING("netsec_do_seal failed: %s\n", nt_errstr(status));
+			return NT_STATUS_ACCESS_DENIED;
+		}
 	}
 
 	if (state->gensec->want_features & GENSEC_FEATURE_SIGN_PKT_HEADER) {
@@ -334,9 +638,16 @@ static NTSTATUS netsec_incoming_packet(struct schannel_state *state,
 		sign_length = length;
 	}
 
-	netsec_do_sign(state, confounder,
-		       sign_data, sign_length,
-		       header, checksum);
+	status = netsec_do_sign(state,
+				confounder,
+				sign_data,
+				sign_length,
+				header,
+				checksum);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("netsec_do_sign failed: %s\n", nt_errstr(status));
+		return NT_STATUS_ACCESS_DENIED;
+	}
 
 	ret = memcmp(checksum, sig->data+16, checksum_length);
 	if (ret != 0) {
@@ -345,7 +656,14 @@ static NTSTATUS netsec_incoming_packet(struct schannel_state *state,
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
-	netsec_do_seq_num(state, checksum, checksum_length, seq_num);
+	status = netsec_do_seq_num(state, checksum, checksum_length, seq_num);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("netsec_do_seq_num failed: %s\n",
+			    nt_errstr(status));
+		return status;
+	}
+
+	ZERO_ARRAY(checksum);
 
 	ret = memcmp(seq_num, sig->data+8, 8);
 	if (ret != 0) {
@@ -389,6 +707,7 @@ static NTSTATUS netsec_outgoing_packet(struct schannel_state *state,
 	uint8_t seq_num[8];
 	const uint8_t *sign_data = NULL;
 	size_t sign_length = 0;
+	NTSTATUS status;
 
 	netsec_offset_and_sizes(state,
 				do_seal,
@@ -414,18 +733,37 @@ static NTSTATUS netsec_outgoing_packet(struct schannel_state *state,
 		sign_length = length;
 	}
 
-	netsec_do_sign(state, confounder,
-		       sign_data, sign_length,
-		       header, checksum);
-
-	if (do_seal) {
-		netsec_do_seal(state, seq_num,
-			       confounder,
-			       data, length,
-			       true);
+	status = netsec_do_sign(state,
+				confounder,
+				sign_data,
+				sign_length,
+				header,
+				checksum);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("netsec_do_sign failed: %s\n", nt_errstr(status));
+		return NT_STATUS_ACCESS_DENIED;
 	}
 
-	netsec_do_seq_num(state, checksum, checksum_length, seq_num);
+	if (do_seal) {
+		status = netsec_do_seal(state,
+					seq_num,
+					confounder,
+					data,
+					length,
+					true);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_WARNING("netsec_do_seal failed: %s\n",
+				    nt_errstr(status));
+			return status;
+		}
+	}
+
+	status = netsec_do_seq_num(state, checksum, checksum_length, seq_num);
+	if (!NT_STATUS_IS_OK(status)) {
+		DBG_WARNING("netsec_do_seq_num failed: %s\n",
+			    nt_errstr(status));
+		return status;
+	}
 
 	(*sig) = data_blob_talloc_zero(mem_ctx, used_sig_size);
 
@@ -504,7 +842,9 @@ static NTSTATUS schannel_update_internal(struct gensec_security *gensec_security
 		struct schannel_state);
 	NTSTATUS status;
 	enum ndr_err_code ndr_err;
-	struct NL_AUTH_MESSAGE bind_schannel = {};
+	struct NL_AUTH_MESSAGE bind_schannel = {
+		.Flags = 0,
+	};
 	struct NL_AUTH_MESSAGE bind_schannel_ack;
 	struct netlogon_creds_CredentialState *creds;
 	const char *workstation;

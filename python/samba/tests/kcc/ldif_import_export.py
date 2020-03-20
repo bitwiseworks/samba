@@ -22,8 +22,6 @@
 import samba
 import os
 import time
-import shutil
-import sys
 import subprocess
 import logging
 import samba.tests
@@ -45,7 +43,7 @@ MULTISITE_LDIF = os.path.join(os.environ['SRCDIR_ABS'],
 # UNCONNECTED_LDIF is a single site, unconnected 5DC database that was
 # created using samba-tool domain join in testenv.
 UNCONNECTED_LDIF = os.path.join(os.environ['SRCDIR_ABS'],
-        "testdata/unconnected-intrasite.ldif")
+                                "testdata/unconnected-intrasite.ldif")
 
 MULTISITE_LDIF_DSAS = (
     ("CN=WIN08,CN=Servers,CN=Site-4,CN=Sites,CN=Configuration,DC=ad,DC=samba,DC=example,DC=com",
@@ -131,7 +129,6 @@ class LdifImportExportTests(samba.tests.TestCaseInTempDir):
                         service_name_res[0]["dsServiceName"][0].decode('utf8'))
             self.assertEqual(dn, ldb.Dn(samdb, "CN=NTDS Settings," + dsa))
             self.remove_files(dburl)
-
 
     def test_samdb_to_ldif_file(self):
         dburl = os.path.join(self.tempdir, "ldap")
@@ -235,7 +232,7 @@ class KCCMultisiteLdifTests(samba.tests.TestCaseInTempDir):
                     r = subprocess.call([dot, '-Tcanon', ffn])
                     self.assertEqual(r, 0)
 
-                #even if dot is not there, at least check the file is non-empty
+                # even if dot is not there, at least check the file is non-empty
                 size = os.stat(ffn).st_size
                 self.assertNotEqual(size, 0)
                 files.append(ffn)

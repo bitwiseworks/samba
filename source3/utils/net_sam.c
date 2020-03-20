@@ -483,7 +483,7 @@ static int net_sam_policy_set(struct net_context *c, int argc, const char **argv
 	uint32_t value = 0;
 	uint32_t old_value = 0;
 	enum pdb_policy_type field;
-	char *endptr;
+	int err = 0;
 
         if (argc != 2 || c->display_usage) {
                 d_fprintf(stderr, "%s\n%s",
@@ -500,9 +500,13 @@ static int net_sam_policy_set(struct net_context *c, int argc, const char **argv
 		value = -1;
 	}
 	else {
-		value = strtoul(argv[1], &endptr, 10);
+		value = smb_strtoul(argv[1],
+				    NULL,
+				    10,
+				    &err,
+				    SMB_STR_FULL_STR_CONV);
 
-		if ((endptr == argv[1]) || (endptr[0] != '\0')) {
+		if (err != 0) {
 			d_printf(_("Unable to set policy \"%s\"! Invalid value "
 				 "\"%s\".\n"),
 				 account_policy, argv[1]);
@@ -693,13 +697,15 @@ static int net_sam_rights_list(struct net_context *c, int argc,
 		for (i=0; i<num_sids; i++) {
 			const char *dom, *name;
 			enum lsa_SidType type;
+			struct dom_sid_buf buf;
 
 			if (lookup_sid(talloc_tos(), &sids[i], &dom, &name,
 				       &type)) {
 				d_printf("%s\\%s\n", dom, name);
 			}
 			else {
-				d_printf("%s\n", sid_string_tos(&sids[i]));
+				d_printf("%s\n",
+					 dom_sid_str_buf(&sids[i], &buf));
 			}
 		}
 		return 0;
@@ -871,6 +877,7 @@ static int net_sam_mapunixgroup(struct net_context *c, int argc, const char **ar
 	NTSTATUS status;
 	GROUP_MAP *map;
 	struct group *grp;
+	struct dom_sid_buf buf;
 
 	if (argc != 1 || c->display_usage) {
 		d_fprintf(stderr, "%s\n%s",
@@ -900,7 +907,7 @@ static int net_sam_mapunixgroup(struct net_context *c, int argc, const char **ar
 	}
 
 	d_printf(_("Mapped unix group %s to SID %s\n"), argv[0],
-		 sid_string_tos(&map->sid));
+		 dom_sid_str_buf(&map->sid, &buf));
 
 	TALLOC_FREE(map);
 	return 0;
@@ -1328,8 +1335,11 @@ static int net_sam_delmem(struct net_context *c, int argc, const char **argv)
 		d_printf(_("Deleted %s\\%s from %s\\%s\n"),
 			 memberdomain, membername, groupdomain, groupname);
 	} else {
+		struct dom_sid_buf buf;
 		d_printf(_("Deleted %s from %s\\%s\n"),
-			 sid_string_tos(&member), groupdomain, groupname);
+			 dom_sid_str_buf(&member, &buf),
+			 groupdomain,
+			 groupname);
 	}
 
 	return 0;
@@ -1406,7 +1416,9 @@ static int net_sam_listmem(struct net_context *c, int argc, const char **argv)
 		if (lookup_sid(talloc_tos(), &members[i], &dom, &name, NULL)) {
 			d_printf(" %s\\%s\n", dom, name);
 		} else {
-			d_printf(" %s\n", sid_string_tos(&members[i]));
+			struct dom_sid_buf buf;
+			d_printf(" %s\n",
+				 dom_sid_str_buf(&members[i], &buf));
 		}
 	}
 
@@ -1555,6 +1567,7 @@ static int net_sam_list(struct net_context *c, int argc, const char **argv)
 static int net_sam_show(struct net_context *c, int argc, const char **argv)
 {
 	struct dom_sid sid;
+	struct dom_sid_buf buf;
 	enum lsa_SidType type;
 	const char *dom, *name;
 
@@ -1572,7 +1585,7 @@ static int net_sam_show(struct net_context *c, int argc, const char **argv)
 	}
 
 	d_printf(_("%s\\%s is a %s with SID %s\n"), dom, name,
-		 sid_type_lookup(type), sid_string_tos(&sid));
+		 sid_type_lookup(type), dom_sid_str_buf(&sid, &buf));
 
 	return 0;
 }
@@ -1682,6 +1695,7 @@ static int net_sam_provision(struct net_context *c, int argc, const char **argv)
 	}
 
 	if (!pdb_getgrsid(gmap, gsid)) {
+		struct dom_sid_buf gsid_str;
 		LDAPMod **mods = NULL;
 		char *dn;
 		char *uname;
@@ -1726,7 +1740,7 @@ static int net_sam_provision(struct net_context *c, int argc, const char **argv)
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "displayName", wname);
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "gidNumber", gidstr);
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "sambaSid",
-				sid_string_talloc(tc, &gsid));
+				dom_sid_str_buf(&gsid, &gsid_str));
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "sambaGroupType", gtype);
 
 		smbldap_talloc_autofree_ldapmod(tc, mods);
@@ -1759,6 +1773,7 @@ domu_done:
 	sid_compose(&gsid, get_global_sam_sid(), DOMAIN_RID_ADMINS);
 
 	if (!pdb_getgrsid(gmap, gsid)) {
+		struct dom_sid_buf gsid_str;
 		LDAPMod **mods = NULL;
 		char *dn;
 		char *uname;
@@ -1803,7 +1818,7 @@ domu_done:
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "displayName", wname);
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "gidNumber", gidstr);
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "sambaSid",
-				sid_string_talloc(tc, &gsid));
+				dom_sid_str_buf(&gsid, &gsid_str));
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "sambaGroupType", gtype);
 
 		smbldap_talloc_autofree_ldapmod(tc, mods);
@@ -1842,6 +1857,7 @@ doma_done:
 	if (!pdb_getsampwnam(samuser, "Administrator")) {
 		LDAPMod **mods = NULL;
 		struct dom_sid sid;
+		struct dom_sid_buf sid_str;
 		char *dn;
 		char *name;
 		char *uidstr;
@@ -1921,7 +1937,7 @@ doma_done:
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "homeDirectory", dir);
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "loginShell", shell);
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "sambaSID",
-				sid_string_talloc(tc, &sid));
+				dom_sid_str_buf(&sid, &sid_str));
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "sambaAcctFlags",
 				pdb_encode_acct_ctrl(ACB_NORMAL|ACB_DISABLED,
 				NEW_PW_FORMAT_SPACE_PADDED_LEN));
@@ -1957,6 +1973,7 @@ doma_done:
 	if (!pdb_getsampwnam(samuser, lp_guest_account())) {
 		LDAPMod **mods = NULL;
 		struct dom_sid sid;
+		struct dom_sid_buf sid_str;
 		char *dn;
 		char *uidstr;
 		char *gidstr;
@@ -2033,7 +2050,7 @@ doma_done:
 			smbldap_set_mod(&mods, LDAP_MOD_ADD, "loginShell", pwd->pw_shell);
 		}
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "sambaSID",
-				sid_string_talloc(tc, &sid));
+				dom_sid_str_buf(&sid, &sid_str));
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "sambaAcctFlags",
 				pdb_encode_acct_ctrl(ACB_NORMAL|ACB_DISABLED,
 				NEW_PW_FORMAT_SPACE_PADDED_LEN));
@@ -2074,6 +2091,7 @@ doma_done:
 	}
 
 	if (!pdb_getgrgid(gmap, pwd->pw_gid)) {
+		struct dom_sid_buf gsid_str;
 		LDAPMod **mods = NULL;
 		char *dn;
 		char *uname;
@@ -2109,7 +2127,7 @@ doma_done:
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "displayName", wname);
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "gidNumber", gidstr);
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "sambaSid",
-				sid_string_talloc(tc, &gsid));
+				dom_sid_str_buf(&gsid, &gsid_str));
 		smbldap_set_mod(&mods, LDAP_MOD_ADD, "sambaGroupType", gtype);
 
 		smbldap_talloc_autofree_ldapmod(tc, mods);

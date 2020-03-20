@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 """
 ntlogon.py written by Timothy (rhacer) Grant
 
@@ -321,17 +321,16 @@ def run():
 
     #
     # open the configuration file
-    #    
+    #
     try:
         iFile = open(configfile, 'r')
     except IOError:
         print 'Unable to open configuration file: ' + configfile
         sys.exit(1)
 
-
     #
     # open the output file
-    #    
+    #
     if not debug:
         try:
             oFile = open(outdir + outfile, 'w')

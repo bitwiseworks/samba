@@ -28,6 +28,13 @@
 #include "auth/gensec/gensec.h"
 #include "../libcli/smb/smb_signing.h"
 
+/*
+ * MS-CIFS, 2.2.4.52.2 SMB_COM_NEGOTIATE Response:
+ * If the server does not support any of the listed dialects, it MUST return a
+ * DialectIndex of 0XFFFF
+ */
+#define NO_PROTOCOL_CHOSEN	0xffff
+
 extern fstring remote_proto;
 
 static void get_challenge(struct smbXsrv_connection *xconn, uint8_t buff[8])
@@ -59,7 +66,7 @@ static void get_challenge(struct smbXsrv_connection *xconn, uint8_t buff[8])
  Reply for the lanman 1.0 protocol.
 ****************************************************************************/
 
-static void reply_lanman1(struct smb_request *req, uint16_t choice)
+static NTSTATUS reply_lanman1(struct smb_request *req, uint16_t choice)
 {
 	int secword=0;
 	time_t t = time(NULL);
@@ -93,7 +100,7 @@ static void reply_lanman1(struct smb_request *req, uint16_t choice)
 	status = smbXsrv_connection_init_tables(xconn, PROTOCOL_LANMAN1);
 	if (!NT_STATUS_IS_OK(status)) {
 		reply_nterror(req, status);
-		return;
+		return status;
 	}
 
 	/* Reply, SMBlockread, SMBwritelock supported. */
@@ -108,14 +115,14 @@ static void reply_lanman1(struct smb_request *req, uint16_t choice)
 
 	srv_put_dos_date((char *)req->outbuf,smb_vwv8,t);
 
-	return;
+	return NT_STATUS_OK;
 }
 
 /****************************************************************************
  Reply for the lanman 2.0 protocol.
 ****************************************************************************/
 
-static void reply_lanman2(struct smb_request *req, uint16_t choice)
+static NTSTATUS reply_lanman2(struct smb_request *req, uint16_t choice)
 {
 	int secword=0;
 	time_t t = time(NULL);
@@ -151,7 +158,7 @@ static void reply_lanman2(struct smb_request *req, uint16_t choice)
 	status = smbXsrv_connection_init_tables(xconn, PROTOCOL_LANMAN2);
 	if (!NT_STATUS_IS_OK(status)) {
 		reply_nterror(req, status);
-		return;
+		return status;
 	}
 
 	/* Reply, SMBlockread, SMBwritelock supported. */
@@ -162,6 +169,7 @@ static void reply_lanman2(struct smb_request *req, uint16_t choice)
 	SSVAL(req->outbuf,smb_vwv5,raw); /* readbraw and/or writebraw */
 	SSVAL(req->outbuf,smb_vwv10, set_server_zone_offset(t)/60);
 	srv_put_dos_date((char *)req->outbuf,smb_vwv8,t);
+	return NT_STATUS_OK;
 }
 
 /****************************************************************************
@@ -259,7 +267,7 @@ DATA_BLOB negprot_spnego(TALLOC_CTX *ctx, struct smbXsrv_connection *xconn)
  Reply for the nt protocol.
 ****************************************************************************/
 
-static void reply_nt1(struct smb_request *req, uint16_t choice)
+static NTSTATUS reply_nt1(struct smb_request *req, uint16_t choice)
 {
 	/* dual names + lock_and_read + nt SMBs + remote API calls */
 	int capabilities = CAP_NT_FIND|CAP_LOCK_AND_READ|
@@ -352,7 +360,7 @@ static void reply_nt1(struct smb_request *req, uint16_t choice)
 	status = smbXsrv_connection_init_tables(xconn, PROTOCOL_NT1);
 	if (!NT_STATUS_IS_OK(status)) {
 		reply_nterror(req, status);
-		return;
+		return status;
 	}
 
 	SSVAL(req->outbuf,smb_vwv1+1, lp_max_mux()); /* maxmpx */
@@ -363,7 +371,7 @@ static void reply_nt1(struct smb_request *req, uint16_t choice)
 	SIVAL(req->outbuf,smb_vwv7+1, getpid()); /* session key */
 	SIVAL(req->outbuf,smb_vwv9+1, capabilities); /* capabilities */
 	clock_gettime(CLOCK_REALTIME,&ts);
-	put_long_date_timespec(TIMESTAMP_SET_NT_OR_BETTER,(char *)req->outbuf+smb_vwv11+1,ts);
+	put_long_date_full_timespec(TIMESTAMP_SET_NT_OR_BETTER,(char *)req->outbuf+smb_vwv11+1,&ts);
 	SSVALS(req->outbuf,smb_vwv15+1,set_server_zone_offset(ts.tv_sec)/60);
 
 	if (!negotiate_spnego) {
@@ -378,7 +386,7 @@ static void reply_nt1(struct smb_request *req, uint16_t choice)
 			if (ret == -1) {
 				DEBUG(0, ("Could not push challenge\n"));
 				reply_nterror(req, NT_STATUS_NO_MEMORY);
-				return;
+				return NT_STATUS_NO_MEMORY;
 			}
 			SCVAL(req->outbuf, smb_vwv16+1, ret);
 		}
@@ -388,7 +396,7 @@ static void reply_nt1(struct smb_request *req, uint16_t choice)
 		if (ret == -1) {
 			DEBUG(0, ("Could not push workgroup string\n"));
 			reply_nterror(req, NT_STATUS_NO_MEMORY);
-			return;
+			return NT_STATUS_NO_MEMORY;
 		}
 		ret = message_push_string(&req->outbuf, lp_netbios_name(),
 					  STR_UNICODE|STR_TERMINATE
@@ -396,7 +404,7 @@ static void reply_nt1(struct smb_request *req, uint16_t choice)
 		if (ret == -1) {
 			DEBUG(0, ("Could not push netbios name string\n"));
 			reply_nterror(req, NT_STATUS_NO_MEMORY);
-			return;
+			return NT_STATUS_NO_MEMORY;
 		}
 		DEBUG(3,("not using SPNEGO\n"));
 	} else {
@@ -404,14 +412,14 @@ static void reply_nt1(struct smb_request *req, uint16_t choice)
 
 		if (spnego_blob.data == NULL) {
 			reply_nterror(req, NT_STATUS_NO_MEMORY);
-			return;
+			return NT_STATUS_NO_MEMORY;
 		}
 
 		ret = message_push_blob(&req->outbuf, spnego_blob);
 		if (ret == -1) {
 			DEBUG(0, ("Could not push spnego blob\n"));
 			reply_nterror(req, NT_STATUS_NO_MEMORY);
-			return;
+			return NT_STATUS_NO_MEMORY;
 		}
 		data_blob_free(&spnego_blob);
 
@@ -419,7 +427,7 @@ static void reply_nt1(struct smb_request *req, uint16_t choice)
 		DEBUG(3,("using SPNEGO\n"));
 	}
 
-	return;
+	return NT_STATUS_OK;
 }
 
 /* these are the protocol lists used for auto architecture detection:
@@ -533,7 +541,7 @@ protocol [SMB 2.???]
 static const struct {
 	const char *proto_name;
 	const char *short_name;
-	void (*proto_reply_fn)(struct smb_request *req, uint16_t choice);
+	NTSTATUS (*proto_reply_fn)(struct smb_request *req, uint16_t choice);
 	int protocol_level;
 } supported_protocols[] = {
 	{"SMB 2.???",               "SMB2_FF",  reply_smb20ff,  PROTOCOL_SMB2_10},
@@ -572,6 +580,7 @@ void reply_negprot(struct smb_request *req)
 	bool signing_required = true;
 	int max_proto;
 	int min_proto;
+	NTSTATUS status;
 
 	START_PROFILE(SMBnegprot);
 
@@ -579,7 +588,6 @@ void reply_negprot(struct smb_request *req)
 		END_PROFILE(SMBnegprot);
 		exit_server_cleanly("multiple negprot's are not permitted");
 	}
-	xconn->smb1.negprot.done = true;
 
 	if (req->buflen == 0) {
 		DEBUG(0, ("negprot got no protocols\n"));
@@ -748,7 +756,7 @@ void reply_negprot(struct smb_request *req)
 
 		DBG_NOTICE("No protocol supported !\n");
 		reply_outbuf(req, 1, 0);
-		SSVAL(req->outbuf, smb_vwv0, choice);
+		SSVAL(req->outbuf, smb_vwv0, NO_PROTOCOL_CHOSEN);
 
 		ok = srv_send_smb(xconn, (char *)req->outbuf,
 				  false, 0, false, NULL);
@@ -760,10 +768,16 @@ void reply_negprot(struct smb_request *req)
 
 	fstrcpy(remote_proto,supported_protocols[protocol].short_name);
 	reload_services(sconn, conn_snum_used, true);
-	supported_protocols[protocol].proto_reply_fn(req, choice);
+	status = supported_protocols[protocol].proto_reply_fn(req, choice);
+	if (!NT_STATUS_IS_OK(status)) {
+		exit_server_cleanly("negprot function failed\n");
+	}
+
 	DEBUG(3,("Selected protocol %s\n",supported_protocols[protocol].proto_name));
 
 	DBG_INFO("negprot index=%zu\n", choice);
+
+	xconn->smb1.negprot.done = true;
 
 	/* We always have xconn->smb1.signing_state also for >= SMB2_02 */
 	signing_required = smb_signing_is_mandatory(xconn->smb1.signing_state);

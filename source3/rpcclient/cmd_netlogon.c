@@ -216,7 +216,7 @@ static WERROR cmd_netlogon_dsr_getdcname(struct rpc_pipe_client *cli,
 	WERROR werr = WERR_OK;
 	uint32_t flags = DS_RETURN_DNS_NAME;
 	const char *server_name = cli->desthost;
-	const char *domain_name;
+	const char *domain_name = NULL;
 	struct GUID domain_guid = GUID_zero();
 	struct GUID site_guid = GUID_zero();
 	struct netr_DsRGetDCNameInfo *info = NULL;
@@ -500,6 +500,7 @@ static NTSTATUS cmd_netlogon_sam_logon(struct rpc_pipe_client *cli,
 	uint32_t flags = 0;
 	uint16_t validation_level;
 	union netr_Validation *validation = NULL;
+	uint64_t logon_id = 0;
 
 	/* Check arguments */
 
@@ -525,6 +526,7 @@ static NTSTATUS cmd_netlogon_sam_logon(struct rpc_pipe_client *cli,
 		result = NT_STATUS_UNSUCCESSFUL;
 		goto done;
 	}
+	logon_id = generate_random_u64();
 
 	/* Perform the sam logon */
 
@@ -536,6 +538,7 @@ static NTSTATUS cmd_netlogon_sam_logon(struct rpc_pipe_client *cli,
 						username,
 						password,
 						workstation,
+						logon_id,
 						logon_type,
 						&authoritative,
 						&flags,
@@ -924,31 +927,259 @@ static NTSTATUS cmd_netlogon_capabilities(struct rpc_pipe_client *cli,
 	return NT_STATUS_OK;
 }
 
+static NTSTATUS cmd_netlogon_logongetdomaininfo(struct rpc_pipe_client *cli,
+						TALLOC_CTX *mem_ctx, int argc,
+						const char **argv)
+{
+	union netr_WorkstationInfo query;
+	struct netr_WorkstationInformation workstation_info;
+	union netr_DomainInfo *domain_info;
+	NTSTATUS status;
+	char *s;
+
+	if (argc > 1) {
+		fprintf(stderr, "Usage: %s\n", argv[0]);
+		return NT_STATUS_OK;
+	}
+
+	ZERO_STRUCT(workstation_info);
+
+	query.workstation_info = &workstation_info;
+
+	status = netlogon_creds_cli_LogonGetDomainInfo(rpcclient_netlogon_creds,
+						       cli->binding_handle,
+						       mem_ctx,
+						       1,
+						       &query,
+						       &domain_info);
+	if (!NT_STATUS_IS_OK(status)) {
+		fprintf(stderr, "netlogon_creds_cli_LogonGetDomainInfo failed: %s\n",
+			nt_errstr(status));
+		return status;
+	}
+
+	s = NDR_PRINT_STRUCT_STRING(mem_ctx, netr_DomainInformation, domain_info->domain_info);
+	if (s) {
+		printf("%s\n", s);
+		TALLOC_FREE(s);
+	}
+
+	return NT_STATUS_OK;
+}
+
 /* List of commands exported by this module */
 
 struct cmd_set netlogon_commands[] = {
 
-	{ "NETLOGON" },
+	{
+		.name = "NETLOGON",
+	},
 
-	{ "logonctrl2", RPC_RTYPE_WERROR, NULL, cmd_netlogon_logon_ctrl2, &ndr_table_netlogon, NULL, "Logon Control 2",     "" },
-	{ "getanydcname", RPC_RTYPE_WERROR, NULL, cmd_netlogon_getanydcname, &ndr_table_netlogon, NULL, "Get trusted DC name",     "" },
-	{ "getdcname", RPC_RTYPE_WERROR, NULL, cmd_netlogon_getdcname, &ndr_table_netlogon, NULL, "Get trusted PDC name",     "" },
-	{ "dsr_getdcname", RPC_RTYPE_WERROR, NULL, cmd_netlogon_dsr_getdcname, &ndr_table_netlogon, NULL, "Get trusted DC name",     "" },
-	{ "dsr_getdcnameex", RPC_RTYPE_WERROR, NULL, cmd_netlogon_dsr_getdcnameex, &ndr_table_netlogon, NULL, "Get trusted DC name",     "" },
-	{ "dsr_getdcnameex2", RPC_RTYPE_WERROR, NULL, cmd_netlogon_dsr_getdcnameex2, &ndr_table_netlogon, NULL, "Get trusted DC name",     "" },
-	{ "dsr_getsitename", RPC_RTYPE_WERROR, NULL, cmd_netlogon_dsr_getsitename, &ndr_table_netlogon, NULL, "Get sitename",     "" },
-	{ "dsr_getforesttrustinfo", RPC_RTYPE_WERROR, NULL, cmd_netlogon_dsr_getforesttrustinfo, &ndr_table_netlogon, NULL, "Get Forest Trust Info",     "" },
-	{ "logonctrl",  RPC_RTYPE_WERROR, NULL, cmd_netlogon_logon_ctrl, &ndr_table_netlogon, NULL, "Logon Control",       "" },
-	{ "samlogon",   RPC_RTYPE_NTSTATUS, cmd_netlogon_sam_logon,   NULL, &ndr_table_netlogon, NULL, "Sam Logon",           "", .use_netlogon_creds = true, },
-	{ "change_trust_pw",   RPC_RTYPE_NTSTATUS, cmd_netlogon_change_trust_pw,   NULL, &ndr_table_netlogon, NULL, "Change Trust Account Password",           "", .use_netlogon_creds = true, },
-	{ "gettrustrid", RPC_RTYPE_WERROR, NULL, cmd_netlogon_gettrustrid, &ndr_table_netlogon, NULL, "Get trust rid",     "" },
-	{ "dsr_enumtrustdom", RPC_RTYPE_WERROR, NULL, cmd_netlogon_dsr_enumtrustdom, &ndr_table_netlogon, NULL, "Enumerate trusted domains",     "" },
-	{ "dsenumdomtrusts",  RPC_RTYPE_WERROR, NULL, cmd_netlogon_dsr_enumtrustdom, &ndr_table_netlogon, NULL, "Enumerate all trusted domains in an AD forest",     "" },
-	{ "deregisterdnsrecords", RPC_RTYPE_WERROR, NULL, cmd_netlogon_deregisterdnsrecords, &ndr_table_netlogon, NULL, "Deregister DNS records",     "" },
-	{ "netrenumtrusteddomains", RPC_RTYPE_NTSTATUS, cmd_netlogon_enumtrusteddomains, NULL, &ndr_table_netlogon, NULL, "Enumerate trusted domains",     "" },
-	{ "netrenumtrusteddomainsex", RPC_RTYPE_WERROR, NULL, cmd_netlogon_enumtrusteddomainsex, &ndr_table_netlogon, NULL, "Enumerate trusted domains",     "" },
-	{ "getdcsitecoverage", RPC_RTYPE_WERROR, NULL, cmd_netlogon_getdcsitecoverage, &ndr_table_netlogon, NULL, "Get the Site-Coverage from a DC",     "" },
-	{ "capabilities", RPC_RTYPE_NTSTATUS, cmd_netlogon_capabilities, NULL, &ndr_table_netlogon, NULL, "Return Capabilities",     "", .use_netlogon_creds = true, },
-
-	{ NULL }
+	{
+		.name               = "logonctrl2",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_logon_ctrl2,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Logon Control 2",
+		.usage              = "",
+	},
+	{
+		.name               = "getanydcname",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_getanydcname,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Get trusted DC name",
+		.usage              = "",
+	},
+	{
+		.name               = "getdcname",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_getdcname,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Get trusted PDC name",
+		.usage              = "",
+	},
+	{
+		.name               = "dsr_getdcname",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_dsr_getdcname,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Get trusted DC name",
+		.usage              = "",
+	},
+	{
+		.name               = "dsr_getdcnameex",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_dsr_getdcnameex,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Get trusted DC name",
+		.usage              = "",
+	},
+	{
+		.name               = "dsr_getdcnameex2",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_dsr_getdcnameex2,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Get trusted DC name",
+		.usage              = "",
+	},
+	{
+		.name               = "dsr_getsitename",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_dsr_getsitename,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Get sitename",
+		.usage              = "",
+	},
+	{
+		.name               = "dsr_getforesttrustinfo",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_dsr_getforesttrustinfo,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Get Forest Trust Info",
+		.usage              = "",
+	},
+	{
+		.name               = "logonctrl",
+		.returntype         =  RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_logon_ctrl,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Logon Control",
+		.usage              = "",
+	},
+	{
+		.name               = "samlogon",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_netlogon_sam_logon,
+		.wfn                = NULL,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Sam Logon",
+		.usage              = "",
+		.use_netlogon_creds = true,
+	},
+	{
+		.name               = "change_trust_pw",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_netlogon_change_trust_pw,
+		.wfn                = NULL,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Change Trust Account Password",
+		.usage              = "",
+		.use_netlogon_creds = true,
+	},
+	{
+		.name               = "gettrustrid",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_gettrustrid,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Get trust rid",
+		.usage              = "",
+	},
+	{
+		.name               = "dsr_enumtrustdom",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_dsr_enumtrustdom,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Enumerate trusted domains",
+		.usage              = "",
+	},
+	{
+		.name               = "dsenumdomtrusts",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_dsr_enumtrustdom,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Enumerate all trusted domains in an AD forest",
+		.usage              = "",
+	},
+	{
+		.name               = "deregisterdnsrecords",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_deregisterdnsrecords,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Deregister DNS records",
+		.usage              = "",
+	},
+	{
+		.name               = "netrenumtrusteddomains",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_netlogon_enumtrusteddomains,
+		.wfn                = NULL,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Enumerate trusted domains",
+		.usage              = "",
+	},
+	{
+		.name               = "netrenumtrusteddomainsex",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_enumtrusteddomainsex,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Enumerate trusted domains",
+		.usage              = "",
+	},
+	{
+		.name               = "getdcsitecoverage",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = cmd_netlogon_getdcsitecoverage,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Get the Site-Coverage from a DC",
+		.usage              = "",
+	},
+	{
+		.name               = "capabilities",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_netlogon_capabilities,
+		.wfn                = NULL,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Return Capabilities",
+		.usage              = "",
+		.use_netlogon_creds = true,
+	},
+	{
+		.name               = "logongetdomaininfo",
+		.returntype         = RPC_RTYPE_NTSTATUS,
+		.ntfn               = cmd_netlogon_logongetdomaininfo,
+		.wfn                = NULL,
+		.table              = &ndr_table_netlogon,
+		.rpc_pipe           = NULL,
+		.description        = "Return LogonGetDomainInfo",
+		.usage              = "",
+		.use_netlogon_creds = true,
+	},
+	{
+		.name = NULL,
+	}
 };

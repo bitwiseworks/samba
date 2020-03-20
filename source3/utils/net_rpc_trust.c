@@ -23,10 +23,12 @@
 #include "rpc_client/cli_lsarpc.h"
 #include "librpc/gen_ndr/ndr_drsblobs.h"
 #include "../librpc/gen_ndr/ndr_lsa_c.h"
-#include "../lib/crypto/crypto.h"
 #include "../libcli/security/dom_sid.h"
 #include "libsmb/libsmb.h"
 
+#include "lib/crypto/gnutls_helpers.h"
+#include <gnutls/gnutls.h>
+#include <gnutls/crypto.h>
 
 #define ARG_OTHERSERVER "otherserver="
 #define ARG_OTHERUSER "otheruser="
@@ -155,6 +157,7 @@ static NTSTATUS get_domain_info(TALLOC_CTX *mem_ctx,
 {
 	NTSTATUS status;
 	struct lsa_QueryInfoPolicy2 qr;
+	struct dom_sid_buf buf;
 
 	qr.in.handle = pol_hnd;
 	qr.in.level = LSA_POLICY_INFO_DNS;
@@ -186,7 +189,7 @@ static NTSTATUS get_domain_info(TALLOC_CTX *mem_ctx,
 
 	DEBUG(0, ("Got the following domain info [%s][%s][%s].\n",
 		  dom_data->domain_name, dom_data->dns_domain_name,
-		  sid_string_talloc(mem_ctx, dom_data->domsid)));
+		  dom_sid_str_buf(dom_data->domsid, &buf)));
 
 	return NT_STATUS_OK;
 }
@@ -511,6 +514,13 @@ static int rpc_trust_common(struct net_context *net_ctx, int argc,
 	}
 
 	if (op == TRUST_CREATE) {
+		gnutls_cipher_hd_t cipher_hnd = NULL;
+		gnutls_datum_t enc_session_key = {
+			.data = session_key[0].data,
+			.size = session_key[0].length,
+		};
+		int rc;
+
 		if (trust_pw == NULL) {
 			if (other_net_ctx == NULL) {
 				DEBUG(0, ("Missing either trustpw or otherhost.\n"));
@@ -544,9 +554,22 @@ static int rpc_trust_common(struct net_context *net_ctx, int argc,
 		}
 		authinfo.auth_blob.size = auth_blob.length;
 
-		arcfour_crypt_blob(authinfo.auth_blob.data,
-				   authinfo.auth_blob.size,
-				   &session_key[0]);
+		rc = gnutls_cipher_init(&cipher_hnd,
+					GNUTLS_CIPHER_ARCFOUR_128,
+					&enc_session_key,
+					NULL);
+		if (rc < 0) {
+			status = gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+			goto done;
+		}
+		rc = gnutls_cipher_encrypt(cipher_hnd,
+					   authinfo.auth_blob.data,
+					   authinfo.auth_blob.size);
+		gnutls_cipher_deinit(cipher_hnd);
+		if (rc < 0) {
+			status = gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+			goto done;
+		}
 
 		status = create_trust(mem_ctx, pipe_hnd[0]->binding_handle,
 				      &pol_hnd[0],
@@ -571,9 +594,27 @@ static int rpc_trust_common(struct net_context *net_ctx, int argc,
 			}
 			authinfo.auth_blob.size = auth_blob.length;
 
-			arcfour_crypt_blob(authinfo.auth_blob.data,
-					   authinfo.auth_blob.size,
-					   &session_key[1]);
+			enc_session_key = (gnutls_datum_t) {
+				.data = session_key[1].data,
+				.size = session_key[1].length,
+			};
+
+			rc = gnutls_cipher_init(&cipher_hnd,
+						GNUTLS_CIPHER_ARCFOUR_128,
+						&enc_session_key,
+						NULL);
+			if (rc < 0) {
+				status = gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+				goto done;
+			}
+			rc = gnutls_cipher_encrypt(cipher_hnd,
+						   authinfo.auth_blob.data,
+						   authinfo.auth_blob.size);
+			gnutls_cipher_deinit(cipher_hnd);
+			if (rc < 0) {
+				status = gnutls_error_to_ntstatus(rc, NT_STATUS_CRYPTO_SYSTEM_INVALID);
+				goto done;
+			}
 
 			status = create_trust(mem_ctx,
 					      pipe_hnd[1]->binding_handle,

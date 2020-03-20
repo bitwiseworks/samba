@@ -13,7 +13,7 @@
 
 <refnamediv>
 	<refname>vfs_gpfs</refname>
-	<refpurpose>gpfs specific samba extensions like acls and prealloc</refpurpose>
+	<refpurpose>gpfs specific samba extensions like acls</refpurpose>
 </refnamediv>
 
 <refsynopsisdiv>
@@ -204,26 +204,6 @@
 		</varlistentry>
 		<varlistentry>
 
-		<term>gpfs:merge_writeappend = [ yes | no ]</term>
-		<listitem>
-		<para>
-		GPFS ACLs doesn't know about the 'APPEND' right.
-		This option lets Samba map the 'APPEND' right to 'WRITE'.
-		</para>
-
-		<itemizedlist>
-		<listitem><para>
-		<command>yes(default)</command> - map 'APPEND' to 'WRITE'.
-		</para></listitem>
-		<listitem><para>
-		<command>no</command> - do not map 'APPEND' to 'WRITE'.
-		</para></listitem>
-		</itemizedlist>
-		</listitem>
-
-		</varlistentry>
-		<varlistentry>
-
 		<term>gpfs:acl = [ yes | no ]</term>
 		<listitem>
 		<para>
@@ -237,6 +217,28 @@
 		<listitem><para>
 		<command>no</command> - do not use GPFS ACLs and pass everything
 		to the next SMB_VFS module.
+		</para></listitem>
+		</itemizedlist>
+		</listitem>
+
+		</varlistentry>
+		<varlistentry>
+
+		<term>gpfs:check_fstype = [ yes | no ]</term>
+		<listitem>
+		<para>
+		Check for a mounted GPFS file system on access to a SMB share.
+		</para>
+
+		<itemizedlist>
+		<listitem><para>
+		<command>yes(default)</command> - Check that the SMB share path
+		is on a GPFS file system. Share access will be denied when a
+		different file system is found.
+		</para></listitem>
+		<listitem><para>
+		<command>no</command> - skip check for GPFS file system on SMB
+		share path.
 		</para></listitem>
 		</itemizedlist>
 		</listitem>
@@ -317,31 +319,6 @@
 		</varlistentry>
 		<varlistentry>
 
-		<term>gpfs:prealloc = [ yes | no ]</term>
-		<listitem>
-		<para>
-		If set to yes the gpfs_prealloc function will be used in the
-		fallocate callback when appropriate. If set to no gpfs_prealloc
-		will not be used. In both cases the system and libc calls are
-		avoided.
-		</para>
-
-		<itemizedlist>
-		<listitem><para>
-		<command>yes (default)</command> - Use gpfs_prealloc for the
-		fallocate callback.
-		</para></listitem>
-		<listitem><para>
-		<command>no</command> - Do not use gpfs_prealloc for the
-		fallocate callback.
-		</para></listitem>
-		</itemizedlist>
-		</listitem>
-
-		</varlistentry>
-
-		<varlistentry>
-
 		<term>gpfs:settimes = [ yes | no ]</term>
 		<listitem>
 		<para>
@@ -394,10 +371,10 @@
 
 		<para>Following is the behaviour of Samba for different values :</para>
 		<itemizedlist>
-		<listitem><para><command>dontcare (default)</command> - copy the ACEs as they come</para></listitem>
-		<listitem><para><command>reject</command> - stop operation and exit with error on ACL set op</para></listitem>
-		<listitem><para><command>ignore</command> - don't include the second matching ACE</para></listitem>
-		<listitem><para><command>merge</command> - bitwise OR the 2 ace.flag fields and 2 ace.mask fields of the 2 duplicate ACEs into 1 ACE</para></listitem>
+		<listitem><para><command>dontcare</command> - copy the ACEs as they come</para></listitem>
+		<listitem><para><command>reject (deprecated)</command> - stop operation and exit with error on ACL set op</para></listitem>
+		<listitem><para><command>ignore (deprecated)</command> - don't include the second matching ACE</para></listitem>
+		<listitem><para><command>merge (default)</command> - bitwise OR the 2 ace.flag fields and 2 ace.mask fields of the 2 duplicate ACEs into 1 ACE</para></listitem>
 		</itemizedlist>
 		</listitem>
 		</varlistentry>

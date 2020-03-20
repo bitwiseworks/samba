@@ -184,6 +184,11 @@ int server_id_db_prune_name(struct server_id_db *db, const char *name,
 
 	tdb_chainunlock(tdb, key);
 
+	if (ret == -1) {
+		enum TDB_ERROR err = tdb_error(tdb);
+		return map_unix_error_from_tdb(err);
+	}
+
 	return 0;
 }
 

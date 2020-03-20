@@ -1,8 +1,7 @@
 # simple makefile wrapper to run waf
 
-PYTHON?=python
 WAF_BINARY=$(PYTHON) ./buildtools/bin/waf
-WAF=WAF_MAKE=1 $(WAF_BINARY)
+WAF=PYTHONHASHSEED=1 WAF_MAKE=1 $(WAF_BINARY)
 
 all:
 	$(WAF) build
@@ -29,6 +28,19 @@ subunit-test:
 testenv:
 	$(WAF) test --testenv $(TEST_OPTIONS)
 
+lcov:
+	@echo usage:
+	@echo ""
+	@echo ./configure --enable-coverage
+	@echo make -j
+	@echo make test TESTS=mytest
+	@echo make lcov
+	@echo ""
+	rm -f lcov.info
+	lcov --capture --directory . --output-file lcov.info && \
+	genhtml lcov.info --output-directory public --prefix=$$(pwd) && \
+	echo Please open public/index.html in browser to view the coverage report
+
 gdbtestenv:
 	$(WAF) test --testenv --gdbtest $(TEST_OPTIONS)
 
@@ -40,6 +52,9 @@ randomized-test:
 
 testlist:
 	$(WAF) test --list $(TEST_OPTIONS)
+
+test-nopython:
+	$(WAF) test --no-subunit-filter --test-list=selftest/no-python-tests.txt $(TEST_OPTIONS)
 
 dist:
 	touch .tmplock
@@ -85,7 +100,7 @@ pydoctor:
 pep8:
 	$(WAF) pep8
 
-# Adding force on the depencies will force the target to be always rebuild form the Make
+# Adding force on the dependencies will force the target to be always rebuild form the Make
 # point of view forcing make to invoke waf
 
 bin/smbd: FORCE

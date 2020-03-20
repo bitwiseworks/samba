@@ -88,11 +88,13 @@ bool tldap_pull_binsid(struct tldap_message *msg, const char *attribute,
 		       struct dom_sid *sid)
 {
 	DATA_BLOB val;
+	ssize_t ret;
 
 	if (!tldap_get_single_valueblob(msg, attribute, &val)) {
 		return false;
 	}
-	return sid_parse(val.data, val.length, sid);
+	ret = sid_parse(val.data, val.length, sid);
+	return (ret != -1);
 }
 
 bool tldap_pull_guid(struct tldap_message *msg, const char *attribute,
@@ -389,13 +391,22 @@ bool tldap_pull_uint64(struct tldap_message *msg, const char *attr,
 {
 	char *str;
 	uint64_t result;
+	int error = 0;
 
 	str = tldap_talloc_single_attribute(msg, attr, talloc_tos());
 	if (str == NULL) {
 		DEBUG(10, ("Could not find attribute %s\n", attr));
 		return false;
 	}
-	result = strtoull(str, NULL, 10);
+
+	result = smb_strtoull(str, NULL, 10, &error, SMB_STR_STANDARD);
+	if (error != 0) {
+		DBG_DEBUG("Attribute conversion failed (%s)\n",
+			  strerror(error));
+		TALLOC_FREE(str);
+		return false;
+	}
+
 	TALLOC_FREE(str);
 	*presult = result;
 	return true;
@@ -457,7 +468,6 @@ static void tldap_fetch_rootdse_done(struct tevent_req *subreq)
 
 	rc = tldap_search_recv(subreq, state, &msg);
 	if (tevent_req_ldap_error(req, rc)) {
-		TALLOC_FREE(subreq);
 		return;
 	}
 
@@ -578,7 +588,9 @@ struct tldap_control *tldap_add_control(TALLOC_CTX *mem_ctx,
 	if (result == NULL) {
 		return NULL;
 	}
-	memcpy(result, ctrls, sizeof(struct tldap_control) * num_ctrls);
+	if (num_ctrls > 0) {
+		memcpy(result, ctrls, sizeof(struct tldap_control) * num_ctrls);
+	}
 	result[num_ctrls] = *ctrl;
 	return result;
 }
@@ -739,7 +751,6 @@ static void tldap_search_paged_done(struct tevent_req *subreq)
 
 	rc = tldap_search_recv(subreq, state, &state->result);
 	if (tevent_req_ldap_error(req, rc)) {
-		TALLOC_FREE(subreq);
 		return;
 	}
 
@@ -799,7 +810,8 @@ static void tldap_search_paged_done(struct tevent_req *subreq)
 	}
 	tevent_req_set_callback(subreq, tldap_search_paged_done, req);
 
-  err:
+	return;
+err:
 
 	TALLOC_FREE(asn1);
 	tevent_req_ldap_error(req, TLDAP_DECODING_ERROR);

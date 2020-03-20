@@ -32,6 +32,32 @@ unc="//$SERVER/tmp"
 UID_WRAPPER_ROOT=1
 export UID_WRAPPER_ROOT
 
+test_smbpasswd()
+{
+	user=$1
+	newpass=$2
+
+	echo "set password with smbpasswd"
+	tmpfile=$PREFIX/smbpasswd_change_password_script
+	cat > $tmpfile <<EOF
+expect New SMB password:
+send ${newpass}\n
+expect Retype new SMB password:
+send ${newpass}\n
+EOF
+
+	cmd='UID_WRAPPER_INITIAL_RUID=0 UID_WRAPPER_INITIAL_EUID=0 $texpect $tmpfile $smbpasswd -L $user -c $SMB_CONF'
+	eval echo "$cmd"
+	out=$(eval $cmd)
+	ret=$?
+	rm -f $tmpfile
+
+	if [ $ret -ne 0 ]; then
+		echo "Failed to change user password $user"
+		return 1
+	fi
+}
+
 testit "pdbtest" $VALGRIND $BINDIR/pdbtest -u $USER $@ || failed=`expr $failed + 1`
 
 NEWUSERPASS=testPaSS@01%
@@ -44,26 +70,21 @@ expect retype new password:
 send ${NEWUSERPASS}\n
 EOF
 
-testit "create user with pdbedit" $texpect ./tmpsmbpasswdscript $VALGRIND $pdbedit -a $USER --account-desc="pdbedit-test-user" $@ || failed=`expr $failed + 1`
+testit "create user with pdbedit" $texpect ./tmpsmbpasswdscript $VALGRIND $pdbedit -s $SMB_CONF -a $USER --account-desc="pdbedit-test-user" $@ || failed=`expr $failed + 1`
 USERPASS=$NEWUSERPASS
 
 test_smbclient "Test login with user (ntlm)" 'ls' "$unc" -k no -U$USER%$NEWUSERPASS $@ || failed=`expr $failed + 1`
 
-testit "modify user"  $VALGRIND $pdbedit --modify $USER --drive="D:" $@ || failed=`expr $failed + 1`
+testit "modify user"  $VALGRIND $pdbedit -s $SMB_CONF --modify $USER --drive="D:" $@ || failed=`expr $failed + 1`
 
 test_smbclient "Test login with user (ntlm)" 'ls' "$unc" -k no -U$USER%$NEWUSERPASS $@|| failed=`expr $failed + 1`
 
 NEWUSERPASS=testPaSS@02%
 
-echo "set password with smbpasswd"
-cat > ./tmpsmbpasswdscript <<EOF
-expect New SMB password:
-send ${NEWUSERPASS}\n
-expect Retype new SMB password:
-send ${NEWUSERPASS}\n
-EOF
+testit "set user password with smbpasswd" \
+	test_smbpasswd $USER $NEWUSERPASS \
+	|| failed=$(expr $failed + 1)
 
-testit "set user password with smbpasswd" $texpect ./tmpsmbpasswdscript $smbpasswd -L $USER -c $SMB_CONF || failed=`expr $failed + 1`
 USERPASS=$NEWUSERPASS
 
 test_smbclient "Test login with user (ntlm)" 'ls' "$unc" -k no -U$USER%$NEWUSERPASS $@|| failed=`expr $failed + 1`
@@ -87,11 +108,11 @@ test_smbclient "Test login with no expiry (ntlm)" 'ls' "$unc" -k no -U$USER%$NEW
 NEWUSERPASS=testPaSS@03%
 NEWUSERHASH=062519096c45739c1938800f80906731
 
-testit "Set user password with password hash" $VALGRIND $pdbedit -u $USER --set-nt-hash $NEWUSERHASH $@ || failed=`expr $failed + 1`
+testit "Set user password with password hash" $VALGRIND $pdbedit -s $SMB_CONF -u $USER --set-nt-hash $NEWUSERHASH $@ || failed=`expr $failed + 1`
 
 test_smbclient "Test login with new password (from hash)" 'ls' "$unc" -k no -U$USER%$NEWUSERPASS || failed=`expr $failed + 1`
 
-testit "del user"  $VALGRIND $pdbedit -x $USER $@ || failed=`expr $failed + 1`
+testit "del user"  $VALGRIND $pdbedit -s $SMB_CONF -x $USER $@ || failed=`expr $failed + 1`
 
 rm ./tmpsmbpasswdscript
 

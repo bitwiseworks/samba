@@ -19,12 +19,12 @@
 
 from samba.samba3 import passdb
 from samba.samba3 import param as s3param
-from samba.tests import TestCase, TestCaseInTempDir
+from samba.tests import TestCaseInTempDir
 from samba.dcerpc.security import dom_sid
 import os
 
 
-for p in [ "../../../../../testdata/samba3", "../../../../testdata/samba3" ]:
+for p in ["../../../../../testdata/samba3", "../../../../testdata/samba3"]:
     DATADIR = os.path.join(os.path.dirname(__file__), p)
     if os.path.exists(DATADIR):
         break

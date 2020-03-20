@@ -169,16 +169,6 @@ const struct dsdb_class *dsdb_class_by_lDAPDisplayName_ldb_val(const struct dsdb
 	return c;
 }
 
-const struct dsdb_class *dsdb_class_by_cn(const struct dsdb_schema *schema,
-					  const char *cn)
-{
-	struct dsdb_class *c;
-	if (!cn) return NULL;
-	BINARY_ARRAY_SEARCH_P(schema->classes_by_cn,
-			      schema->num_classes, cn, cn, strcasecmp, c);
-	return c;
-}
-
 const struct dsdb_class *dsdb_class_by_cn_ldb_val(const struct dsdb_schema *schema,
 						  const struct ldb_val *cn)
 {
@@ -230,7 +220,9 @@ WERROR dsdb_linked_attribute_lDAPDisplayName_list(const struct dsdb_schema *sche
 		attr_list[i] = cur->lDAPDisplayName;
 		i++;
 	}
-	attr_list[i] = NULL;
+	if (attr_list != NULL && attr_list[i] != NULL) {
+		attr_list[i] = NULL;
+	}
 	*attr_list_ret = attr_list;
 	return WERR_OK;
 }

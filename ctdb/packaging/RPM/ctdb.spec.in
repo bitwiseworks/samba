@@ -87,7 +87,8 @@ fi
 
 export CC
 
-CFLAGS="$RPM_OPT_FLAGS $EXTRA -D_GNU_SOURCE" ./buildtools/bin/waf configure \
+CFLAGS="$RPM_OPT_FLAGS $EXTRA -D_GNU_SOURCE" \
+$PYTHON ./buildtools/bin/waf configure \
 	--builtin-libraries=replace,popt \
 	--bundled-libraries=!talloc,!tevent,!tdb \
 	--minimum-library-version=talloc:%libtalloc_version,tdb:%libtdb_version,tevent:%libtevent_version \
@@ -102,7 +103,7 @@ CFLAGS="$RPM_OPT_FLAGS $EXTRA -D_GNU_SOURCE" ./buildtools/bin/waf configure \
 	--mandir=%{_mandir} \
 	--localstatedir=%{_localstatedir}
 
-./buildtools/bin/waf build
+$PYTHON ./buildtools/bin/waf build
 
 %install
 # Clean up in case there is trash left from a previous build
@@ -111,7 +112,7 @@ rm -rf $RPM_BUILD_ROOT
 # Create the target build directory hierarchy
 mkdir -p $RPM_BUILD_ROOT%{_sysconfdir}/sudoers.d
 
-DESTDIR=$RPM_BUILD_ROOT ./buildtools/bin/waf install
+DESTDIR=$RPM_BUILD_ROOT $PYTHON ./buildtools/bin/waf install
 
 install -m644 config/ctdb.conf $RPM_BUILD_ROOT%{_sysconfdir}/ctdb
 install -m644 config/ctdb.tunables $RPM_BUILD_ROOT%{_sysconfdir}/ctdb
@@ -221,7 +222,7 @@ fi
 %{_bindir}/onnode
 %dir %{_libexecdir}/ctdb
 %{_libexecdir}/ctdb/*
-%dir %{_libdir}
+%dir %{_libdir}/ctdb
 %{_libdir}/ctdb/lib*
 %dir %{_datadir}/ctdb/events
 %{_datadir}/ctdb/events/*
@@ -257,7 +258,7 @@ development libraries for ctdb
 Summary: CTDB test suite
 Group: Development/Tools
 Requires: ctdb = %{version}
-Requires: nc
+Requires: nc, tcpdump
 
 %description tests
 test suite for ctdb
@@ -270,6 +271,7 @@ test suite for ctdb
 %{_libexecdir}/%{name}/tests/*
 %{_bindir}/ctdb_run_tests
 %{_bindir}/ctdb_run_cluster_tests
+%{_bindir}/ctdb_local_daemons
 %doc tests/README
 
 %if %with_pcp_pmda

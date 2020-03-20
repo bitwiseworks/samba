@@ -28,13 +28,14 @@ import re
 import shutil
 import samba
 
+from samba.compat import cmp_fn
 from samba import Ldb, version, ntacls
 from ldb import SCOPE_SUBTREE, SCOPE_ONELEVEL, SCOPE_BASE
 import ldb
 from samba.provision import (provision_paths_from_lp,
-                            getpolicypath, set_gpos_acl, create_gpo_struct,
-                            provision, ProvisioningError,
-                            setsysvolacl, secretsdb_self_join)
+                             getpolicypath, create_gpo_struct,
+                             provision, ProvisioningError,
+                             secretsdb_self_join)
 from samba.provision.common import FILL_FULL
 from samba.dcerpc import xattr, drsblobs, security
 from samba.dcerpc.misc import SEC_CHAN_BDC
@@ -48,22 +49,22 @@ import tempfile
 # And so opening them create a file in the current directory which is not what
 # we want
 # I still keep them commented because I plan soon to make more cleaner
-ERROR =     -1
-SIMPLE =     0x00
-CHANGE =     0x01
-CHANGESD =     0x02
-GUESS =     0x04
-PROVISION =    0x08
-CHANGEALL =    0xff
+ERROR = -1
+SIMPLE = 0x00
+CHANGE = 0x01
+CHANGESD = 0x02
+GUESS = 0x04
+PROVISION = 0x08
+CHANGEALL = 0xff
 
 hashAttrNotCopied = set(["dn", "whenCreated", "whenChanged", "objectGUID",
-    "uSNCreated", "replPropertyMetaData", "uSNChanged", "parentGUID",
-    "objectCategory", "distinguishedName", "nTMixedDomain",
-    "showInAdvancedViewOnly", "instanceType", "msDS-Behavior-Version",
-    "nextRid", "cn", "versionNumber", "lmPwdHistory", "pwdLastSet",
-    "ntPwdHistory", "unicodePwd","dBCSPwd", "supplementalCredentials",
-    "gPCUserExtensionNames", "gPCMachineExtensionNames","maxPwdAge", "secret",
-    "possibleInferiors", "privilege", "sAMAccountType"])
+                         "uSNCreated", "replPropertyMetaData", "uSNChanged", "parentGUID",
+                         "objectCategory", "distinguishedName", "nTMixedDomain",
+                         "showInAdvancedViewOnly", "instanceType", "msDS-Behavior-Version",
+                         "nextRid", "cn", "versionNumber", "lmPwdHistory", "pwdLastSet",
+                         "ntPwdHistory", "unicodePwd", "dBCSPwd", "supplementalCredentials",
+                         "gPCUserExtensionNames", "gPCMachineExtensionNames", "maxPwdAge", "secret",
+                         "possibleInferiors", "privilege", "sAMAccountType"])
 
 
 class ProvisionLDB(object):
@@ -172,11 +173,11 @@ def usn_in_range(usn, range):
     cont = True
     ok = False
     while cont:
-        if idx ==  len(range):
+        if idx == len(range):
             cont = False
             continue
         if usn < int(range[idx]):
-            if idx %2 == 1:
+            if idx % 2 == 1:
                 ok = True
             cont = False
         if usn == int(range[idx]):
@@ -211,6 +212,7 @@ def get_paths(param, targetdir=None, smbconf=None):
     paths = provision_paths_from_lp(lp, lp.get("realm"))
     return paths
 
+
 def update_policyids(names, samdb):
     """Update policy ids that could have changed after sam update
 
@@ -219,16 +221,16 @@ def update_policyids(names, samdb):
     """
     # policy guid
     res = samdb.search(expression="(displayName=Default Domain Policy)",
-                        base="CN=Policies,CN=System," + str(names.rootdn),
-                        scope=SCOPE_ONELEVEL, attrs=["cn","displayName"])
-    names.policyid = str(res[0]["cn"]).replace("{","").replace("}","")
+                       base="CN=Policies,CN=System," + str(names.rootdn),
+                       scope=SCOPE_ONELEVEL, attrs=["cn", "displayName"])
+    names.policyid = str(res[0]["cn"]).replace("{", "").replace("}", "")
     # dc policy guid
     res2 = samdb.search(expression="(displayName=Default Domain Controllers"
                                    " Policy)",
-                            base="CN=Policies,CN=System," + str(names.rootdn),
-                            scope=SCOPE_ONELEVEL, attrs=["cn","displayName"])
+                        base="CN=Policies,CN=System," + str(names.rootdn),
+                        scope=SCOPE_ONELEVEL, attrs=["cn", "displayName"])
     if len(res2) == 1:
-        names.policyid_dc = str(res2[0]["cn"]).replace("{","").replace("}","")
+        names.policyid_dc = str(res2[0]["cn"]).replace("{", "").replace("}", "")
     else:
         names.policyid_dc = None
 
@@ -251,19 +253,17 @@ def newprovision(names, session, smbconf, provdir, logger, base_schema=None):
     os.mkdir(provdir)
     logger.info("Provision stored in %s", provdir)
     return provision(logger, session, smbconf=smbconf,
-            targetdir=provdir, samdb_fill=FILL_FULL, realm=names.realm,
-            domain=names.domain, domainguid=names.domainguid,
-            domainsid=names.domainsid, ntdsguid=names.ntdsguid,
-            policyguid=names.policyid, policyguid_dc=names.policyid_dc,
-            hostname=names.netbiosname.lower(), hostip=None, hostip6=None,
-            invocationid=names.invocation, adminpass=names.adminpass,
-            krbtgtpass=None, machinepass=None, dnspass=None, root=None,
-            nobody=None, users=None,
-            serverrole="domain controller",
-            backend_type=None, ldapadminpass=None, ol_mmr_urls=None,
-            slapd_path=None,
-            dom_for_fun_level=names.domainlevel, dns_backend=names.dns_backend,
-            useeadb=True, use_ntvfs=True, base_schema=base_schema)
+                     targetdir=provdir, samdb_fill=FILL_FULL, realm=names.realm,
+                     domain=names.domain, domainguid=names.domainguid,
+                     domainsid=names.domainsid, ntdsguid=names.ntdsguid,
+                     policyguid=names.policyid, policyguid_dc=names.policyid_dc,
+                     hostname=names.netbiosname.lower(), hostip=None, hostip6=None,
+                     invocationid=names.invocation, adminpass=names.adminpass,
+                     krbtgtpass=None, machinepass=None, dnspass=None, root=None,
+                     nobody=None, users=None,
+                     serverrole="domain controller",
+                     dom_for_fun_level=names.domainlevel, dns_backend=names.dns_backend,
+                     useeadb=True, use_ntvfs=True, base_schema=base_schema)
 
 
 def dn_sort(x, y):
@@ -280,17 +280,16 @@ def dn_sort(x, y):
     tab1 = p.split(str(x))
     tab2 = p.split(str(y))
     minimum = min(len(tab1), len(tab2))
-    len1 = len(tab1)-1
-    len2 = len(tab2)-1
+    len1 = len(tab1) - 1
+    len2 = len(tab2) - 1
     # Note: python range go up to upper limit but do not include it
-    cmp = lambda x, y:  (x > y) - (x < y)  # cmp is removed in py3
     for i in range(0, minimum):
-        ret = cmp(tab1[len1-i], tab2[len2-i])
+        ret = cmp_fn(tab1[len1 - i], tab2[len2 - i])
         if ret != 0:
             return ret
         else:
-            if i == minimum-1:
-                assert len1!=len2,"PB PB PB" + " ".join(tab1)+" / " + " ".join(tab2)
+            if i == minimum - 1:
+                assert len1 != len2, "PB PB PB" + " ".join(tab1) + " / " + " ".join(tab2)
                 if len1 > len2:
                     return 1
                 else:
@@ -335,9 +334,9 @@ def update_secrets(newsecrets_ldb, secrets_ldb, messagefunc):
         secrets_ldb.modify(delta)
 
     reference = newsecrets_ldb.search(expression="objectClass=top", base="",
-                                        scope=SCOPE_SUBTREE, attrs=["dn"])
+                                      scope=SCOPE_SUBTREE, attrs=["dn"])
     current = secrets_ldb.search(expression="objectClass=top", base="",
-                                        scope=SCOPE_SUBTREE, attrs=["dn"])
+                                 scope=SCOPE_SUBTREE, attrs=["dn"])
     hash_new = {}
     hash = {}
     listMissing = []
@@ -360,9 +359,9 @@ def update_secrets(newsecrets_ldb, secrets_ldb, messagefunc):
 
     for entry in listMissing:
         reference = newsecrets_ldb.search(expression="distinguishedName=%s" % entry,
-                                            base="", scope=SCOPE_SUBTREE)
+                                          base="", scope=SCOPE_SUBTREE)
         current = secrets_ldb.search(expression="distinguishedName=%s" % entry,
-                                            base="", scope=SCOPE_SUBTREE)
+                                     base="", scope=SCOPE_SUBTREE)
         delta = secrets_ldb.msg_diff(empty, reference[0])
         for att in hashAttrNotCopied:
             delta.remove(att)
@@ -375,9 +374,9 @@ def update_secrets(newsecrets_ldb, secrets_ldb, messagefunc):
 
     for entry in listPresent:
         reference = newsecrets_ldb.search(expression="distinguishedName=%s" % entry,
-                                            base="", scope=SCOPE_SUBTREE)
+                                          base="", scope=SCOPE_SUBTREE)
         current = secrets_ldb.search(expression="distinguishedName=%s" % entry, base="",
-                                            scope=SCOPE_SUBTREE)
+                                     scope=SCOPE_SUBTREE)
         delta = secrets_ldb.msg_diff(current[0], reference[0])
         for att in hashAttrNotCopied:
             delta.remove(att)
@@ -391,9 +390,9 @@ def update_secrets(newsecrets_ldb, secrets_ldb, messagefunc):
 
     for entry in listPresent:
         reference = newsecrets_ldb.search(expression="distinguishedName=%s" % entry, base="",
-                                            scope=SCOPE_SUBTREE)
+                                          scope=SCOPE_SUBTREE)
         current = secrets_ldb.search(expression="distinguishedName=%s" % entry, base="",
-                                            scope=SCOPE_SUBTREE)
+                                     scope=SCOPE_SUBTREE)
         delta = secrets_ldb.msg_diff(current[0], reference[0])
         for att in hashAttrNotCopied:
             delta.remove(att)
@@ -409,7 +408,7 @@ def update_secrets(newsecrets_ldb, secrets_ldb, messagefunc):
         secrets_ldb.modify(delta)
 
     res2 = secrets_ldb.search(expression="(samaccountname=dns)",
-                                scope=SCOPE_SUBTREE, attrs=["dn"])
+                              scope=SCOPE_SUBTREE, attrs=["dn"])
 
     if len(res2) == 1:
             messagefunc(SIMPLE, "Remove old dns account")
@@ -425,7 +424,7 @@ def getOEMInfo(samdb, rootdn):
     :return: The content of the field oEMInformation (if any)
     """
     res = samdb.search(expression="(objectClass=*)", base=str(rootdn),
-                            scope=SCOPE_BASE, attrs=["dn", "oEMInformation"])
+                       scope=SCOPE_BASE, attrs=["dn", "oEMInformation"])
     if len(res) > 0 and res[0].get("oEMInformation"):
         info = res[0]["oEMInformation"]
         return info
@@ -441,7 +440,7 @@ def updateOEMInfo(samdb, rootdn):
         the provision (ie. DC=...,DC=...)
     """
     res = samdb.search(expression="(objectClass=*)", base=rootdn,
-                            scope=SCOPE_BASE, attrs=["dn", "oEMInformation"])
+                       scope=SCOPE_BASE, attrs=["dn", "oEMInformation"])
     if len(res) > 0:
         if res[0].get("oEMInformation"):
             info = str(res[0]["oEMInformation"])
@@ -451,8 +450,9 @@ def updateOEMInfo(samdb, rootdn):
         delta = ldb.Message()
         delta.dn = ldb.Dn(samdb, str(res[0]["dn"]))
         delta["oEMInformation"] = ldb.MessageElement(info, ldb.FLAG_MOD_REPLACE,
-                                                        "oEMInformation" )
+                                                     "oEMInformation")
         samdb.modify(delta)
+
 
 def update_gpo(paths, samdb, names, lp, message):
     """Create missing GPO file object if needed
@@ -467,6 +467,7 @@ def update_gpo(paths, samdb, names, lp, message):
     if not os.path.isdir(dir):
         create_gpo_struct(dir)
 
+
 def increment_calculated_keyversion_number(samdb, rootdn, hashDns):
     """For a given hash associating dn and a number, this function will
     update the replPropertyMetaData of each dn in the hash, so that the
@@ -480,11 +481,10 @@ def increment_calculated_keyversion_number(samdb, rootdn, hashDns):
                  have
     """
     entry = samdb.search(expression='(objectClass=user)',
-                         base=ldb.Dn(samdb,str(rootdn)),
+                         base=ldb.Dn(samdb, str(rootdn)),
                          scope=SCOPE_SUBTREE, attrs=["msDs-KeyVersionNumber"],
                          controls=["search_options:1:2"])
     done = 0
-    hashDone = {}
     if len(entry) == 0:
         raise ProvisioningError("Unable to find msDs-KeyVersionNumber")
     else:
@@ -497,8 +497,10 @@ def increment_calculated_keyversion_number(samdb, rootdn, hashDns):
                 if int(str(val)) < version:
                     done = done + 1
                     samdb.set_attribute_replmetadata_version(str(e.dn),
-                                                              "unicodePwd",
-                                                              version, True)
+                                                             "unicodePwd",
+                                                             version, True)
+
+
 def delta_update_basesamdb(refsampath, sampath, creds, session, lp, message):
     """Update the provision container db: sam.ldb
     This function is aimed for alpha9 and newer;
@@ -515,9 +517,9 @@ def delta_update_basesamdb(refsampath, sampath, creds, session, lp, message):
     message(SIMPLE,
             "Update base samdb by searching difference with reference one")
     refsam = Ldb(refsampath, session_info=session, credentials=creds,
-                    lp=lp, options=["modules:"])
+                 lp=lp, options=["modules:"])
     sam = Ldb(sampath, session_info=session, credentials=creds, lp=lp,
-                options=["modules:"])
+              options=["modules:"])
 
     empty = ldb.Message()
     deltaattr = None
@@ -525,12 +527,12 @@ def delta_update_basesamdb(refsampath, sampath, creds, session, lp, message):
 
     for refentry in reference:
         entry = sam.search(expression="distinguishedName=%s" % refentry["dn"],
-                            scope=SCOPE_SUBTREE)
+                           scope=SCOPE_SUBTREE)
         if not len(entry):
             delta = sam.msg_diff(empty, refentry)
             message(CHANGE, "Adding %s to sam db" % str(refentry.dn))
             if str(refentry.dn) == "@PROVISION" and\
-                delta.get(samba.provision.LAST_PROVISION_USN_ATTRIBUTE):
+                    delta.get(samba.provision.LAST_PROVISION_USN_ATTRIBUTE):
                 delta.remove(samba.provision.LAST_PROVISION_USN_ATTRIBUTE)
             delta.dn = refentry.dn
             sam.add(delta)
@@ -539,7 +541,7 @@ def delta_update_basesamdb(refsampath, sampath, creds, session, lp, message):
             if str(refentry.dn) == "@ATTRIBUTES":
                 deltaattr = sam.msg_diff(refentry, entry[0])
             if str(refentry.dn) == "@PROVISION" and\
-                delta.get(samba.provision.LAST_PROVISION_USN_ATTRIBUTE):
+                    delta.get(samba.provision.LAST_PROVISION_USN_ATTRIBUTE):
                 delta.remove(samba.provision.LAST_PROVISION_USN_ATTRIBUTE)
             if len(delta.items()) > 1:
                 delta.dn = refentry.dn
@@ -560,9 +562,10 @@ def construct_existor_expr(attrs):
     if len(attrs) > 0:
         expr = "(|"
         for att in attrs:
-            expr = "%s(%s=*)"%(expr,att)
-        expr = "%s)"%expr
+            expr = "%s(%s=*)" %(expr, att)
+        expr = "%s)" %expr
     return expr
+
 
 def update_machine_account_password(samdb, secrets_ldb, names):
     """Update (change) the password of the current DC both in the SAM db and in
@@ -575,7 +578,7 @@ def update_machine_account_password(samdb, secrets_ldb, names):
 
     expression = "samAccountName=%s$" % names.netbiosname
     secrets_msg = secrets_ldb.search(expression=expression,
-                                        attrs=["secureChannelType"])
+                                     attrs=["secureChannelType"])
     if int(secrets_msg[0]["secureChannelType"][0]) == SEC_CHAN_BDC:
         res = samdb.search(expression=expression, attrs=[])
         assert(len(res) == 1)
@@ -584,27 +587,28 @@ def update_machine_account_password(samdb, secrets_ldb, names):
         machinepass = samba.generate_random_machine_password(128, 255)
         mputf16 = machinepass.encode('utf-16-le')
         msg["clearTextPassword"] = ldb.MessageElement(mputf16,
-                                                ldb.FLAG_MOD_REPLACE,
-                                                "clearTextPassword")
+                                                      ldb.FLAG_MOD_REPLACE,
+                                                      "clearTextPassword")
         samdb.modify(msg)
 
         res = samdb.search(expression=("samAccountName=%s$" % names.netbiosname),
-                     attrs=["msDs-keyVersionNumber"])
+                           attrs=["msDs-keyVersionNumber"])
         assert(len(res) == 1)
         kvno = int(str(res[0]["msDs-keyVersionNumber"]))
         secChanType = int(secrets_msg[0]["secureChannelType"][0])
 
         secretsdb_self_join(secrets_ldb, domain=names.domain,
-                    realm=names.realm,
-                    domainsid=names.domainsid,
-                    dnsdomain=names.dnsdomain,
-                    netbiosname=names.netbiosname,
-                    machinepass=machinepass,
-                    key_version_number=kvno,
-                    secure_channel_type=secChanType)
+                            realm=names.realm,
+                            domainsid=names.domainsid,
+                            dnsdomain=names.dnsdomain,
+                            netbiosname=names.netbiosname,
+                            machinepass=machinepass,
+                            key_version_number=kvno,
+                            secure_channel_type=secChanType)
     else:
         raise ProvisioningError("Unable to find a Secure Channel"
                                 "of type SEC_CHAN_BDC")
+
 
 def update_dns_account_password(samdb, secrets_ldb, names):
     """Update (change) the password of the dns both in the SAM db and in
@@ -625,25 +629,26 @@ def update_dns_account_password(samdb, secrets_ldb, names):
         machinepass = samba.generate_random_password(128, 255)
         mputf16 = machinepass.encode('utf-16-le')
         msg["clearTextPassword"] = ldb.MessageElement(mputf16,
-                                                ldb.FLAG_MOD_REPLACE,
-                                                "clearTextPassword")
+                                                      ldb.FLAG_MOD_REPLACE,
+                                                      "clearTextPassword")
 
         samdb.modify(msg)
 
         res = samdb.search(expression=expression,
-                     attrs=["msDs-keyVersionNumber"])
+                           attrs=["msDs-keyVersionNumber"])
         assert(len(res) == 1)
         kvno = str(res[0]["msDs-keyVersionNumber"])
 
         msg = ldb.Message(secrets_msg[0].dn)
         msg["secret"] = ldb.MessageElement(machinepass,
-                                                ldb.FLAG_MOD_REPLACE,
-                                                "secret")
+                                           ldb.FLAG_MOD_REPLACE,
+                                           "secret")
         msg["msDS-KeyVersionNumber"] = ldb.MessageElement(kvno,
-                                                ldb.FLAG_MOD_REPLACE,
-                                                "msDS-KeyVersionNumber")
+                                                          ldb.FLAG_MOD_REPLACE,
+                                                          "msDS-KeyVersionNumber")
 
         secrets_ldb.modify(msg)
+
 
 def update_krbtgt_account_password(samdb):
     """Update (change) the password of the krbtgt account
@@ -663,6 +668,7 @@ def update_krbtgt_account_password(samdb):
 
     samdb.modify(msg)
 
+
 def search_constructed_attrs_stored(samdb, rootdn, attrs):
     """Search a given sam DB for calculated attributes that are
     still stored in the db.
@@ -681,7 +687,7 @@ def search_constructed_attrs_stored(samdb, rootdn, attrs):
         return hashAtt
     entry = samdb.search(expression=expr, base=ldb.Dn(samdb, str(rootdn)),
                          scope=SCOPE_SUBTREE, attrs=attrs,
-                         controls=["search_options:1:2","bypassoperational:0"])
+                         controls=["search_options:1:2", "bypassoperational:0"])
     if len(entry) == 0:
         # Nothing anymore
         return hashAtt
@@ -696,6 +702,7 @@ def search_constructed_attrs_stored(samdb, rootdn, attrs):
                     hashAtt[att][str(ent.dn).lower()] = str(ent[att])
 
     return hashAtt
+
 
 def findprovisionrange(samdb, basedn):
     """ Find ranges of usn grouped by invocation id and then by timestamp
@@ -714,18 +721,18 @@ def findprovisionrange(samdb, basedn):
     hash_id = {}
 
     res = samdb.search(base=basedn, expression="objectClass=*",
-                                    scope=ldb.SCOPE_SUBTREE,
-                                    attrs=["replPropertyMetaData"],
-                                    controls=["search_options:1:2"])
+                       scope=ldb.SCOPE_SUBTREE,
+                       attrs=["replPropertyMetaData"],
+                       controls=["search_options:1:2"])
 
     for e in res:
         nb_obj = nb_obj + 1
         obj = ndr_unpack(drsblobs.replPropertyMetaDataBlob,
-                            str(e["replPropertyMetaData"])).ctr
+                         str(e["replPropertyMetaData"])).ctr
 
         for o in obj.array:
             # like a timestamp but with the resolution of 1 minute
-            minutestamp =_glue.nttime2unix(o.originating_change_time) // 60
+            minutestamp = _glue.nttime2unix(o.originating_change_time) // 60
             hash_ts = hash_id.get(str(o.originating_invocation_id))
 
             if hash_ts is None:
@@ -756,10 +763,11 @@ def findprovisionrange(samdb, basedn):
 
     return (hash_id, nb_obj)
 
+
 def print_provision_ranges(dic, limit_print, dest, samdb_path, invocationid):
     """ print the differents ranges passed as parameter
 
-        :param dic: A dictionnary as returned by findprovisionrange
+        :param dic: A dictionary as returned by findprovisionrange
         :param limit_print: minimum number of object in a range in order to print it
         :param dest: Destination directory
         :param samdb_path: Path to the sam.ldb file
@@ -777,10 +785,10 @@ def print_provision_ranges(dic, limit_print, dest, samdb_path, invocationid):
         for k in sorted_keys:
             obj = hash_ts[k]
             if obj["num"] > limit_print:
-                dt = _glue.nttime2string(_glue.unix2nttime(k*60))
-                print("%s # of modification: %d  \tmin: %d max: %d" % (dt , obj["num"],
-                                                                    obj["min"],
-                                                                    obj["max"]))
+                dt = _glue.nttime2string(_glue.unix2nttime(k * 60))
+                print("%s # of modification: %d  \tmin: %d max: %d" % (dt, obj["num"],
+                                                                       obj["min"],
+                                                                       obj["max"]))
             if hash_ts[k]["num"] > 600:
                 kept_record.append(k)
 
@@ -788,7 +796,7 @@ def print_provision_ranges(dic, limit_print, dest, samdb_path, invocationid):
         for i in range(0, len(kept_record)):
             if i != 0:
                 key1 = kept_record[i]
-                key2 = kept_record[i-1]
+                key2 = kept_record[i - 1]
                 if key1 - key2 == 1:
                     # previous record is just 1 minute away from current
                     if int(hash_ts[key1]["min"]) == int(hash_ts[key2]["max"]) + 1:
@@ -801,17 +809,19 @@ def print_provision_ranges(dic, limit_print, dest, samdb_path, invocationid):
                 obj = hash_ts[k]
                 if obj.get("skipped") is None:
                     ldif = "%slastProvisionUSN: %d-%d;%s\n" % (ldif, obj["min"],
-                                obj["max"], id)
+                                                               obj["max"], id)
 
     if ldif != "":
-        file = tempfile.mktemp(dir=dest, prefix="usnprov", suffix=".ldif")
+        fd, file = tempfile.mkstemp(dir=dest, prefix="usnprov", suffix=".ldif")
         print()
         print("To track the USNs modified/created by provision and upgrade proivsion,")
         print(" the following ranges are proposed to be added to your provision sam.ldb: \n%s" % ldif)
         print("We recommend to review them, and if it's correct to integrate the following ldif: %s in your sam.ldb" % file)
-        print("You can load this file like this: ldbadd -H %s %s\n"%(str(samdb_path),file))
+        print("You can load this file like this: ldbadd -H %s %s\n" %(str(samdb_path), file))
         ldif = "dn: @PROVISION\nprovisionnerID: %s\n%s" % (invocationid, ldif)
-        open(file,'w').write(ldif)
+        os.write(fd, ldif)
+        os.close(fd)
+
 
 def int64range2str(value):
     """Display the int64 range stored in value as xxx-yyy
@@ -819,7 +829,6 @@ def int64range2str(value):
     :param value: The int64 range
     :return: A string of the representation of the range
     """
-
-    lvalue = long(value)
-    str = "%d-%d" % (lvalue&0xFFFFFFFF, lvalue>>32)
+    lvalue = int(value)
+    str = "%d-%d" % (lvalue &0xFFFFFFFF, lvalue >>32)
     return str

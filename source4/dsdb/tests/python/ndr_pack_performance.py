@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import optparse
 import sys
@@ -65,7 +65,7 @@ random.seed(1)
 
 
 BIG_SD_SDDL = ''.join(
-"""O:S-1-5-21-3328325300-3937145445-4190589019-512G:S-1-5-2
+    """O:S-1-5-21-3328325300-3937145445-4190589019-512G:S-1-5-2
 1-3328325300-3937145445-4190589019-512D:AI(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;S-
 1-5-21-3328325300-3937145445-4190589019-512)(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;
 SY)(A;;RPLCLORC;;;AU)(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;AO)(A;;RPLCLORC;;;PS)(O
@@ -118,7 +118,7 @@ f30e3bbe-9ff0-11d1-b603-0000f80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)
 80367c1;bf967aa5-0de6-11d0-a285-00aa003049e2;WD)""".split())
 
 LITTLE_SD_SDDL = ''.join(
-"""O:S-1-5-21-3328325300-3937145445-4190589019-512G:S-1-5-2
+    """O:S-1-5-21-3328325300-3937145445-4190589019-512G:S-1-5-2
 1-3328325300-3937145445-4190589019-512D:AI(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;S-
 1-5-21-3328325300-3937145445-4190589019-512)(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;
 SY)(A;;RPLCLORC;;;AU)(A;;RPWPCRCCDCLCLORCWOWDSDDTSW;;;AO)(A;;RPLCLORC;;;PS)(O
@@ -140,6 +140,7 @@ e6-11d0-a285-00aa003049e2;ED)""".split())
 
 # set SCALE = 100 for normal test, or 1 for testing the test.
 SCALE = 100
+
 
 class UserTests(samba.tests.TestCase):
 
@@ -208,8 +209,9 @@ class UserTests(samba.tests.TestCase):
 
     def test_pack_repl_sample(self):
         blob = self.get_file_blob('testdata/replication-ndrpack-example.gz')
-        desc =  ndr_unpack(drsuapi.DsGetNCChangesCtr6, blob)
+        desc = ndr_unpack(drsuapi.DsGetNCChangesCtr6, blob)
         self._test_pack(desc, cycles=20)
+
 
 if "://" not in host:
     if os.path.isfile(host):

@@ -48,7 +48,7 @@
 	DATA_BLOB tmp_blob = data_blob(NULL, 0);
 	struct PAC_SIGNATURE_DATA *kdc_checksum = NULL;
 	struct PAC_SIGNATURE_DATA *srv_checksum = NULL;
-	int i;
+	uint32_t i;
 
 	/* First, just get the keytypes filled in (and lengths right, eventually) */
 	for (i=0; i < pac_data->num_buffers; i++) {
@@ -120,6 +120,13 @@
 					 &srv_checksum->type,
 					 &srv_checksum->signature);
 
+	if (ret) {
+		DBG_WARNING("making krbtgt PAC srv_checksum failed: %s\n",
+			    smb_get_krb5_error_message(context, ret, mem_ctx));
+		talloc_free(pac_data);
+		return ret;
+	}
+
 	/* Then sign Server checksum */
 	ret = smb_krb5_make_pac_checksum(mem_ctx,
 					 &srv_checksum->signature,
@@ -128,8 +135,8 @@
 					 &kdc_checksum->type,
 					 &kdc_checksum->signature);
 	if (ret) {
-		DEBUG(2, ("making krbtgt PAC checksum failed: %s\n",
-			  smb_get_krb5_error_message(context, ret, mem_ctx)));
+		DBG_WARNING("making krbtgt PAC kdc_checksum failed: %s\n",
+			    smb_get_krb5_error_message(context, ret, mem_ctx));
 		talloc_free(pac_data);
 		return ret;
 	}

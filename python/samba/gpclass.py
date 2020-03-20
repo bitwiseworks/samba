@@ -17,18 +17,24 @@
 
 import sys
 import os
+import errno
 import tdb
 sys.path.insert(0, "bin/python")
 from samba import NTSTATUSError
-from ConfigParser import ConfigParser
-from StringIO import StringIO
+from samba.compat import ConfigParser
+from samba.compat import StringIO
+from samba.compat import get_bytes
 from abc import ABCMeta, abstractmethod
 import xml.etree.ElementTree as etree
 import re
 from samba.net import Net
 from samba.dcerpc import nbt
-from samba import smb
+from samba.samba3 import libsmb_samba_internal as libsmb
+from samba.samba3 import param as s3param
 import samba.gpo as gpo
+from samba.param import LoadParm
+from uuid import UUID
+from tempfile import NamedTemporaryFile
 
 try:
     from enum import Enum
@@ -38,6 +44,7 @@ except ImportError:
         APPLY = 1
         ENFORCE = 2
         UNAPPLY = 3
+
 
 class gp_log:
     ''' Log settings overwritten by gpo apply
@@ -135,27 +142,11 @@ class gp_log:
             apply_log = user_obj.find('applylog')
             if apply_log is None:
                 apply_log = etree.SubElement(user_obj, 'applylog')
-            item = etree.SubElement(apply_log, 'guid')
-            item.attrib['count'] = '%d' % (len(apply_log)-1)
-            item.attrib['value'] = guid
-
-    def apply_log_pop(self):
-        ''' Pop a GPO guid from the applylog
-        return              - last applied GPO guid
-
-        Removes the GPO guid last added to the list, which is the most recently
-        applied GPO.
-        '''
-        user_obj = self.gpdb.find('user[@name="%s"]' % self.user)
-        apply_log = user_obj.find('applylog')
-        if apply_log is not None:
-            ret = apply_log.find('guid[@count="%d"]' % (len(apply_log)-1))
-            if ret is not None:
-                apply_log.remove(ret)
-                return ret.attrib['value']
-            if len(apply_log) == 0 and apply_log in user_obj:
-                user_obj.remove(apply_log)
-        return None
+            prev = apply_log.find('guid[@value="%s"]' % guid)
+            if prev is None:
+                item = etree.SubElement(apply_log, 'guid')
+                item.attrib['count'] = '%d' % (len(apply_log) - 1)
+                item.attrib['value'] = guid
 
     def store(self, gp_ext_name, attribute, old_val):
         ''' Store an attribute in the gp_log
@@ -196,37 +187,43 @@ class gp_log:
                 return attr.text
         return None
 
-    def list(self, gp_extensions):
-        ''' Return a list of attributes, their previous values, and functions
-            to set them
-        param gp_extensions - list of extension objects, for retrieving attr to
-                              func mappings
-        return              - list of (attr, value, apply_func) tuples for
-                              unapplying policy
+    def get_applied_guids(self):
+        ''' Return a list of applied ext guids
+        return              - List of guids for gpos that have applied settings
+                              to the system.
         '''
+        guids = []
         user_obj = self.gpdb.find('user[@name="%s"]' % self.user)
-        guid_obj = user_obj.find('guid[@value="%s"]' % self.guid)
-        assert guid_obj is not None, "gpo guid was not set"
+        if user_obj is not None:
+            apply_log = user_obj.find('applylog')
+            if apply_log is not None:
+                guid_objs = apply_log.findall('guid[@count]')
+                guids_by_count = [(g.get('count'), g.get('value'))
+                                  for g in guid_objs]
+                guids_by_count.sort(reverse=True)
+                guids.extend(guid for count, guid in guids_by_count)
+        return guids
+
+    def get_applied_settings(self, guids):
+        ''' Return a list of applied ext guids
+        return              - List of tuples containing the guid of a gpo, then
+                              a dictionary of policies and their values prior
+                              policy application. These are sorted so that the
+                              most recently applied settings are removed first.
+        '''
         ret = []
-        data_maps = {}
-        for gp_ext in gp_extensions:
-            data_maps.update(gp_ext.apply_map())
-        exts = guid_obj.findall('gp_ext')
-        if exts is not None:
+        user_obj = self.gpdb.find('user[@name="%s"]' % self.user)
+        for guid in guids:
+            guid_settings = user_obj.find('guid[@value="%s"]' % guid)
+            exts = guid_settings.findall('gp_ext')
+            settings = {}
             for ext in exts:
+                attr_dict = {}
                 attrs = ext.findall('attribute')
                 for attr in attrs:
-                    func = None
-                    if attr.attrib['name'] in data_maps[ext.attrib['name']]:
-                        func = data_maps[ext.attrib['name']]\
-                               [attr.attrib['name']][-1]
-                    else:
-                        for dmap in data_maps[ext.attrib['name']].keys():
-                            if data_maps[ext.attrib['name']][dmap][0] == \
-                               attr.attrib['name']:
-                                func = data_maps[ext.attrib['name']][dmap][-1]
-                                break
-                    ret.append((attr.attrib['name'], attr.text, func))
+                    attr_dict[attr.attrib['name']] = attr.text
+                settings[ext.attrib['name']] = attr_dict
+            ret.append((guid, settings))
         return ret
 
     def delete(self, gp_ext_name, attribute):
@@ -250,36 +247,37 @@ class gp_log:
         ''' Write gp_log changes to disk '''
         self.gpostore.store(self.username, etree.tostring(self.gpdb, 'utf-8'))
 
+
 class GPOStorage:
     def __init__(self, log_file):
         if os.path.isfile(log_file):
             self.log = tdb.open(log_file)
         else:
-            self.log = tdb.Tdb(log_file, 0, tdb.DEFAULT, os.O_CREAT|os.O_RDWR)
+            self.log = tdb.Tdb(log_file, 0, tdb.DEFAULT, os.O_CREAT | os.O_RDWR)
 
     def start(self):
         self.log.transaction_start()
 
     def get_int(self, key):
         try:
-            return int(self.log.get(key))
+            return int(self.log.get(get_bytes(key)))
         except TypeError:
             return None
 
     def get(self, key):
-        return self.log.get(key)
+        return self.log.get(get_bytes(key))
 
     def get_gplog(self, user):
-        return gp_log(user, self, self.log.get(user))
+        return gp_log(user, self, self.log.get(get_bytes(user)))
 
     def store(self, key, val):
-        self.log.store(key, val)
+        self.log.store(get_bytes(key), get_bytes(val))
 
     def cancel(self):
         self.log.transaction_cancel()
 
     def delete(self, key):
-        self.log.delete(key)
+        self.log.delete(get_bytes(key))
 
     def commit(self):
         self.log.transaction_commit()
@@ -287,64 +285,45 @@ class GPOStorage:
     def __del__(self):
         self.log.close()
 
+
 class gp_ext(object):
     __metaclass__ = ABCMeta
 
-    def __init__(self, logger):
+    def __init__(self, logger, lp, creds, store):
         self.logger = logger
+        self.lp = lp
+        self.creds = creds
+        self.gp_db = store.get_gplog(creds.get_username())
 
     @abstractmethod
-    def list(self, rootpath):
-        pass
-
-    @abstractmethod
-    def apply_map(self):
+    def process_group_policy(self, deleted_gpo_list, changed_gpo_list):
         pass
 
     @abstractmethod
     def read(self, policy):
         pass
 
-    def parse(self, afile, ldb, conn, gp_db, lp):
-        self.ldb = ldb
-        self.gp_db = gp_db
-        self.lp = lp
-
-        # Fixing the bug where only some Linux Boxes capitalize MACHINE
-        try:
-            blist = afile.split('/')
-            idx = afile.lower().split('/').index('machine')
-            for case in [
-                            blist[idx].upper(),
-                            blist[idx].capitalize(),
-                            blist[idx].lower()
-                        ]:
-                bfile = '/'.join(blist[:idx]) + '/' + case + '/' + \
-                    '/'.join(blist[idx+1:])
-                try:
-                    return self.read(conn.loadfile(bfile.replace('/', '\\')))
-                except NTSTATUSError:
-                    continue
-        except ValueError:
-            try:
-                return self.read(conn.loadfile(afile.replace('/', '\\')))
-            except Exception as e:
-                self.logger.error(str(e))
-                return None
+    def parse(self, afile):
+        local_path = self.lp.cache_path('gpo_cache')
+        data_file = os.path.join(local_path, check_safe_path(afile).upper())
+        if os.path.exists(data_file):
+            return self.read(open(data_file, 'r').read())
+        return None
 
     @abstractmethod
     def __str__(self):
         pass
 
-class gp_ext_setter():
+
+class gp_ext_setter(object):
     __metaclass__ = ABCMeta
 
-    def __init__(self, logger, ldb, gp_db, lp, attribute, val):
+    def __init__(self, logger, gp_db, lp, creds, attribute, val):
         self.logger = logger
-        self.ldb = ldb
         self.attribute = attribute
         self.val = val
         self.lp = lp
+        self.creds = creds
         self.gp_db = gp_db
 
     def explicit(self):
@@ -358,64 +337,39 @@ class gp_ext_setter():
     def mapper(self):
         pass
 
+    def delete(self):
+        upd_sam, _ = self.mapper().get(self.attribute)
+        upd_sam(self.val)
+
     @abstractmethod
     def __str__(self):
         pass
 
+
 class gp_inf_ext(gp_ext):
-    @abstractmethod
-    def list(self, rootpath):
-        pass
-
-    @abstractmethod
-    def apply_map(self):
-        pass
-
     def read(self, policy):
-        ret = False
-        inftable = self.apply_map()
-
-        current_section = None
-
-        # So here we would declare a boolean,
-        # that would get changed to TRUE.
-        #
-        # If at any point in time a GPO was applied,
-        # then we return that boolean at the end.
-
         inf_conf = ConfigParser()
-        inf_conf.optionxform=str
+        inf_conf.optionxform = str
         try:
             inf_conf.readfp(StringIO(policy))
         except:
             inf_conf.readfp(StringIO(policy.decode('utf-16')))
+        return inf_conf
 
-        for section in inf_conf.sections():
-            current_section = inftable.get(section)
-            if not current_section:
-                continue
-            for key, value in inf_conf.items(section):
-                if current_section.get(key):
-                    (att, setter) = current_section.get(key)
-                    value = value.encode('ascii', 'ignore')
-                    ret = True
-                    setter(self.logger, self.ldb, self.gp_db, self.lp, att,
-                           value).update_samba()
-                    self.gp_db.commit()
-        return ret
-
-    @abstractmethod
-    def __str__(self):
-        pass
 
 ''' Fetch the hostname of a writable DC '''
+
+
 def get_dc_hostname(creds, lp):
     net = Net(creds=creds, lp=lp)
     cldap_ret = net.finddc(domain=lp.get('realm'), flags=(nbt.NBT_SERVER_LDAP |
-        nbt.NBT_SERVER_DS))
+                                                          nbt.NBT_SERVER_DS))
     return cldap_ret.pdc_dns_name
 
+
 ''' Fetch a list of GUIDs for applicable GPOs '''
+
+
 def get_gpo_list(dc_hostname, creds, lp):
     gpos = []
     ads = gpo.ADS_STRUCT(dc_hostname, lp, creds)
@@ -423,59 +377,196 @@ def get_gpo_list(dc_hostname, creds, lp):
         gpos = ads.get_gpo_list(creds.get_username())
     return gpos
 
-def apply_gp(lp, creds, test_ldb, logger, store, gp_extensions):
+
+def cache_gpo_dir(conn, cache, sub_dir):
+    loc_sub_dir = sub_dir.upper()
+    local_dir = os.path.join(cache, loc_sub_dir)
+    try:
+        os.makedirs(local_dir, mode=0o755)
+    except OSError as e:
+        if e.errno != errno.EEXIST:
+            raise
+    for fdata in conn.list(sub_dir):
+        if fdata['attrib'] & libsmb.FILE_ATTRIBUTE_DIRECTORY:
+            cache_gpo_dir(conn, cache, os.path.join(sub_dir, fdata['name']))
+        else:
+            local_name = fdata['name'].upper()
+            f = NamedTemporaryFile(delete=False, dir=local_dir)
+            fname = os.path.join(sub_dir, fdata['name']).replace('/', '\\')
+            f.write(conn.loadfile(fname))
+            f.close()
+            os.rename(f.name, os.path.join(local_dir, local_name))
+
+
+def check_safe_path(path):
+    dirs = re.split('/|\\\\', path)
+    if 'sysvol' in path:
+        dirs = dirs[dirs.index('sysvol') + 1:]
+    if '..' not in dirs:
+        return os.path.join(*dirs)
+    raise OSError(path)
+
+
+def check_refresh_gpo_list(dc_hostname, lp, creds, gpos):
+    # the SMB bindings rely on having a s3 loadparm
+    s3_lp = s3param.get_context()
+    s3_lp.load(lp.configfile)
+    conn = libsmb.Conn(dc_hostname, 'sysvol', lp=s3_lp, creds=creds, sign=True)
+    cache_path = lp.cache_path('gpo_cache')
+    for gpo in gpos:
+        if not gpo.file_sys_path:
+            continue
+        cache_gpo_dir(conn, cache_path, check_safe_path(gpo.file_sys_path))
+
+
+def get_deleted_gpos_list(gp_db, gpos):
+    applied_gpos = gp_db.get_applied_guids()
+    current_guids = set([p.name for p in gpos])
+    deleted_gpos = [guid for guid in applied_gpos if guid not in current_guids]
+    return gp_db.get_applied_settings(deleted_gpos)
+
+def gpo_version(lp, path):
+    # gpo.gpo_get_sysvol_gpt_version() reads the GPT.INI from a local file,
+    # read from the gpo client cache.
+    gpt_path = lp.cache_path(os.path.join('gpo_cache', path))
+    return int(gpo.gpo_get_sysvol_gpt_version(gpt_path)[1])
+
+
+def apply_gp(lp, creds, logger, store, gp_extensions, force=False):
     gp_db = store.get_gplog(creds.get_username())
     dc_hostname = get_dc_hostname(creds, lp)
-    try:
-        conn =  smb.SMB(dc_hostname, 'sysvol', lp=lp, creds=creds)
-    except:
-        logger.error('Error connecting to \'%s\' using SMB' % dc_hostname)
-        raise
     gpos = get_gpo_list(dc_hostname, creds, lp)
+    del_gpos = get_deleted_gpos_list(gp_db, gpos)
+    try:
+        check_refresh_gpo_list(dc_hostname, lp, creds, gpos)
+    except:
+        logger.error('Failed downloading gpt cache from \'%s\' using SMB'
+                     % dc_hostname)
+        return
 
-    for gpo_obj in gpos:
-        guid = gpo_obj.name
-        if guid == 'Local Policy':
-            continue
-        path = os.path.join(lp.get('realm').lower(), 'Policies', guid)
-        local_path = os.path.join(lp.get("path", "sysvol"), path)
-        version = int(gpo.gpo_get_sysvol_gpt_version(local_path)[1])
-        if version != store.get_int(guid):
-            logger.info('GPO %s has changed' % guid)
-            gp_db.state(GPOSTATE.APPLY)
-        else:
-            gp_db.state(GPOSTATE.ENFORCE)
-        gp_db.set_guid(guid)
-        store.start()
-        for ext in gp_extensions:
-            try:
-                ext.parse(ext.list(path), test_ldb, conn, gp_db, lp)
-            except Exception as e:
-                logger.error('Failed to parse gpo %s for extension %s' % \
-                    (guid, str(ext)))
-                logger.error('Message was: ' + str(e))
-                store.cancel()
+    if force:
+        changed_gpos = gpos
+        gp_db.state(GPOSTATE.ENFORCE)
+    else:
+        changed_gpos = []
+        for gpo_obj in gpos:
+            if not gpo_obj.file_sys_path:
                 continue
+            guid = gpo_obj.name
+            path = check_safe_path(gpo_obj.file_sys_path).upper()
+            version = gpo_version(lp, path)
+            if version != store.get_int(guid):
+                logger.info('GPO %s has changed' % guid)
+                changed_gpos.append(gpo_obj)
+        gp_db.state(GPOSTATE.APPLY)
+
+    store.start()
+    for ext in gp_extensions:
+        try:
+            ext.process_group_policy(del_gpos, changed_gpos)
+        except Exception as e:
+            logger.error('Failed to apply extension  %s' % str(ext))
+            logger.error('Message was: ' + str(e))
+            continue
+    for gpo_obj in gpos:
+        if not gpo_obj.file_sys_path:
+            continue
+        guid = gpo_obj.name
+        path = check_safe_path(gpo_obj.file_sys_path).upper()
+        version = gpo_version(lp, path)
         store.store(guid, '%i' % version)
-        store.commit()
+    store.commit()
 
-def unapply_log(gp_db):
-    while True:
-        item = gp_db.apply_log_pop()
-        if item:
-            yield item
-        else:
-            break
 
-def unapply_gp(lp, creds, test_ldb, logger, store, gp_extensions):
+def unapply_gp(lp, creds, logger, store, gp_extensions):
     gp_db = store.get_gplog(creds.get_username())
     gp_db.state(GPOSTATE.UNAPPLY)
-    for gpo_guid in unapply_log(gp_db):
-        gp_db.set_guid(gpo_guid)
-        unapply_attributes = gp_db.list(gp_extensions)
-        for attr in unapply_attributes:
-            attr_obj = attr[-1](logger, test_ldb, gp_db, lp, attr[0], attr[1])
-            attr_obj.mapper()[attr[0]][0](attr[1]) # Set the old value
-            gp_db.delete(str(attr_obj), attr[0])
-        gp_db.commit()
+    # Treat all applied gpos as deleted
+    del_gpos = gp_db.get_applied_settings(gp_db.get_applied_guids())
+    store.start()
+    for ext in gp_extensions:
+        try:
+            ext.process_group_policy(del_gpos, [])
+        except Exception as e:
+            logger.error('Failed to unapply extension  %s' % str(ext))
+            logger.error('Message was: ' + str(e))
+            continue
+    store.commit()
 
+
+def parse_gpext_conf(smb_conf):
+    lp = LoadParm()
+    if smb_conf is not None:
+        lp.load(smb_conf)
+    else:
+        lp.load_default()
+    ext_conf = lp.state_path('gpext.conf')
+    parser = ConfigParser()
+    parser.read(ext_conf)
+    return lp, parser
+
+
+def atomic_write_conf(lp, parser):
+    ext_conf = lp.state_path('gpext.conf')
+    with NamedTemporaryFile(mode="w+", delete=False, dir=os.path.dirname(ext_conf)) as f:
+        parser.write(f)
+        os.rename(f.name, ext_conf)
+
+
+def check_guid(guid):
+    # Check for valid guid with curly braces
+    if guid[0] != '{' or guid[-1] != '}' or len(guid) != 38:
+        return False
+    try:
+        UUID(guid, version=4)
+    except ValueError:
+        return False
+    return True
+
+
+def register_gp_extension(guid, name, path,
+                          smb_conf=None, machine=True, user=True):
+    # Check that the module exists
+    if not os.path.exists(path):
+        return False
+    if not check_guid(guid):
+        return False
+
+    lp, parser = parse_gpext_conf(smb_conf)
+    if guid not in parser.sections():
+        parser.add_section(guid)
+    parser.set(guid, 'DllName', path)
+    parser.set(guid, 'ProcessGroupPolicy', name)
+    parser.set(guid, 'NoMachinePolicy', "0" if machine else "1")
+    parser.set(guid, 'NoUserPolicy', "0" if user else "1")
+
+    atomic_write_conf(lp, parser)
+
+    return True
+
+
+def list_gp_extensions(smb_conf=None):
+    _, parser = parse_gpext_conf(smb_conf)
+    results = {}
+    for guid in parser.sections():
+        results[guid] = {}
+        results[guid]['DllName'] = parser.get(guid, 'DllName')
+        results[guid]['ProcessGroupPolicy'] = \
+            parser.get(guid, 'ProcessGroupPolicy')
+        results[guid]['MachinePolicy'] = \
+            not int(parser.get(guid, 'NoMachinePolicy'))
+        results[guid]['UserPolicy'] = not int(parser.get(guid, 'NoUserPolicy'))
+    return results
+
+
+def unregister_gp_extension(guid, smb_conf=None):
+    if not check_guid(guid):
+        return False
+
+    lp, parser = parse_gpext_conf(smb_conf)
+    if guid in parser.sections():
+        parser.remove_section(guid)
+
+    atomic_write_conf(lp, parser)
+
+    return True

@@ -26,6 +26,7 @@
 
 #include "protocol.h"
 #include "protocol_util.h"
+#include "lib/util/util.h"
 
 static struct {
 	enum ctdb_runstate runstate;
@@ -146,7 +147,7 @@ int ctdb_sock_addr_to_buf(char *buf, socklen_t buflen,
 
 		ret = snprintf(buf+len, buflen-len,
 			       ":%u", ctdb_sock_addr_port(addr));
-		if (ret >= buflen-len) {
+		if (ret < 0 || (size_t)ret >= buflen-len) {
 			return ENOSPC;
 		}
 	}
@@ -154,8 +155,9 @@ int ctdb_sock_addr_to_buf(char *buf, socklen_t buflen,
 	return 0;
 }
 
-const char *ctdb_sock_addr_to_string(TALLOC_CTX *mem_ctx,
-				     ctdb_sock_addr *addr, bool with_port)
+char *ctdb_sock_addr_to_string(TALLOC_CTX *mem_ctx,
+			       ctdb_sock_addr *addr,
+			       bool with_port)
 {
 	size_t len = 64;
 	char *cip;
@@ -251,6 +253,9 @@ static int ip_from_string(const char *str, ctdb_sock_addr *addr)
 		if (memcmp(&addr->ip6.sin6_addr.s6_addr[0],
 			   ipv4_mapped_prefix,
 			   sizeof(ipv4_mapped_prefix)) == 0) {
+                        /* Initialize addr struct to zero before reparsing as IPV4 */
+                        ZERO_STRUCTP(addr);
+
 			/* Reparse as IPv4 */
 			ret = ipv4_from_string(p+1, &addr->ip);
 		}
@@ -265,7 +270,6 @@ int ctdb_sock_addr_from_string(const char *str,
 	char *p;
 	char s[64]; /* Much longer than INET6_ADDRSTRLEN */
 	unsigned port;
-	char *endp = NULL;
 	size_t len;
 	int ret;
 
@@ -286,8 +290,8 @@ int ctdb_sock_addr_from_string(const char *str,
 		return EINVAL;
 	}
 
-	port = strtoul(p+1, &endp, 10);
-	if (endp == p+1 || *endp != '\0') {
+	port = smb_strtoul(p+1, NULL, 10, &ret, SMB_STR_FULL_STR_CONV);
+	if (ret != 0) {
 		/* Empty string or trailing garbage */
 		return EINVAL;
 	}
@@ -296,6 +300,46 @@ int ctdb_sock_addr_from_string(const char *str,
 	ret = ip_from_string(s, addr);
 
 	ctdb_sock_addr_set_port(addr, port);
+
+	return ret;
+}
+
+int ctdb_sock_addr_mask_from_string(const char *str,
+				    ctdb_sock_addr *addr,
+				    unsigned int *mask)
+{
+	char *p;
+	char s[64]; /* Much longer than INET6_ADDRSTRLEN */
+	unsigned int m;
+	size_t len;
+	int ret = 0;
+
+	if (addr == NULL || mask == NULL) {
+		return EINVAL;
+	}
+
+	len = strlcpy(s, str, sizeof(s));
+	if (len >= sizeof(s)) {
+		return EINVAL;
+	}
+
+	p = rindex(s, '/');
+	if (p == NULL) {
+		return EINVAL;
+	}
+
+	m = smb_strtoul(p+1, NULL, 10, &ret, SMB_STR_FULL_STR_CONV);
+	if (ret != 0) {
+		/* Empty string or trailing garbage */
+		return EINVAL;
+	}
+
+	*p = '\0';
+	ret = ip_from_string(s, addr);
+
+	if (ret == 0) {
+		*mask = m;
+	}
 
 	return ret;
 }
@@ -441,16 +485,16 @@ int ctdb_connection_to_buf(char *buf, size_t buflen,
 	} else {
 		ret = snprintf(buf, buflen, "%s %s", client, server);
 	}
-	if (ret >= buflen) {
+	if (ret < 0 || (size_t)ret >= buflen) {
 		return ENOSPC;
 	}
 
 	return 0;
 }
 
-const char *ctdb_connection_to_string(TALLOC_CTX *mem_ctx,
-				      struct ctdb_connection *conn,
-				      bool client_first)
+char *ctdb_connection_to_string(TALLOC_CTX *mem_ctx,
+				struct ctdb_connection *conn,
+				bool client_first)
 {
 	const size_t len = 128;
 	char *out;
@@ -567,7 +611,7 @@ int ctdb_connection_list_sort(struct ctdb_connection_list *conn_list)
 	return 0;
 }
 
-const char *ctdb_connection_list_to_string(
+char *ctdb_connection_list_to_string(
 	TALLOC_CTX *mem_ctx,
 	struct ctdb_connection_list *conn_list, bool client_first)
 {

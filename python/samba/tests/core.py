@@ -23,6 +23,7 @@ import samba
 from samba import arcfour_encrypt, string_to_byte_array
 from samba.tests import TestCase, TestCaseInTempDir
 
+
 class SubstituteVarTestCase(TestCase):
 
     def test_empty(self):
@@ -30,24 +31,25 @@ class SubstituteVarTestCase(TestCase):
 
     def test_nothing(self):
         self.assertEquals("foo bar",
-                samba.substitute_var("foo bar", {"bar": "bla"}))
+                          samba.substitute_var("foo bar", {"bar": "bla"}))
 
     def test_replace(self):
         self.assertEquals("foo bla",
-                samba.substitute_var("foo ${bar}", {"bar": "bla"}))
+                          samba.substitute_var("foo ${bar}", {"bar": "bla"}))
 
     def test_broken(self):
         self.assertEquals("foo ${bdkjfhsdkfh sdkfh ",
-            samba.substitute_var("foo ${bdkjfhsdkfh sdkfh ", {"bar": "bla"}))
+                          samba.substitute_var("foo ${bdkjfhsdkfh sdkfh ", {"bar": "bla"}))
 
     def test_unknown_var(self):
         self.assertEquals("foo ${bla} gsff",
-                samba.substitute_var("foo ${bla} gsff", {"bar": "bla"}))
+                          samba.substitute_var("foo ${bla} gsff", {"bar": "bla"}))
 
     def test_check_all_substituted(self):
         samba.check_all_substituted("nothing to see here")
         self.assertRaises(Exception, samba.check_all_substituted,
-                "Not subsituted: ${FOOBAR}")
+                          "Not subsituted: ${FOOBAR}")
+
 
 class ArcfourTestCase(TestCase):
 
@@ -58,12 +60,14 @@ class ArcfourTestCase(TestCase):
         crypt_calculated = arcfour_encrypt(key, plain)
         self.assertEquals(crypt_expected, crypt_calculated)
 
+
 class StringToByteArrayTestCase(TestCase):
 
     def test_byte_array(self):
         expected = [218, 145, 90, 176, 108, 215, 185, 207, 153]
         calculated = string_to_byte_array('\xda\x91Z\xb0l\xd7\xb9\xcf\x99')
         self.assertEquals(expected, calculated)
+
 
 class LdbExtensionTests(TestCaseInTempDir):
 
@@ -73,7 +77,7 @@ class LdbExtensionTests(TestCaseInTempDir):
         try:
             l.add({"dn": "foo=dc", "bar": "bla"})
             self.assertEquals(b"bla",
-                l.searchone(basedn=ldb.Dn(l, "foo=dc"), attribute="bar"))
+                              l.searchone(basedn=ldb.Dn(l, "foo=dc"), attribute="bar"))
         finally:
             del l
             os.unlink(path)

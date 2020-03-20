@@ -191,12 +191,22 @@ struct tdb_lock_type {
 	uint32_t ltype;
 };
 
+struct tdb_chainwalk_ctx {
+	tdb_off_t slow_ptr;
+	bool slow_chase;
+};
+
 struct tdb_traverse_lock {
 	struct tdb_traverse_lock *next;
 	uint32_t off;
 	uint32_t list;
 	int lock_rw;
 };
+
+void tdb_chainwalk_init(struct tdb_chainwalk_ctx *ctx, tdb_off_t ptr);
+bool tdb_chainwalk_check(struct tdb_context *tdb,
+			 struct tdb_chainwalk_ctx *ctx,
+			 tdb_off_t next_ptr);
 
 enum tdb_lock_flags {
 	/* WAIT == F_SETLKW, NOWAIT == F_SETLK */
@@ -294,6 +304,19 @@ void *tdb_convert(void *buf, uint32_t size);
 int tdb_free(struct tdb_context *tdb, tdb_off_t offset, struct tdb_record *rec);
 tdb_off_t tdb_allocate(struct tdb_context *tdb, int hash, tdb_len_t length,
 		       struct tdb_record *rec);
+
+int _tdb_oob(struct tdb_context *tdb, tdb_off_t off, tdb_len_t len, int probe);
+
+static inline int tdb_oob(
+	struct tdb_context *tdb, tdb_off_t off, tdb_len_t len, int probe)
+{
+	if (likely((off + len >= off) && (off + len <= tdb->map_size))) {
+		return 0;
+	}
+	return _tdb_oob(tdb, off, len, probe);
+}
+
+
 int tdb_ofs_read(struct tdb_context *tdb, tdb_off_t offset, tdb_off_t *d);
 int tdb_ofs_write(struct tdb_context *tdb, tdb_off_t offset, tdb_off_t *d);
 int tdb_lock_record(struct tdb_context *tdb, tdb_off_t off);
@@ -301,7 +324,6 @@ int tdb_unlock_record(struct tdb_context *tdb, tdb_off_t off);
 bool tdb_needs_recovery(struct tdb_context *tdb);
 int tdb_rec_read(struct tdb_context *tdb, tdb_off_t offset, struct tdb_record *rec);
 int tdb_rec_write(struct tdb_context *tdb, tdb_off_t offset, struct tdb_record *rec);
-int tdb_do_delete(struct tdb_context *tdb, tdb_off_t rec_ptr, struct tdb_record *rec);
 unsigned char *tdb_alloc_read(struct tdb_context *tdb, tdb_off_t offset, tdb_len_t len);
 int tdb_parse_data(struct tdb_context *tdb, TDB_DATA key,
 		   tdb_off_t offset, tdb_len_t len,
@@ -313,7 +335,7 @@ tdb_off_t tdb_find_lock_hash(struct tdb_context *tdb, TDB_DATA key, uint32_t has
 tdb_off_t tdb_find_dead(struct tdb_context *tdb, uint32_t hash,
 			struct tdb_record *r, tdb_len_t length,
 			tdb_off_t *p_last_ptr);
-int tdb_purge_dead(struct tdb_context *tdb, uint32_t hash);
+int tdb_trim_dead(struct tdb_context *tdb, uint32_t hash);
 void tdb_io_init(struct tdb_context *tdb);
 int tdb_expand(struct tdb_context *tdb, tdb_off_t size);
 tdb_off_t tdb_expand_adjust(tdb_off_t map_size, tdb_off_t size, int page_size);

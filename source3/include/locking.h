@@ -26,12 +26,11 @@
    PENDING read and write locks to allow posix lock downgrades to trigger a lock
    re-evaluation. */
 
-enum brl_type {READ_LOCK, WRITE_LOCK, PENDING_READ_LOCK, PENDING_WRITE_LOCK, UNLOCK_LOCK};
+enum brl_type {READ_LOCK, WRITE_LOCK, UNLOCK_LOCK};
 enum brl_flavour {WINDOWS_LOCK = 0, POSIX_LOCK = 1};
 
-#define IS_PENDING_LOCK(type) ((type) == PENDING_READ_LOCK || (type) == PENDING_WRITE_LOCK)
-
 #include "librpc/gen_ndr/server_id.h"
+#include "librpc/gen_ndr/misc.h"
 
 /* This contains elements that differentiate locks. The smbpid is a
    client supplied pid, and is essentially the locking context for
@@ -63,27 +62,8 @@ struct lock_struct {
 	enum brl_flavour lock_flav;
 };
 
-/****************************************************************************
- This is the structure to queue to implement blocking locks.
-*****************************************************************************/
-
-struct blocking_lock_record {
-	struct blocking_lock_record *next;
-	struct blocking_lock_record *prev;
-	struct files_struct *fsp;
-	struct timeval expire_time;
-	int lock_num;
-	uint64_t offset;
-	uint64_t count;
-	uint64_t smblctx;
-	uint64_t blocking_smblctx; /* Context that blocks us. */
-	enum brl_flavour lock_flav;
-	enum brl_type lock_type;
-	struct smb_request *req;
-	void *blr_private; /* Implementation specific. */
-};
-
 struct smbd_lock_element {
+	struct GUID req_guid;
 	uint64_t smblctx;
 	enum brl_type brltype;
 	uint64_t offset;

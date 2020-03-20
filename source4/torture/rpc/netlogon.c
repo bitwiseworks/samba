@@ -304,7 +304,13 @@ bool test_SetupCredentials3(struct dcerpc_pipe *p, struct torture_context *tctx,
 	uint32_t rid;
 	const char *machine_name;
 	const char *plain_pass;
-	struct dcerpc_binding_handle *b = p->binding_handle;
+	struct dcerpc_binding_handle *b = NULL;
+
+	if (p == NULL) {
+		return false;
+	}
+
+	b = p->binding_handle;
 
 	machine_name = cli_credentials_get_workstation(machine_credentials);
 	torture_assert(tctx, machine_name != NULL, "machine_name");
@@ -988,8 +994,7 @@ static bool test_netlogon_ops_args(struct dcerpc_pipe *p, struct torture_context
 	ninfo.nt.length = nt_resp.length;
 
 	ninfo.identity_info.parameter_control = 0;
-	ninfo.identity_info.logon_id_low = 0;
-	ninfo.identity_info.logon_id_high = 0;
+	ninfo.identity_info.logon_id = 0;
 	ninfo.identity_info.workstation.string = cli_credentials_get_workstation(credentials);
 
 	logon.network = &ninfo;
@@ -4091,7 +4096,7 @@ static bool test_GetDomainInfo(struct torture_context *tctx,
 	struct dcerpc_binding_handle *b = NULL;
 	struct netr_OneDomainInfo *odi1 = NULL;
 	struct netr_OneDomainInfo *odi2 = NULL;
-	struct netr_trust_extension *tex2 = NULL;
+	struct netr_trust_extension_info *tex2 = NULL;
 
 	torture_comment(tctx, "Testing netr_LogonGetDomainInfo\n");
 
@@ -4476,13 +4481,13 @@ static bool test_GetDomainInfo(struct torture_context *tctx,
 	for (i=0; i < info.domain_info->trusted_domain_count; i++) {
 		struct netr_OneDomainInfo *odiT =
 			&info.domain_info->trusted_domains[i];
-		struct netr_trust_extension *texT = NULL;
+		struct netr_trust_extension_info *texT = NULL;
 
 		torture_assert_int_equal(tctx, odiT->trust_extension.length, 16,
 					 "trust_list should have extension");
 		torture_assert(tctx, odiT->trust_extension.info != NULL,
 			       "trust_list should have extension");
-		texT = odiT->trust_extension.info;
+		texT = &odiT->trust_extension.info->info;
 
 		if (GUID_equal(&odiT->domain_guid, &odi1->domain_guid)) {
 			odi2 = odiT;
@@ -4557,7 +4562,7 @@ static bool test_GetDomainInfo(struct torture_context *tctx,
 				 "trust_list should have extension");
 	torture_assert(tctx, odi2->trust_extension.info != NULL,
 		       "trust_list should have extension");
-	tex2 = odi2->trust_extension.info;
+	tex2 = &odi2->trust_extension.info->info;
 	torture_assert_int_equal(tctx,
 				 tex2->flags & NETR_TRUST_FLAG_PRIMARY,
 				 NETR_TRUST_FLAG_PRIMARY,

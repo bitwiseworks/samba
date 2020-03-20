@@ -32,7 +32,7 @@
 #include "dsdb/common/util.h"
 #include "libds/common/flag_mapping.h"
 #include "../lib/util/dlinklist.h"
-#include "../lib/crypto/crypto.h"
+#include "lib/crypto/md4.h"
 #include "libcli/ldap/ldap_ndr.h"
 
 NTSTATUS dsdb_trust_forest_info_from_lsa(TALLOC_CTX *mem_ctx,
@@ -382,7 +382,9 @@ static NTSTATUS dsdb_trust_parse_crossref_info(TALLOC_CTX *mem_ctx,
 	const char *dns = NULL;
 	const char *netbios = NULL;
 	struct ldb_dn *nc_dn = NULL;
-	struct dom_sid sid = {};
+	struct dom_sid sid = {
+		.num_auths = 0,
+	};
 	NTSTATUS status;
 
 	*_tdo = NULL;
@@ -621,11 +623,11 @@ static int dns_cmp(const char *s1, const char *s2)
 	size_t l1 = 0;
 	const char *p1 = NULL;
 	size_t num_comp1 = 0;
-	uint16_t comp1[UINT8_MAX] = {};
+	uint16_t comp1[UINT8_MAX] = {0};
 	size_t l2 = 0;
 	const char *p2 = NULL;
 	size_t num_comp2 = 0;
-	uint16_t comp2[UINT8_MAX] = {};
+	uint16_t comp2[UINT8_MAX] = {0};
 	size_t i;
 
 	if (s1 != NULL) {
@@ -1011,8 +1013,12 @@ NTSTATUS dsdb_trust_xref_forest_info(TALLOC_CTX *mem_ctx,
 		const char *dns = NULL;
 		const char *netbios = NULL;
 		struct ldb_dn *nc_dn = NULL;
-		struct dom_sid sid = {};
-		struct lsa_ForestTrustRecord e = {};
+		struct dom_sid sid = {
+			.num_auths = 0,
+		};
+		struct lsa_ForestTrustRecord e = {
+			.flags = 0,
+		};
 		struct lsa_ForestTrustDomainInfo *d = NULL;
 		struct lsa_StringLarge *t = NULL;
 		bool match = false;
@@ -1086,7 +1092,9 @@ NTSTATUS dsdb_trust_xref_forest_info(TALLOC_CTX *mem_ctx,
 	for (i=0; (tln_el != NULL) && i < tln_el->num_values; i++) {
 		const struct ldb_val *v = &tln_el->values[i];
 		const char *dns = (const char *)v->data;
-		struct lsa_ForestTrustRecord e = {};
+		struct lsa_ForestTrustRecord e = {
+			.flags = 0,
+		};
 		struct lsa_StringLarge *t = NULL;
 		bool match = false;
 		NTSTATUS status;
@@ -2037,7 +2045,9 @@ NTSTATUS dsdb_trust_merge_forest_info(TALLOC_CTX *mem_ctx,
 	 */
 	for (ni = 0; ni < nfti->count; ni++) {
 		const struct lsa_ForestTrustRecord *nftr = nfti->entries[ni];
-		struct lsa_ForestTrustRecord tftr = {};
+		struct lsa_ForestTrustRecord tftr = {
+			.flags = 0,
+		};
 		const char *ndns = NULL;
 		bool ignore_new = false;
 		bool found_old = false;
@@ -2152,7 +2162,9 @@ NTSTATUS dsdb_trust_merge_forest_info(TALLOC_CTX *mem_ctx,
 	 */
 	for (ni = 0; ni < nfti->count; ni++) {
 		const struct lsa_ForestTrustRecord *nftr = nfti->entries[ni];
-		struct lsa_ForestTrustRecord tftr = {};
+		struct lsa_ForestTrustRecord tftr = {
+			.flags = 0,
+		};
 		const struct lsa_ForestTrustDomainInfo *nd = NULL;
 		const char *ndns = NULL;
 		const char *nnbt = NULL;
@@ -2648,13 +2660,19 @@ NTSTATUS dsdb_trust_get_incoming_passwords(struct ldb_message *msg,
 					   struct samr_Password **_previous)
 {
 	TALLOC_CTX *frame = talloc_stackframe();
-	struct samr_Password __current = {};
-	struct samr_Password __previous = {};
+	struct samr_Password __current = {
+		.hash = {0},
+	};
+	struct samr_Password __previous = {
+		.hash = {0},
+	};
 	struct samr_Password *current = NULL;
 	struct samr_Password *previous = NULL;
 	const struct ldb_val *blob = NULL;
 	enum ndr_err_code ndr_err;
-	struct trustAuthInOutBlob incoming = {};
+	struct trustAuthInOutBlob incoming = {
+		.count = 0,
+	};
 	uint32_t i;
 
 	if (_current != NULL) {
@@ -2894,6 +2912,14 @@ NTSTATUS dsdb_trust_routing_table_load(struct ldb_context *sam_ctx,
 		return status;
 	}
 
+	/*
+	 * d->tdo should not be NULL of status above is 'NT_STATUS_OK'
+	 * check is needed to satisfy clang static checker
+	*/
+	if (d->tdo == NULL) {
+		TALLOC_FREE(frame);
+		return NT_STATUS_NO_MEMORY;
+	}
 	d->di.domain_sid = d->tdo->sid;
 	d->di.netbios_domain_name.string = d->tdo->netbios_name.string;
 	d->di.dns_domain_name.string = d->tdo->domain_name.string;

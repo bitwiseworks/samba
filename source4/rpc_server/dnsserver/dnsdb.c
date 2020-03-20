@@ -273,7 +273,8 @@ failed:
 /* Increment serial number and update timestamp */
 static unsigned int dnsserver_update_soa(TALLOC_CTX *mem_ctx,
 				struct ldb_context *samdb,
-				struct dnsserver_zone *z)
+				struct dnsserver_zone *z,
+				WERROR *werr)
 {
 	const char * const attrs[] = { "dnsRecord", NULL };
 	struct ldb_result *res;
@@ -281,6 +282,8 @@ static unsigned int dnsserver_update_soa(TALLOC_CTX *mem_ctx,
 	struct ldb_message_element *el;
 	enum ndr_err_code ndr_err;
 	int ret, i, serial = -1;
+
+	*werr = WERR_INTERNAL_DB_ERROR;
 
 	ret = ldb_search(samdb, mem_ctx, &res, z->zone_dn, LDB_SCOPE_ONELEVEL, attrs,
 			"(&(objectClass=dnsNode)(name=@))");
@@ -309,6 +312,7 @@ static unsigned int dnsserver_update_soa(TALLOC_CTX *mem_ctx,
 			ndr_err = ndr_push_struct_blob(&el->values[i], mem_ctx, &rec,
 					(ndr_push_flags_fn_t)ndr_push_dnsp_DnssrvRpcRecord);
 			if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+				*werr = WERR_NOT_ENOUGH_MEMORY;
 				return -1;
 			}
 			break;
@@ -319,9 +323,14 @@ static unsigned int dnsserver_update_soa(TALLOC_CTX *mem_ctx,
 		el->flags = LDB_FLAG_MOD_REPLACE;
 		ret = ldb_modify(samdb, res->msgs[0]);
 		if (ret != LDB_SUCCESS) {
+			if (ret == LDB_ERR_INSUFFICIENT_ACCESS_RIGHTS) {
+				*werr = WERR_ACCESS_DENIED;
+			}
 			return -1;
 		}
 	}
+
+	*werr = WERR_OK;
 
 	return serial;
 }
@@ -383,6 +392,7 @@ WERROR dnsserver_db_add_empty_node(TALLOC_CTX *mem_ctx,
 	struct ldb_result *res;
 	struct ldb_dn *dn;
 	char *encoded_name = ldb_binary_encode_string(mem_ctx, name);
+	struct ldb_val name_val = data_blob_string_const(name);
 	int ret;
 
 	ret = ldb_search(samdb, mem_ctx, &res, z->zone_dn, LDB_SCOPE_BASE, attrs,
@@ -400,7 +410,7 @@ WERROR dnsserver_db_add_empty_node(TALLOC_CTX *mem_ctx,
 	dn = ldb_dn_copy(mem_ctx, z->zone_dn);
 	W_ERROR_HAVE_NO_MEMORY(dn);
 
-	if (!ldb_dn_add_child_fmt(dn, "DC=%s", name)) {
+	if (!ldb_dn_add_child_val(dn, "DC", name_val)) {
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
 
@@ -443,9 +453,9 @@ WERROR dnsserver_db_add_record(TALLOC_CTX *mem_ctx,
 		rec->rank |= DNS_RANK_ROOT_HINT;
 	}
 
-	serial = dnsserver_update_soa(mem_ctx, samdb, z);
+	serial = dnsserver_update_soa(mem_ctx, samdb, z, &werr);
 	if (serial < 0) {
-		return WERR_INTERNAL_DB_ERROR;
+		return werr;
 	}
 
 	rec->dwSerial = serial;
@@ -607,9 +617,9 @@ WERROR dnsserver_db_update_record(TALLOC_CTX *mem_ctx,
 
 	/* If updating SOA record, use specified serial, otherwise increment */
 	if (arec->wType != DNS_TYPE_SOA) {
-		serial = dnsserver_update_soa(mem_ctx, samdb, z);
+		serial = dnsserver_update_soa(mem_ctx, samdb, z, &werr);
 		if (serial < 0) {
-			return WERR_INTERNAL_DB_ERROR;
+			return werr;
 		}
 		arec->dwSerial = serial;
 	}
@@ -646,9 +656,9 @@ WERROR dnsserver_db_delete_record(TALLOC_CTX *mem_ctx,
 	int serial;
 	WERROR werr;
 
-	serial = dnsserver_update_soa(mem_ctx, samdb, z);
+	serial = dnsserver_update_soa(mem_ctx, samdb, z, &werr);
 	if (serial < 0) {
-		return WERR_INTERNAL_DB_ERROR;
+		return werr;
 	}
 
 	werr = dns_to_dnsp_convert(mem_ctx, del_record, &rec, false);
@@ -997,6 +1007,11 @@ static WERROR dnsserver_db_do_create_zone(TALLOC_CTX *tmp_ctx,
 	if (ret != LDB_SUCCESS) {
 		DEBUG(0, ("dnsserver: Failed to create zone (%s): %s\n",
 		      z->name, ldb_errstring(samdb)));
+
+		if (ret == LDB_ERR_INSUFFICIENT_ACCESS_RIGHTS) {
+			return WERR_ACCESS_DENIED;
+		}
+
 		return WERR_INTERNAL_DB_ERROR;
 	}
 
@@ -1018,6 +1033,7 @@ WERROR dnsserver_db_create_zone(struct ldb_context *samdb,
 	struct dnsp_DnssrvRpcRecord *dns_rec;
 	struct dnsp_soa soa;
 	char *tmpstr, *server_fqdn, *soa_email;
+	struct ldb_val name_val = data_blob_string_const(zone->name);
 
 	/* We only support primary zones for now */
 	if (zone->zoneinfo->dwZoneType != DNS_ZONE_TYPE_PRIMARY) {
@@ -1043,7 +1059,12 @@ WERROR dnsserver_db_create_zone(struct ldb_context *samdb,
 	dn = ldb_dn_copy(tmp_ctx, p->partition_dn);
 	W_ERROR_HAVE_NO_MEMORY_AND_FREE(dn, tmp_ctx);
 
-	if(!ldb_dn_add_child_fmt(dn, "DC=%s,CN=MicrosoftDNS", zone->name)) {
+	if (!ldb_dn_add_child_fmt(dn, "CN=MicrosoftDNS")) {
+		talloc_free(tmp_ctx);
+		return WERR_NOT_ENOUGH_MEMORY;
+	}
+
+	if (!ldb_dn_add_child_val(dn, "DC", name_val)) {
 		talloc_free(tmp_ctx);
 		return WERR_NOT_ENOUGH_MEMORY;
 	}
@@ -1124,6 +1145,10 @@ WERROR dnsserver_db_delete_zone(struct ldb_context *samdb,
 	ret = dsdb_delete(samdb, zone->zone_dn, DSDB_TREE_DELETE);
 	if (ret != LDB_SUCCESS) {
 		ldb_transaction_cancel(samdb);
+
+		if (ret == LDB_ERR_INSUFFICIENT_ACCESS_RIGHTS) {
+			return WERR_ACCESS_DENIED;
+		}
 		return WERR_INTERNAL_DB_ERROR;
 	}
 

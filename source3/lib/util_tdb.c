@@ -29,17 +29,6 @@
 #undef calloc
 #undef strdup
 
-/* these are little tdb utility functions that are meant to make
-   dealing with a tdb database a little less cumbersome in Samba */
-
-int tdb_trans_store_bystring(TDB_CONTEXT *tdb, const char *keystr,
-			     TDB_DATA data, int flags)
-{
-	TDB_DATA key = string_term_tdb_data(keystr);
-
-	return tdb_trans_store(tdb, key, data, flags);
-}
-
 /****************************************************************************
  Useful pair of routines for packing/unpacking data consisting of
  integers and strings.
@@ -52,13 +41,12 @@ static size_t tdb_pack_va(uint8_t *buf, int bufsize, const char *fmt, va_list ap
 	uint32_t d;
 	int i;
 	void *p;
-	int len;
+	int len = 0;
 	char *s;
 	char c;
-	uint8_t *buf0 = buf;
 	const char *fmt0 = fmt;
 	int bufsize0 = bufsize;
-
+	size_t to_write = 0;
 	while (*fmt) {
 		switch ((c = *fmt++)) {
 		case 'b': /* unsigned 8-bit integer */
@@ -87,14 +75,11 @@ static size_t tdb_pack_va(uint8_t *buf, int bufsize, const char *fmt, va_list ap
 				SIVAL(buf, 0, d);
 			break;
 		case 'P': /* null-terminated string */
-			s = va_arg(ap,char *);
-			w = strlen(s);
-			len = w + 1;
-			if (bufsize && bufsize >= len)
-				memcpy(buf, s, len);
-			break;
 		case 'f': /* null-terminated string */
 			s = va_arg(ap,char *);
+			if (s == NULL) {
+				smb_panic("Invalid argument");
+			}
 			w = strlen(s);
 			len = w + 1;
 			if (bufsize && bufsize >= len)
@@ -106,7 +91,9 @@ static size_t tdb_pack_va(uint8_t *buf, int bufsize, const char *fmt, va_list ap
 			len = 4+i;
 			if (bufsize && bufsize >= len) {
 				SIVAL(buf, 0, i);
-				memcpy(buf+4, s, i);
+				if (s != NULL) {
+					memcpy(buf+4, s, i);
+				}
 			}
 			break;
 		default:
@@ -116,17 +103,19 @@ static size_t tdb_pack_va(uint8_t *buf, int bufsize, const char *fmt, va_list ap
 			break;
 		}
 
-		buf += len;
-		if (bufsize)
+		to_write += len;
+		if (bufsize > 0) {
 			bufsize -= len;
+			buf += len;
+		}
 		if (bufsize < 0)
 			bufsize = 0;
 	}
 
 	DEBUG(18,("tdb_pack_va(%s, %d) -> %d\n", 
-		 fmt0, bufsize0, (int)PTR_DIFF(buf, buf0)));
+		 fmt0, bufsize0, (int)to_write));
 
-	return PTR_DIFF(buf, buf0);
+	return to_write;
 }
 
 size_t tdb_pack(uint8_t *buf, int bufsize, const char *fmt, ...)
@@ -140,59 +129,25 @@ size_t tdb_pack(uint8_t *buf, int bufsize, const char *fmt, ...)
 	return result;
 }
 
-bool tdb_pack_append(TALLOC_CTX *mem_ctx, uint8_t **buf, size_t *len,
-		     const char *fmt, ...)
-{
-	va_list ap;
-	size_t len1, len2;
-
-	va_start(ap, fmt);
-	len1 = tdb_pack_va(NULL, 0, fmt, ap);
-	va_end(ap);
-
-	if (mem_ctx != NULL) {
-		*buf = talloc_realloc(mem_ctx, *buf, uint8_t,
-					    (*len) + len1);
-	} else {
-		*buf = SMB_REALLOC_ARRAY(*buf, uint8_t, (*len) + len1);
-	}
-
-	if (*buf == NULL) {
-		return False;
-	}
-
-	va_start(ap, fmt);
-	len2 = tdb_pack_va((*buf)+(*len), len1, fmt, ap);
-	va_end(ap);
-
-	if (len1 != len2) {
-		return False;
-	}
-
-	*len += len2;
-
-	return True;
-}
-
 /****************************************************************************
  Useful pair of routines for packing/unpacking data consisting of
  integers and strings.
 ****************************************************************************/
 
-int tdb_unpack(const uint8_t *buf, int bufsize, const char *fmt, ...)
+int tdb_unpack(const uint8_t *buf, int in_bufsize, const char *fmt, ...)
 {
 	va_list ap;
 	uint8_t *bt;
 	uint16_t *w;
 	uint32_t *d;
-	int len;
-	int *i;
+	size_t bufsize = in_bufsize;
+	size_t len;
+	uint32_t *i;
 	void **p;
 	char *s, **b, **ps;
 	char c;
 	const uint8_t *buf0 = buf;
 	const char *fmt0 = fmt;
-	int bufsize0 = bufsize;
 
 	va_start(ap, fmt);
 
@@ -237,9 +192,11 @@ int tdb_unpack(const uint8_t *buf, int bufsize, const char *fmt, ...)
 			len = strnlen((const char *)buf, bufsize) + 1;
 			if (bufsize < len)
 				goto no_space;
-			*ps = SMB_STRDUP((const char *)buf);
-			if (*ps == NULL) {
-				goto no_space;
+			if (ps != NULL) {
+				*ps = SMB_STRDUP((const char *)buf);
+				if (*ps == NULL) {
+					goto no_space;
+				}
 			}
 			break;
 		case 'f': /* null-terminated string */
@@ -247,10 +204,12 @@ int tdb_unpack(const uint8_t *buf, int bufsize, const char *fmt, ...)
 			len = strnlen((const char *)buf, bufsize) + 1;
 			if (bufsize < len || len > sizeof(fstring))
 				goto no_space;
-			memcpy(s, buf, len);
+			if (s != NULL) {
+				memcpy(s, buf, len);
+			}
 			break;
 		case 'B': /* fixed-length string */
-			i = va_arg(ap, int *);
+			i = va_arg(ap, uint32_t *);
 			b = va_arg(ap, char **);
 			len = 4;
 			if (bufsize < len)
@@ -261,12 +220,17 @@ int tdb_unpack(const uint8_t *buf, int bufsize, const char *fmt, ...)
 				break;
 			}
 			len += *i;
+			if (len < *i) {
+				goto no_space;
+			}
 			if (bufsize < len)
 				goto no_space;
-			*b = (char *)SMB_MALLOC(*i);
-			if (! *b)
-				goto no_space;
-			memcpy(*b, buf+4, *i);
+			if (b != NULL) {
+				*b = (char *)SMB_MALLOC(*i);
+				if (! *b)
+					goto no_space;
+				memcpy(*b, buf+4, *i);
+			}
 			break;
 		default:
 			DEBUG(0,("Unknown tdb_unpack format %c in %s\n",
@@ -283,7 +247,7 @@ int tdb_unpack(const uint8_t *buf, int bufsize, const char *fmt, ...)
 	va_end(ap);
 
 	DEBUG(18,("tdb_unpack(%s, %d) -> %d\n",
-		 fmt0, bufsize0, (int)PTR_DIFF(buf, buf0)));
+		 fmt0, in_bufsize, (int)PTR_DIFF(buf, buf0)));
 
 	return PTR_DIFF(buf, buf0);
 
@@ -348,61 +312,6 @@ TDB_CONTEXT *tdb_open_log(const char *name, int hash_size, int tdb_flags,
 		return NULL;
 
 	return tdb;
-}
-
-/****************************************************************************
- tdb_store, wrapped in a transaction. This way we make sure that a process
- that dies within writing does not leave a corrupt tdb behind.
-****************************************************************************/
-
-int tdb_trans_store(struct tdb_context *tdb, TDB_DATA key, TDB_DATA dbuf,
-		    int flag)
-{
-	int res;
-
-	if ((res = tdb_transaction_start(tdb)) != 0) {
-		DEBUG(5, ("tdb_transaction_start failed\n"));
-		return res;
-	}
-
-	if ((res = tdb_store(tdb, key, dbuf, flag)) != 0) {
-		DEBUG(10, ("tdb_store failed\n"));
-		tdb_transaction_cancel(tdb);
-		return res;
-	}
-
-	if ((res = tdb_transaction_commit(tdb)) != 0) {
-		DEBUG(5, ("tdb_transaction_commit failed\n"));
-	}
-
-	return res;
-}
-
-/****************************************************************************
- tdb_delete, wrapped in a transaction. This way we make sure that a process
- that dies within deleting does not leave a corrupt tdb behind.
-****************************************************************************/
-
-int tdb_trans_delete(struct tdb_context *tdb, TDB_DATA key)
-{
-	int res;
-
-	if ((res = tdb_transaction_start(tdb)) != 0) {
-		DEBUG(5, ("tdb_transaction_start failed\n"));
-		return res;
-	}
-
-	if ((res = tdb_delete(tdb, key)) != 0) {
-		DEBUG(10, ("tdb_delete failed\n"));
-		tdb_transaction_cancel(tdb);
-		return res;
-	}
-
-	if ((res = tdb_transaction_commit(tdb)) != 0) {
-		DEBUG(5, ("tdb_transaction_commit failed\n"));
-	}
-
-	return res;
 }
 
 int tdb_data_cmp(TDB_DATA t1, TDB_DATA t2)

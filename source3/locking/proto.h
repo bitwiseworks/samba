@@ -23,6 +23,8 @@
 #ifndef _LOCKING_PROTO_H_
 #define _LOCKING_PROTO_H_
 
+#include <tdb.h>
+
 /* The following definitions come from locking/brlock.c  */
 
 void brl_init(bool read_only);
@@ -30,34 +32,36 @@ void brl_shutdown(void);
 
 unsigned int brl_num_locks(const struct byte_range_lock *brl);
 struct files_struct *brl_fsp(struct byte_range_lock *brl);
-uint32_t brl_num_read_oplocks(const struct byte_range_lock *brl);
-void brl_set_num_read_oplocks(struct byte_range_lock *brl,
-			      uint32_t num_read_oplocks);
+TALLOC_CTX *brl_req_mem_ctx(const struct byte_range_lock *brl);
+const struct GUID *brl_req_guid(const struct byte_range_lock *brl);
+
+bool byte_range_valid(uint64_t ofs, uint64_t len);
+bool byte_range_overlap(uint64_t ofs1,
+			uint64_t len1,
+			uint64_t ofs2,
+			uint64_t len2);
 
 NTSTATUS brl_lock_windows_default(struct byte_range_lock *br_lck,
-		struct lock_struct *plock,
-		bool blocking_lock);
+				  struct lock_struct *plock);
 
-NTSTATUS brl_lock(struct messaging_context *msg_ctx,
-		struct byte_range_lock *br_lck,
-		uint64_t smblctx,
-		struct server_id pid,
-		br_off start,
-		br_off size,
-		enum brl_type lock_type,
-		enum brl_flavour lock_flav,
-		bool blocking_lock,
-		uint64_t *psmblctx);
-bool brl_unlock(struct messaging_context *msg_ctx,
-		struct byte_range_lock *br_lck,
+NTSTATUS brl_lock(
+	struct byte_range_lock *br_lck,
+	uint64_t smblctx,
+	struct server_id pid,
+	br_off start,
+	br_off size,
+	enum brl_type lock_type,
+	enum brl_flavour lock_flav,
+	struct server_id *blocker_pid,
+	uint64_t *psmblctx);
+bool brl_unlock(struct byte_range_lock *br_lck,
 		uint64_t smblctx,
 		struct server_id pid,
 		br_off start,
 		br_off size,
 		enum brl_flavour lock_flav);
-bool brl_unlock_windows_default(struct messaging_context *msg_ctx,
-			       struct byte_range_lock *br_lck,
-			       const struct lock_struct *plock);
+bool brl_unlock_windows_default(struct byte_range_lock *br_lck,
+				const struct lock_struct *plock);
 bool brl_locktest(struct byte_range_lock *br_lck,
 		  const struct lock_struct *rw_probe);
 NTSTATUS brl_lockquery(struct byte_range_lock *br_lck,
@@ -67,32 +71,22 @@ NTSTATUS brl_lockquery(struct byte_range_lock *br_lck,
 		br_off *psize,
 		enum brl_type *plock_type,
 		enum brl_flavour lock_flav);
-bool brl_lock_cancel(struct byte_range_lock *br_lck,
-		uint64_t smblctx,
-		struct server_id pid,
-		br_off start,
-		br_off size,
-		enum brl_flavour lock_flav);
-bool brl_lock_cancel_default(struct byte_range_lock *br_lck,
-		struct lock_struct *plock);
 bool brl_mark_disconnected(struct files_struct *fsp);
 bool brl_reconnect_disconnected(struct files_struct *fsp);
-void brl_close_fnum(struct messaging_context *msg_ctx,
-		    struct byte_range_lock *br_lck);
+void brl_close_fnum(struct byte_range_lock *br_lck);
 int brl_forall(void (*fn)(struct file_id id, struct server_id pid,
 			  enum brl_type lock_type,
 			  enum brl_flavour lock_flav,
 			  br_off start, br_off size,
 			  void *private_data),
 	       void *private_data);
+struct byte_range_lock *brl_get_locks_for_locking(TALLOC_CTX *mem_ctx,
+						  files_struct *fsp,
+						  TALLOC_CTX *req_mem_ctx,
+						  const struct GUID *req_guid);
 struct byte_range_lock *brl_get_locks(TALLOC_CTX *mem_ctx,
 					files_struct *fsp);
 struct byte_range_lock *brl_get_locks_readonly(files_struct *fsp);
-void brl_revalidate(struct messaging_context *msg_ctx,
-		    void *private_data,
-		    uint32_t msg_type,
-		    struct server_id server_id,
-		    DATA_BLOB *data);
 bool brl_cleanup_disconnected(struct file_id fid, uint64_t open_persistent_id);
 
 /* The following definitions come from locking/locking.c  */
@@ -113,29 +107,22 @@ NTSTATUS query_lock(files_struct *fsp,
 			uint64_t *poffset,
 			enum brl_type *plock_type,
 			enum brl_flavour lock_flav);
-struct byte_range_lock *do_lock(struct messaging_context *msg_ctx,
-			files_struct *fsp,
-			uint64_t smblctx,
-			uint64_t count,
-			uint64_t offset,
-			enum brl_type lock_type,
-			enum brl_flavour lock_flav,
-			bool blocking_lock,
-			NTSTATUS *perr,
-			uint64_t *psmblctx);
-NTSTATUS do_unlock(struct messaging_context *msg_ctx,
-			files_struct *fsp,
-			uint64_t smblctx,
-			uint64_t count,
-			uint64_t offset,
-			enum brl_flavour lock_flav);
-NTSTATUS do_lock_cancel(files_struct *fsp,
-			uint64_t smblctx,
-			uint64_t count,
-			uint64_t offset,
-			enum brl_flavour lock_flav);
-void locking_close_file(struct messaging_context *msg_ctx,
-			files_struct *fsp,
+NTSTATUS do_lock(files_struct *fsp,
+		 TALLOC_CTX *req_mem_ctx,
+		 const struct GUID *req_guid,
+		 uint64_t smblctx,
+		 uint64_t count,
+		 uint64_t offset,
+		 enum brl_type lock_type,
+		 enum brl_flavour lock_flav,
+		 struct server_id *pblocker_pid,
+		 uint64_t *psmblctx);
+NTSTATUS do_unlock(files_struct *fsp,
+		   uint64_t smblctx,
+		   uint64_t count,
+		   uint64_t offset,
+		   enum brl_flavour lock_flav);
+void locking_close_file(files_struct *fsp,
 			enum file_close_type close_type);
 bool locking_init(void);
 bool locking_init_readonly(void);
@@ -151,6 +138,27 @@ struct share_mode_lock *get_share_mode_lock(
 	const char *servicepath,
 	const struct smb_filename *smb_fname,
 	const struct timespec *old_write_time);
+
+bool file_has_read_lease(struct files_struct *fsp);
+
+struct db_record;
+NTSTATUS share_mode_do_locked(
+	struct file_id id,
+	void (*fn)(TDB_DATA value,
+		   bool *modified_dependent,
+		   void *private_data),
+	void *private_data);
+NTSTATUS share_mode_wakeup_waiters(struct file_id id);
+bool share_mode_have_entries(struct share_mode_lock *lck);
+
+struct tevent_req *share_mode_watch_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct file_id id,
+	struct server_id blocker);
+NTSTATUS share_mode_watch_recv(
+	struct tevent_req *req, bool *blockerdead, struct server_id *blocker);
+
 struct share_mode_lock *fetch_share_mode_unlocked(TALLOC_CTX *mem_ctx,
 						  struct file_id id);
 struct tevent_req *fetch_share_mode_send(TALLOC_CTX *mem_ctx,
@@ -172,24 +180,29 @@ void get_file_infos(struct file_id id,
 		    bool *delete_on_close,
 		    struct timespec *write_time);
 bool is_valid_share_mode_entry(const struct share_mode_entry *e);
-bool share_mode_stale_pid(struct share_mode_data *d, uint32_t idx);
-bool set_share_mode(struct share_mode_lock *lck, struct files_struct *fsp,
-		    uid_t uid, uint64_t mid, uint16_t op_type,
-		    uint32_t lease_idx);
-struct share_mode_entry *find_share_mode_entry(struct share_mode_lock *lck,
-					       files_struct *fsp);
-void remove_stale_share_mode_entries(struct share_mode_data *d);
+bool share_entry_stale_pid(struct share_mode_entry *e);
+bool set_share_mode(struct share_mode_lock *lck,
+		    struct files_struct *fsp,
+		    uid_t uid,
+		    uint64_t mid,
+		    uint16_t op_type,
+		    uint32_t share_access,
+		    uint32_t access_mask);
+bool reset_share_mode_entry(
+	struct share_mode_lock *lck,
+	struct server_id old_pid,
+	uint64_t old_share_file_id,
+	struct server_id new_pid,
+	uint64_t new_mid,
+	uint64_t new_share_file_id);
+NTSTATUS remove_lease_if_stale(struct share_mode_lock *lck,
+			       const struct GUID *client_guid,
+			       const struct smb2_lease_key *lease_key);
 bool del_share_mode(struct share_mode_lock *lck, files_struct *fsp);
 bool mark_share_mode_disconnected(struct share_mode_lock *lck,
 				  struct files_struct *fsp);
 bool remove_share_oplock(struct share_mode_lock *lck, files_struct *fsp);
 bool downgrade_share_oplock(struct share_mode_lock *lck, files_struct *fsp);
-struct share_mode_lease;
-NTSTATUS downgrade_share_lease(struct smbd_server_connection *sconn,
-			       struct share_mode_lock *lck,
-			       const struct smb2_lease_key *key,
-			       uint32_t new_lease_state,
-			       struct share_mode_lease **_l);
 bool get_delete_on_close_token(struct share_mode_lock *lck,
 				uint32_t name_hash,
 				const struct security_token **pp_nt_tok,
@@ -212,14 +225,27 @@ int share_mode_forall(int (*fn)(struct file_id fid,
 				const struct share_mode_data *data,
 				void *private_data),
 		      void *private_data);
-int share_entry_forall(int (*fn)(const struct share_mode_entry *,
-				 const struct file_id *id,
-				 const char *, const char *,
-				 const char *, void *),
+int share_entry_forall(int (*fn)(struct file_id fid,
+				 const struct share_mode_data *data,
+				 const struct share_mode_entry *entry,
+				 void *private_data),
 		      void *private_data);
 bool share_mode_cleanup_disconnected(struct file_id id,
 				     uint64_t open_persistent_id);
+bool share_mode_forall_leases(
+	struct share_mode_lock *lck,
+	bool (*fn)(struct share_mode_entry *e,
+		   void *private_data),
+	void *private_data);
 
+bool share_mode_forall_entries(
+	struct share_mode_lock *lck,
+	bool (*fn)(struct share_mode_entry *e,
+		   bool *modified,
+		   void *private_data),
+	void *private_data);
+
+NTSTATUS share_mode_count_entries(struct file_id fid, size_t *num_share_modes);
 
 /* The following definitions come from locking/posix.c  */
 
@@ -261,8 +287,8 @@ bool release_posix_lock_posix_flavour(files_struct *fsp,
 
 /* The following definitions come from locking/leases_util.c */
 uint32_t map_oplock_to_lease_type(uint16_t op_type);
-uint32_t fsp_lease_type(const struct files_struct *fsp);
-uint32_t lease_type_is_exclusive(uint32_t lease_type);
-bool fsp_lease_type_is_exclusive(const struct files_struct *fsp);
+uint32_t fsp_lease_type(struct files_struct *fsp);
+bool fsp_lease_type_is_exclusive(struct files_struct *fsp);
+const struct GUID *fsp_client_guid(const files_struct *fsp);
 
 #endif /* _LOCKING_PROTO_H_ */

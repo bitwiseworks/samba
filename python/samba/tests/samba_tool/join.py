@@ -15,8 +15,10 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-import os, ldb
+import os
+import ldb
 from samba.tests.samba_tool.base import SambaToolCmdTest
+
 
 class JoinCmdTestCase(SambaToolCmdTest):
     """Test for samba-tool fsmo show subcommand"""
@@ -26,4 +28,4 @@ class JoinCmdTestCase(SambaToolCmdTest):
         (result, out, err) = self.runsubcmd("domain", "join", os.environ["REALM"], "dc", "-U%s%%%s" % (os.environ["USERNAME"], os.environ["PASSWORD"]))
 
         self.assertCmdFail(result)
-        self.assertTrue("Not removing account" in err,"Should fail with exception")
+        self.assertTrue("Not removing account" in err, "Should fail with exception")

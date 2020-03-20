@@ -232,7 +232,7 @@ static NTSTATUS cmd_quit(struct vfs_state *vfs, TALLOC_CTX *mem_ctx, int argc, c
 
 static struct cmd_set vfstest_commands[] = {
 
-	{ "GENERAL OPTIONS" },
+	{ .name = "GENERAL OPTIONS" },
 
 	{ "conf", 	cmd_conf, 	"Load smb configuration file", "conf <smb.conf>" },
 	{ "help", 	cmd_help, 	"Get help on commands", "" },
@@ -242,12 +242,17 @@ static struct cmd_set vfstest_commands[] = {
 	{ "exit", 	cmd_quit, 	"Exit program", "" },
 	{ "quit", 	cmd_quit, 	"Exit program", "" },
 
-	{ NULL }
+	{ .name = NULL }
 };
 
 static struct cmd_set separator_command[] = {
-	{ "---------------", NULL,	"----------------------" },
-	{ NULL }
+	{
+		.name        = "---------------",
+		.description = "----------------------"
+	},
+	{
+		.name = NULL,
+	},
 };
 
 
@@ -464,7 +469,7 @@ int main(int argc, const char *argv[])
 	struct vfs_state *vfs;
 	int i;
 	char *filename = NULL;
-	char cwd[MAXPATHLEN];
+	char *cwd = NULL;
 	TALLOC_CTX *frame = talloc_stackframe();
 	struct auth_session_info *session_info = NULL;
 	NTSTATUS status = NT_STATUS_OK;
@@ -474,10 +479,27 @@ int main(int argc, const char *argv[])
 	poptContext pc;
 	struct poptOption long_options[] = {
 		POPT_AUTOHELP
-		{"file",	'f', POPT_ARG_STRING,	&filename, 0, },
-		{"command",	'c', POPT_ARG_STRING,	&cmdstr, 0, "Execute specified list of commands" },
-		{"memreport",	'm', POPT_ARG_INT,	&memreports, 0,
-		 "Report memory left on talloc stackframe after each command" },
+		{
+			.longName   = "file",
+			.shortName  = 'f',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &filename,
+		},
+		{
+			.longName   = "command",
+			.shortName  = 'c',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &cmdstr,
+			.val        = 0,
+			.descrip    = "Execute specified list of commands",
+		},
+		{
+			.longName   = "memreport",
+			.shortName  = 'm',
+			.argInfo    = POPT_ARG_INT,
+			.arg        = &memreports,
+			.descrip    = "Report memory left on talloc stackframe after each command",
+		},
 		POPT_COMMON_SAMBA
 		POPT_TABLEEND
 	};
@@ -511,6 +533,8 @@ int main(int argc, const char *argv[])
 	   facilities.  See lib/debug.c */
 	setup_logging("vfstest", DEBUG_STDOUT);
 
+	per_thread_cwd_check();
+
 	set_smbd_shim(&vfstest_shim_fns);
 
 	/* Load command lists */
@@ -536,11 +560,18 @@ int main(int argc, const char *argv[])
 		return 1;
 	}
 
-	status = create_conn_struct_tos(server_messaging_context(),
+	/* Provided by libreplace if not present. Always mallocs. */
+	cwd = get_current_dir_name();
+	if (cwd == NULL) {
+		return -1;
+	}
+
+	status = create_conn_struct_tos_cwd(global_messaging_context(),
 					-1,
-					getcwd(cwd, sizeof(cwd)),
+					cwd,
 					session_info,
 					&c);
+	SAFE_FREE(cwd);
 	if (!NT_STATUS_IS_OK(status)) {
 		return 1;
 	}

@@ -36,8 +36,8 @@ from samba.ntstatus import (
     NT_STATUS_NO_SUCH_DOMAIN
 )
 import samba
-samba.ensure_third_party_module("dns", "dnspython")
 import dns.resolver
+from ldb import SCOPE_BASE
 
 def uint32(v):
     return ctypes.c_uint32(v).value
@@ -329,12 +329,18 @@ def packet_ldap_3(packet, conversation, context):
 
     (scope, dn_sig, filter, attrs, extra, desc, oid) = packet.extra
     if not scope:
-        scope = 0
+        scope = SCOPE_BASE
 
     samdb = context.get_ldap_connection()
     dn = context.get_matching_dn(dn_sig)
 
+    # try to guess the search expression (don't bother for base searches, as
+    # they're only looking up a single object)
+    if (filter is None or filter is '') and scope != SCOPE_BASE:
+        filter = context.guess_search_filter(attrs, dn_sig, dn)
+
     samdb.search(dn,
+                 expression=filter,
                  scope=int(scope),
                  attrs=attrs.split(','),
                  controls=["paged_results:1:1000"])
@@ -563,10 +569,10 @@ def packet_rpc_netlogon_30(packet, conversation, context):
     # subsequent runs
     newpass = context.machine_creds.get_password().encode('utf-16-le')
     pwd_len = len(newpass)
-    filler  = [ord(x) for x in os.urandom(DATA_LEN - pwd_len)]
+    filler  = [x if isinstance(x, int) else ord(x) for x in os.urandom(DATA_LEN - pwd_len)]
     pwd = netlogon.netr_CryptPassword()
     pwd.length = pwd_len
-    pwd.data = filler + [ord(x) for x in newpass]
+    pwd.data = filler + [x if isinstance(x, int) else ord(x) for x in newpass]
     context.machine_creds.encrypt_netr_crypt_password(pwd)
     c.netr_ServerPasswordSet2(context.server,
                               # must ends with $, so use get_username instead
@@ -644,10 +650,11 @@ def samlogon_logon_info(domain_name, computer_name, creds):
 
     logon = netlogon.netr_NetworkInfo()
 
-    logon.challenge     = [ord(x) for x in challenge]
+    logon.challenge     = [x if isinstance(x, int) else ord(x) for x in challenge]
     logon.nt            = netlogon.netr_ChallengeResponse()
     logon.nt.length     = len(response["nt_response"])
-    logon.nt.data       = [ord(x) for x in response["nt_response"]]
+    logon.nt.data       = [x if isinstance(x, int) else ord(x) for x in response["nt_response"]]
+
     logon.identity_info = netlogon.netr_IdentityInfo()
 
     (username, domain)  = creds.get_ntlm_username_domain()

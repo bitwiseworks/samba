@@ -57,6 +57,7 @@ struct preopen_state {
 static void preopen_helper_destroy(struct preopen_helper *c)
 {
 	int status;
+	TALLOC_FREE(c->fde);
 	close(c->fd);
 	c->fd = -1;
 	kill(c->pid, SIGKILL);
@@ -239,7 +240,7 @@ static NTSTATUS preopen_init_helper(struct preopen_helper *h)
 	}
 	close(fdpair[1]);
 	h->fd = fdpair[0];
-	h->fde = tevent_add_fd(server_event_context(), h->state, h->fd,
+	h->fde = tevent_add_fd(global_event_context(), h->state, h->fd,
 			      TEVENT_FD_READ, preopen_helper_readable, h);
 	if (h->fde == NULL) {
 		close(h->fd);
@@ -274,6 +275,7 @@ static NTSTATUS preopen_init_helpers(TALLOC_CTX *mem_ctx, size_t to_read,
 	result->queue_max = queue_max;
 	result->template_fname = NULL;
 	result->fnum_sent = 0;
+	result->fnum_queue_end = 0;
 
 	for (i=0; i<num_helpers; i++) {
 		result->helpers[i].state = result;
@@ -345,6 +347,7 @@ static bool preopen_parse_fname(const char *fname, unsigned long *pnum,
 	const char *p;
 	char *q = NULL;
 	unsigned long num;
+	int error = 0;
 
 	p = strrchr_m(fname, '/');
 	if (p == NULL) {
@@ -363,7 +366,10 @@ static bool preopen_parse_fname(const char *fname, unsigned long *pnum,
 		return false;
 	}
 
-	num = strtoul(p, (char **)&q, 10);
+	num = smb_strtoul(p, (char **)&q, 10, &error, SMB_STR_STANDARD);
+	if (error != 0) {
+		return false;
+	}
 
 	if (num+1 < num) {
 		/* overflow */
@@ -396,7 +402,7 @@ static int preopen_open(vfs_handle_struct *handle,
 		return -1;
 	}
 
-	if (flags != O_RDONLY) {
+	if ((flags & O_ACCMODE) != O_RDONLY) {
 		return res;
 	}
 
@@ -409,7 +415,7 @@ static int preopen_open(vfs_handle_struct *handle,
 	TALLOC_FREE(state->template_fname);
 	state->template_fname = talloc_asprintf(
 		state, "%s/%s",
-		fsp->conn->cwd_fname->base_name, smb_fname->base_name);
+		fsp->conn->cwd_fsp->fsp_name->base_name, smb_fname->base_name);
 
 	if (state->template_fname == NULL) {
 		return res;

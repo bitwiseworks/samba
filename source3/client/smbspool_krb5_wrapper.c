@@ -21,6 +21,7 @@
 
 #include "includes.h"
 #include "system/filesys.h"
+#include "system/kerberos.h"
 #include "system/passwd.h"
 
 #include <errno.h>
@@ -68,6 +69,50 @@ static void cups_smb_debug(enum cups_smb_dbglvl_e lvl, const char *format, ...)
 		buffer);
 }
 
+static bool kerberos_get_default_ccache(char *ccache_buf, size_t len)
+{
+	krb5_context ctx;
+	const char *ccache_name = NULL;
+	char *full_ccache_name = NULL;
+	krb5_ccache ccache = NULL;
+	krb5_error_code code;
+
+	code = krb5_init_context(&ctx);
+	if (code != 0) {
+		return false;
+	}
+
+	ccache_name = krb5_cc_default_name(ctx);
+	if (ccache_name == NULL) {
+		krb5_free_context(ctx);
+		return false;
+	}
+
+	code = krb5_cc_resolve(ctx, ccache_name, &ccache);
+	if (code != 0) {
+		krb5_free_context(ctx);
+		return false;
+	}
+
+	code = krb5_cc_get_full_name(ctx, ccache, &full_ccache_name);
+	krb5_cc_close(ctx, ccache);
+	if (code != 0) {
+		krb5_free_context(ctx);
+		return false;
+	}
+
+	snprintf(ccache_buf, len, "%s", full_ccache_name);
+
+#ifdef SAMBA4_USES_HEIMDAL
+	free(full_ccache_name);
+#else
+	krb5_free_string(ctx, full_ccache_name);
+#endif
+	krb5_free_context(ctx);
+
+	return true;
+}
+
 /*
  * This is a helper binary to execute smbspool.
  *
@@ -82,40 +127,80 @@ int main(int argc, char *argv[])
 {
 	char smbspool_cmd[PATH_MAX] = {0};
 	struct passwd *pwd;
+	struct group *g = NULL;
 	char gen_cc[PATH_MAX] = {0};
-	struct stat sb;
-	char *env;
+	char *env = NULL;
+	char auth_info_required[256] = {0};
+	char device_uri[4096] = {0};
 	uid_t uid = (uid_t)-1;
 	gid_t gid = (gid_t)-1;
+	gid_t groups[1] = { (gid_t)-1 };
 	unsigned long tmp;
+	bool ok;
 	int cmp;
 	int rc;
 
-	/* Check if AuthInfoRequired is set to negotiate */
+	env = getenv("DEVICE_URI");
+	if (env != NULL && strlen(env) > 2) {
+		snprintf(device_uri, sizeof(device_uri), "%s", env);
+	}
+
+	/* We must handle the following values of AUTH_INFO_REQUIRED:
+	 *  none: Anonymous/guest printing
+	 *  username,password: A username (of the form "username" or "DOMAIN\username")
+	 *                     and password are required
+	 *  negotiate: Kerberos authentication
+	 *  NULL (not set): will never happen when called from cupsd
+	 * https://www.cups.org/doc/spec-ipp.html#auth-info-required
+	 * https://github.com/apple/cups/issues/5674
+	 */
 	env = getenv("AUTH_INFO_REQUIRED");
 
         /* If not set, then just call smbspool. */
-	if (env == NULL) {
+	if (env == NULL || env[0] == 0) {
 		CUPS_SMB_DEBUG("AUTH_INFO_REQUIRED is not set - "
-			       "execute smbspool");
+			       "executing smbspool");
+		/* Pass this printing task to smbspool without Kerberos auth */
 		goto smbspool;
 	} else {
 		CUPS_SMB_DEBUG("AUTH_INFO_REQUIRED=%s", env);
 
-		cmp = strcmp(env, "username,password");
+		/* First test the value of AUTH_INFO_REQUIRED
+		 * against known possible values
+		 */
+		cmp = strcmp(env, "none");
 		if (cmp == 0) {
-			CUPS_SMB_DEBUG("Authenticate using username/password - "
-				       "execute smbspool");
+			CUPS_SMB_DEBUG("Authenticate using none (anonymous) - "
+				       "executing smbspool");
 			goto smbspool;
 		}
 
-		/* if AUTH_INFO_REQUIRED=none */
+		cmp = strcmp(env, "username,password");
+		if (cmp == 0) {
+			CUPS_SMB_DEBUG("Authenticate using username/password - "
+				       "executing smbspool");
+			goto smbspool;
+		}
+
+		/* Now, if 'goto smbspool' still has not happened,
+		 * there are only two variants left:
+		 * 1) AUTH_INFO_REQUIRED is "negotiate" and then
+		 *    we have to continue working
+		 * 2) or it is something not known to us, then Kerberos
+		 *    authentication is not required, so just also pass
+		 *    this task to smbspool
+		 */
 		cmp = strcmp(env, "negotiate");
 		if (cmp != 0) {
-			CUPS_SMB_ERROR("Authentication unsupported");
-			fprintf(stderr, "ATTR: auth-info-required=negotiate\n");
-			return CUPS_BACKEND_AUTH_REQUIRED;
+			CUPS_SMB_DEBUG("Value of AUTH_INFO_REQUIRED is not known "
+				       "to smbspool_krb5_wrapper, executing smbspool");
+			goto smbspool;
 		}
+
+		snprintf(auth_info_required,
+			 sizeof(auth_info_required),
+			 "%s",
+			 env);
 	}
 
 	uid = getuid();
@@ -149,6 +234,11 @@ int main(int argc, char *argv[])
 	}
 	uid = (uid_t)tmp;
 
+	/* If we are printing as the root user, we're done here. */
+	if (uid == 0) {
+		goto smbspool;
+	}
+
 	pwd = getpwuid(uid);
 	if (pwd == NULL) {
 		CUPS_SMB_ERROR("Failed to find system user: %u - %s",
@@ -160,6 +250,26 @@ int main(int argc, char *argv[])
 	rc = setgroups(0, NULL);
 	if (rc != 0) {
 		CUPS_SMB_ERROR("Failed to clear groups - %s",
+			       strerror(errno));
+		return CUPS_BACKEND_FAILED;
+	}
+
+	/*
+	 * We need the primary group of the 'lp' user. This is needed to access
+	 * temporary files in /var/spool/cups/.
+	 */
+	g = getgrnam("lp");
+	if (g == NULL) {
+		CUPS_SMB_ERROR("Failed to find user 'lp' - %s",
+			       strerror(errno));
+		return CUPS_BACKEND_FAILED;
+	}
+
+	CUPS_SMB_DEBUG("Adding group 'lp' (%u)", g->gr_gid);
+	groups[0] = g->gr_gid;
+	rc = setgroups(sizeof(groups), groups);
+	if (rc != 0) {
+		CUPS_SMB_ERROR("Failed to set groups for 'lp' - %s",
 			       strerror(errno));
 		return CUPS_BACKEND_FAILED;
 	}
@@ -185,49 +295,25 @@ int main(int argc, char *argv[])
 	env = getenv("KRB5CCNAME");
 	if (env != NULL && env[0] != 0) {
 		snprintf(gen_cc, sizeof(gen_cc), "%s", env);
+		CUPS_SMB_DEBUG("User already set KRB5CCNAME [%s] as ccache",
+			       gen_cc);
 
 		goto create_env;
 	}
 
-#ifdef __OS2__
-	snprintf(gen_cc, sizeof(gen_cc), "%s/krb5cc_%d", getenv("TEMP"), uid);
-#else
-	snprintf(gen_cc, sizeof(gen_cc), "/tmp/krb5cc_%d", uid);
-#endif
-
-	rc = lstat(gen_cc, &sb);
-	if (rc == 0) {
-#ifdef __OS2__
-		snprintf(gen_cc, sizeof(gen_cc), "FILE:%s/krb5cc_%d", getenv("TEMP"), uid);
-#else
-		snprintf(gen_cc, sizeof(gen_cc), "FILE:/tmp/krb5cc_%d", uid);
-#endif
-	} else {
-#ifdef __OS2__
-		snprintf(gen_cc, sizeof(gen_cc), "/@unixroot/var/run/user/%d/krb5cc", uid);
-#else
-		snprintf(gen_cc, sizeof(gen_cc), "/run/user/%d/krb5cc", uid);
-#endif
-
-		rc = lstat(gen_cc, &sb);
-		if (rc == 0 && S_ISDIR(sb.st_mode)) {
-			snprintf(gen_cc,
-				 sizeof(gen_cc),
-#ifdef __OS2__
-				 "DIR:/@unixroot/var/run/user/%d/krb5cc",
-#else
-				 "DIR:/run/user/%d/krb5cc",
-#endif
-				 uid);
-		} else {
-#if defined(__linux__)
-			snprintf(gen_cc,
-				 sizeof(gen_cc),
-				 "KEYRING:persistent:%d",
-				 uid);
-#endif
-		}
+	ok = kerberos_get_default_ccache(gen_cc, sizeof(gen_cc));
+	if (ok) {
+		CUPS_SMB_DEBUG("Use default KRB5CCNAME [%s]",
+			       gen_cc);
+		goto create_env;
 	}
+
+	/* Fallback to a FILE ccache */
+#ifdef __OS2__
+	snprintf(gen_cc, sizeof(gen_cc), "FILE:%s/krb5cc_%d", getenv("TEMP"), uid);
+#else
+	snprintf(gen_cc, sizeof(gen_cc), "FILE:/tmp/krb5cc_%d", uid);
+#endif
 
 create_env:
 	/*
@@ -239,12 +325,18 @@ create_env:
 #else
 	{
 		extern char **environ;
-		environ = calloc(1, sizeof(*environ));
+		environ = calloc(3, sizeof(*environ));
 	}
 #endif
 
 	CUPS_SMB_DEBUG("Setting KRB5CCNAME to '%s'", gen_cc);
 	setenv("KRB5CCNAME", gen_cc, 1);
+	if (device_uri[0] != '\0') {
+		setenv("DEVICE_URI", device_uri, 1);
+	}
+	if (auth_info_required[0] != '\0') {
+		setenv("AUTH_INFO_REQUIRED", auth_info_required, 1);
+	}
 
 smbspool:
 	snprintf(smbspool_cmd,

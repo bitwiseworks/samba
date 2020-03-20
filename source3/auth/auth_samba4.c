@@ -59,7 +59,7 @@ static struct server_id *new_server_id_task(TALLOC_CTX *mem_ctx)
 		}
 	}
 
-	msg_ctx = server_messaging_context();
+	msg_ctx = global_messaging_context();
 	if (msg_ctx == NULL) {
 		return NULL;
 	}
@@ -364,8 +364,8 @@ static NTSTATUS make_auth4_context_s4(const struct auth_context *auth_context,
 
 /* module initialisation */
 static NTSTATUS auth_init_samba4(struct auth_context *auth_context,
-				    const char *param,
-				    auth_methods **auth_method)
+				 const char *param,
+				 struct auth_methods **auth_method)
 {
 	struct auth_methods *result;
 

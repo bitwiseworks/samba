@@ -32,6 +32,7 @@
 #include "auth/gensec/gensec.h"
 #include "auth/gensec/gensec_internal.h" /* TODO: remove this */
 #include "../libcli/auth/spnego.h"
+#include "krb5_errs.h"
 
 #ifdef HAVE_KRB5
 
@@ -169,6 +170,7 @@ NTSTATUS kerberos_return_pac(TALLOC_CTX *mem_ctx,
 					  request_pac,
 					  add_netbios_addr,
 					  renewable_time,
+					  NULL, NULL, NULL,
 					  &status);
 	if (ret) {
 		DEBUG(1,("kinit failed for '%s' with: %s (%d)\n",

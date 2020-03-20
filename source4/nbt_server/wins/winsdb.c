@@ -148,6 +148,7 @@ static NTSTATUS winsdb_nbt_name(TALLOC_CTX *mem_ctx, struct ldb_dn *dn, struct n
 	struct nbt_name *name;
 	unsigned int comp_num;
 	uint32_t cur = 0;
+	int error = 0;
 
 	name = talloc(mem_ctx, struct nbt_name);
 	if (!name) {
@@ -181,7 +182,17 @@ static NTSTATUS winsdb_nbt_name(TALLOC_CTX *mem_ctx, struct ldb_dn *dn, struct n
 	}
 
 	if (comp_num > cur && strcasecmp("type", ldb_dn_get_component_name(dn, cur)) == 0) {
-		name->type	= strtoul((char *)ldb_dn_get_component_val(dn, cur)->data, NULL, 0);
+		name->type =
+			smb_strtoul(
+				(char *)ldb_dn_get_component_val(dn, cur)->data,
+				NULL,
+				0,
+				&error,
+				SMB_STR_STANDARD);
+		if (error != 0) {
+			status = NT_STATUS_INTERNAL_DB_CORRUPTION;
+			goto failed;
+		}
 		cur++;
 	} else {
 		status = NT_STATUS_INTERNAL_DB_CORRUPTION;
@@ -974,6 +985,8 @@ struct winsdb_handle *winsdb_connect(TALLOC_CTX *mem_ctx,
 				     const char *owner,
 				     enum winsdb_handle_caller caller)
 {
+	const struct loadparm_substitution *lp_sub =
+		lpcfg_noop_substitution();
 	struct winsdb_handle *h = NULL;
 	unsigned int flags = 0;
 	bool ret;
@@ -994,7 +1007,7 @@ struct winsdb_handle *winsdb_connect(TALLOC_CTX *mem_ctx,
 	if (!h->ldb) goto failed;
 
 	h->caller = caller;
-	h->hook_script = lpcfg_wins_hook(lp_ctx, h);
+	h->hook_script = lpcfg_wins_hook(lp_ctx, lp_sub, h);
 
 	h->local_owner = talloc_strdup(h, owner);
 	if (!h->local_owner) goto failed;

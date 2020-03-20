@@ -28,6 +28,7 @@ struct cli_state;
 #include "../libcli/security/security.h"
 #include "passdb/machine_sid.h"
 #include "util_sd.h"
+#include "cmdline_contexts.h"
 
 static TALLOC_CTX *ctx;
 
@@ -162,6 +163,7 @@ static int change_share_sec(TALLOC_CTX *mem_ctx, const char *sharename, char *th
 	struct security_descriptor *old = NULL;
 	size_t sd_size = 0;
 	uint32_t i, j;
+	NTSTATUS status;
 
 	if (mode != SMB_ACL_SET && mode != SMB_SD_DELETE) {
 	    if (!(old = get_share_security( mem_ctx, sharename, &sd_size )) ) {
@@ -221,8 +223,9 @@ static int change_share_sec(TALLOC_CTX *mem_ctx, const char *sharename, char *th
 		}
 
 		if (!found) {
+		    struct dom_sid_buf buf;
 		    printf("ACL for SID %s not found\n",
-			   sid_string_tos(&sd->dacl->aces[i].trustee));
+			   dom_sid_str_buf(&sd->dacl->aces[i].trustee, &buf));
 		}
 	    }
 
@@ -243,7 +246,8 @@ static int change_share_sec(TALLOC_CTX *mem_ctx, const char *sharename, char *th
 	    old = sd;
 	    break;
 	case SMB_SD_DELETE:
-	    if (!delete_share_security(sharename)) {
+	    status = delete_share_security(sharename);
+	    if (!NT_STATUS_IS_OK(status)) {
 		fprintf( stderr, "Failed to delete security descriptor for "
 			 "share [%s]\n", sharename );
 		return -1;
@@ -257,7 +261,8 @@ static int change_share_sec(TALLOC_CTX *mem_ctx, const char *sharename, char *th
 	/* Denied ACE entries must come before allowed ones */
 	sort_acl(old->dacl);
 
-	if ( !set_share_security( sharename, old ) ) {
+	status = set_share_security(sharename, old);
+	if (!NT_STATUS_IS_OK(status)) {
 	    fprintf( stderr, "Failed to store acl for share [%s]\n", sharename );
 	    return 2;
 	}
@@ -267,7 +272,7 @@ static int change_share_sec(TALLOC_CTX *mem_ctx, const char *sharename, char *th
 static int set_sharesec_sddl(const char *sharename, const char *sddl)
 {
 	struct security_descriptor *sd;
-	bool ret;
+	NTSTATUS status;
 
 	sd = sddl_decode(talloc_tos(), sddl, get_global_sam_sid());
 	if (sd == NULL) {
@@ -275,9 +280,9 @@ static int set_sharesec_sddl(const char *sharename, const char *sddl)
 		return -1;
 	}
 
-	ret = set_share_security(sharename, sd);
+	status = set_share_security(sharename, sd);
 	TALLOC_FREE(sd);
-	if (!ret) {
+	if (!NT_STATUS_IS_OK(status)) {
 		fprintf(stderr, "Failed to store acl for share [%s]\n",
 			sharename);
 		return -1;
@@ -332,22 +337,101 @@ int main(int argc, const char *argv[])
 	bool initialize_sid = False;
 	struct poptOption long_options[] = {
 		POPT_AUTOHELP
-		{ "remove", 'r', POPT_ARG_STRING, &the_acl, 'r', "Remove ACEs", "ACL" },
-		{ "modify", 'm', POPT_ARG_STRING, &the_acl, 'm', "Modify existing ACEs", "ACL" },
-		{ "add", 'a', POPT_ARG_STRING, &the_acl, 'a', "Add ACEs", "ACL" },
-		{ "replace", 'R', POPT_ARG_STRING, &the_acl, 'R', "Overwrite share permission ACL", "ACLS" },
-		{ "delete", 'D', POPT_ARG_NONE, NULL, 'D', "Delete the entire security descriptor" },
-		{ "setsddl", 'S', POPT_ARG_STRING, the_acl, 'S',
-		  "Set the SD in sddl format" },
-		{ "viewsddl", 'V', POPT_ARG_NONE, the_acl, 'V',
-		  "View the SD in sddl format" },
-		{ "view", 'v', POPT_ARG_NONE, NULL, 'v', "View current share permissions" },
-		{ "view-all", 0, POPT_ARG_NONE, NULL, OPT_VIEW_ALL,
-		  "View all current share permissions" },
-		{ "machine-sid", 'M', POPT_ARG_NONE, NULL, 'M', "Initialize the machine SID" },
-		{ "force", 'F', POPT_ARG_NONE, NULL, 'F', "Force storing the ACL", "ACLS" },
+		{
+			.longName   = "remove",
+			.shortName  = 'r',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &the_acl,
+			.val        = 'r',
+			.descrip    = "Remove ACEs",
+			.argDescrip = "ACL",
+		},
+		{
+			.longName   = "modify",
+			.shortName  = 'm',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &the_acl,
+			.val        = 'm',
+			.descrip    = "Modify existing ACEs",
+			.argDescrip = "ACL",
+		},
+		{
+			.longName   = "add",
+			.shortName  = 'a',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &the_acl,
+			.val        = 'a',
+			.descrip    = "Add ACEs",
+			.argDescrip = "ACL",
+		},
+		{
+			.longName   = "replace",
+			.shortName  = 'R',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &the_acl,
+			.val        = 'R',
+			.descrip    = "Overwrite share permission ACL",
+			.argDescrip = "ACLS",
+		},
+		{
+			.longName   = "delete",
+			.shortName  = 'D',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'D',
+			.descrip    = "Delete the entire security descriptor",
+		},
+		{
+			.longName   = "setsddl",
+			.shortName  = 'S',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = the_acl,
+			.val        = 'S',
+			.descrip    = "Set the SD in sddl format",
+		},
+		{
+			.longName   = "viewsddl",
+			.shortName  = 'V',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = the_acl,
+			.val        = 'V',
+			.descrip    = "View the SD in sddl format",
+		},
+		{
+			.longName   = "view",
+			.shortName  = 'v',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'v',
+			.descrip    = "View current share permissions",
+		},
+		{
+			.longName   = "view-all",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = OPT_VIEW_ALL,
+			.descrip    = "View all current share permissions",
+		},
+		{
+			.longName   = "machine-sid",
+			.shortName  = 'M',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'M',
+			.descrip    = "Initialize the machine SID",
+		},
+		{
+			.longName   = "force",
+			.shortName  = 'F',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'F',
+			.descrip    = "Force storing the ACL",
+			.argDescrip = "ACLS",
+		},
 		POPT_COMMON_SAMBA
-		{ NULL }
+		POPT_TABLEEND
 	};
 
 	if ( !(ctx = talloc_stackframe()) ) {
@@ -426,19 +510,23 @@ int main(int argc, const char *argv[])
 
 	if ( initialize_sid ) {
 		struct dom_sid *sid = get_global_sam_sid();
+		struct dom_sid_buf buf;
 
 		if ( !sid ) {
 			fprintf( stderr, "Failed to retrieve Machine SID!\n");
-			return 3;
+			retval = 3;
+			goto done;
 		}
 
-		printf ("%s\n", sid_string_tos( sid ) );
-		return 0;
+		printf ("%s\n", dom_sid_str_buf(sid, &buf) );
+		retval = 0;
+		goto done;
 	}
 
 	if ( mode == SMB_ACL_VIEW && force_acl ) {
 		fprintf( stderr, "Invalid combination of -F and -v\n");
-		return -1;
+		retval = -1;
+		goto done;
 	}
 
 	if (mode == SMB_ACL_VIEW_ALL) {
@@ -446,7 +534,9 @@ int main(int argc, const char *argv[])
 
 		for (i=0; i<lp_numservices(); i++) {
 			TALLOC_CTX *frame = talloc_stackframe();
-			const char *service = lp_servicename(frame, i);
+			const struct loadparm_substitution *lp_sub =
+				loadparm_s3_global_substitution();
+			const char *service = lp_servicename(frame, lp_sub, i);
 
 			if (service == NULL) {
 				continue;
@@ -464,7 +554,8 @@ int main(int argc, const char *argv[])
 
 	if(!poptPeekArg(pc)) {
 		poptPrintUsage(pc, stderr, 0);
-		return -1;
+		retval = -1;
+		goto done;
 	}
 
 	fstrcpy(sharename, poptGetArg(pc));
@@ -473,7 +564,8 @@ int main(int argc, const char *argv[])
 
 	if ( snum == -1 && !force_acl ) {
 		fprintf( stderr, "Invalid sharename: %s\n", sharename);
-		return -1;
+		retval = -1;
+		goto done;
 	}
 
 	switch (mode) {
@@ -489,6 +581,7 @@ int main(int argc, const char *argv[])
 	}
 
 done:
+	poptFreeContext(pc);
 	talloc_destroy(ctx);
 
 	return retval;

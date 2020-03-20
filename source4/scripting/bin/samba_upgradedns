@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Unix SMB/CIFS implementation.
 # Copyright (C) Amitay Isaacs <amitay@gmail.com> 2012
@@ -68,7 +68,6 @@ from samba.provision.sambadns import (
     create_named_txt )
 from samba.dcerpc import security
 
-samba.ensure_third_party_module("dns", "dnspython")
 import dns.zone, dns.rdatatype
 
 __docformat__ = 'restructuredText'
@@ -401,16 +400,17 @@ if __name__ == '__main__':
         ncs = msg.get("msDS-hasMasterNCs")
         if ncs:
             for nc in ncs:
-                master_nclist.append(nc)
+                master_nclist.append(str(nc))
 
         partial_nclist = []
         ncs = msg.get("hasPartialReplicaNCs")
         if ncs:
             for nc in ncs:
-                partial_nclist.append(nc)
+                partial_nclist.append(str(nc))
 
         modified_master = False
         modified_partial = False
+
         for nc in dns_nclist:
             if nc not in master_nclist:
                 master_nclist.append(nc)
@@ -515,14 +515,14 @@ if __name__ == '__main__':
                     os.chmod(paths.binddns_dir, 0o770)
                     os.chown(paths.binddns_dir, -1, paths.bind_gid)
                 except OSError:
-                    if not os.environ.has_key('SAMBA_SELFTEST'):
+                    if 'SAMBA_SELFTEST' not in os.environ:
                         logger.info("Failed to chown %s to bind gid %u",
                                     paths.binddns_dir, paths.bind_gid)
                 try:
-                    os.chmod(bind_dns_keytab_path, 0640)
+                    os.chmod(bind_dns_keytab_path, 0o640)
                     os.chown(bind_dns_keytab_path, -1, paths.bind_gid)
                 except OSError:
-                    if not os.environ.has_key('SAMBA_SELFTEST'):
+                    if 'SAMBA_SELFTEST' not in os.environ:
                         logger.info("Failed to chown %s to bind gid %u",
                                     bind_dns_keytab_path, paths.bind_gid)
 

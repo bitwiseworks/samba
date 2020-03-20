@@ -16,17 +16,21 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-import os, sys, string
+import os
+import sys
+import string
 from samba.net import Net
 import samba.dckeytab
 from samba import tests
 from samba.param import LoadParm
+
 
 def open_bytes(filename):
     if sys.version_info[0] == 3:
         return open(filename, errors='ignore')
     else:
         return open(filename, 'rb')
+
 
 class DCKeytabTests(tests.TestCase):
     def setUp(self):
@@ -52,5 +56,5 @@ class DCKeytabTests(tests.TestCase):
                     result += c
             principal_parts = self.principal.split('@')
             assert principal_parts[0] in result and \
-                   principal_parts[1] in result, \
-                        'Principal not found in generated keytab'
+                principal_parts[1] in result, \
+                'Principal not found in generated keytab'

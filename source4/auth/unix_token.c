@@ -38,6 +38,21 @@ NTSTATUS security_token_to_unix_token(TALLOC_CTX *mem_ctx,
 	uint32_t s, g;
 	NTSTATUS status;
 	struct id_map *ids;
+	bool match;
+
+	match = security_token_is_system(token);
+	if (match) {
+		/*
+		 * SYSTEM user uid and gid is 0
+		 */
+
+		*sec = talloc_zero(mem_ctx, struct security_unix_token);
+		if (*sec == NULL) {
+			return NT_STATUS_NO_MEMORY;
+		}
+
+		return NT_STATUS_OK;
+	}
 
 	/* we can't do unix security without a user and group */
 	if (token->num_sids < 2) {
@@ -76,11 +91,11 @@ NTSTATUS security_token_to_unix_token(TALLOC_CTX *mem_ctx,
 	} else if (ids[0].xid.type == ID_TYPE_UID) {
 		(*sec)->uid = ids[0].xid.id;
 	} else {
-		char *sid_str = dom_sid_string(mem_ctx, ids[0].sid);
+		struct dom_sid_buf buf;
 		DEBUG(0, ("Unable to convert first SID (%s) in user token to a UID.  Conversion was returned as type %d, full token:\n",
-			  sid_str, (int)ids[0].xid.type));
+			  dom_sid_str_buf(ids[0].sid, &buf),
+			  (int)ids[0].xid.type));
 		security_token_debug(DBGC_AUTH, 0, token);
-		talloc_free(sid_str);
 		return NT_STATUS_INVALID_SID;
 	}
 
@@ -90,11 +105,11 @@ NTSTATUS security_token_to_unix_token(TALLOC_CTX *mem_ctx,
 		(*sec)->groups[g] = ids[1].xid.id;
 		g++;
 	} else {
-		char *sid_str = dom_sid_string(mem_ctx, ids[1].sid);
+		struct dom_sid_buf buf;
 		DEBUG(0, ("Unable to convert second SID (%s) in user token to a GID.  Conversion was returned as type %d, full token:\n",
-			  sid_str, (int)ids[1].xid.type));
+			  dom_sid_str_buf(ids[1].sid, &buf),
+			  (int)ids[1].xid.type));
 		security_token_debug(DBGC_AUTH, 0, token);
-		talloc_free(sid_str);
 		return NT_STATUS_INVALID_SID;
 	}
 
@@ -104,11 +119,11 @@ NTSTATUS security_token_to_unix_token(TALLOC_CTX *mem_ctx,
 			(*sec)->groups[g] = ids[s].xid.id;
 			g++;
 		} else {
-			char *sid_str = dom_sid_string(mem_ctx, ids[s].sid);
+			struct dom_sid_buf buf;
 			DEBUG(0, ("Unable to convert SID (%s) at index %u in user token to a GID.  Conversion was returned as type %d, full token:\n",
-				  sid_str, (unsigned int)s, (int)ids[s].xid.type));
+				  dom_sid_str_buf(ids[s].sid, &buf),
+				  (unsigned int)s, (int)ids[s].xid.type));
 			security_token_debug(DBGC_AUTH, 0, token);
-			talloc_free(sid_str);
 			return NT_STATUS_INVALID_SID;
 		}
 	}
@@ -144,6 +159,10 @@ NTSTATUS auth_session_info_fill_unix(struct loadparm_context *lp_ctx,
 							     lpcfg_winbind_separator(lp_ctx),
 							     session_info->info->account_name);
 	NT_STATUS_HAVE_NO_MEMORY(session_info->unix_info->unix_name);
+
+	if (original_user_name == NULL) {
+		original_user_name = session_info->unix_info->unix_name;
+	}
 
 	len = strlen(original_user_name) + 1;
 	session_info->unix_info->sanitized_username = su = talloc_array(session_info->unix_info, char, len);

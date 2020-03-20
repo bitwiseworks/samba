@@ -27,7 +27,7 @@ import warnings
 
 from samba.tests import (
     TestCase,
-    )
+)
 
 
 def get_python_source_files():
@@ -151,14 +151,13 @@ class TestSource(TestCase):
 
     def _format_message(self, dict_, message):
         files = ["%s: %s" % (f, ', '.join([str(i + 1) for i in lines]))
-                for f, lines in dict_.items()]
+                 for f, lines in dict_.items()]
         files.sort()
         return message + '\n\n    %s' % ('\n    '.join(files))
 
     def _iter_source_files_lines(self):
         for fname, text in get_source_file_contents():
             lines = text.splitlines(True)
-            last_line_no = len(lines) - 1
             for line_no, line in enumerate(lines):
                 yield fname, line_no, line
 
@@ -170,8 +169,8 @@ class TestSource(TestCase):
                 self._push_file(tabs, fname, line_no)
         if tabs:
             self.fail(self._format_message(tabs,
-                'Tab characters were found in the following source files.'
-                '\nThey should either be replaced by "\\t" or by spaces:'))
+                                           'Tab characters were found in the following source files.'
+                                           '\nThey should either be replaced by "\\t" or by spaces:'))
 
     def test_unix_newlines(self):
         """Check for unix new lines."""
@@ -181,7 +180,7 @@ class TestSource(TestCase):
                 self._push_file(illegal_newlines, fname, line_no)
         if illegal_newlines:
             self.fail(self._format_message(illegal_newlines,
-                'Non-unix newlines were found in the following source files:'))
+                                           'Non-unix newlines were found in the following source files:'))
 
     def test_trailing_whitespace(self):
         """Check that there is not trailing whitespace in Python files."""
@@ -191,12 +190,12 @@ class TestSource(TestCase):
                 self._push_file(trailing_whitespace, fname, line_no)
         if trailing_whitespace:
             self.fail(self._format_message(trailing_whitespace,
-                'Trailing whitespace was found in the following source files.'))
+                                           'Trailing whitespace was found in the following source files.'))
 
     def test_shebang_lines(self):
         """Check that files with shebang lines and only those are executable."""
         files_with_shebang = {}
-        files_without_shebang= {}
+        files_without_shebang = {}
         for fname, line_no, line in self._iter_source_files_lines():
             if line_no >= 1:
                 continue
@@ -208,7 +207,7 @@ class TestSource(TestCase):
                 self._push_file(files_without_shebang, fname, line_no)
         if files_with_shebang:
             self.fail(self._format_message(files_with_shebang,
-                      'Files with shebang line that are not executable:'))
+                                           'Files with shebang line that are not executable:'))
         if files_without_shebang:
             self.fail(self._format_message(files_without_shebang,
-                      'Files without shebang line that are executable:'))
+                                           'Files without shebang line that are executable:'))

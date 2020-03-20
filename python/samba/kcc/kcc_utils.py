@@ -19,7 +19,8 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
+from __future__ import print_function
+import sys
 import ldb
 import uuid
 
@@ -28,7 +29,7 @@ from samba.dcerpc import (
     drsblobs,
     drsuapi,
     misc,
-    )
+)
 from samba.common import dsdb_Dn
 from samba.ndr import ndr_unpack, ndr_pack
 from collections import Counter
@@ -40,6 +41,7 @@ class KCCError(Exception):
 
 class NCType(object):
     (unknown, schema, domain, config, application) = range(0, 5)
+
 
 # map the NCType enum to strings for debugging
 nctype_lut = dict((v, k) for k, v in NCType.__dict__.items() if k[:2] != '__')
@@ -64,9 +66,9 @@ class NamingContext(object):
 
     def __str__(self):
         '''Debug dump string output of class'''
-        text = "%s:" % (self.__class__.__name__,)
-        text = text + "\n\tnc_dnstr=%s" % self.nc_dnstr
-        text = text + "\n\tnc_guid=%s" % str(self.nc_guid)
+        text = "%s:" % (self.__class__.__name__,) +\
+               "\n\tnc_dnstr=%s" % self.nc_dnstr +\
+               "\n\tnc_guid=%s" % str(self.nc_guid)
 
         if self.nc_sid is None:
             text = text + "\n\tnc_sid=<absent>"
@@ -198,20 +200,16 @@ class NCReplica(NamingContext):
 
     def __str__(self):
         '''Debug dump string output of class'''
-        text = "%s:" % self.__class__.__name__
-        text = text + "\n\tdsa_dnstr=%s" % self.rep_dsa_dnstr
-        text = text + "\n\tdsa_guid=%s" % self.rep_dsa_guid
-        text = text + "\n\tdefault=%s" % self.rep_default
-        text = text + "\n\tro=%s" % self.rep_ro
-        text = text + "\n\tpartial=%s" % self.rep_partial
-        text = text + "\n\tpresent=%s" % self.is_present()
-        text = text + "\n\tfsmo_role_owner=%s" % self.rep_fsmo_role_owner
-
-        for rep in self.rep_repsFrom:
-            text = text + "\n%s" % rep
-
-        for rep in self.rep_repsTo:
-            text = text + "\n%s" % rep
+        text = "%s:" % self.__class__.__name__ +\
+               "\n\tdsa_dnstr=%s" % self.rep_dsa_dnstr +\
+               "\n\tdsa_guid=%s" % self.rep_dsa_guid +\
+               "\n\tdefault=%s" % self.rep_default +\
+               "\n\tro=%s" % self.rep_ro +\
+               "\n\tpartial=%s" % self.rep_partial +\
+               "\n\tpresent=%s" % self.is_present() +\
+               "\n\tfsmo_role_owner=%s" % self.rep_fsmo_role_owner +\
+               "".join("\n%s" % rep for rep in self.rep_repsFrom) +\
+               "".join("\n%s" % rep for rep in self.rep_repsTo)
 
         return "%s\n%s" % (NamingContext.__str__(self), text)
 
@@ -313,8 +311,13 @@ class NCReplica(NamingContext):
         # Possibly no repsFrom if this is a singleton DC
         if "repsFrom" in msg:
             for value in msg["repsFrom"]:
-                rep = RepsFromTo(self.nc_dnstr,
-                                 ndr_unpack(drsblobs.repsFromToBlob, value))
+                try:
+                    unpacked = ndr_unpack(drsblobs.repsFromToBlob, value)
+                except RuntimeError as e:
+                    print("bad repsFrom NDR: %r" % (value),
+                          file=sys.stderr)
+                    continue
+                rep = RepsFromTo(self.nc_dnstr, unpacked)
                 self.rep_repsFrom.append(rep)
 
     def commit_repsFrom(self, samdb, ro=False):
@@ -467,8 +470,13 @@ class NCReplica(NamingContext):
         # Possibly no repsTo if this is a singleton DC
         if "repsTo" in msg:
             for value in msg["repsTo"]:
-                rep = RepsFromTo(self.nc_dnstr,
-                                 ndr_unpack(drsblobs.repsFromToBlob, value))
+                try:
+                    unpacked = ndr_unpack(drsblobs.repsFromToBlob, value)
+                except RuntimeError as e:
+                    print("bad repsTo NDR: %r" % (value),
+                          file=sys.stderr)
+                    continue
+                rep = RepsFromTo(self.nc_dnstr, unpacked)
                 self.rep_repsTo.append(rep)
 
     def commit_repsTo(self, samdb, ro=False):
@@ -577,16 +585,15 @@ class DirectoryServiceAgent(object):
         if self.dsa_ivid is not None:
             text = text + "\n\tdsa_ivid=%s" % str(self.dsa_ivid)
 
-        text = text + "\n\tro=%s" % self.is_ro()
-        text = text + "\n\tgc=%s" % self.is_gc()
-        text = text + "\n\tistg=%s" % self.is_istg()
-
-        text = text + "\ncurrent_replica_table:"
-        text = text + "\n%s" % self.dumpstr_current_replica_table()
-        text = text + "\nneeded_replica_table:"
-        text = text + "\n%s" % self.dumpstr_needed_replica_table()
-        text = text + "\nconnect_table:"
-        text = text + "\n%s" % self.dumpstr_connect_table()
+        text += "\n\tro=%s" % self.is_ro() +\
+                "\n\tgc=%s" % self.is_gc() +\
+                "\n\tistg=%s" % self.is_istg() +\
+                "\ncurrent_replica_table:" +\
+                "\n%s" % self.dumpstr_current_replica_table() +\
+                "\nneeded_replica_table:" +\
+                "\n%s" % self.dumpstr_needed_replica_table() +\
+                "\nconnect_table:" +\
+                "\n%s" % self.dumpstr_connect_table()
 
         return text
 
@@ -668,7 +675,7 @@ class DirectoryServiceAgent(object):
         if "options" in msg:
             self.options = int(msg["options"][0])
 
-        if "msDS-isRODC" in msg and msg["msDS-isRODC"][0] == "TRUE":
+        if "msDS-isRODC" in msg and str(msg["msDS-isRODC"][0]) == "TRUE":
             self.dsa_is_ro = True
         else:
             self.dsa_is_ro = False
@@ -743,7 +750,7 @@ class DirectoryServiceAgent(object):
                     flags = dsdn.get_binary_integer()
                     dnstr = str(dsdn.dn)
 
-                    if not dnstr in tmp_table:
+                    if dnstr not in tmp_table:
                         rep = NCReplica(self, dnstr)
                         tmp_table[dnstr] = rep
                     else:
@@ -907,39 +914,38 @@ class NTDSConnection(object):
     def __str__(self):
         '''Debug dump string output of NTDSConnection object'''
 
-        text = "%s:\n\tdn=%s" % (self.__class__.__name__, self.dnstr)
-        text = text + "\n\tenabled=%s" % self.enabled
-        text = text + "\n\tto_be_added=%s" % self.to_be_added
-        text = text + "\n\tto_be_deleted=%s" % self.to_be_deleted
-        text = text + "\n\tto_be_modified=%s" % self.to_be_modified
-        text = text + "\n\toptions=0x%08X" % self.options
-        text = text + "\n\tsystem_flags=0x%08X" % self.system_flags
-        text = text + "\n\twhenCreated=%d" % self.whenCreated
-        text = text + "\n\ttransport_dn=%s" % self.transport_dnstr
+        text = "%s:\n\tdn=%s" % (self.__class__.__name__, self.dnstr) +\
+               "\n\tenabled=%s" % self.enabled +\
+               "\n\tto_be_added=%s" % self.to_be_added +\
+               "\n\tto_be_deleted=%s" % self.to_be_deleted +\
+               "\n\tto_be_modified=%s" % self.to_be_modified +\
+               "\n\toptions=0x%08X" % self.options +\
+               "\n\tsystem_flags=0x%08X" % self.system_flags +\
+               "\n\twhenCreated=%d" % self.whenCreated +\
+               "\n\ttransport_dn=%s" % self.transport_dnstr
 
         if self.guid is not None:
-            text = text + "\n\tguid=%s" % str(self.guid)
+            text += "\n\tguid=%s" % str(self.guid)
 
         if self.transport_guid is not None:
-            text = text + "\n\ttransport_guid=%s" % str(self.transport_guid)
+            text += "\n\ttransport_guid=%s" % str(self.transport_guid)
 
         text = text + "\n\tfrom_dn=%s" % self.from_dnstr
 
         if self.schedule is not None:
-            text += "\n\tschedule.size=%s" % self.schedule.size
-            text += "\n\tschedule.bandwidth=%s" % self.schedule.bandwidth
-            text += ("\n\tschedule.numberOfSchedules=%s" %
+            text += "\n\tschedule.size=%s" % self.schedule.size +\
+                    "\n\tschedule.bandwidth=%s" % self.schedule.bandwidth +\
+                    ("\n\tschedule.numberOfSchedules=%s" %
                      self.schedule.numberOfSchedules)
 
             for i, header in enumerate(self.schedule.headerArray):
                 text += ("\n\tschedule.headerArray[%d].type=%d" %
-                         (i, header.type))
-                text += ("\n\tschedule.headerArray[%d].offset=%d" %
-                         (i, header.offset))
-                text += "\n\tschedule.dataArray[%d].slots[ " % i
-                for slot in self.schedule.dataArray[i].slots:
-                    text = text + "0x%X " % slot
-                text = text + "]"
+                        (i, header.type)) +\
+                        ("\n\tschedule.headerArray[%d].offset=%d" %
+                         (i, header.offset)) +\
+                        "\n\tschedule.dataArray[%d].slots[ " % i +\
+                        "".join("0x%X " % slot for slot in self.schedule.dataArray[i].slots) +\
+                        "]"
 
         return text
 
@@ -971,7 +977,7 @@ class NTDSConnection(object):
             self.options = int(msg["options"][0])
 
         if "enabledConnection" in msg:
-            if msg["enabledConnection"][0].upper().lstrip().rstrip() == "TRUE":
+            if str(msg["enabledConnection"][0]).upper().lstrip().rstrip() == "TRUE":
                 self.enabled = True
 
         if "systemFlags" in msg:
@@ -993,7 +999,7 @@ class NTDSConnection(object):
             self.schedule = ndr_unpack(drsblobs.schedule, msg["schedule"][0])
 
         if "whenCreated" in msg:
-            self.whenCreated = ldb.string_to_time(msg["whenCreated"][0])
+            self.whenCreated = ldb.string_to_time(str(msg["whenCreated"][0]))
 
         if "fromServer" in msg:
             dsdn = dsdb_Dn(samdb, msg["fromServer"][0].decode('utf8'))
@@ -1352,7 +1358,7 @@ class Partition(NamingContext):
                 continue
 
             if k == "Enabled":
-                if msg[k][0].upper().lstrip().rstrip() == "TRUE":
+                if str(msg[k][0]).upper().lstrip().rstrip() == "TRUE":
                     self.enabled = True
                 else:
                     self.enabled = False
@@ -1446,12 +1452,10 @@ class Partition(NamingContext):
 
     def __str__(self):
         '''Debug dump string output of class'''
-        text = "%s" % NamingContext.__str__(self)
-        text = text + "\n\tpartdn=%s" % self.partstr
-        for k in self.rw_location_list:
-            text = text + "\n\tmsDS-NC-Replica-Locations=%s" % k
-        for k in self.ro_location_list:
-            text = text + "\n\tmsDS-NC-RO-Replica-Locations=%s" % k
+        text = "%s" % NamingContext.__str__(self) +\
+               "\n\tpartdn=%s" % self.partstr +\
+               "".join("\n\tmsDS-NC-Replica-Locations=%s" % k for k in self.rw_location_list) +\
+               "".join("\n\tmsDS-NC-RO-Replica-Locations=%s" % k for k in self.ro_location_list)
         return text
 
 
@@ -1645,7 +1649,7 @@ class Site(object):
                 i_idx = j_idx
                 t_time = 0
 
-            #XXX doc says current time < c.timeLastSyncSuccess - f
+            # XXX doc says current time < c.timeLastSyncSuccess - f
             # which is true only if f is negative or clocks are wrong.
             # f is not negative in the default case (2 hours).
             elif self.nt_now - cursor.last_sync_success > f:
@@ -1752,11 +1756,11 @@ class Site(object):
 
     def __str__(self):
         '''Debug dump string output of class'''
-        text = "%s:" % self.__class__.__name__
-        text = text + "\n\tdn=%s" % self.site_dnstr
-        text = text + "\n\toptions=0x%X" % self.site_options
-        text = text + "\n\ttopo_generator=%s" % self.site_topo_generator
-        text = text + "\n\ttopo_failover=%d" % self.site_topo_failover
+        text = "%s:" % self.__class__.__name__ +\
+               "\n\tdn=%s" % self.site_dnstr +\
+               "\n\toptions=0x%X" % self.site_options +\
+               "\n\ttopo_generator=%s" % self.site_topo_generator +\
+               "\n\ttopo_failover=%d" % self.site_topo_failover
         for key, dsa in self.dsa_table.items():
             text = text + "\n%s" % dsa
         return text
@@ -1780,9 +1784,9 @@ class GraphNode(object):
         self.edge_from = []
 
     def __str__(self):
-        text = "%s:" % self.__class__.__name__
-        text = text + "\n\tdsa_dnstr=%s" % self.dsa_dnstr
-        text = text + "\n\tmax_edges=%d" % self.max_edges
+        text = "%s:" % self.__class__.__name__ +\
+               "\n\tdsa_dnstr=%s" % self.dsa_dnstr +\
+               "\n\tmax_edges=%d" % self.max_edges
 
         for i, edge in enumerate(self.edge_from):
             if isinstance(edge, str):
@@ -1882,13 +1886,12 @@ class Transport(object):
     def __str__(self):
         '''Debug dump string output of Transport object'''
 
-        text = "%s:\n\tdn=%s" % (self.__class__.__name__, self.dnstr)
-        text = text + "\n\tguid=%s" % str(self.guid)
-        text = text + "\n\toptions=%d" % self.options
-        text = text + "\n\taddress_attr=%s" % self.address_attr
-        text = text + "\n\tname=%s" % self.name
-        for dnstr in self.bridgehead_list:
-            text = text + "\n\tbridgehead_list=%s" % dnstr
+        text = "%s:\n\tdn=%s" % (self.__class__.__name__, self.dnstr) +\
+               "\n\tguid=%s" % str(self.guid) +\
+               "\n\toptions=%d" % self.options +\
+               "\n\taddress_attr=%s" % self.address_attr +\
+               "\n\tname=%s" % self.name +\
+               "".join("\n\tbridgehead_list=%s" % dnstr for dnstr in self.bridgehead_list)
 
         return text
 
@@ -1994,25 +1997,24 @@ class RepsFromTo(object):
     def __str__(self):
         '''Debug dump string output of class'''
 
-        text = "%s:" % self.__class__.__name__
-        text += "\n\tdnstr=%s" % self.nc_dnstr
-        text += "\n\tupdate_flags=0x%X" % self.update_flags
-        text += "\n\tversion=%d" % self.version
-        text += "\n\tsource_dsa_obj_guid=%s" % self.source_dsa_obj_guid
-        text += ("\n\tsource_dsa_invocation_id=%s" %
-                 self.source_dsa_invocation_id)
-        text += "\n\ttransport_guid=%s" % self.transport_guid
-        text += "\n\treplica_flags=0x%X" % self.replica_flags
-        text += ("\n\tconsecutive_sync_failures=%d" %
-                 self.consecutive_sync_failures)
-        text += "\n\tlast_success=%s" % self.last_success
-        text += "\n\tlast_attempt=%s" % self.last_attempt
-        text += "\n\tdns_name1=%s" % self.dns_name1
-        text += "\n\tdns_name2=%s" % self.dns_name2
-        text += "\n\tschedule[ "
-        for slot in self.schedule:
-            text += "0x%X " % slot
-        text += "]"
+        text = "%s:" % self.__class__.__name__ +\
+               "\n\tdnstr=%s" % self.nc_dnstr +\
+               "\n\tupdate_flags=0x%X" % self.update_flags +\
+               "\n\tversion=%d" % self.version +\
+               "\n\tsource_dsa_obj_guid=%s" % self.source_dsa_obj_guid +\
+               ("\n\tsource_dsa_invocation_id=%s" %
+                 self.source_dsa_invocation_id) +\
+               "\n\ttransport_guid=%s" % self.transport_guid +\
+               "\n\treplica_flags=0x%X" % self.replica_flags +\
+               ("\n\tconsecutive_sync_failures=%d" %
+                 self.consecutive_sync_failures) +\
+               "\n\tlast_success=%s" % self.last_success +\
+               "\n\tlast_attempt=%s" % self.last_attempt +\
+               "\n\tdns_name1=%s" % self.dns_name1 +\
+               "\n\tdns_name2=%s" % self.dns_name2 +\
+               "\n\tschedule[ " +\
+               "".join("0x%X " % slot for slot in self.schedule) +\
+               "]"
 
         return text
 
@@ -2126,27 +2128,26 @@ class SiteLink(object):
     def __str__(self):
         '''Debug dump string output of Transport object'''
 
-        text = "%s:\n\tdn=%s" % (self.__class__.__name__, self.dnstr)
-        text = text + "\n\toptions=%d" % self.options
-        text = text + "\n\tsystem_flags=%d" % self.system_flags
-        text = text + "\n\tcost=%d" % self.cost
-        text = text + "\n\tinterval=%s" % self.interval
+        text = "%s:\n\tdn=%s" % (self.__class__.__name__, self.dnstr) +\
+               "\n\toptions=%d" % self.options +\
+               "\n\tsystem_flags=%d" % self.system_flags +\
+               "\n\tcost=%d" % self.cost +\
+               "\n\tinterval=%s" % self.interval
 
         if self.schedule is not None:
-            text += "\n\tschedule.size=%s" % self.schedule.size
-            text += "\n\tschedule.bandwidth=%s" % self.schedule.bandwidth
-            text += ("\n\tschedule.numberOfSchedules=%s" %
+            text += "\n\tschedule.size=%s" % self.schedule.size +\
+                    "\n\tschedule.bandwidth=%s" % self.schedule.bandwidth +\
+                    ("\n\tschedule.numberOfSchedules=%s" %
                      self.schedule.numberOfSchedules)
 
             for i, header in enumerate(self.schedule.headerArray):
                 text += ("\n\tschedule.headerArray[%d].type=%d" %
-                         (i, header.type))
-                text += ("\n\tschedule.headerArray[%d].offset=%d" %
-                         (i, header.offset))
-                text = text + "\n\tschedule.dataArray[%d].slots[ " % i
-                for slot in self.schedule.dataArray[i].slots:
-                    text = text + "0x%X " % slot
-                text = text + "]"
+                         (i, header.type)) +\
+                        ("\n\tschedule.headerArray[%d].offset=%d" %
+                         (i, header.offset)) +\
+                        "\n\tschedule.dataArray[%d].slots[ " % i +\
+                        "".join("0x%X " % slot for slot in self.schedule.dataArray[i].slots) +\
+                        "]"
 
         for guid, dn in self.site_list:
             text = text + "\n\tsite_list=%s (%s)" % (guid, dn)

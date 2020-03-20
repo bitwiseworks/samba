@@ -35,10 +35,10 @@ from samba.credentials import Credentials
 from samba.samdb import SamDB
 
 unix_now = int(time.time())
-unix_once_upon_a_time = 1000000000 #2001-09-09
+unix_once_upon_a_time = 1000000000  # 2001-09-09
 
 ENV_DSAS = {
-    'ad_dc_ntvfs' : ['CN=LOCALDC,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samba,DC=example,DC=com'],
+    'ad_dc_ntvfs': ['CN=LOCALDC,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samba,DC=example,DC=com'],
     'fl2000dc': ['CN=DC5,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samba2000,DC=example,DC=com'],
     'fl2003dc': ['CN=DC6,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samba2003,DC=example,DC=com'],
     'fl2008r2dc': ['CN=DC7,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samba2008r2,DC=example,DC=com'],
@@ -47,6 +47,7 @@ ENV_DSAS = {
     'vampire_dc': ['CN=LOCALDC,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samba,DC=example,DC=com',
                    'CN=LOCALVAMPIREDC,CN=Servers,CN=Default-First-Site-Name,CN=Sites,CN=Configuration,DC=samba,DC=example,DC=com'],
 }
+
 
 class KCCTests(samba.tests.TestCase):
     def setUp(self):
@@ -57,12 +58,14 @@ class KCCTests(samba.tests.TestCase):
         self.creds.set_username(os.environ["USERNAME"])
         self.creds.set_password(os.environ["PASSWORD"])
 
-
     def test_list_dsas(self):
         my_kcc = kcc.KCC(unix_now, False, False, False, False)
         my_kcc.load_samdb("ldap://%s" % os.environ["SERVER"],
                           self.lp, self.creds)
-        dsas = my_kcc.list_dsas()
+        try:
+            dsas = my_kcc.list_dsas()
+        except kcc.KCCError as e:
+            self.fail("kcc.list_dsas failed with %s" % e)
         env = os.environ['TEST_ENV']
         for expected_dsa in ENV_DSAS[env]:
             self.assertIn(expected_dsa, dsas)
@@ -75,6 +78,13 @@ class KCCTests(samba.tests.TestCase):
         my_kcc = kcc.KCC(unix_now, readonly=True, verify=True,
                          debug=False, dot_file_dir=None)
 
-        my_kcc.run("ldap://%s" % os.environ["SERVER"],
-                   self.lp, self.creds,
-                   attempt_live_connections=False)
+        # As this is flapping with errors under python3, we catch
+        # exceptions and turn them into failures..
+        try:
+            my_kcc.run("ldap://%s" % os.environ["SERVER"],
+                       self.lp, self.creds,
+                       attempt_live_connections=False)
+        except (samba.kcc.graph_utils.GraphError, kcc.KCCError):
+            import traceback
+            traceback.print_exc()
+            self.fail()

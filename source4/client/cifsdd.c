@@ -85,20 +85,64 @@ static const char * argtype_str(enum argtype arg_type)
 
 static struct argdef args[] =
 {
-	{ "bs",	ARG_SIZE,	"force ibs and obs to SIZE bytes" },
-	{ "ibs", ARG_SIZE,	"read SIZE bytes at a time" },
-	{ "obs", ARG_SIZE,	"write SIZE bytes at a time" },
+	{
+		.arg_name = "bs",
+		.arg_type = ARG_SIZE,
+		.arg_help = "force ibs and obs to SIZE bytes",
+	},
+	{
+		.arg_name = "ibs",
+		.arg_type = ARG_SIZE,
+		.arg_help = "read SIZE bytes at a time",
+	},
+	{
+		.arg_name = "obs",
+		.arg_type = ARG_SIZE,
+		.arg_help = "write SIZE bytes at a time",
+	},
 
-	{ "count", ARG_NUMERIC,	"copy COUNT input blocks" },
-	{ "seek",ARG_NUMERIC,	"skip COUNT blocks at start of output" },
-	{ "skip",ARG_NUMERIC,	"skip COUNT blocks at start of input" },
+	{
+		.arg_name = "count",
+		.arg_type = ARG_NUMERIC,
+		.arg_help = "copy COUNT input blocks",
+	},
+	{
+		.arg_name = "seek",
+		.arg_type = ARG_NUMERIC,
+		.arg_help = "skip COUNT blocks at start of output",
+	},
+	{
+		.arg_name = "skip",
+		.arg_type = ARG_NUMERIC,
+		.arg_help = "skip COUNT blocks at start of input",
+	},
 
-	{ "if",	ARG_PATHNAME,	"read input from FILE" },
-	{ "of",	ARG_PATHNAME,	"write output to FILE" },
+	{
+		.arg_name = "if",
+		.arg_type = ARG_PATHNAME,
+		.arg_help = "read input from FILE",
+	},
+	{
+		.arg_name = "of",
+		.arg_type = ARG_PATHNAME,
+		.arg_help = "write output to FILE",
+	},
 
-	{ "direct", ARG_BOOL,	"use direct I/O if non-zero" },
-	{ "sync", ARG_BOOL,	"use synchronous writes if non-zero" },
-	{ "oplock", ARG_BOOL,	"take oplocks on the input and output files" },
+	{
+		.arg_name = "direct",
+		.arg_type = ARG_BOOL,
+		.arg_help = "use direct I/O if non-zero",
+	},
+	{
+		.arg_name = "sync",
+		.arg_type = ARG_BOOL,
+		.arg_help = "use synchronous writes if non-zero",
+	},
+	{
+		.arg_name = "oplock",
+		.arg_type = ARG_BOOL,
+		.arg_help = "take oplocks on the input and output files",
+	},
 
 /* FIXME: We should support using iflags and oflags for setting oplock and I/O
  * options. This would make us compatible with GNU dd.
@@ -540,11 +584,27 @@ done:
 /* ------------------------------------------------------------------------- */
 
 struct poptOption cifsddHelpOptions[] = {
-  { NULL, '\0', POPT_ARG_CALLBACK, (void *)&cifsdd_help_message, '\0', NULL, NULL },
-  { "help", '?', 0, NULL, '?', "Show this help message", NULL },
-  { "usage", '\0', 0, NULL, 'u', "Display brief usage message", NULL },
-  { NULL }
-} ;
+	{
+		.longName   = NULL,
+		.shortName  = '\0',
+		.argInfo    = POPT_ARG_CALLBACK,
+		.arg        = (void *)&cifsdd_help_message,
+		.val        = '\0',
+	},
+	{
+		.longName   = "help",
+		.shortName  = '?',
+		.val        = '?',
+		.descrip    = "Show this help message",
+	},
+	{
+		.longName   = "usage",
+		.shortName  = '\0',
+		.val        = 'u',
+		.descrip    = "Display brief usage message",
+	},
+	POPT_TABLEEND
+};
 
 int main(int argc, const char ** argv)
 {
@@ -629,6 +689,8 @@ int main(int argc, const char ** argv)
 	CatchSignal(SIGINT, dd_handle_signal);
 	CatchSignal(SIGUSR1, dd_handle_signal);
 	rc = copy_files(ev, cmdline_lp_ctx);
+
+	poptFreeContext(pctx);
 	talloc_free(ev);
 	return rc;
 }

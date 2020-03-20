@@ -12,11 +12,11 @@ use POSIX;
 use Cwd qw(abs_path);
 
 sub new($$$$$) {
-	my ($classname, $bindir, $ldap, $srcdir, $server_maxtime) = @_;
+	my ($classname, $bindir, $srcdir, $server_maxtime) = @_;
 
 	my $self = {
 	    samba3 => new Samba3($bindir, $srcdir, $server_maxtime),
-	    samba4 => new Samba4($bindir, $ldap, $srcdir, $server_maxtime),
+	    samba4 => new Samba4($bindir, $srcdir, $server_maxtime),
 	};
 	bless $self;
 	return $self;
@@ -24,6 +24,9 @@ sub new($$$$$) {
 
 %Samba::ENV_DEPS = (%Samba3::ENV_DEPS, %Samba4::ENV_DEPS);
 our %ENV_DEPS;
+
+%Samba::ENV_DEPS_POST = (%Samba3::ENV_DEPS_POST, %Samba4::ENV_DEPS_POST);
+our %ENV_DEPS_POST;
 
 %Samba::ENV_TARGETS = (
 	(map { $_ => "Samba3" } keys %Samba3::ENV_DEPS),
@@ -59,6 +62,8 @@ sub setup_env($$$)
 		return $target->{vars}->{$envname};
 	}
 
+	$target->{vars}->{$envname} = "";
+
 	my @dep_vars;
 	foreach(@{$ENV_DEPS{$envname}}) {
 		my $vars = $self->setup_env($_, $path);
@@ -87,6 +92,13 @@ sub setup_env($$$)
 	$target->{vars}->{$envname} = $env;
 	$target->{vars}->{$envname}->{target} = $target;
 
+	foreach(@{$ENV_DEPS_POST{$envname}}) {
+		my $vars = $self->setup_env($_, $path);
+		if (not defined($vars)) {
+			return undef;
+		}
+	}
+
 	return $env;
 }
 
@@ -94,9 +106,20 @@ sub bindir_path($$) {
 	my ($object, $path) = @_;
 
 	my $valpath = "$object->{bindir}/$path";
+	my $python_cmd = "";
+	my $result = $path;
+	if (defined $ENV{'PYTHON'}) {
+		$python_cmd = $ENV{'PYTHON'} . " ";
+	}
 
-	return $valpath if (-f $valpath or -d $valpath);
-	return $path;
+	if (-f $valpath or -d $valpath) {
+		$result = $valpath;
+	}
+	# make sure we prepend samba-tool with calling $PYTHON python version
+	if ($path eq "samba-tool") {
+		$result = $python_cmd . $result;
+	}
+	return $result;
 }
 
 sub nss_wrapper_winbind_so_path($) {
@@ -238,16 +261,21 @@ sub mk_krb5_conf($$)
  dns_lookup_kdc = true
  ticket_lifetime = 24h
  forwardable = yes
- allow_weak_crypto = yes
- # Set the grace clocskew to 5 seconds
- # This is especially required by samba3.raw.session krb5 and
- # reauth tests
- clockskew = 5
+
  # We are running on the same machine, do not correct
  # system clock differences
  kdc_timesync = 0
 
 ";
+
+	if (defined($ENV{MITKRB5})) {
+		print KRB5CONF "
+ # Set the grace clocskew to 5 seconds
+ # This is especially required by samba3.raw.session krb5 and
+ # reauth tests when not using Heimdal
+ clockskew = 5
+    ";
+	}
 
 	if (defined($ctx->{krb5_ccname})) {
 		print KRB5CONF "
@@ -368,59 +396,168 @@ sub mk_mitkdc_conf($$)
 	close(KDCCONF);
 }
 
+sub realm_to_ip_mappings
+{
+	# this maps the DNS realms for the various testenvs to the corresponding
+	# PDC (i.e. the first DC created for that realm).
+	my %realm_to_pdc_mapping = (
+		'adnonssdom.samba.example.com'    => 'addc_no_nss',
+		'adnontlmdom.samba.example.com'   => 'addc_no_ntlm',
+		'samba2000.example.com'           => 'dc5',
+		'samba2003.example.com'           => 'dc6',
+		'samba2008r2.example.com'         => 'dc7',
+		'addom.samba.example.com'         => 'addc',
+		'sub.samba.example.com'           => 'localsubdc',
+		'chgdcpassword.samba.example.com' => 'chgdcpass',
+		'backupdom.samba.example.com'     => 'backupfromdc',
+		'renamedom.samba.example.com'     => 'renamedc',
+		'labdom.samba.example.com'        => 'labdc',
+		'schema.samba.example.com'        => 'liveupgrade1dc',
+		'samba.example.com'               => 'localdc',
+	);
+
+	my @mapping = ();
+
+	# convert the hashmap to a list of key=value strings, where key is the
+	# realm and value is the IP address
+	while (my ($realm, $pdc) = each(%realm_to_pdc_mapping)) {
+		my $ipaddr = get_ipv4_addr($pdc);
+		push(@mapping, "$realm=$ipaddr");
+	}
+	# return the mapping as a single comma-separated string
+	return join(',', @mapping);
+}
+
 sub get_interface($)
 {
-    my ($netbiosname) = @_;
-    $netbiosname = lc($netbiosname);
+	my ($netbiosname) = @_;
+	$netbiosname = lc($netbiosname);
 
-    my %interfaces = ();
-    $interfaces{"localnt4dc2"} = 3;
-    $interfaces{"localnt4member3"} = 4;
-    $interfaces{"localshare4"} = 5;
+	# this maps the SOCKET_WRAPPER_DEFAULT_IFACE value for each possible
+	# testenv to the DC's NETBIOS name. This value also corresponds to last
+	# digit of the DC's IP address. Note that the NETBIOS name may differ from
+	# the testenv name.
+	# Note that when adding a DC with a new realm, also update
+	# get_realm_ip_mappings() above.
+	my %testenv_iface_mapping = (
+		localnt4dc2       => 3,
+		localnt4member3   => 4,
+		localshare4       => 5,
+		# 6 is spare
+		localktest6       => 7,
+		maptoguest        => 8,
+		localnt4dc9       => 9,
+		# 10 is spare
 
-    $interfaces{"localktest6"} = 7;
-    $interfaces{"maptoguest"} = 8;
-    $interfaces{"localnt4dc9"} = 9;
+		# 11-16 are used by selftest.pl for the client.conf. Most tests only
+		# use the first .11 IP. However, some tests (like winsreplication) rely
+		# on the client having multiple IPs.
+		client            => 11,
 
-    # 11-16 used by selftest.pl for client interfaces
+		addc_no_nss       => 17,
+		addc_no_ntlm      => 18,
+		idmapadmember     => 19,
+		idmapridmember    => 20,
+		localdc           => 21,
+		localvampiredc    => 22,
+		s4member          => 23,
+		localrpcproxy     => 24,
+		dc5               => 25,
+		dc6               => 26,
+		dc7               => 27,
+		rodc              => 28,
+		localadmember     => 29,
+		addc              => 30,
+		localsubdc        => 31,
+		chgdcpass         => 32,
+		promotedvdc       => 33,
+		rfc2307member     => 34,
+		fileserver        => 35,
+		fakednsforwarder1 => 36,
+		fakednsforwarder2 => 37,
+		s4member_dflt     => 38,
+		vampire2000dc     => 39,
+		backupfromdc      => 40,
+		restoredc         => 41,
+		renamedc          => 42,
+		labdc             => 43,
+		offlinebackupdc   => 44,
+		customdc          => 45,
+		prockilldc        => 46,
+		proclimitdc       => 47,
+		liveupgrade1dc    => 48,
+		liveupgrade2dc    => 49,
 
-    $interfaces{"addc_no_nss"} = 17;
-    $interfaces{"addc_no_ntlm"} = 18;
-    $interfaces{"idmapadmember"} = 19;
-    $interfaces{"idmapridmember"} = 20;
-    $interfaces{"localdc"} = 21;
-    $interfaces{"localvampiredc"} = 22;
-    $interfaces{"s4member"} = 23;
-    $interfaces{"localrpcproxy"} = 24;
-    $interfaces{"dc5"} = 25;
-    $interfaces{"dc6"} = 26;
-    $interfaces{"dc7"} = 27;
-    $interfaces{"rodc"} = 28;
-    $interfaces{"localadmember"} = 29;
-    $interfaces{"addc"} = 30;
-    $interfaces{"localsubdc"} = 31;
-    $interfaces{"chgdcpass"} = 32;
-    $interfaces{"promotedvdc"} = 33;
-    $interfaces{"rfc2307member"} = 34;
-    $interfaces{"fileserver"} = 35;
-    $interfaces{"fakednsforwarder1"} = 36;
-    $interfaces{"fakednsforwarder2"} = 37;
-    $interfaces{"s4member_dflt"} = 38;
-    $interfaces{"vampire2000dc"} = 39;
-    $interfaces{"backupfromdc"} = 40;
-    $interfaces{"restoredc"} = 41;
-    $interfaces{"renamedc"} = 42;
-    $interfaces{"labdc"} = 43;
+		rootdnsforwarder  => 64,
 
-    # update lib/socket_wrapper/socket_wrapper.c
-    #  #define MAX_WRAPPED_INTERFACES 64
-    # if you wish to have more than 64 interfaces
+		# Note: that you also need to update dns_hub.py when adding a new
+		# multi-DC testenv
+		# update lib/socket_wrapper/socket_wrapper.c
+		#  #define MAX_WRAPPED_INTERFACES 64
+		# if you wish to have more than 64 interfaces
+	);
 
-    if (not defined($interfaces{$netbiosname})) {
-	die();
-    }
+	if (not defined($testenv_iface_mapping{$netbiosname})) {
+		die();
+	}
 
-    return $interfaces{$netbiosname};
+	return $testenv_iface_mapping{$netbiosname};
+}
+
+sub get_ipv4_addr
+{
+	my ($hostname, $iface_num) = @_;
+	my $swiface = Samba::get_interface($hostname);
+
+	# Handle testenvs with multiple different addresses, i.e. IP multihoming.
+	# Currently only the selftest client has multiple IPv4 addresses.
+	if (defined($iface_num)) {
+		$swiface += $iface_num;
+	}
+
+	if (use_namespaces()) {
+		# use real IPs if selftest is running in its own network namespace
+		return "10.0.0.$swiface";
+	} else {
+		# use loopback IPs with socket-wrapper
+		return "127.0.0.$swiface";
+	}
+}
+
+sub get_ipv6_addr
+{
+	(my $hostname) = @_;
+	my $swiface = Samba::get_interface($hostname);
+
+	return sprintf("fd00:0000:0000:0000:0000:0000:5357:5f%02x", $swiface);
+}
+
+# returns the 'interfaces' setting for smb.conf, i.e. the IPv4/IPv6
+# addresses for testenv
+sub get_interfaces_config
+{
+	my ($hostname, $num_ips) = @_;
+	my $interfaces = "";
+
+	# We give the client.conf multiple different IPv4 addresses.
+	# All other testenvs generally just have one IPv4 address.
+	if (! defined($num_ips)) {
+		$num_ips = 1;
+	}
+	for (my $i = 0; $i < $num_ips; $i++) {
+		my $ipv4_addr = Samba::get_ipv4_addr($hostname, $i);
+		if (use_namespaces()) {
+			# use a /24 subnet with network namespaces
+			$interfaces .= "$ipv4_addr/24 ";
+		} else {
+			$interfaces .= "$ipv4_addr/8 ";
+		}
+	}
+
+	my $ipv6_addr = Samba::get_ipv6_addr($hostname);
+	$interfaces .= "$ipv6_addr/64";
+
+	return $interfaces;
 }
 
 sub cleanup_child($$)
@@ -451,6 +588,337 @@ sub random_domain_sid()
 {
 	my $domain_sid = "S-1-5-21-". int(rand(4294967295)) . "-" . int(rand(4294967295)) . "-" . int(rand(4294967295));
 	return $domain_sid;
+}
+
+# sets the environment variables ready for running a given process
+sub set_env_for_process
+{
+	my ($proc_name, $env_vars, $proc_envs) = @_;
+
+	if (not defined($proc_envs)) {
+		$proc_envs = get_env_for_process($proc_name, $env_vars);
+	}
+
+	foreach my $key (keys %{ $proc_envs }) {
+		$ENV{$key} = $proc_envs->{$key};
+	}
+}
+
+sub get_env_for_process
+{
+	my ($proc_name, $env_vars) = @_;
+	my $proc_envs = {
+		KRB5_CONFIG => $env_vars->{KRB5_CONFIG},
+		KRB5CCNAME => "$env_vars->{KRB5_CCACHE}.$proc_name",
+		SELFTEST_WINBINDD_SOCKET_DIR => $env_vars->{SELFTEST_WINBINDD_SOCKET_DIR},
+		NMBD_SOCKET_DIR => $env_vars->{NMBD_SOCKET_DIR},
+		NSS_WRAPPER_PASSWD => $env_vars->{NSS_WRAPPER_PASSWD},
+		NSS_WRAPPER_GROUP => $env_vars->{NSS_WRAPPER_GROUP},
+		NSS_WRAPPER_HOSTS => $env_vars->{NSS_WRAPPER_HOSTS},
+		NSS_WRAPPER_HOSTNAME => $env_vars->{NSS_WRAPPER_HOSTNAME},
+		NSS_WRAPPER_MODULE_SO_PATH => $env_vars->{NSS_WRAPPER_MODULE_SO_PATH},
+		NSS_WRAPPER_MODULE_FN_PREFIX => $env_vars->{NSS_WRAPPER_MODULE_FN_PREFIX},
+		UID_WRAPPER_ROOT => "1",
+		ENVNAME => "$ENV{ENVNAME}.$proc_name",
+	};
+
+	if (defined($env_vars->{RESOLV_WRAPPER_CONF})) {
+		$proc_envs->{RESOLV_WRAPPER_CONF} = $env_vars->{RESOLV_WRAPPER_CONF};
+	} else {
+		$proc_envs->{RESOLV_WRAPPER_HOSTS} = $env_vars->{RESOLV_WRAPPER_HOSTS};
+	}
+	return $proc_envs;
+}
+
+sub fork_and_exec
+{
+	my ($self, $env_vars, $daemon_ctx, $STDIN_READER) = @_;
+
+	unlink($daemon_ctx->{LOG_FILE});
+	print "STARTING $daemon_ctx->{NAME} for $ENV{ENVNAME}...";
+
+	my $parent_pid = $$;
+	my $pid = fork();
+
+	# exec the daemon in the child process
+	if ($pid == 0) {
+		my @preargs = ();
+
+		# redirect the daemon's stdout/stderr to a log file
+		if (defined($daemon_ctx->{TEE_STDOUT})) {
+			# in some cases, we want out from samba to go to the log file,
+			# but also to the users terminal when running 'make test' on the
+			# command line. This puts it on stderr on the terminal
+			open STDOUT, "| tee $daemon_ctx->{LOG_FILE} 1>&2";
+		} else {
+			open STDOUT, ">$daemon_ctx->{LOG_FILE}";
+		}
+		open STDERR, '>&STDOUT';
+
+		SocketWrapper::set_default_iface($env_vars->{SOCKET_WRAPPER_DEFAULT_IFACE});
+		if (defined($daemon_ctx->{PCAP_FILE})) {
+			SocketWrapper::setup_pcap($daemon_ctx->{PCAP_FILE});
+		}
+
+		# setup ENV variables in the child process
+		set_env_for_process($daemon_ctx->{NAME}, $env_vars,
+				    $daemon_ctx->{ENV_VARS});
+
+		# not all s3 daemons run in all testenvs (e.g. fileserver doesn't
+		# run winbindd). In which case, the child process just sleeps
+		if (defined($daemon_ctx->{SKIP_DAEMON})) {
+			$SIG{USR1} = $SIG{ALRM} = $SIG{INT} = $SIG{QUIT} = $SIG{TERM} = sub {
+				my $signame = shift;
+				print("Skip $daemon_ctx->{NAME} received signal $signame");
+				exit 0;
+			};
+			sleep($self->{server_maxtime});
+			exit 0;
+		}
+
+		$ENV{MAKE_TEST_BINARY} = $daemon_ctx->{BINARY_PATH};
+
+		# we close the child's write-end of the pipe and redirect the read-end
+		# to its stdin. That way the daemon will receive an EOF on stdin when
+		# parent selftest process closes its write-end.
+		close($env_vars->{STDIN_PIPE});
+		open STDIN, ">&", $STDIN_READER or die "can't dup STDIN_READER to STDIN: $!";
+
+		# if using kernel namespaces, prepend the command so the process runs in
+		# its own namespace
+		if (Samba::use_namespaces()) {
+			@preargs = ns_exec_preargs($parent_pid, $env_vars);
+		}
+
+		# the command args are stored as an array reference (because...Perl),
+		# so convert the reference back to an array
+		my @full_cmd = @{ $daemon_ctx->{FULL_CMD} };
+
+		exec(@preargs, @full_cmd) or die("Unable to start $ENV{MAKE_TEST_BINARY}: $!");
+	}
+
+	print "DONE ($pid)\n";
+
+	# if using kernel namespaces, we now establish a connection between the
+	# main selftest namespace (i.e. this process) and the new child namespace
+	if (use_namespaces()) {
+		ns_child_forked($pid, $env_vars);
+	}
+
+	return $pid;
+}
+
+my @exported_envvars = (
+	# domain stuff
+	"DOMAIN",
+	"DNSNAME",
+	"REALM",
+	"DOMSID",
+
+	# stuff related to a trusted domain
+	"TRUST_SERVER",
+	"TRUST_USERNAME",
+	"TRUST_PASSWORD",
+	"TRUST_DOMAIN",
+	"TRUST_REALM",
+	"TRUST_DOMSID",
+
+	# stuff related to a trusted domain, on a trust_member
+	# the domain behind a forest trust (two-way)
+	"TRUST_F_BOTH_SERVER",
+	"TRUST_F_BOTH_SERVER_IP",
+	"TRUST_F_BOTH_SERVER_IPV6",
+	"TRUST_F_BOTH_NETBIOSNAME",
+	"TRUST_F_BOTH_USERNAME",
+	"TRUST_F_BOTH_PASSWORD",
+	"TRUST_F_BOTH_DOMAIN",
+	"TRUST_F_BOTH_REALM",
+
+	# stuff related to a trusted domain, on a trust_member
+	# the domain behind an external trust (two-way)
+	"TRUST_E_BOTH_SERVER",
+	"TRUST_E_BOTH_SERVER_IP",
+	"TRUST_E_BOTH_SERVER_IPV6",
+	"TRUST_E_BOTH_NETBIOSNAME",
+	"TRUST_E_BOTH_USERNAME",
+	"TRUST_E_BOTH_PASSWORD",
+	"TRUST_E_BOTH_DOMAIN",
+	"TRUST_E_BOTH_REALM",
+
+	# domain controller stuff
+	"DC_SERVER",
+	"DC_SERVER_IP",
+	"DC_SERVER_IPV6",
+	"DC_NETBIOSNAME",
+	"DC_NETBIOSALIAS",
+
+	# server stuff
+	"SERVER",
+	"SERVER_IP",
+	"SERVER_IPV6",
+	"NETBIOSNAME",
+	"NETBIOSALIAS",
+	"SAMSID",
+
+	# only use these 2 as a last resort. Some tests need to test both client-
+	# side and server-side. In this case, run as default client, ans access
+	# server's smb.conf as needed, typically using:
+	#  param.LoadParm(filename_for_non_global_lp=os.environ['SERVERCONFFILE'])
+	"SERVERCONFFILE",
+	"DC_SERVERCONFFILE",
+
+	# user stuff
+	"USERNAME",
+	"USERID",
+	"PASSWORD",
+	"DC_USERNAME",
+	"DC_PASSWORD",
+
+	# UID/GID for rfc2307 mapping tests
+	"UID_RFC2307TEST",
+	"GID_RFC2307TEST",
+
+	# misc stuff
+	"KRB5_CONFIG",
+	"KRB5CCNAME",
+	"SELFTEST_WINBINDD_SOCKET_DIR",
+	"NMBD_SOCKET_DIR",
+	"LOCAL_PATH",
+	"DNS_FORWARDER1",
+	"DNS_FORWARDER2",
+	"RESOLV_CONF",
+	"UNACCEPTABLE_PASSWORD",
+	"LOCK_DIR",
+	"SMBD_TEST_LOG",
+
+	# nss_wrapper
+	"NSS_WRAPPER_PASSWD",
+	"NSS_WRAPPER_GROUP",
+	"NSS_WRAPPER_HOSTS",
+	"NSS_WRAPPER_HOSTNAME",
+	"NSS_WRAPPER_MODULE_SO_PATH",
+	"NSS_WRAPPER_MODULE_FN_PREFIX",
+
+	# resolv_wrapper
+	"RESOLV_WRAPPER_CONF",
+	"RESOLV_WRAPPER_HOSTS",
+);
+
+sub exported_envvars_str
+{
+	my ($testenv_vars) = @_;
+	my $out = "";
+
+	foreach (@exported_envvars) {
+		next unless defined($testenv_vars->{$_});
+		$out .= $_."=".$testenv_vars->{$_}."\n";
+	}
+
+	return $out;
+}
+
+sub clear_exported_envvars
+{
+	foreach (@exported_envvars) {
+		delete $ENV{$_};
+	}
+}
+
+sub export_envvars
+{
+	my ($testenv_vars) = @_;
+
+	foreach (@exported_envvars) {
+		if (defined($testenv_vars->{$_})) {
+			$ENV{$_} = $testenv_vars->{$_};
+		} else {
+			delete $ENV{$_};
+		}
+	}
+}
+
+sub export_envvars_to_file
+{
+	my ($filepath, $testenv_vars) = @_;
+	my $env_str = exported_envvars_str($testenv_vars);
+
+	open(FILE, "> $filepath");
+	print FILE "$env_str";
+	close(FILE);
+}
+
+# Returns true if kernel namespaces are being used instead of socket-wrapper.
+# The default is false.
+sub use_namespaces
+{
+	return defined($ENV{USE_NAMESPACES});
+}
+
+# returns a given testenv's interface-name (only when USE_NAMESPACES=1)
+sub ns_interface_name
+{
+	my ($hostname) = @_;
+
+	# when using namespaces, each testenv has its own vethX interface,
+	# where X = Samba::get_interface(testenv_name)
+	my $iface = get_interface($hostname);
+	return "veth$iface";
+}
+
+# Called after a new child namespace has been forked
+sub ns_child_forked
+{
+	my ($child_pid, $env_vars) = @_;
+
+	# we only need to do this for the first child forked for this testenv
+	if (defined($env_vars->{NS_PID})) {
+		return;
+	}
+
+	# store the child PID. It's the only way the main (selftest) namespace can
+	# access the new child (testenv) namespace.
+	$env_vars->{NS_PID} = $child_pid;
+
+	# Add the new child namespace's interface to the main selftest bridge.
+	# This connects together the various testenvs so that selftest can talk to
+	# them all
+	my $iface = ns_interface_name($env_vars->{NETBIOSNAME});
+	system "$ENV{SRCDIR}/selftest/ns/add_bridge_iface.sh $iface-br selftest0";
+}
+
+# returns args to prepend to a command in order to execute it the correct
+# namespace for the testenv (creating a new namespace if needed).
+# This should only used when USE_NAMESPACES=1 is set.
+sub ns_exec_preargs
+{
+	my ($parent_pid, $env_vars) = @_;
+
+	# NS_PID stores the pid of the first child daemon run in this namespace
+	if (defined($env_vars->{NS_PID})) {
+
+		# the namespace has already been created previously. So we use nsenter
+		# to execute the command in the given testenv's namespace. We need to
+		# use the NS_PID to identify this particular namespace
+		return ("nsenter", "-t", "$env_vars->{NS_PID}", "--net");
+	} else {
+
+		# We need to create a new namespace for this daemon (i.e. we're
+		# setting up a new testenv). First, write the environment variables to
+		# an exports.sh file for this testenv (for convenient access by the
+		# namespace scripts).
+		my $exports_file = "$env_vars->{TESTENV_DIR}/exports.sh";
+		export_envvars_to_file($exports_file, $env_vars);
+
+		# when using namespaces, each testenv has its own veth interface
+		my $interface = ns_interface_name($env_vars->{NETBIOSNAME});
+
+		# we use unshare to create a new network namespace. The start_in_ns.sh
+		# helper script gets run first to setup the new namespace's interfaces.
+		# (This all gets prepended around the actual command to run in the new
+		# namespace)
+		return ("unshare", "--net", "$ENV{SRCDIR}/selftest/ns/start_in_ns.sh",
+				$interface, $exports_file, $parent_pid);
+	}
 }
 
 1;

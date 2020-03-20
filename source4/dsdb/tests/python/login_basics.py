@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Basic sanity-checks of user login. This sanity-checks that a user can login
@@ -178,6 +178,7 @@ userPassword: %s
 
     def test_login_basics_ntlm(self):
         self._test_login_basics(self.lockout1ntlm_creds)
+
 
 host_url = "ldap://%s" % host
 

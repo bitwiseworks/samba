@@ -84,6 +84,7 @@
 #include "rpc_server/rpc_ncacn_np.h"
 #include "auth/credentials/credentials.h"
 #include "lib/param/param.h"
+#include "lib/gencache.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_WINBIND
@@ -225,10 +226,10 @@ static bool fork_child_dc_connect(struct winbindd_domain *domain)
 
 	if (domain->dc_probe_pid != (pid_t)0) {
 		/* Parent */
-		messaging_register(server_messaging_context(), NULL,
+		messaging_register(global_messaging_context(), NULL,
 				   MSG_WINBIND_TRY_TO_GO_ONLINE,
 				   msg_try_to_go_online);
-		messaging_register(server_messaging_context(), NULL,
+		messaging_register(global_messaging_context(), NULL,
 				   MSG_WINBIND_FAILED_TO_GO_ONLINE,
 				   msg_failed_to_go_online);
 		return True;
@@ -240,7 +241,8 @@ static bool fork_child_dc_connect(struct winbindd_domain *domain)
 
 	if (!override_logfile) {
 		if (asprintf(&lfile, "%s/log.winbindd-dc-connect", get_dyn_LOGFILEBASE()) == -1) {
-			DEBUG(0, ("fork_child_dc_connect: out of memory.\n"));
+			DBG_ERR("fork_child_dc_connect: "
+				"out of memory in asprintf().\n");
 			_exit(1);
 		}
 	}
@@ -249,7 +251,7 @@ static bool fork_child_dc_connect(struct winbindd_domain *domain)
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(1, ("winbindd_reinit_after_fork failed: %s\n",
 			  nt_errstr(status)));
-		messaging_send_buf(server_messaging_context(),
+		messaging_send_buf(global_messaging_context(),
 				   pid_to_procid(parent_pid),
 				   MSG_WINBIND_FAILED_TO_GO_ONLINE,
 				   (const uint8_t *)domain->name,
@@ -263,7 +265,7 @@ static bool fork_child_dc_connect(struct winbindd_domain *domain)
 	mem_ctx = talloc_init("fork_child_dc_connect");
 	if (!mem_ctx) {
 		DEBUG(0,("talloc_init failed.\n"));
-		messaging_send_buf(server_messaging_context(),
+		messaging_send_buf(global_messaging_context(),
 				   pid_to_procid(parent_pid),
 				   MSG_WINBIND_FAILED_TO_GO_ONLINE,
 				   (const uint8_t *)domain->name,
@@ -275,7 +277,7 @@ static bool fork_child_dc_connect(struct winbindd_domain *domain)
 	TALLOC_FREE(mem_ctx);
 	if (!ok || (num_dcs == 0)) {
 		/* Still offline ? Can't find DC's. */
-		messaging_send_buf(server_messaging_context(),
+		messaging_send_buf(global_messaging_context(),
 				   pid_to_procid(parent_pid),
 				   MSG_WINBIND_FAILED_TO_GO_ONLINE,
 				   (const uint8_t *)domain->name,
@@ -286,7 +288,7 @@ static bool fork_child_dc_connect(struct winbindd_domain *domain)
 	/* We got a DC. Send a message to our parent to get it to
 	   try and do the same. */
 
-	messaging_send_buf(server_messaging_context(),
+	messaging_send_buf(global_messaging_context(),
 			   pid_to_procid(parent_pid),
 			   MSG_WINBIND_TRY_TO_GO_ONLINE,
 			   (const uint8_t *)domain->name,
@@ -434,7 +436,7 @@ void set_domain_offline(struct winbindd_domain *domain)
 
 	calc_new_online_timeout_check(domain);
 
-	domain->check_online_event = tevent_add_timer(server_event_context(),
+	domain->check_online_event = tevent_add_timer(global_event_context(),
 						NULL,
 						timeval_current_ofs(domain->check_online_timeout,0),
 						check_domain_online_handler,
@@ -450,7 +452,7 @@ void set_domain_offline(struct winbindd_domain *domain)
 
 	/* Send a message to the parent that the domain is offline. */
 	if (parent_pid > 1 && !domain->internal) {
-		messaging_send_buf(server_messaging_context(),
+		messaging_send_buf(global_messaging_context(),
 				   pid_to_procid(parent_pid),
 				   MSG_WINBIND_DOMAIN_OFFLINE,
 				   (uint8_t *)domain->name,
@@ -464,7 +466,7 @@ void set_domain_offline(struct winbindd_domain *domain)
 		struct winbindd_child *idmap = idmap_child();
 
 		if ( idmap->pid != 0 ) {
-			messaging_send_buf(server_messaging_context(),
+			messaging_send_buf(global_messaging_context(),
 					   pid_to_procid(idmap->pid), 
 					   MSG_WINBIND_OFFLINE, 
 					   (const uint8_t *)domain->name,
@@ -527,16 +529,16 @@ static void set_domain_online(struct winbindd_domain *domain)
 	TALLOC_FREE(domain->check_online_event);
 
 	/* Ensure we ignore any pending child messages. */
-	messaging_deregister(server_messaging_context(),
+	messaging_deregister(global_messaging_context(),
 			     MSG_WINBIND_TRY_TO_GO_ONLINE, NULL);
-	messaging_deregister(server_messaging_context(),
+	messaging_deregister(global_messaging_context(),
 			     MSG_WINBIND_FAILED_TO_GO_ONLINE, NULL);
 
 	domain->online = True;
 
 	/* Send a message to the parent that the domain is online. */
 	if (parent_pid > 1 && !domain->internal) {
-		messaging_send_buf(server_messaging_context(),
+		messaging_send_buf(global_messaging_context(),
 				   pid_to_procid(parent_pid),
 				   MSG_WINBIND_DOMAIN_ONLINE,
 				   (uint8_t *)domain->name,
@@ -550,7 +552,7 @@ static void set_domain_online(struct winbindd_domain *domain)
 		struct winbindd_child *idmap = idmap_child();
 
 		if ( idmap->pid != 0 ) {
-			messaging_send_buf(server_messaging_context(),
+			messaging_send_buf(global_messaging_context(),
 					   pid_to_procid(idmap->pid), 
 					   MSG_WINBIND_ONLINE, 
 					   (const uint8_t *)domain->name,
@@ -610,7 +612,7 @@ void set_domain_online_request(struct winbindd_domain *domain)
 
 	TALLOC_FREE(domain->check_online_event);
 
-	domain->check_online_event = tevent_add_timer(server_event_context(),
+	domain->check_online_event = tevent_add_timer(global_event_context(),
 						     NULL,
 						     tev,
 						     check_domain_online_handler,
@@ -1164,7 +1166,7 @@ static NTSTATUS cm_prepare_connection(struct winbindd_domain *domain,
 		  nt_errstr(result)));
 
 	/*
-	 * If we are not going to validiate the conneciton
+	 * If we are not going to validate the connection
 	 * with SMB signing, then allow us to fall back to
 	 * anonymous
 	 */
@@ -1217,7 +1219,7 @@ static NTSTATUS cm_prepare_connection(struct winbindd_domain *domain,
 		  nt_errstr(result)));
 
 	/*
-	 * If we are not going to validiate the conneciton
+	 * If we are not going to validate the connection
 	 * with SMB signing, then allow us to fall back to
 	 * anonymous
 	 */
@@ -1412,7 +1414,10 @@ static bool dcip_check_name(TALLOC_CTX *mem_ctx,
 
 		print_sockaddr(addr, sizeof(addr), pss);
 
-		ads = ads_init(domain->alt_name, domain->name, addr);
+		ads = ads_init(domain->alt_name,
+			       domain->name,
+			       addr,
+			       ADS_SASL_PLAIN);
 		ads->auth.flags |= ADS_AUTH_NO_BIND;
 		ads->config.flags |= request_flags;
 		ads->server.no_fallback = true;
@@ -1475,7 +1480,7 @@ static bool dcip_check_name(TALLOC_CTX *mem_ctx,
 			 "%s$",
 			 lp_netbios_name());
 
-		status = nbt_getdc(server_messaging_context(), 10, pss,
+		status = nbt_getdc(global_messaging_context(), 10, pss,
 				   domain->name, &domain->sid,
 				   my_acct_name, ACB_WSTRUST,
 				   nt_version, mem_ctx, &nt_version,
@@ -1849,7 +1854,7 @@ NTSTATUS wb_open_internal_pipe(TALLOC_CTX *mem_ctx,
 						 session_info,
 						 NULL,
 						 NULL,
-						 server_messaging_context(),
+						 global_messaging_context(),
 						 &cli);
 	} else {
 		status = rpc_pipe_open_internal(mem_ctx,
@@ -1857,7 +1862,7 @@ NTSTATUS wb_open_internal_pipe(TALLOC_CTX *mem_ctx,
 						session_info,
 						NULL,
 						NULL,
-						server_messaging_context(),
+						global_messaging_context(),
 						&cli);
 	}
 	if (!NT_STATUS_IS_OK(status)) {
@@ -2147,7 +2152,7 @@ static bool connection_ok(struct winbindd_domain *domain)
 		return False;
 	}
 
-	if (domain->online == False) {
+	if (!domain->online) {
 		DEBUG(3, ("connection_ok: Domain %s is offline\n", domain->name));
 		return False;
 	}
@@ -2550,15 +2555,15 @@ no_dssetup:
 			    !dom_sid_equal(&domain->sid,
 					   lsa_info->dns.sid))
 			{
+				struct dom_sid_buf buf1, buf2;
 				DEBUG(1, ("set_dc_type_and_flags_connect: DC "
 					  "for domain %s (%s) claimed it was "
 					  "a DC for domain %s, refusing to "
 					  "initialize\n",
-					  dom_sid_string(talloc_tos(),
-							 &domain->sid),
+					  dom_sid_str_buf(&domain->sid, &buf1),
 					  domain->name,
-					  dom_sid_string(talloc_tos(),
-							 lsa_info->dns.sid)));
+					  dom_sid_str_buf(lsa_info->dns.sid,
+							  &buf2)));
 				TALLOC_FREE(cli);
 				TALLOC_FREE(mem_ctx);
 				return;
@@ -2609,16 +2614,18 @@ no_dssetup:
 				    !dom_sid_equal(&domain->sid,
 						lsa_info->account_domain.sid))
 				{
+					struct dom_sid_buf buf1, buf2;
 					DEBUG(1,
 					      ("set_dc_type_and_flags_connect: "
 					       "DC for domain %s (%s) claimed "
 					       "it was a DC for domain %s, "
 					       "refusing to initialize\n",
-					       dom_sid_string(talloc_tos(),
-							      &domain->sid),
+					       dom_sid_str_buf(
+						       &domain->sid, &buf1),
 					       domain->name,
-					       dom_sid_string(talloc_tos(),
-						lsa_info->account_domain.sid)));
+					       dom_sid_str_buf(
+						lsa_info->account_domain.sid,
+						&buf2)));
 					TALLOC_FREE(cli);
 					TALLOC_FREE(mem_ctx);
 					return;
@@ -3293,7 +3300,7 @@ static NTSTATUS cm_connect_netlogon_transport(struct winbindd_domain *domain,
 					      enum dcerpc_transport_t transport,
 					      struct rpc_pipe_client **cli)
 {
-	struct messaging_context *msg_ctx = server_messaging_context();
+	struct messaging_context *msg_ctx = global_messaging_context();
 	struct winbindd_cm_conn *conn;
 	NTSTATUS result;
 	enum netr_SchannelType sec_chan_type;

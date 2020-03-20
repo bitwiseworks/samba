@@ -28,6 +28,10 @@
 #include "auth/credentials/credentials.h"
 #include "auth/credentials/credentials_internal.h"
 
+#include "lib/crypto/gnutls_helpers.h"
+#include <gnutls/gnutls.h>
+#include <gnutls/crypto.h>
+
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_AUTH
 
@@ -47,6 +51,7 @@ _PUBLIC_ NTSTATUS cli_credentials_get_ntlm_response(struct cli_credentials *cred
 	DATA_BLOB lm_session_key = data_blob_null;
 	DATA_BLOB session_key = data_blob_null;
 	const struct samr_Password *nt_hash = NULL;
+	int rc;
 
 	if (cred->use_kerberos == CRED_MUST_USE_KERBEROS) {
 		TALLOC_FREE(frame);
@@ -152,7 +157,6 @@ _PUBLIC_ NTSTATUS cli_credentials_get_ntlm_response(struct cli_credentials *cred
 			memset(lm_response.data, 0, lm_response.length);
 		}
 	} else if (*flags & CLI_CRED_NTLM2) {
-		MD5_CTX md5_session_nonce_ctx;
 		uint8_t session_nonce[16];
 		uint8_t session_nonce_hash[16];
 		uint8_t user_session_key[16];
@@ -167,10 +171,13 @@ _PUBLIC_ NTSTATUS cli_credentials_get_ntlm_response(struct cli_credentials *cred
 		memcpy(session_nonce, challenge.data, 8);
 		memcpy(&session_nonce[8], lm_response.data, 8);
 
-		MD5Init(&md5_session_nonce_ctx);
-		MD5Update(&md5_session_nonce_ctx, session_nonce,
-			  sizeof(session_nonce));
-		MD5Final(session_nonce_hash, &md5_session_nonce_ctx);
+		rc = gnutls_hash_fast(GNUTLS_DIG_MD5,
+				      session_nonce,
+				      sizeof(session_nonce),
+				      session_nonce_hash);
+		if (rc < 0) {
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		}
 
 		DEBUG(5, ("NTLMSSP challenge set by NTLM2\n"));
 		DEBUG(5, ("challenge is: \n"));
@@ -181,9 +188,15 @@ _PUBLIC_ NTSTATUS cli_credentials_get_ntlm_response(struct cli_credentials *cred
 			TALLOC_FREE(frame);
 			return NT_STATUS_NO_MEMORY;
 		}
-		SMBOWFencrypt(nt_hash->hash,
-			      session_nonce_hash,
-			      nt_response.data);
+		rc = SMBOWFencrypt(nt_hash->hash,
+				   session_nonce_hash,
+                                   nt_response.data);
+		if (rc != 0) {
+			TALLOC_FREE(frame);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+		}
+
+		ZERO_ARRAY(session_nonce_hash);
 
 		session_key = data_blob_talloc_zero(frame, 16);
 		if (session_key.data == NULL) {
@@ -192,8 +205,19 @@ _PUBLIC_ NTSTATUS cli_credentials_get_ntlm_response(struct cli_credentials *cred
 		}
 
 		SMBsesskeygen_ntv1(nt_hash->hash, user_session_key);
-		hmac_md5(user_session_key, session_nonce, sizeof(session_nonce), session_key.data);
-		ZERO_STRUCT(user_session_key);
+
+		rc = gnutls_hmac_fast(GNUTLS_MAC_MD5,
+				      user_session_key,
+				      sizeof(user_session_key),
+				      session_nonce,
+				      sizeof(session_nonce),
+				      session_key.data);
+		if (rc < 0) {
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		}
+
+		ZERO_ARRAY(user_session_key);
+
 		dump_data_pw("NTLM2 session key:\n", session_key.data, session_key.length);
 
 		/* LM Key is incompatible... */
@@ -208,8 +232,12 @@ _PUBLIC_ NTSTATUS cli_credentials_get_ntlm_response(struct cli_credentials *cred
 			TALLOC_FREE(frame);
 			return NT_STATUS_NO_MEMORY;
 		}
-		SMBOWFencrypt(nt_hash->hash, challenge.data,
-			      nt_response.data);
+		rc = SMBOWFencrypt(nt_hash->hash, challenge.data,
+				   nt_response.data);
+		if (rc != 0) {
+			TALLOC_FREE(frame);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+		}
 
 		session_key = data_blob_talloc_zero(frame, 16);
 		if (session_key.data == NULL) {
@@ -234,9 +262,14 @@ _PUBLIC_ NTSTATUS cli_credentials_get_ntlm_response(struct cli_credentials *cred
 				return NT_STATUS_NO_MEMORY;
 			}
 
-			SMBencrypt_hash(lm_hash,
-					challenge.data,
-					lm_response.data);
+			rc = SMBencrypt_hash(lm_hash,
+					     challenge.data,
+					     lm_response.data);
+			if (rc != 0) {
+				ZERO_STRUCT(lm_hash);
+				TALLOC_FREE(frame);
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+			}
 		} else {
 			/* just copy the nt_response */
 			lm_response = data_blob_dup_talloc(frame, nt_response);

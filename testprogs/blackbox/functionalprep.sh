@@ -61,7 +61,7 @@ provision_2012r2() {
 ldapcmp_ignore() {
     # At some point we will need to ignore, but right now, it should be perfect
     IGNORE_ATTRS=$1
-    $PYTHON $BINDIR/samba-tool ldapcmp tdb://$PREFIX_ABS/$2/private/sam.ldb tdb://$PREFIX_ABS/$3/private/sam.ldb --two
+    $PYTHON $BINDIR/samba-tool ldapcmp tdb://$PREFIX_ABS/$2/private/sam.ldb tdb://$PREFIX_ABS/$3/private/sam.ldb --two --skip-missing-dn --filter msDS-SupportedEncryptionTypes
 }
 
 ldapcmp() {
@@ -71,21 +71,21 @@ ldapcmp() {
 }
 
 functional_prep() {
-    $BINDIR/samba-tool domain functionalprep -H tdb://$PREFIX_ABS/2012R2_schema/private/sam.ldb --function-level=2012_R2
+    $PYTHON $BINDIR/samba-tool domain functionalprep -H tdb://$PREFIX_ABS/2012R2_schema/private/sam.ldb --function-level=2012_R2
 }
 
 functional_prep_old() {
-    $BINDIR/samba-tool domain functionalprep -H tdb://$PREFIX_ABS/$OLD_RELEASE/private/sam.ldb --function-level=2012_R2
+    $PYTHON $BINDIR/samba-tool domain functionalprep -H tdb://$PREFIX_ABS/$OLD_RELEASE/private/sam.ldb --function-level=2012_R2
 }
 
 steal_roles() {
     # Must steal schema master and infrastructure roles first
-    $BINDIR/samba-tool fsmo seize --role=schema -H tdb://$PREFIX_ABS/$OLD_RELEASE/private/sam.ldb --force
-    $BINDIR/samba-tool fsmo seize --role=infrastructure -H tdb://$PREFIX_ABS/$OLD_RELEASE/private/sam.ldb --force
+    $PYTHON $BINDIR/samba-tool fsmo seize --role=schema -H tdb://$PREFIX_ABS/$OLD_RELEASE/private/sam.ldb --force
+    $PYTHON $BINDIR/samba-tool fsmo seize --role=infrastructure -H tdb://$PREFIX_ABS/$OLD_RELEASE/private/sam.ldb --force
 }
 
 schema_upgrade() {
-    $BINDIR/samba-tool domain schemaupgrade -H tdb://$PREFIX_ABS/$OLD_RELEASE/private/sam.ldb --schema=2012_R2
+    $PYTHON $BINDIR/samba-tool domain schemaupgrade -H tdb://$PREFIX_ABS/$OLD_RELEASE/private/sam.ldb --schema=2012_R2
 }
 
 # double-check we cleaned up from the last test run

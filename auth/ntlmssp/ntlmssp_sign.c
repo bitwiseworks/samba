@@ -21,10 +21,12 @@
 #include "includes.h"
 #include "../auth/ntlmssp/ntlmssp.h"
 #include "../libcli/auth/libcli_auth.h"
-#include "../lib/crypto/md5.h"
-#include "../lib/crypto/hmacmd5.h"
-#include "../lib/crypto/crc32.h"
+#include "zlib.h"
 #include "../auth/ntlmssp/ntlmssp_private.h"
+
+#include "lib/crypto/gnutls_helpers.h"
+#include <gnutls/gnutls.h>
+#include <gnutls/crypto.h>
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_AUTH
@@ -45,20 +47,35 @@
  */
 
 static void dump_arc4_state(const char *description,
-			    struct arcfour_state *state)
+			    gnutls_cipher_hd_t *state)
 {
-	dump_data_pw(description, state->sbox, sizeof(state->sbox));
+	DBG_DEBUG("%s\n", description);
 }
 
-static void calc_ntlmv2_key(uint8_t subkey[16],
-			    DATA_BLOB session_key,
-			    const char *constant)
+static NTSTATUS calc_ntlmv2_key(uint8_t subkey[16],
+				DATA_BLOB session_key,
+				const char *constant)
 {
-	MD5_CTX ctx3;
-	MD5Init(&ctx3);
-	MD5Update(&ctx3, session_key.data, session_key.length);
-	MD5Update(&ctx3, (const uint8_t *)constant, strlen(constant)+1);
-	MD5Final(subkey, &ctx3);
+	gnutls_hash_hd_t hash_hnd = NULL;
+	int rc;
+
+	rc = gnutls_hash_init(&hash_hnd, GNUTLS_DIG_MD5);
+	if (rc < 0) {
+		return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+	}
+	rc = gnutls_hash(hash_hnd, session_key.data, session_key.length);
+	if (rc < 0) {
+		gnutls_hash_deinit(hash_hnd, NULL);
+		return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+	}
+	rc = gnutls_hash(hash_hnd, constant, strlen(constant) + 1);
+	if (rc < 0) {
+		gnutls_hash_deinit(hash_hnd, NULL);
+		return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+	}
+	gnutls_hash_deinit(hash_hnd, subkey);
+
+	return NT_STATUS_OK;
 }
 
 enum ntlmssp_direction {
@@ -73,8 +90,11 @@ static NTSTATUS ntlmssp_make_packet_signature(struct ntlmssp_state *ntlmssp_stat
 					      enum ntlmssp_direction direction,
 					      DATA_BLOB *sig, bool encrypt_sig)
 {
+	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
+	int rc;
+
 	if (ntlmssp_state->neg_flags & NTLMSSP_NEGOTIATE_NTLM2) {
-		HMACMD5Context ctx;
+		gnutls_hmac_hd_t hmac_hnd = NULL;
 		uint8_t digest[16];
 		uint8_t seq_num[4];
 
@@ -92,7 +112,14 @@ static NTSTATUS ntlmssp_make_packet_signature(struct ntlmssp_state *ntlmssp_stat
 
 			SIVAL(seq_num, 0, ntlmssp_state->crypt->ntlm2.sending.seq_num);
 			ntlmssp_state->crypt->ntlm2.sending.seq_num++;
-			hmac_md5_init_limK_to_64(ntlmssp_state->crypt->ntlm2.sending.sign_key, 16, &ctx);
+
+			rc = gnutls_hmac_init(&hmac_hnd,
+					      GNUTLS_MAC_MD5,
+					      ntlmssp_state->crypt->ntlm2.sending.sign_key,
+					      16);
+			if (rc < 0) {
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+			}
 			break;
 		case NTLMSSP_RECEIVE:
 
@@ -103,40 +130,67 @@ static NTSTATUS ntlmssp_make_packet_signature(struct ntlmssp_state *ntlmssp_stat
 
 			SIVAL(seq_num, 0, ntlmssp_state->crypt->ntlm2.receiving.seq_num);
 			ntlmssp_state->crypt->ntlm2.receiving.seq_num++;
-			hmac_md5_init_limK_to_64(ntlmssp_state->crypt->ntlm2.receiving.sign_key, 16, &ctx);
+
+			rc = gnutls_hmac_init(&hmac_hnd,
+					      GNUTLS_MAC_MD5,
+					      ntlmssp_state->crypt->ntlm2.receiving.sign_key,
+					      16);
+			if (rc < 0) {
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+			}
 			break;
 		}
 
 		dump_data_pw("pdu data ", whole_pdu, pdu_length);
 
-		hmac_md5_update(seq_num, sizeof(seq_num), &ctx);
-		hmac_md5_update(whole_pdu, pdu_length, &ctx);
-		hmac_md5_final(digest, &ctx);
+		rc = gnutls_hmac(hmac_hnd, seq_num, sizeof(seq_num));
+		if (rc < 0) {
+			gnutls_hmac_deinit(hmac_hnd, NULL);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		}
+		rc = gnutls_hmac(hmac_hnd, whole_pdu, pdu_length);
+		if (rc < 0) {
+			gnutls_hmac_deinit(hmac_hnd, NULL);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		}
+		gnutls_hmac_deinit(hmac_hnd, digest);
 
 		if (encrypt_sig && (ntlmssp_state->neg_flags & NTLMSSP_NEGOTIATE_KEY_EXCH)) {
 			switch (direction) {
 			case NTLMSSP_SEND:
-				arcfour_crypt_sbox(&ntlmssp_state->crypt->ntlm2.sending.seal_state,
-						   digest, 8);
+				rc = gnutls_cipher_encrypt(ntlmssp_state->crypt->ntlm2.sending.seal_state,
+							   digest,
+							   8);
 				break;
 			case NTLMSSP_RECEIVE:
-				arcfour_crypt_sbox(&ntlmssp_state->crypt->ntlm2.receiving.seal_state,
-						   digest, 8);
+				rc = gnutls_cipher_encrypt(ntlmssp_state->crypt->ntlm2.receiving.seal_state,
+							   digest,
+							   8);
 				break;
+			}
+			if (rc < 0) {
+				DBG_ERR("gnutls_cipher_encrypt for NTLMv2 EXCH "
+					"%s packet signature failed: %s\n",
+					direction == NTLMSSP_SEND ?
+						"send" : "receive",
+					gnutls_strerror(rc));
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
 			}
 		}
 
 		SIVAL(sig->data, 0, NTLMSSP_SIGN_VERSION);
 		memcpy(sig->data + 4, digest, 8);
+		ZERO_ARRAY(digest);
 		memcpy(sig->data + 12, seq_num, 4);
+		ZERO_ARRAY(seq_num);
 
 		dump_data_pw("ntlmssp v2 sig ", sig->data, sig->length);
 
 	} else {
-		NTSTATUS status;
 		uint32_t crc;
 
-		crc = crc32_calc_buffer(data, length);
+		crc = crc32(0, Z_NULL, 0);
+		crc = crc32(crc, data, length);
 
 		status = msrpc_gen(sig_mem_ctx,
 			       sig, "dddd",
@@ -150,9 +204,17 @@ static NTSTATUS ntlmssp_make_packet_signature(struct ntlmssp_state *ntlmssp_stat
 
 		dump_arc4_state("ntlmssp hash: \n",
 				&ntlmssp_state->crypt->ntlm.seal_state);
-		arcfour_crypt_sbox(&ntlmssp_state->crypt->ntlm.seal_state,
-				   sig->data+4, sig->length-4);
+		rc = gnutls_cipher_encrypt(ntlmssp_state->crypt->ntlm.seal_state,
+					   sig->data + 4,
+					   sig->length - 4);
+		if (rc < 0) {
+			DBG_ERR("gnutls_cipher_encrypt for NTLM packet "
+				"signature failed: %s\n",
+				gnutls_strerror(rc));
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		}
 	}
+
 	return NT_STATUS_OK;
 }
 
@@ -272,6 +334,8 @@ NTSTATUS ntlmssp_seal_packet(struct ntlmssp_state *ntlmssp_state,
 			     const uint8_t *whole_pdu, size_t pdu_length,
 			     DATA_BLOB *sig)
 {
+	int rc;
+
 	if (!(ntlmssp_state->neg_flags & NTLMSSP_NEGOTIATE_SEAL)) {
 		DEBUG(3, ("NTLMSSP Sealing not negotiated - cannot seal packet!\n"));
 		return NT_STATUS_INVALID_PARAMETER;
@@ -308,17 +372,32 @@ NTSTATUS ntlmssp_seal_packet(struct ntlmssp_state *ntlmssp_state,
 			return nt_status;
 		}
 
-		arcfour_crypt_sbox(&ntlmssp_state->crypt->ntlm2.sending.seal_state,
-				   data, length);
+		rc = gnutls_cipher_encrypt(ntlmssp_state->crypt->ntlm2.sending.seal_state,
+					   data,
+					   length);
+		if (rc < 0) {
+			DBG_ERR("gnutls_cipher_encrypt ntlmv2 sealing the data "
+				"failed: %s\n",
+				gnutls_strerror(rc));
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		}
 		if (ntlmssp_state->neg_flags & NTLMSSP_NEGOTIATE_KEY_EXCH) {
-			arcfour_crypt_sbox(&ntlmssp_state->crypt->ntlm2.sending.seal_state,
-					   sig->data+4, 8);
+			rc = gnutls_cipher_encrypt(ntlmssp_state->crypt->ntlm2.sending.seal_state,
+						    sig->data + 4,
+						    8);
+			if (rc < 0) {
+				DBG_ERR("gnutls_cipher_encrypt ntlmv2 sealing "
+					"the EXCH signature data failed: %s\n",
+					gnutls_strerror(rc));
+				return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+			}
 		}
 	} else {
 		NTSTATUS status;
 		uint32_t crc;
 
-		crc = crc32_calc_buffer(data, length);
+		crc = crc32(0, Z_NULL, 0);
+		crc = crc32(crc, data, length);
 
 		status = msrpc_gen(sig_mem_ctx,
 			       sig, "dddd",
@@ -335,17 +414,30 @@ NTSTATUS ntlmssp_seal_packet(struct ntlmssp_state *ntlmssp_state,
 		 * is not constant, but is is rather updated with
 		 * each iteration
 		 */
+		dump_arc4_state("ntlmv1 arc4 state:\n",
+				&ntlmssp_state->crypt->ntlm.seal_state);
+		rc = gnutls_cipher_encrypt(ntlmssp_state->crypt->ntlm.seal_state,
+					   data,
+					   length);
+		if (rc < 0) {
+			DBG_ERR("gnutls_cipher_encrypt ntlmv1 sealing data"
+				"failed: %s\n",
+				gnutls_strerror(rc));
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		}
 
 		dump_arc4_state("ntlmv1 arc4 state:\n",
 				&ntlmssp_state->crypt->ntlm.seal_state);
-		arcfour_crypt_sbox(&ntlmssp_state->crypt->ntlm.seal_state,
-				   data, length);
 
-		dump_arc4_state("ntlmv1 arc4 state:\n",
-				&ntlmssp_state->crypt->ntlm.seal_state);
-
-		arcfour_crypt_sbox(&ntlmssp_state->crypt->ntlm.seal_state,
-				   sig->data+4, sig->length-4);
+		rc = gnutls_cipher_encrypt(ntlmssp_state->crypt->ntlm.seal_state,
+					    sig->data + 4,
+					    sig->length - 4);
+		if (rc < 0) {
+			DBG_ERR("gnutls_cipher_encrypt ntlmv1 sealing signing "
+				"data failed: %s\n",
+				gnutls_strerror(rc));
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		}
 
 		ntlmssp_state->crypt->ntlm.seq_num++;
 	}
@@ -366,6 +458,8 @@ NTSTATUS ntlmssp_unseal_packet(struct ntlmssp_state *ntlmssp_state,
 			       const DATA_BLOB *sig)
 {
 	NTSTATUS status;
+	int rc;
+
 	if (!ntlmssp_state->session_key.length) {
 		DEBUG(3, ("NO session key, cannot unseal packet\n"));
 		return NT_STATUS_NO_USER_SESSION_KEY;
@@ -376,14 +470,29 @@ NTSTATUS ntlmssp_unseal_packet(struct ntlmssp_state *ntlmssp_state,
 
 	if (ntlmssp_state->neg_flags & NTLMSSP_NEGOTIATE_NTLM2) {
 		/* First unseal the data. */
-		arcfour_crypt_sbox(&ntlmssp_state->crypt->ntlm2.receiving.seal_state,
-				   data, length);
+		rc = gnutls_cipher_decrypt(ntlmssp_state->crypt->ntlm2.receiving.seal_state,
+					   data,
+					   length);
+		if (rc < 0) {
+			DBG_ERR("gnutls_cipher_decrypt ntlmv2 unsealing the "
+				"data failed: %s\n",
+				gnutls_strerror(rc));
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		}
 		dump_data_pw("ntlmv2 clear data\n", data, length);
 	} else {
-		arcfour_crypt_sbox(&ntlmssp_state->crypt->ntlm.seal_state,
-				   data, length);
+		rc = gnutls_cipher_decrypt(ntlmssp_state->crypt->ntlm.seal_state,
+					   data,
+					   length);
+		if (rc < 0) {
+			DBG_ERR("gnutls_cipher_decrypt ntlmv1 unsealing the "
+				"data failed: %s\n",
+				gnutls_strerror(rc));
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		}
 		dump_data_pw("ntlmv1 clear data\n", data, length);
 	}
+
 	status = ntlmssp_check_packet(ntlmssp_state,
 				      data, length,
 				      whole_pdu, pdu_length,
@@ -509,6 +618,8 @@ NTSTATUS ntlmssp_unwrap(struct ntlmssp_state *ntlmssp_state,
 NTSTATUS ntlmssp_sign_reset(struct ntlmssp_state *ntlmssp_state,
 			    bool reset_seqnums)
 {
+	int rc;
+
 	DEBUG(3, ("NTLMSSP Sign/Seal - Initialising with flags:\n"));
 	debug_ntlmssp_flags(ntlmssp_state->neg_flags);
 
@@ -538,12 +649,17 @@ NTSTATUS ntlmssp_sign_reset(struct ntlmssp_state *ntlmssp_state,
 		const char *send_seal_const;
 		const char *recv_sign_const;
 		const char *recv_seal_const;
-		uint8_t send_seal_key[16];
-		DATA_BLOB send_seal_blob = data_blob_const(send_seal_key,
-					   sizeof(send_seal_key));
-		uint8_t recv_seal_key[16];
-		DATA_BLOB recv_seal_blob = data_blob_const(recv_seal_key,
-					   sizeof(recv_seal_key));
+		uint8_t send_seal_key[16] = {0};
+		gnutls_datum_t send_seal_blob = {
+			.data = send_seal_key,
+			.size = sizeof(send_seal_key),
+		};
+		uint8_t recv_seal_key[16] = {0};
+		gnutls_datum_t recv_seal_blob = {
+			.data = recv_seal_key,
+			.size = sizeof(recv_seal_key),
+		};
+		NTSTATUS status;
 
 		switch (ntlmssp_state->role) {
 		case NTLMSSP_CLIENT:
@@ -586,18 +702,37 @@ NTSTATUS ntlmssp_sign_reset(struct ntlmssp_state *ntlmssp_state,
 			     weak_session_key.length);
 
 		/* SEND: sign key */
-		calc_ntlmv2_key(ntlmssp_state->crypt->ntlm2.sending.sign_key,
-				ntlmssp_state->session_key, send_sign_const);
+		status = calc_ntlmv2_key(ntlmssp_state->crypt->ntlm2.sending.sign_key,
+					 ntlmssp_state->session_key, send_sign_const);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
 		dump_data_pw("NTLMSSP send sign key:\n",
 			     ntlmssp_state->crypt->ntlm2.sending.sign_key, 16);
 
 		/* SEND: seal ARCFOUR pad */
-		calc_ntlmv2_key(send_seal_key,
-				weak_session_key, send_seal_const);
-		dump_data_pw("NTLMSSP send seal key:\n", send_seal_key, 16);
+		status = calc_ntlmv2_key(send_seal_key,
+					 weak_session_key,
+					 send_seal_const);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
+		dump_data_pw("NTLMSSP send seal key:\n",
+			     send_seal_key,
+			     sizeof(send_seal_key));
 
-		arcfour_init(&ntlmssp_state->crypt->ntlm2.sending.seal_state,
-			     &send_seal_blob);
+		if (ntlmssp_state->crypt->ntlm2.sending.seal_state != NULL) {
+			gnutls_cipher_deinit(ntlmssp_state->crypt->ntlm2.sending.seal_state);
+		}
+		rc = gnutls_cipher_init(&ntlmssp_state->crypt->ntlm2.sending.seal_state,
+					GNUTLS_CIPHER_ARCFOUR_128,
+					&send_seal_blob,
+					NULL);
+		if (rc < 0) {
+			DBG_ERR("gnutls_cipher_init failed: %s\n",
+				gnutls_strerror(rc));
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		}
 
 		dump_arc4_state("NTLMSSP send seal arc4 state:\n",
 				&ntlmssp_state->crypt->ntlm2.sending.seal_state);
@@ -608,18 +743,37 @@ NTSTATUS ntlmssp_sign_reset(struct ntlmssp_state *ntlmssp_state,
 		}
 
 		/* RECV: sign key */
-		calc_ntlmv2_key(ntlmssp_state->crypt->ntlm2.receiving.sign_key,
-				ntlmssp_state->session_key, recv_sign_const);
+		status = calc_ntlmv2_key(ntlmssp_state->crypt->ntlm2.receiving.sign_key,
+					 ntlmssp_state->session_key, recv_sign_const);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
 		dump_data_pw("NTLMSSP recv sign key:\n",
 			     ntlmssp_state->crypt->ntlm2.receiving.sign_key, 16);
 
 		/* RECV: seal ARCFOUR pad */
-		calc_ntlmv2_key(recv_seal_key,
-				weak_session_key, recv_seal_const);
-		dump_data_pw("NTLMSSP recv seal key:\n", recv_seal_key, 16);
+		status = calc_ntlmv2_key(recv_seal_key,
+					 weak_session_key,
+					 recv_seal_const);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
+		dump_data_pw("NTLMSSP recv seal key:\n",
+			     recv_seal_key,
+			     sizeof(recv_seal_key));
 
-		arcfour_init(&ntlmssp_state->crypt->ntlm2.receiving.seal_state,
-			     &recv_seal_blob);
+		if (ntlmssp_state->crypt->ntlm2.receiving.seal_state != NULL) {
+			gnutls_cipher_deinit(ntlmssp_state->crypt->ntlm2.receiving.seal_state);
+		}
+		rc = gnutls_cipher_init(&ntlmssp_state->crypt->ntlm2.receiving.seal_state,
+					GNUTLS_CIPHER_ARCFOUR_128,
+					&recv_seal_blob,
+					NULL);
+		if (rc < 0) {
+			DBG_ERR("gnutls_cipher_init failed: %s\n",
+				gnutls_strerror(rc));
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		}
 
 		dump_arc4_state("NTLMSSP recv seal arc4 state:\n",
 				&ntlmssp_state->crypt->ntlm2.receiving.seal_state);
@@ -629,8 +783,10 @@ NTSTATUS ntlmssp_sign_reset(struct ntlmssp_state *ntlmssp_state,
 			ntlmssp_state->crypt->ntlm2.receiving.seq_num = 0;
 		}
 	} else {
-		uint8_t weak_session_key[8];
-		DATA_BLOB seal_session_key = ntlmssp_state->session_key;
+		gnutls_datum_t seal_session_key = {
+			.data = ntlmssp_state->session_key.data,
+			.size = ntlmssp_state->session_key.length,
+		};
 		bool do_weak = false;
 
 		DEBUG(5, ("NTLMSSP Sign/Seal - using NTLM1\n"));
@@ -648,14 +804,19 @@ NTSTATUS ntlmssp_sign_reset(struct ntlmssp_state *ntlmssp_state,
 		 * Nothing to weaken.
 		 * We certainly don't want to 'extend' the length...
 		 */
-		if (seal_session_key.length < 16) {
+		if (ntlmssp_state->session_key.length < 16) {
 			/* TODO: is this really correct? */
 			do_weak = false;
 		}
 
 		if (do_weak) {
+			uint8_t weak_session_key[8];
+
 			memcpy(weak_session_key, seal_session_key.data, 8);
-			seal_session_key = data_blob_const(weak_session_key, 8);
+			seal_session_key = (gnutls_datum_t) {
+				.data = weak_session_key,
+				.size = sizeof(weak_session_key),
+			};
 
 			/*
 			 * LM key doesn't support 128 bit crypto, so this is
@@ -671,8 +832,18 @@ NTSTATUS ntlmssp_sign_reset(struct ntlmssp_state *ntlmssp_state,
 			}
 		}
 
-		arcfour_init(&ntlmssp_state->crypt->ntlm.seal_state,
-			     &seal_session_key);
+		if (ntlmssp_state->crypt->ntlm.seal_state != NULL) {
+			gnutls_cipher_deinit(ntlmssp_state->crypt->ntlm.seal_state);
+		}
+		rc = gnutls_cipher_init(&ntlmssp_state->crypt->ntlm.seal_state,
+					GNUTLS_CIPHER_ARCFOUR_128,
+					&seal_session_key,
+					NULL);
+		if (rc < 0) {
+			DBG_ERR("gnutls_cipher_init failed: %s\n",
+				gnutls_strerror(rc));
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		}
 
 		dump_arc4_state("NTLMv1 arc4 state:\n",
 				&ntlmssp_state->crypt->ntlm.seal_state);
@@ -683,6 +854,24 @@ NTSTATUS ntlmssp_sign_reset(struct ntlmssp_state *ntlmssp_state,
 	}
 
 	return NT_STATUS_OK;
+}
+
+static int ntlmssp_crypt_free_gnutls_cipher_state(union ntlmssp_crypt_state *c)
+{
+	if (c->ntlm2.sending.seal_state != NULL) {
+		gnutls_cipher_deinit(c->ntlm2.sending.seal_state);
+		c->ntlm2.sending.seal_state = NULL;
+	}
+	if (c->ntlm2.receiving.seal_state != NULL) {
+		gnutls_cipher_deinit(c->ntlm2.receiving.seal_state);
+		c->ntlm2.receiving.seal_state = NULL;
+	}
+	if (c->ntlm.seal_state != NULL) {
+		gnutls_cipher_deinit(c->ntlm.seal_state);
+		c->ntlm.seal_state = NULL;
+	}
+
+	return 0;
 }
 
 NTSTATUS ntlmssp_sign_init(struct ntlmssp_state *ntlmssp_state)
@@ -697,6 +886,8 @@ NTSTATUS ntlmssp_sign_init(struct ntlmssp_state *ntlmssp_state)
 	if (ntlmssp_state->crypt == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
+	talloc_set_destructor(ntlmssp_state->crypt,
+			      ntlmssp_crypt_free_gnutls_cipher_state);
 
 	return ntlmssp_sign_reset(ntlmssp_state, true);
 }

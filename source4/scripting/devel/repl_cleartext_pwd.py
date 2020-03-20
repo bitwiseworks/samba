@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Copyright Stefan Metzmacher 2011-2012
 #
@@ -56,6 +56,7 @@ import os
 
 from ldif import LDIFWriter
 
+
 class globals:
     def __init__(self):
         self.global_objs = {}
@@ -63,17 +64,19 @@ class globals:
 
     def add_attr(self, dn, attname, vals):
         if dn not in self.global_objs:
-           self.global_objs[dn] = {}
+            self.global_objs[dn] = {}
         self.global_objs[dn][attname] = vals
 
     def print_all(self):
         for dn, obj in self.global_objs.items():
-           self.ldif.unparse(dn, obj)
-           continue
+            self.ldif.unparse(dn, obj)
+            continue
         self.global_objs = {}
 
-def attid_equal(a1,a2):
+
+def attid_equal(a1, a2):
     return (a1 & 0xffffffff) == (a2 & 0xffffffff)
+
 
 ########### main code ###########
 if __name__ == "__main__":
@@ -125,34 +128,34 @@ if __name__ == "__main__":
 
     gls = globals()
     try:
-       f = open(cookie_file, 'r')
-       store_blob = f.read()
-       f.close()
+        f = open(cookie_file, 'r')
+        store_blob = f.read()
+        f.close()
 
-       store_hdr = store_blob[0:28]
-       (store_version, \
-        store_dn_len, store_dn_ofs, \
-        store_hwm_len, store_hwm_ofs, \
-        store_utdv_len, store_utdv_ofs) = \
-        struct.unpack("<LLLLLLL", store_hdr)
+        store_hdr = store_blob[0:28]
+        (store_version,
+         store_dn_len, store_dn_ofs,
+         store_hwm_len, store_hwm_ofs,
+         store_utdv_len, store_utdv_ofs) = \
+            struct.unpack("<LLLLLLL", store_hdr)
 
-       store_dn = store_blob[store_dn_ofs:store_dn_ofs+store_dn_len]
-       store_hwm_blob = store_blob[store_hwm_ofs:store_hwm_ofs+store_hwm_len]
-       store_utdv_blob = store_blob[store_utdv_ofs:store_utdv_ofs+store_utdv_len]
+        store_dn = store_blob[store_dn_ofs:store_dn_ofs + store_dn_len]
+        store_hwm_blob = store_blob[store_hwm_ofs:store_hwm_ofs + store_hwm_len]
+        store_utdv_blob = store_blob[store_utdv_ofs:store_utdv_ofs + store_utdv_len]
 
-       store_hwm = ndr_unpack(drsuapi.DsReplicaHighWaterMark, store_hwm_blob)
-       store_utdv = ndr_unpack(drsblobs.replUpToDateVectorBlob, store_utdv_blob)
+        store_hwm = ndr_unpack(drsuapi.DsReplicaHighWaterMark, store_hwm_blob)
+        store_utdv = ndr_unpack(drsblobs.replUpToDateVectorBlob, store_utdv_blob)
 
-       assert store_dn == dn
-       #print "%s" % ndr_print(store_hwm)
-       #print "%s" % ndr_print(store_utdv)
+        assert store_dn == dn
+        # print "%s" % ndr_print(store_hwm)
+        # print "%s" % ndr_print(store_utdv)
     except Exception:
-       store_dn = dn
-       store_hwm = drsuapi.DsReplicaHighWaterMark()
-       store_hwm.tmp_highest_usn  = 0
-       store_hwm.reserved_usn     = 0
-       store_hwm.highest_usn      = 0
-       store_utdv = None
+        store_dn = dn
+        store_hwm = drsuapi.DsReplicaHighWaterMark()
+        store_hwm.tmp_highest_usn  = 0
+        store_hwm.reserved_usn     = 0
+        store_hwm.highest_usn      = 0
+        store_utdv = None
 
     binding_str = "ncacn_ip_tcp:%s[spnego,seal]" % server
 
@@ -237,7 +240,7 @@ if __name__ == "__main__":
 
     while True:
         (level, ctr) = drs_conn.DsGetNCChanges(drs_handle, 8, req8)
-        if ctr.first_object == None and ctr.object_count != 0:
+        if ctr.first_object is None and ctr.object_count != 0:
             raise RuntimeError("DsGetNCChanges: NULL first_object with object_count=%u" % (ctr.object_count))
 
         obj_item = ctr.first_object
@@ -248,7 +251,7 @@ if __name__ == "__main__":
                 obj_item = obj_item.next_object
                 continue
 
-            #print '%s' % obj.identifier.dn
+            # print '%s' % obj.identifier.dn
 
             is_deleted = False
             for i in range(0, obj.attribute_ctr.num_attributes):
@@ -308,7 +311,7 @@ if __name__ == "__main__":
 
             spl = ndr_unpack(drsblobs.supplementalCredentialsBlob, attr_val)
 
-            #print '%s' % ndr_print(spl)
+            # print '%s' % ndr_print(spl)
 
             cleartext_hex = None
 
@@ -344,7 +347,7 @@ if __name__ == "__main__":
                 krb5_old_raw = binascii.a2b_hex(krb5_old_hex)
                 krb5_old = ndr_unpack(drsblobs.package_PrimaryKerberosBlob, krb5_old_raw, allow_remaining=True)
 
-                #print '%s' % ndr_print(krb5_old)
+                # print '%s' % ndr_print(krb5_old)
 
             krb5_new_hex = None
 
@@ -358,7 +361,7 @@ if __name__ == "__main__":
                 krb5_new_raw = binascii.a2b_hex(krb5_new_hex)
                 krb5_new = ndr_unpack(drsblobs.package_PrimaryKerberosBlob, krb5_new_raw, allow_remaining=True)
 
-                #print '%s' % ndr_print(krb5_new)
+                # print '%s' % ndr_print(krb5_new)
 
             obj_item = obj_item.next_object
 
@@ -374,8 +377,8 @@ if __name__ == "__main__":
             store_utdv_ctr.cursors = ctr.uptodateness_vector.cursors
             store_utdv.ctr = store_utdv_ctr
 
-            #print "%s" % ndr_print(store_hwm)
-            #print "%s" % ndr_print(store_utdv)
+            # print "%s" % ndr_print(store_hwm)
+            # print "%s" % ndr_print(store_utdv)
 
             store_hwm_blob = ndr_pack(store_hwm)
             store_utdv_blob = ndr_pack(store_utdv)
@@ -392,11 +395,11 @@ if __name__ == "__main__":
             dn_ofs = store_hdr_len
             hwm_ofs = dn_ofs + len(dn)
             utdv_ofs = hwm_ofs + len(store_hwm_blob)
-            store_blob = struct.pack("<LLLLLLL", 1, \
+            store_blob = struct.pack("<LLLLLLL", 1,
                                      len(dn), dn_ofs,
-                                     len(store_hwm_blob), hwm_ofs, \
+                                     len(store_hwm_blob), hwm_ofs,
                                      len(store_utdv_blob), utdv_ofs) + \
-                                     dn + store_hwm_blob + store_utdv_blob
+                dn + store_hwm_blob + store_utdv_blob
 
             tmp_file = "%s.tmp" % cookie_file
             f = open(tmp_file, 'wb')

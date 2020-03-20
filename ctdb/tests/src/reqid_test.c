@@ -40,7 +40,7 @@ int main(void)
 
 	for (i=0; i<1024*1024; i++) {
 		reqid = reqid_new(reqid_ctx, data);
-		assert(reqid != -1);
+		assert(reqid != REQID_INVALID);
 	}
 
 	for (i=0; i<1024; i++) {
@@ -65,6 +65,22 @@ int main(void)
 
 	talloc_free(reqid_ctx);
 	assert(talloc_get_size(mem_ctx) == 0);
+
+	ret = reqid_init(mem_ctx, INT_MAX-1, &reqid_ctx);
+	assert(ret == 0);
+
+	reqid = reqid_new(reqid_ctx, data);
+	assert(reqid == INT_MAX);
+
+	reqid = reqid_new(reqid_ctx, data);
+	assert(reqid == 0);
+
+	reqid_remove(reqid_ctx, 0);
+
+	reqid = reqid_new(reqid_ctx, data);
+	assert(reqid == 1);
+
+	talloc_free(reqid_ctx);
 
 	talloc_free(mem_ctx);
 

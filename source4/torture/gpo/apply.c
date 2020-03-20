@@ -27,6 +27,8 @@
 #include "lib/ldb/include/ldb.h"
 #include "torture/gpo/proto.h"
 #include <unistd.h>
+#include "lib/util/samba_util.h"
+#include "util/tevent_ntstatus.h"
 
 struct torture_suite *gpo_apply_suite(TALLOC_CTX *ctx)
 {
@@ -40,22 +42,27 @@ struct torture_suite *gpo_apply_suite(TALLOC_CTX *ctx)
 	return suite;
 }
 
-static int exec_wait(char **cmd)
+static int exec_wait(struct torture_context *tctx, const char **gpo_update_cmd)
 {
-	int ret;
-	pid_t pid = fork();
-	switch (pid) {
-		case 0:
-			execv(cmd[0], &(cmd[1]));
-			ret = -1;
-			break;
-		case -1:
-			ret = errno;
-			break;
-		default:
-			if (waitpid(pid, &ret, 0) < 0)
-				ret = errno;
-			break;
+	NTSTATUS status;
+	int ret = 0;
+	struct tevent_req *req;
+
+	req = samba_runcmd_send(tctx,
+				tctx->ev,
+				timeval_current_ofs(100, 0),
+				2, 0,
+				gpo_update_cmd,
+				"gpo_reload_cmd", NULL);
+	if (req == NULL) {
+		return -1;
+	}
+
+	if (!tevent_req_poll_ntstatus(req, tctx->ev, &status)) {
+		return -1;
+	}
+	if (!samba_runcmd_recv(req, &ret) == 0) {
+		return -1;
 	}
 	return ret;
 }
@@ -95,7 +102,8 @@ bool torture_gpo_system_access_policies(struct torture_context *tctx)
 	};
 	FILE *fp = NULL;
 	const char **gpo_update_cmd;
-	char **gpo_unapply_cmd;
+	const char **gpo_unapply_cmd;
+	const char **gpo_update_force_cmd;
 	int minpwdcases[] = { 0, 1, 998 };
 	int maxpwdcases[] = { 0, 1, 999 };
 	int pwdlencases[] = { 0, 1, 14 };
@@ -164,10 +172,10 @@ bool torture_gpo_system_access_policies(struct torture_context *tctx)
 		}
 
 		/* Run the gpo update command */
-		ret = exec_wait(discard_const_p(char *, gpo_update_cmd));
+		ret = exec_wait(tctx, gpo_update_cmd);
+
 		torture_assert(tctx, ret == 0,
 			       "Failed to execute the gpo update command");
-
 		ret = ldb_search(samdb, ctx, &result,
 				 ldb_get_default_basedn(samdb),
 				 LDB_SCOPE_BASE, attrs, NULL);
@@ -207,18 +215,127 @@ bool torture_gpo_system_access_policies(struct torture_context *tctx)
 			       "The pwdProperties were not applied");
 	}
 
-	/* Unapply the settings and verify they are removed */
+	/* Reset settings, then verify a reapply doesn't force them back */
+	for (i = 0; i < old_message->num_elements; i++) {
+		old_message->elements[i].flags = LDB_FLAG_MOD_REPLACE;
+	}
+	ret = ldb_modify(samdb, old_message);
+	torture_assert(tctx, ret == 0, "Failed to reset password settings.");
+
+	ret = exec_wait(tctx, gpo_update_cmd);
+	torture_assert(tctx, ret == 0,
+		       "Failed to execute the gpo update command");
+
+	/* Validate that the apply did nothing (without --force param) */
+	ret = ldb_search(samdb, ctx, &result, ldb_get_default_basedn(samdb),
+			 LDB_SCOPE_BASE, attrs, NULL);
+	torture_assert(tctx, ret == LDB_SUCCESS && result->count == 1,
+		       "Searching the samdb failed");
+	/* minPwdAge */
+	torture_assert_int_equal(tctx, unix2nttime(ldb_msg_find_attr_as_string(
+						result->msgs[0],
+						attrs[0],
+						"")),
+		       unix2nttime(ldb_msg_find_attr_as_string(old_message,
+							       attrs[0],
+							       "")
+				  ),
+		       "The minPwdAge was re-applied");
+	/* maxPwdAge */
+	torture_assert_int_equal(tctx, unix2nttime(ldb_msg_find_attr_as_string(
+						result->msgs[0],
+						attrs[1],
+						"")),
+		       unix2nttime(ldb_msg_find_attr_as_string(old_message,
+							       attrs[1],
+							       "")
+				  ),
+		       "The maxPwdAge was re-applied");
+	/* minPwdLength */
+	torture_assert_int_equal(tctx, ldb_msg_find_attr_as_int(
+						result->msgs[0],
+						attrs[2],
+						-1),
+				       ldb_msg_find_attr_as_int(
+						old_message,
+						attrs[2],
+						-2),
+			"The minPwdLength was re-applied");
+	/* pwdProperties */
+	torture_assert_int_equal(tctx, ldb_msg_find_attr_as_int(
+						result->msgs[0],
+						attrs[3],
+						-1),
+					ldb_msg_find_attr_as_int(
+						old_message,
+						attrs[3],
+						-2),
+			"The pwdProperties were re-applied");
+
 	for (itr = gpo_update_cmd; *itr != NULL; itr++) {
 		gpo_update_len++;
 	}
-	gpo_unapply_cmd = talloc_array(ctx, char*, gpo_update_len+2);
+
+	/* Run gpupdate --force and verify settings are re-applied */
+	gpo_update_force_cmd = talloc_array(ctx, const char*, gpo_update_len+2);
+	for (i = 0; i < gpo_update_len; i++) {
+		gpo_update_force_cmd[i] = talloc_strdup(gpo_update_force_cmd,
+							gpo_update_cmd[i]);
+	}
+	gpo_update_force_cmd[i] = talloc_asprintf(gpo_update_force_cmd,
+						  "--force");
+	gpo_update_force_cmd[i+1] = NULL;
+	ret = exec_wait(tctx, gpo_update_force_cmd);
+	torture_assert(tctx, ret == 0,
+		       "Failed to execute the gpupdate --force command");
+
+	ret = ldb_search(samdb, ctx, &result,
+			 ldb_get_default_basedn(samdb),
+			 LDB_SCOPE_BASE, attrs, NULL);
+	torture_assert(tctx, ret == LDB_SUCCESS && result->count == 1,
+		       "Searching the samdb failed");
+
+	/* minPwdAge */
+	torture_assert_int_equal(tctx, unix2nttime(
+					ldb_msg_find_attr_as_string(
+						result->msgs[0],
+						attrs[0],
+						"")), minpwdcases[2],
+		       "The minPwdAge was not applied");
+
+	/* maxPwdAge */
+	torture_assert_int_equal(tctx, unix2nttime(
+					ldb_msg_find_attr_as_string(
+						result->msgs[0],
+						attrs[1],
+						"")), maxpwdcases[2],
+		       "The maxPwdAge was not applied");
+
+	/* minPwdLength */
+	torture_assert_int_equal(tctx, ldb_msg_find_attr_as_int(
+						result->msgs[0],
+						attrs[2],
+						-1),
+				       pwdlencases[2],
+			"The minPwdLength was not applied");
+
+	/* pwdProperties */
+	torture_assert_int_equal(tctx, ldb_msg_find_attr_as_int(
+						result->msgs[0],
+						attrs[3],
+						-1),
+				       pwdpropcases[2],
+		       "The pwdProperties were not applied");
+
+	/* Unapply the settings and verify they are removed */
+	gpo_unapply_cmd = talloc_array(ctx, const char*, gpo_update_len+2);
 	for (i = 0; i < gpo_update_len; i++) {
 		gpo_unapply_cmd[i] = talloc_strdup(gpo_unapply_cmd,
 						   gpo_update_cmd[i]);
 	}
 	gpo_unapply_cmd[i] = talloc_asprintf(gpo_unapply_cmd, "--unapply");
 	gpo_unapply_cmd[i+1] = NULL;
-	ret = exec_wait(gpo_unapply_cmd);
+	ret = exec_wait(tctx, gpo_unapply_cmd);
 	torture_assert(tctx, ret == 0,
 		       "Failed to execute the gpo unapply command");
 	ret = ldb_search(samdb, ctx, &result, ldb_get_default_basedn(samdb),

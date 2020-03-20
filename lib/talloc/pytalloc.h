@@ -29,10 +29,10 @@ typedef struct {
 	void *ptr; /* eg the array element */
 } pytalloc_Object;
 
-/* Return the PyTypeObject for pytalloc_Object. Returns a new reference. */
+/* Return the PyTypeObject for pytalloc_Object. Returns a borrowed reference. */
 PyTypeObject *pytalloc_GetObjectType(void);
 
-/* Return the PyTypeObject for pytalloc_BaseObject. Returns a new reference. */
+/* Return the PyTypeObject for pytalloc_BaseObject. Returns a borrowed reference. */
 PyTypeObject *pytalloc_GetBaseObjectType(void);
 
 /* Check whether a specific object is a talloc Object. */
@@ -54,27 +54,16 @@ void *_pytalloc_get_ptr(PyObject *py_obj);
 TALLOC_CTX *_pytalloc_get_mem_ctx(PyObject *py_obj);
 #define pytalloc_get_mem_ctx(py_obj) _pytalloc_get_mem_ctx((PyObject *)(py_obj))
 
+const char *_pytalloc_get_name(PyObject *py_obj);
+#define pytalloc_get_name(py_obj) _pytalloc_get_name((PyObject *)(py_obj))
+
+
 PyObject *pytalloc_steal_ex(PyTypeObject *py_type, TALLOC_CTX *mem_ctx, void *ptr);
 PyObject *pytalloc_steal(PyTypeObject *py_type, void *ptr);
 PyObject *pytalloc_reference_ex(PyTypeObject *py_type, TALLOC_CTX *mem_ctx, void *ptr);
 #define pytalloc_reference(py_type, talloc_ptr) pytalloc_reference_ex(py_type, talloc_ptr, talloc_ptr)
 
 #define pytalloc_new(type, typeobj) pytalloc_steal(typeobj, talloc_zero(NULL, type))
-
-#if PY_MAJOR_VERSION < 3
-/*
- * Don't use this anymore! Use pytalloc_GenericObject_steal()
- * or pytalloc_GenericObject_reference().
- */
-#ifndef _DEPRECATED_
-#ifdef HAVE___ATTRIBUTE__
-#define _DEPRECATED_ __attribute__ ((deprecated))
-#else
-#define _DEPRECATED_
-#endif
-#endif
-PyObject *pytalloc_CObject_FromTallocPtr(void *) _DEPRECATED_;
-#endif
 
 /*
  * Wrap a generic talloc pointer into a talloc.GenericObject,

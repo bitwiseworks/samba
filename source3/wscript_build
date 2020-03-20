@@ -1,8 +1,5 @@
 #!/usr/bin/env python
 
-from samba_utils import *
-import samba_version, samba3
-
 LIBS='ICONV'
 
 config_h = "../include/config.h"
@@ -115,7 +112,7 @@ bld.SAMBA3_BINARY('test_tldap',
                        smbconf
                        cmocka
                        ''',
-                  install=False)
+                  for_selftest=True)
 
 # libpdb.so should not expose internal symbols that are only usable
 # to the statically linked modules that are merged into libpdb.
@@ -152,7 +149,7 @@ bld.SAMBA3_LIBRARY('samba-passdb',
                                   ''',
                    abi_match=private_pdb_match,
                    abi_directory='passdb/ABI',
-                   vnum='0.27.1')
+                   vnum='0.28.0')
 
 bld.SAMBA3_SUBSYSTEM('pdb',
                    source='''
@@ -171,8 +168,7 @@ bld.SAMBA3_SUBSYSTEM('pdb',
                           lib/winbind_util.c
                           passdb/pdb_util.c
                           passdb/pdb_interface.c
-                          passdb/pdb_secrets.c
-                          passdb/pdb_unixid.c''',
+                          passdb/pdb_secrets.c''',
                    deps='''
                         secrets3
                         GROUPDB
@@ -181,6 +177,8 @@ bld.SAMBA3_SUBSYSTEM('pdb',
                         LIBCLI_AUTH
                         flag_mapping
                         samba-credentials
+                        samba-modules
+                        nscd
                         ''')
 
 bld.SAMBA3_LIBRARY('smbldaphelper',
@@ -206,9 +204,11 @@ bld.SAMBA3_SUBSYSTEM('REGFIO',
                     source='registry/regfio.c',
                     deps='samba-util REG_PARSE_PRS')
 
-bld.SAMBA3_SUBSYSTEM('REG_API_REGF',
-                    source='registry/reg_api_regf.c',
-                    deps='samba-util')
+bld.SAMBA_BINARY('test_registry_regfio',
+                 source='registry/tests/test_regfio.c',
+                 deps='cmocka samba3-util smbconf REGFIO',
+                 local_include=False,
+                 for_selftest=True)
 
 # Do not link against this use 'smbconf'
 bld.SAMBA3_SUBSYSTEM('SMBREGISTRY',
@@ -221,6 +221,7 @@ bld.SAMBA3_SUBSYSTEM('SMBREGISTRY',
                           lib/util_nttoken.c
                           registry/reg_backend_db.c
                           registry/reg_parse_internal.c
+                          registry/reg_parse.c
                           lib/srprs.c
                           registry/reg_init_basic.c
                           ''',
@@ -268,12 +269,22 @@ bld.SAMBA3_SUBSYSTEM('REG_FULL',
 
 bld.SAMBA3_LIBRARY('popt_samba3',
                    source='lib/popt_common.c',
-                   deps='popt samba-util util_cmdline',
+                   deps='popt samba-util smbconf',
+                   private_library=True)
+
+bld.SAMBA3_LIBRARY('popt_samba3_cmdline',
+                   source='lib/popt_common_cmdline.c',
+                   deps='popt_samba3 util_cmdline cmdline_contexts',
                    private_library=True)
 
 bld.SAMBA3_LIBRARY('util_cmdline',
                    source='lib/util_cmdline.c',
-                   deps='secrets3',
+                   deps='secrets3 samba-credentials',
+                   private_library=True)
+
+bld.SAMBA3_LIBRARY('cmdline_contexts',
+                   source='lib/cmdline_contexts.c',
+                   deps='samba3core',
                    private_library=True)
 
 bld.SAMBA3_SUBSYSTEM('KRBCLIENT',
@@ -295,7 +306,7 @@ bld.SAMBA3_SUBSYSTEM('samba3util',
                           lib/util_sock.c
                           lib/util_tsock.c
                           lib/util_transfer_file.c
-                          lib/sys_popen.c
+                          lib/util_macstreams.c
                           ''',
                    deps='''
                         CHARSET3
@@ -360,6 +371,7 @@ bld.SAMBA3_LIBRARY('messages_dgm',
                         PTHREADPOOL
                         msghdr
                         genrand
+			samba-util
                         ''',
                    private_library=True)
 
@@ -388,10 +400,9 @@ bld.SAMBA3_SUBSYSTEM('samba3core',
                           lib/ms_fnmatch.c
                           lib/tallocmsg.c
                           lib/dmallocmsg.c
-                          intl/lang_tdb.c
                           lib/gencache.c
                           lib/util_event.c
-                          lib/server_contexts.c
+                          lib/global_contexts.c
                           lib/server_prefork.c
                           lib/server_prefork_util.c
                           lib/ldap_escape.c
@@ -420,9 +431,10 @@ bld.SAMBA3_SUBSYSTEM('samba3core',
                         server_id_db
                         messages_util
                         messages_dgm
-                        talloc_report
+                        talloc_report_printf
                         access
                         TDB_LIB
+                        z
                         ''')
 
 bld.SAMBA3_LIBRARY('smbd_shim',
@@ -495,6 +507,8 @@ bld.SAMBA3_LIBRARY('secrets3',
                         smbconf
                         samba3util
                         dbwrap
+                        krb5samba
+                        LIBCLI_AUTH
                         ''',
                    private_library=True)
 
@@ -581,7 +595,7 @@ bld.SAMBA3_LIBRARY('smbconf',
                         SAMBA_VERSION
                         cap
                         charset
-                        cli_smb_common
+                        samba-hostconfig
                         errors3
                         SMBCONF_PARAM
                         samba-util
@@ -604,6 +618,7 @@ bld.SAMBA3_SUBSYSTEM('sysquotas',
                         lib/sysquotas_xfs.c
                         lib/sysquotas_4A.c
                         lib/sysquotas_4B.c
+                        lib/sysquotas_jfs2.c
                         lib/sysquotas_nfs.c
                      ''',
                      allow_warnings=True,
@@ -661,7 +676,6 @@ bld.SAMBA3_LIBRARY('smbd_base',
                           smbd/error.c
                           printing/printspoolss.c
                           lib/sessionid_tdb.c
-                          lib/conn_tdb.c
                           lib/cleanupdb.c
                           smbd/fake_file.c
                           smbd/quotas.c
@@ -706,11 +720,11 @@ bld.SAMBA3_LIBRARY('smbd_base',
                           smbd/mangle_hash.c
                           smbd/mangle_hash2.c
                           smbd/oplock.c
-                          smbd/oplock_irix.c
                           smbd/oplock_linux.c
                           smbd/notify.c
                           smbd/notify_msg.c
                           smbd/build_options.c
+                          smbd/smb1_utils.c
                           ''' + NOTIFY_SOURCES,
                    deps='''
                         talloc
@@ -742,6 +756,7 @@ bld.SAMBA3_LIBRARY('smbd_base',
                         notifyd
                         vfs_acl_common
                         NDR_QUOTA
+                        GNUTLS_HELPERS
                    ''' +
                    bld.env['dmapi_lib'] +
                    bld.env['legacy_quota_libs'] +
@@ -775,7 +790,10 @@ bld.SAMBA3_SUBSYSTEM('LEASES_UTIL',
 if bld.CONFIG_GET("WITH_PROFILE"):
     bld.SAMBA3_SUBSYSTEM('PROFILE',
                          source='profile/profile.c',
-                         deps='samba-util')
+                         deps='''
+                              samba-util
+                              gnutls
+                              ''')
 else:
     bld.SAMBA3_SUBSYSTEM('PROFILE',
                          source='profile/profile_dummy.c',
@@ -905,6 +923,7 @@ bld.SAMBA3_SUBSYSTEM('PLAINTEXT_AUTH',
                            auth/pass_check.c
                            ''',
                     deps='''
+                         crypt
                          pam
                          PAM_ERRORS
                          ''')
@@ -962,6 +981,7 @@ bld.SAMBA3_LIBRARY('samba3-util',
                           lib/namearray.c
                           lib/file_id.c
                           lib/cbuf.c
+                          lib/per_thread_cwd.c
                           ''',
                    deps='''
                         samba-util
@@ -999,7 +1019,7 @@ bld.SAMBA3_SUBSYSTEM('errors3',
 
 bld.SAMBA3_SUBSYSTEM('LIBCLI_SAMR',
                     source='rpc_client/cli_samr.c',
-                    deps='RPC_NDR_SAMR')
+                    deps='RPC_NDR_SAMR INIT_SAMR')
 
 bld.SAMBA3_LIBRARY('libcli_lsa3',
                    source='rpc_client/cli_lsarpc.c',
@@ -1014,7 +1034,6 @@ bld.SAMBA3_LIBRARY('libcli_netlogon3',
                    deps='''
                         msrpc3
                         RPC_NDR_NETLOGON
-                        INIT_NETLOGON
                         cliauth
                         smbconf
                         NETLOGON_CREDS_CLI''',
@@ -1043,17 +1062,20 @@ bld.SAMBA3_SUBSYSTEM('RPC_CLIENT_SCHANNEL',
                     source='rpc_client/cli_pipe_schannel.c',
                     deps='samba-util krb5samba')
 
+bld.SAMBA3_SUBSYSTEM('RPCCLI_MDSSVC',
+                    source='''
+                    rpc_client/cli_mdssvc.c
+                    rpc_client/cli_mdssvc_util.c
+                    ''',
+                    deps='mdssvc RPC_NDR_MDSSVC')
+
 bld.SAMBA3_SUBSYSTEM('INIT_LSA',
                     source='rpc_client/init_lsa.c',
                     deps='samba-util')
 
-bld.SAMBA3_SUBSYSTEM('INIT_NETLOGON',
-                    source='rpc_client/init_netlogon.c',
-                    deps='samba-util')
-
 bld.SAMBA3_SUBSYSTEM('INIT_SAMR',
                     source='rpc_client/init_samr.c',
-                    deps='samba-util')
+                    deps='samba-util GNUTLS_HELPERS')
 
 bld.SAMBA3_SUBSYSTEM('LIBLSA',
                      source='lib/lsa.c')
@@ -1064,6 +1086,19 @@ bld.SAMBA3_SUBSYSTEM('SPOOLSSD',
                          samba-util
                          RPC_SOCK_HELPER
                          ''')
+
+bld.SAMBA3_SUBSYSTEM('tevent-glib-glue',
+                    source='lib/tevent_glib_glue.c',
+                    deps='glib-2.0',
+                    enabled=bld.CONFIG_SET('WITH_TEVENT_GLIB_GLUE'),
+)
+
+bld.SAMBA3_SUBSYSTEM('ADOUBLE',
+                    source='lib/adouble.c',
+                    deps='STRING_REPLACE')
+
+bld.SAMBA3_SUBSYSTEM('STRING_REPLACE',
+                    source='lib/string_replace.c')
 
 ########################## BINARIES #################################
 
@@ -1094,7 +1129,7 @@ bld.SAMBA3_BINARY('client/smbclient',
                         ''',
                  deps='''
                       talloc
-                      popt_samba3
+                      popt_samba3_cmdline
                       smbconf
                       ndr-standard
                       SMBREADLINE
@@ -1120,9 +1155,14 @@ bld.SAMBA3_BINARY('smbspool_krb5_wrapper',
                  deps='''
                       DYNCONFIG
                       cups
+                      krb5samba
                       ''',
                  install_path='${LIBEXECDIR}/samba',
                  enabled=bld.CONFIG_SET('HAVE_CUPS'))
+
+bld.SAMBA3_BINARY('smbspool_argv_wrapper',
+		  source='script/tests/smbspool_argv_wrapper.c',
+		  for_selftest=True)
 
 bld.SAMBA3_BINARY('locktest2',
                  source='torture/locktest2.c',
@@ -1132,25 +1172,7 @@ bld.SAMBA3_BINARY('locktest2',
                       libsmb
                       LOCKING
                       ''',
-                 install=False)
-
-smbstatus_source = 'utils/status.c smbd/notify_msg.c'
-
-if bld.CONFIG_GET("WITH_PROFILE"):
-    smbstatus_source += ' utils/status_profile.c'
-else:
-    smbstatus_source += ' utils/status_profile_dummy.c'
-
-bld.SAMBA3_BINARY('smbstatus',
-                 source=smbstatus_source,
-                 deps='''
-                      talloc
-                      smbconf
-                      popt_samba3
-                      smbd_base
-                      LOCKING
-                      PROFILE
-                      ''')
+                 for_selftest=True)
 
 bld.SAMBA3_BINARY('smbtorture' + bld.env.suffix3,
                  source='''
@@ -1189,6 +1211,8 @@ bld.SAMBA3_BINARY('smbtorture' + bld.env.suffix3,
                         torture/wbc_async.c
                         torture/test_g_lock.c
                         torture/test_namemap_cache.c
+                        torture/test_idmap_cache.c
+                        torture/test_hidenewfiles.c
                         ''',
                  deps='''
                       talloc
@@ -1205,7 +1229,7 @@ bld.SAMBA3_BINARY('smbtorture' + bld.env.suffix3,
                       samba-cluster-support
                       ''',
                  cflags='-DWINBINDD_SOCKET_DIR=\"%s\"' % bld.env.WINBINDD_SOCKET_DIR,
-                 install=False)
+                 for_selftest=True)
 
 bld.SAMBA3_BINARY('smbconftort',
                  source='lib/smbconf/testsuite.c',
@@ -1214,12 +1238,7 @@ bld.SAMBA3_BINARY('smbconftort',
                       smbconf
                       popt_samba3
                       ''',
-                 install=False)
-
-bld.SAMBA3_BINARY('replacetort',
-                 source='../lib/replace/test/main.c',
-                 deps='replace replace-test',
-                 install=False)
+                 for_selftest=True)
 
 bld.SAMBA3_BINARY('msgtest',
                  source='torture/msgtest.c',
@@ -1245,6 +1264,24 @@ bld.SAMBA3_BINARY('msg_source',
                       ''',
                  install=False)
 
+bld.SAMBA3_BINARY('test_mdsparser_es',
+                 source='''
+                 rpc_server/mdssvc/test_mdsparser_es.c
+                 rpc_server/mdssvc/es_parser.y
+                 rpc_server/mdssvc/es_lexer.l
+                 rpc_server/mdssvc/es_mapping.c
+                 ''',
+                 deps='''
+                 samba3-util
+                 talloc
+                 smbconf
+                 jansson
+                 cmocka
+                 popt_samba3_cmdline
+                 ''',
+                 enabled=bld.env.spotlight_backend_es,
+                 for_selftest=True)
+
 bld.SAMBA3_BINARY('pdbtest',
                  source='torture/pdbtest.c',
                  deps='''
@@ -1254,7 +1291,7 @@ bld.SAMBA3_BINARY('pdbtest',
                       AUTH_COMMON
                       auth
                       ''',
-                 install=False)
+                 for_selftest=True)
 
 bld.SAMBA3_BINARY('vfstest',
                  source='''
@@ -1268,7 +1305,7 @@ bld.SAMBA3_BINARY('vfstest',
                       smbconf
                       SMBREADLINE
                       ''',
-                 install=False)
+                 for_selftest=True)
 
 bld.SAMBA3_BINARY('versiontest',
                  source='lib/version_test.c',
@@ -1280,7 +1317,7 @@ bld.SAMBA3_BINARY('versiontest',
 
 bld.SAMBA3_BINARY('timelimit',
                  source='script/tests/timelimit.c',
-                 install=False)
+                 for_selftest=True)
 
 bld.SAMBA3_BINARY('rpc_open_tcp',
                  source='torture/rpc_open_tcp.c',
@@ -1288,7 +1325,7 @@ bld.SAMBA3_BINARY('rpc_open_tcp',
                       talloc
                       msrpc3
                       ''',
-                 install=False)
+                 for_selftest=True)
 
 bld.SAMBA3_BINARY('vlp',
                  source='printing/tests/vlp.c',
@@ -1296,27 +1333,28 @@ bld.SAMBA3_BINARY('vlp',
                       talloc
                       smbconf
                       ''',
-                 install=False)
+                 for_selftest=True)
 
 
-for env in bld.gen_python_environments():
-    pyrpc_util = bld.pyembed_libname('pyrpc_util')
-    pytalloc_util = bld.pyembed_libname('pytalloc-util')
-    bld.SAMBA3_PYTHON('pysmbd',
+pyrpc_util = bld.pyembed_libname('pyrpc_util')
+pytalloc_util = bld.pyembed_libname('pytalloc-util')
+bld.SAMBA3_PYTHON('pysmbd',
                   source='smbd/pysmbd.c',
                   deps=' '.join(['smbd_base', pyrpc_util, pytalloc_util]),
                   realname='samba/samba3/smbd.so'
                   )
 
-for env in bld.gen_python_environments():
-    pycredentials = 'pycredentials'
-    if bld.env['IS_EXTRA_PYTHON']:
-        pycredentials = 'extra-' + pycredentials
-    bld.SAMBA3_PYTHON('pylibsmb',
+pycredentials = 'pycredentials'
+bld.SAMBA3_PYTHON('pylibsmb',
                   source='libsmb/pylibsmb.c',
                   deps='smbclient samba-credentials %s' % pycredentials,
                   realname='samba/samba3/libsmb_samba_internal.so'
                   )
+
+bld.SAMBA3_PYTHON('pymdscli',
+                  source='rpc_client/py_mdscli.c',
+                  deps=' '.join(['RPCCLI_MDSSVC', pytalloc_util, pyrpc_util]),
+                  realname='samba/samba3/mdscli.so')
 
 bld.SAMBA3_BINARY('spotlight2sparql',
                  source='''
@@ -1325,7 +1363,37 @@ bld.SAMBA3_BINARY('spotlight2sparql',
                  rpc_server/mdssvc/sparql_lexer.l
                  rpc_server/mdssvc/sparql_mapping.c''',
                  deps='samba3-util talloc ' + bld.env['libtracker'],
-                 enabled=bld.env.with_spotlight,
+                 enabled=bld.env.spotlight_backend_tracker,
+                 install=False)
+
+bld.SAMBA3_BINARY('spotlight2es',
+                 source='''
+                 rpc_server/mdssvc/es_parser_test.c
+                 rpc_server/mdssvc/es_parser.y
+                 rpc_server/mdssvc/es_lexer.l
+                 rpc_server/mdssvc/es_mapping.c''',
+                 deps='samba3-util talloc jansson smbconf',
+                 enabled=bld.env.spotlight_backend_es,
+                 install=False)
+
+bld.SAMBA3_BINARY('tevent_glib_glue_test',
+                 source='lib/tevent_glib_glue_tests.c',
+                 deps='''
+                 talloc
+                 libsmb
+                 popt_samba3
+                 tevent-glib-glue''',
+                 enabled=bld.CONFIG_SET('WITH_TEVENT_GLIB_GLUE'),
+                 for_selftest=True)
+
+bld.SAMBA3_BINARY('tevent_glib_tracker',
+                 source='utils/async-tracker.c',
+                 deps='''
+                 talloc
+                 libsmb
+                 popt_samba3
+                 tevent-glib-glue ''' + bld.env['libtracker'],
+                 enabled=bld.CONFIG_SET('HAVE_TRACKER') and bld.CONFIG_SET('WITH_TEVENT_GLIB_GLUE'),
                  install=False)
 
 ########################## INCLUDES #################################
@@ -1346,12 +1414,14 @@ bld.RECURSE('../examples/libsmbclient')
 bld.RECURSE('../examples/pdb')
 bld.RECURSE('../examples/VFS')
 bld.RECURSE('../examples/fuse')
+bld.RECURSE('../examples/winexe')
 bld.RECURSE('lib/netapi/tests')
 bld.RECURSE('lib/netapi/examples')
 bld.RECURSE('smbd/notifyd')
 bld.RECURSE('rpcclient')
 bld.RECURSE('utils')
 bld.RECURSE('nmbd')
+bld.RECURSE('lib/util')
 
 bld.ENFORCE_GROUP_ORDERING()
 bld.CHECK_PROJECT_RULES()

@@ -92,10 +92,10 @@ int sys_get_vfs_quota(const char *path, const char *bdev,
 		case SMB_GROUP_FS_QUOTA_TYPE:
 			DEBUG(10, ("sys_get_vfs_quota: path[%s] bdev[%s] "
 				   "SMB_GROUP_FS_QUOTA_TYPE (gid[%u])\n",
-				   path, bdev, (unsigned)getgid()));
+				   path, bdev, (unsigned)getegid()));
 
 			if ((ret = quotactl(QCMD(Q_GETQUOTA, GRPQUOTA), bdev,
-					    getgid(), (caddr_t)&D)) == 0) {
+					    getegid(), (caddr_t)&D)) == 0) {
 				qflags |= QUOTAS_DENY_DISK;
 			}
 
@@ -140,14 +140,12 @@ int sys_set_vfs_quota(const char *path, const char *bdev,
 	if (bsize == dp->bsize) {
 		D.dqb_bsoftlimit = dp->softlimit;
 		D.dqb_bhardlimit = dp->hardlimit;
-		D.dqb_ihardlimit = dp->ihardlimit;
-		D.dqb_isoftlimit = dp->isoftlimit;
 	} else {
 		D.dqb_bsoftlimit = (dp->softlimit*dp->bsize)/bsize;
 		D.dqb_bhardlimit = (dp->hardlimit*dp->bsize)/bsize;
-		D.dqb_ihardlimit = (dp->ihardlimit*dp->bsize)/bsize;
-		D.dqb_isoftlimit = (dp->isoftlimit*dp->bsize)/bsize;
 	}
+	D.dqb_ihardlimit = dp->ihardlimit;
+	D.dqb_isoftlimit = dp->isoftlimit;
 	D.dqb_valid = QIF_LIMITS;
 
 	switch (qtype) {
@@ -189,10 +187,10 @@ int sys_set_vfs_quota(const char *path, const char *bdev,
 		case SMB_GROUP_FS_QUOTA_TYPE:
 			DEBUG(10, ("sys_set_vfs_quota: path[%s] bdev[%s] "
 				   "SMB_GROUP_FS_QUOTA_TYPE (gid[%u])\n",
-				   path, bdev, (unsigned)getgid()));
+				   path, bdev, (unsigned)getegid()));
 
 			ret = quotactl(QCMD(Q_GETQUOTA, GRPQUOTA), bdev,
-				       getgid(), (caddr_t)&D);
+				       getegid(), (caddr_t)&D);
 			cur_enf = (ret == 0);
 			new_enf = ((dp->qflags & QUOTAS_DENY_DISK) != 0);
 			/* We're not changing quota enforcement, so return

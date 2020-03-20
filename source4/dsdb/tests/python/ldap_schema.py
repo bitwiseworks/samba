@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # This is a port of the original in testprogs/ejs/ldap.js
 
@@ -17,7 +17,6 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
-
 
 
 from __future__ import print_function
@@ -74,14 +73,14 @@ class SchemaTests(samba.tests.TestCase):
     def setUp(self):
         super(SchemaTests, self).setUp()
         self.ldb = SamDB(host, credentials=creds,
-            session_info=system_session(lp), lp=lp, options=ldb_options)
+                         session_info=system_session(lp), lp=lp, options=ldb_options)
         self.base_dn = self.ldb.domain_dn()
         self.schema_dn = self.ldb.get_schema_basedn().get_linearized()
 
     def test_generated_schema(self):
         """Testing we can read the generated schema via LDAP"""
-        res = self.ldb.search("cn=aggregate,"+self.schema_dn, scope=SCOPE_BASE,
-                attrs=["objectClasses", "attributeTypes", "dITContentRules"])
+        res = self.ldb.search("cn=aggregate," + self.schema_dn, scope=SCOPE_BASE,
+                              attrs=["objectClasses", "attributeTypes", "dITContentRules"])
         self.assertEquals(len(res), 1)
         self.assertTrue("dITContentRules" in res[0])
         self.assertTrue("objectClasses" in res[0])
@@ -90,7 +89,7 @@ class SchemaTests(samba.tests.TestCase):
     def test_generated_schema_is_operational(self):
         """Testing we don't get the generated schema via LDAP by default"""
         # Must keep the "*" form
-        res = self.ldb.search("cn=aggregate,"+self.schema_dn, scope=SCOPE_BASE,
+        res = self.ldb.search("cn=aggregate," + self.schema_dn, scope=SCOPE_BASE,
                               attrs=["*"])
         self.assertEquals(len(res), 1)
         self.assertFalse("dITContentRules" in res[0])
@@ -99,7 +98,7 @@ class SchemaTests(samba.tests.TestCase):
 
     def test_schemaUpdateNow(self):
         """Testing schemaUpdateNow"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         attr_name = "test-Attr" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name = attr_name.replace("-", "")
 
@@ -131,9 +130,9 @@ schemaUpdateNow: 1
         # Search for created attribute
         res = []
         res = self.ldb.search("cn=%s,%s" % (attr_name, self.schema_dn), scope=SCOPE_BASE,
-                              attrs=["lDAPDisplayName","schemaIDGUID", "msDS-IntID"])
+                              attrs=["lDAPDisplayName", "schemaIDGUID", "msDS-IntID"])
         self.assertEquals(len(res), 1)
-        self.assertEquals(res[0]["lDAPDisplayName"][0], attr_ldap_display_name)
+        self.assertEquals(str(res[0]["lDAPDisplayName"][0]), attr_ldap_display_name)
         self.assertTrue("schemaIDGUID" in res[0])
         if "msDS-IntId" in res[0]:
             msDS_IntId = int(res[0]["msDS-IntId"][0])
@@ -154,7 +153,7 @@ defaultObjectCategory: CN=_
 adminDescription: """ + class_name + """
 adminDisplayName: """ + class_name + """
 cn: """ + class_name + """
-governsId: 1.3.6.1.4.1.7165.4.6.2.6.1.""" + str(random.randint(1,100000)) + """
+governsId: 1.3.6.1.4.1.7165.4.6.2.6.1.""" + str(random.randint(1, 100000)) + """
 instanceType: 4
 objectClassCategory: 1
 subClassOf: organizationalPerson
@@ -165,11 +164,11 @@ systemMustContain: """ + attr_ldap_display_name + """
 systemOnly: FALSE
 """
         try:
-                 self.ldb.add_ldif(ldif)
-                 self.fail()
+            self.ldb.add_ldif(ldif)
+            self.fail()
         except LdbError as e1:
-                 (num, _) = e1.args
-                 self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
+            (num, _) = e1.args
+            self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
         ldif = """
 dn: CN=%s,%s""" % (class_name, self.schema_dn) + """
@@ -178,7 +177,7 @@ objectClass: classSchema
 adminDescription: """ + class_name + """
 adminDisplayName: """ + class_name + """
 cn: """ + class_name + """
-governsId: 1.3.6.1.4.1.7165.4.6.2.6.2.""" + str(random.randint(1,100000)) + """
+governsId: 1.3.6.1.4.1.7165.4.6.2.6.2.""" + str(random.randint(1, 100000)) + """
 instanceType: 4
 objectClassCategory: 1
 subClassOf: organizationalPerson
@@ -195,7 +194,7 @@ systemOnly: FALSE
         res = self.ldb.search("cn=%s,%s" % (class_name, self.schema_dn), scope=SCOPE_BASE,
                               attrs=["lDAPDisplayName", "defaultObjectCategory", "schemaIDGUID", "distinguishedName"])
         self.assertEquals(len(res), 1)
-        self.assertEquals(res[0]["lDAPDisplayName"][0], class_ldap_display_name)
+        self.assertEquals(str(res[0]["lDAPDisplayName"][0]), class_ldap_display_name)
         self.assertEquals(res[0]["defaultObjectCategory"][0], res[0]["distinguishedName"][0])
         self.assertTrue("schemaIDGUID" in res[0])
 
@@ -210,15 +209,15 @@ schemaUpdateNow: 1
         object_name = "obj" + time.strftime("%s", time.gmtime())
 
         ldif = """
-dn: CN=%s,CN=Users,%s"""% (object_name, self.base_dn) + """
+dn: CN=%s,CN=Users,%s""" % (object_name, self.base_dn) + """
 objectClass: organizationalPerson
 objectClass: person
 objectClass: """ + class_ldap_display_name + """
 objectClass: top
 cn: """ + object_name + """
 instanceType: 4
-objectCategory: CN=%s,%s"""% (class_name, self.schema_dn) + """
-distinguishedName: CN=%s,CN=Users,%s"""% (object_name, self.base_dn) + """
+objectCategory: CN=%s,%s""" % (class_name, self.schema_dn) + """
+distinguishedName: CN=%s,CN=Users,%s""" % (object_name, self.base_dn) + """
 name: """ + object_name + """
 """ + attr_ldap_display_name + """: test
 """
@@ -230,7 +229,7 @@ name: """ + object_name + """
         self.assertEquals(len(obj_res), 1)
         self.assertTrue("replPropertyMetaData" in obj_res[0])
         val = obj_res[0]["replPropertyMetaData"][0]
-        repl = ndr_unpack(drsblobs.replPropertyMetaDataBlob, str(val))
+        repl = ndr_unpack(drsblobs.replPropertyMetaDataBlob, val)
         obj = repl.ctr
 
         # Windows 2000 functional level won't have this.  It is too
@@ -247,7 +246,7 @@ name: """ + object_name + """
         delete_force(self.ldb, "cn=%s,cn=Users,%s" % (object_name, self.base_dn))
 
     def test_subClassOf(self):
-        """ Testing usage of custom child schamaClass
+        """ Testing usage of custom child classSchema
         """
 
         class_name = "my-Class" + time.strftime("%s", time.gmtime())
@@ -260,7 +259,7 @@ objectClass: classSchema
 adminDescription: """ + class_name + """
 adminDisplayName: """ + class_name + """
 cn: """ + class_name + """
-governsId: 1.3.6.1.4.1.7165.4.6.2.6.3.""" + str(random.randint(1,100000)) + """
+governsId: 1.3.6.1.4.1.7165.4.6.2.6.3.""" + str(random.randint(1, 100000)) + """
 instanceType: 4
 objectClassCategory: 1
 subClassOf: organizationalUnit
@@ -275,7 +274,7 @@ systemOnly: FALSE
                               attrs=["lDAPDisplayName", "defaultObjectCategory",
                                      "schemaIDGUID", "distinguishedName"])
         self.assertEquals(len(res), 1)
-        self.assertEquals(res[0]["lDAPDisplayName"][0], class_ldap_display_name)
+        self.assertEquals(str(res[0]["lDAPDisplayName"][0]), class_ldap_display_name)
         self.assertEquals(res[0]["defaultObjectCategory"][0], res[0]["distinguishedName"][0])
         self.assertTrue("schemaIDGUID" in res[0])
 
@@ -304,10 +303,9 @@ instanceType: 4
         # Delete the object
         delete_force(self.ldb, "ou=%s,%s" % (object_name, self.base_dn))
 
-
     def test_duplicate_attributeID(self):
         """Testing creating a duplicate attribute"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         attr_name = "test-Attr" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name = attr_name.replace("-", "")
         attributeID = "1.3.6.1.4.1.7165.4.6.1.6.2." + rand
@@ -348,10 +346,9 @@ systemOnly: FALSE
             (enum, estr) = e2.args
             self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
-
     def test_duplicate_attributeID_governsID(self):
         """Testing creating a duplicate attribute and class"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         attr_name = "test-Attr" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name = attr_name.replace("-", "")
         attributeID = "1.3.6.1.4.1.7165.4.6.1.6.3." + rand
@@ -393,10 +390,9 @@ systemOnly: FALSE
             (enum, estr) = e3.args
             self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
-
     def test_duplicate_cn(self):
         """Testing creating a duplicate attribute"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         attr_name = "test-Attr" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name = attr_name.replace("-", "")
         attributeID = "1.3.6.1.4.1.7165.4.6.1.6.4." + rand
@@ -439,7 +435,7 @@ systemOnly: FALSE
 
     def test_duplicate_implicit_ldapdisplayname(self):
         """Testing creating a duplicate attribute ldapdisplayname"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         attr_name = "test-Attr" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name = attr_name.replace("-", "")
         attributeID = "1.3.6.1.4.1.7165.4.6.1.6.5." + rand
@@ -481,10 +477,9 @@ systemOnly: FALSE
             (enum, estr) = e5.args
             self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
-
     def test_duplicate_explicit_ldapdisplayname(self):
         """Testing creating a duplicate attribute ldapdisplayname"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         attr_name = "test-Attr" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name = attr_name.replace("-", "")
         attributeID = "1.3.6.1.4.1.7165.4.6.1.6.6." + rand
@@ -527,11 +522,10 @@ systemOnly: FALSE
             (enum, estr) = e6.args
             self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
-
     def test_duplicate_explicit_ldapdisplayname_with_class(self):
         """Testing creating a duplicate attribute ldapdisplayname between
         and attribute and a class"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         attr_name = "test-Attr" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name = attr_name.replace("-", "")
         attributeID = "1.3.6.1.4.1.7165.4.6.1.6.7." + rand
@@ -576,10 +570,9 @@ systemOnly: FALSE
             (enum, estr) = e7.args
             self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
-
     def test_duplicate_via_rename_ldapdisplayname(self):
         """Testing creating a duplicate attribute ldapdisplayname"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         attr_name = "test-Attr" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name = attr_name.replace("-", "")
         attributeID = "1.3.6.1.4.1.7165.4.6.1.6.8." + rand
@@ -631,10 +624,9 @@ ldapDisplayName: """ + attr_ldap_display_name + """
             (enum, estr) = e8.args
             self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
-
     def test_duplicate_via_rename_attributeID(self):
         """Testing creating a duplicate attributeID"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         attr_name = "test-Attr" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name = attr_name.replace("-", "")
         attributeID = "1.3.6.1.4.1.7165.4.6.1.6.9." + rand
@@ -688,7 +680,7 @@ attributeId: """ + attributeID + """
 
     def test_remove_ldapdisplayname(self):
         """Testing removing the ldapdisplayname"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         attr_name = "test-Attr" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name = attr_name.replace("-", "")
         attributeID = "1.3.6.1.4.1.7165.4.6.1.6.10." + rand
@@ -724,7 +716,7 @@ replace: ldapDisplayName
 
     def test_rename_ldapdisplayname(self):
         """Testing renaming ldapdisplayname"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         attr_name = "test-Attr" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name = attr_name.replace("-", "")
         attributeID = "1.3.6.1.4.1.7165.4.6.1.6.11." + rand
@@ -754,10 +746,9 @@ ldapDisplayName: """ + attr_ldap_display_name + """2
 """
         self.ldb.modify_ldif(ldif)
 
-
     def test_change_attributeID(self):
         """Testing change the attributeID"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         attr_name = "test-Attr" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name = attr_name.replace("-", "")
         attributeID = "1.3.6.1.4.1.7165.4.6.1.6.12." + rand
@@ -792,10 +783,9 @@ attributeId: """ + attributeID + """.1
             (enum, estr) = e11.args
             self.assertEquals(enum, ERR_CONSTRAINT_VIOLATION)
 
-
     def test_change_attributeID_same(self):
         """Testing change the attributeID to the same value"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         attr_name = "test-Attr" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name = attr_name.replace("-", "")
         attributeID = "1.3.6.1.4.1.7165.4.6.1.6.13." + rand
@@ -830,7 +820,6 @@ attributeId: """ + attributeID + """
             (enum, estr) = e12.args
             self.assertEquals(enum, ERR_CONSTRAINT_VIOLATION)
 
-
     def test_generated_linkID(self):
         """
         Test that we automatically generate a linkID if the
@@ -843,13 +832,13 @@ attributeId: """ + attributeID + """
 
         # linkID generation isn't available before 2003
         res = self.ldb.search(base="", expression="", scope=SCOPE_BASE,
-                         attrs=["domainControllerFunctionality"])
+                              attrs=["domainControllerFunctionality"])
         self.assertEquals(len(res), 1)
         dc_level = int(res[0]["domainControllerFunctionality"][0])
         if dc_level < DS_DOMAIN_FUNCTION_2003:
             return
 
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
 
         attr_name_1 = "test-generated-linkID" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name_1 = attr_name_1.replace("-", "")
@@ -979,7 +968,7 @@ adminDescription: """ + attr_name_3 + """
 adminDisplayName: """ + attr_name_3 + """
 cn: """ + attr_name_3 + """
 attributeId: """ + attributeID_3 + """
-linkID: """ + str(linkID_1+1) + """
+linkID: """ + str(linkID_1 + 1) + """
 attributeSyntax: 2.5.5.1
 ldapDisplayName: """ + attr_ldap_display_name_3 + """
 omSyntax: 127
@@ -1130,7 +1119,7 @@ systemOnly: FALSE
         duplicate mAPIIDs.
         """
 
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
 
         attr_name_1 = "test-generated-mAPIID" + time.strftime("%s", time.gmtime()) + "-" + rand
         attr_ldap_display_name_1 = attr_name_1.replace("-", "")
@@ -1200,10 +1189,9 @@ systemOnly: FALSE
             (enum, estr) = e22.args
             self.assertEquals(enum, ERR_UNWILLING_TO_PERFORM)
 
-
     def test_change_governsID(self):
         """Testing change the governsID"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         class_name = "test-Class" + time.strftime("%s", time.gmtime()) + "-" + rand
         class_ldap_display_name = class_name.replace("-", "")
         governsID = "1.3.6.1.4.1.7165.4.6.2.6.5." + rand
@@ -1239,10 +1227,9 @@ governsId: """ + governsID + """.1
             (enum, estr) = e23.args
             self.assertEquals(enum, ERR_CONSTRAINT_VIOLATION)
 
-
     def test_change_governsID_same(self):
         """Testing change the governsID"""
-        rand = str(random.randint(1,100000))
+        rand = str(random.randint(1, 100000))
         class_name = "test-Class" + time.strftime("%s", time.gmtime()) + "-" + rand
         class_ldap_display_name = class_name.replace("-", "")
         governsID = "1.3.6.1.4.1.7165.4.6.2.6.6." + rand
@@ -1279,74 +1266,15 @@ governsId: """ + governsID + """.1
             self.assertEquals(enum, ERR_CONSTRAINT_VIOLATION)
 
 
-    def test_subClassOf(self):
-        """ Testing usage of custom child classSchema
-        """
-
-        class_name = "my-Class" + time.strftime("%s", time.gmtime())
-        class_ldap_display_name = class_name.replace("-", "")
-
-        ldif = """
-dn: CN=%s,%s""" % (class_name, self.schema_dn) + """
-objectClass: top
-objectClass: classSchema
-adminDescription: """ + class_name + """
-adminDisplayName: """ + class_name + """
-cn: """ + class_name + """
-governsId: 1.3.6.1.4.1.7165.4.6.2.6.7.""" + str(random.randint(1,100000)) + """
-instanceType: 4
-objectClassCategory: 1
-subClassOf: organizationalUnit
-systemFlags: 16
-systemOnly: FALSE
-"""
-        self.ldb.add_ldif(ldif)
-
-        # Search for created objectclass
-        res = []
-        res = self.ldb.search("cn=%s,%s" % (class_name, self.schema_dn), scope=SCOPE_BASE,
-                              attrs=["lDAPDisplayName", "defaultObjectCategory",
-                                     "schemaIDGUID", "distinguishedName"])
-        self.assertEquals(len(res), 1)
-        self.assertEquals(res[0]["lDAPDisplayName"][0], class_ldap_display_name)
-        self.assertEquals(res[0]["defaultObjectCategory"][0], res[0]["distinguishedName"][0])
-        self.assertTrue("schemaIDGUID" in res[0])
-
-        ldif = """
-dn:
-changetype: modify
-add: schemaUpdateNow
-schemaUpdateNow: 1
-"""
-        self.ldb.modify_ldif(ldif)
-
-        object_name = "org" + time.strftime("%s", time.gmtime())
-
-        ldif = """
-dn: OU=%s,%s""" % (object_name, self.base_dn) + """
-objectClass: """ + class_ldap_display_name + """
-ou: """ + object_name + """
-instanceType: 4
-"""
-        self.ldb.add_ldif(ldif)
-
-        # Search for created object
-        res = []
-        res = self.ldb.search("ou=%s,%s" % (object_name, self.base_dn), scope=SCOPE_BASE, attrs=["dn"])
-        self.assertEquals(len(res), 1)
-        # Delete the object
-        delete_force(self.ldb, "ou=%s,%s" % (object_name, self.base_dn))
-
-
 class SchemaTests_msDS_IntId(samba.tests.TestCase):
 
     def setUp(self):
         super(SchemaTests_msDS_IntId, self).setUp()
         self.ldb = SamDB(host, credentials=creds,
-            session_info=system_session(lp), lp=lp, options=ldb_options)
+                         session_info=system_session(lp), lp=lp, options=ldb_options)
         res = self.ldb.search(base="", expression="", scope=SCOPE_BASE,
-                         attrs=["schemaNamingContext", "defaultNamingContext",
-                                "forestFunctionality"])
+                              attrs=["schemaNamingContext", "defaultNamingContext",
+                                     "forestFunctionality"])
         self.assertEquals(len(res), 1)
         self.schema_dn = res[0]["schemaNamingContext"][0]
         self.base_dn = res[0]["defaultNamingContext"][0]
@@ -1382,7 +1310,7 @@ objectClass: attributeSchema
 adminDescription: """ + attr_name + """
 adminDisplayName: """ + attr_name + """
 cn: """ + attr_name + """
-attributeId: 1.3.6.1.4.1.7165.4.6.1.6.14.""" + str(random.randint(1,100000)) + """
+attributeId: 1.3.6.1.4.1.7165.4.6.1.6.14.""" + str(random.randint(1, 100000)) + """
 attributeSyntax: 2.5.5.12
 omSyntax: 64
 instanceType: 4
@@ -1429,7 +1357,7 @@ systemOnly: FALSE
         res = self.ldb.search(attr_dn, scope=SCOPE_BASE,
                               attrs=["lDAPDisplayName", "msDS-IntId", "systemFlags"])
         self.assertEquals(len(res), 1)
-        self.assertEquals(res[0]["lDAPDisplayName"][0], attr_ldap_name)
+        self.assertEquals(str(res[0]["lDAPDisplayName"][0]), attr_ldap_name)
         if self.forest_level >= DS_DOMAIN_FUNCTION_2003:
             if self._is_schema_base_object(res[0]):
                 self.assertTrue("msDS-IntId" not in res[0])
@@ -1474,7 +1402,7 @@ systemOnly: FALSE
         res = self.ldb.search(attr_dn, scope=SCOPE_BASE,
                               attrs=["lDAPDisplayName", "msDS-IntId"])
         self.assertEquals(len(res), 1)
-        self.assertEquals(res[0]["lDAPDisplayName"][0], attr_ldap_name)
+        self.assertEquals(str(res[0]["lDAPDisplayName"][0]), attr_ldap_name)
         if self.forest_level >= DS_DOMAIN_FUNCTION_2003:
             if self._is_schema_base_object(res[0]):
                 self.assertTrue("msDS-IntId" not in res[0])
@@ -1493,7 +1421,6 @@ systemOnly: FALSE
             (num, _) = e28.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
 
-
     def _make_class_ldif(self, class_dn, class_name, sub_oid):
         ldif = """
 dn: """ + class_dn + """
@@ -1502,7 +1429,7 @@ objectClass: classSchema
 adminDescription: """ + class_name + """
 adminDisplayName: """ + class_name + """
 cn: """ + class_name + """
-governsId: 1.3.6.1.4.1.7165.4.6.2.6.%d.""" % sub_oid + str(random.randint(1,100000)) + """
+governsId: 1.3.6.1.4.1.7165.4.6.2.6.%d.""" % sub_oid + str(random.randint(1, 100000)) + """
 instanceType: 4
 objectClassCategory: 1
 subClassOf: organizationalPerson
@@ -1530,7 +1457,7 @@ systemOnly: FALSE
 
         res = self.ldb.search(class_dn, scope=SCOPE_BASE, attrs=["msDS-IntId"])
         self.assertEquals(len(res), 1)
-        self.assertEquals(res[0]["msDS-IntId"][0], "-1993108831")
+        self.assertEquals(str(res[0]["msDS-IntId"][0]), "-1993108831")
 
         # add a new Class and update schema
         (class_name, class_ldap_name, class_dn) = self._make_obj_names("msDS-IntId-Class-2-")
@@ -1568,7 +1495,7 @@ systemOnly: FALSE
 
         res = self.ldb.search(class_dn, scope=SCOPE_BASE, attrs=["msDS-IntId"])
         self.assertEquals(len(res), 1)
-        self.assertEquals(res[0]["msDS-IntId"][0], "-1993108831")
+        self.assertEquals(str(res[0]["msDS-IntId"][0]), "-1993108831")
 
         # add the new Class and update schema
         (class_name, class_ldap_name, class_dn) = self._make_obj_names("msDS-IntId-Class-4-")
@@ -1595,7 +1522,6 @@ systemOnly: FALSE
         res = self.ldb.search(class_dn, scope=SCOPE_BASE, attrs=["msDS-IntId"])
         self.assertEquals(len(res), 1)
         self.assertFalse("msDS-IntId" in res[0])
-
 
     def test_verify_msDS_IntId(self):
         """Verify msDS-IntId exists only on attributes without FLAG_SCHEMA_BASE_OBJECT flag set"""
@@ -1625,8 +1551,8 @@ class SchemaTests_msDS_isRODC(samba.tests.TestCase):
 
     def setUp(self):
         super(SchemaTests_msDS_isRODC, self).setUp()
-        self.ldb =  SamDB(host, credentials=creds,
-            session_info=system_session(lp), lp=lp, options=ldb_options)
+        self.ldb = SamDB(host, credentials=creds,
+                         session_info=system_session(lp), lp=lp, options=ldb_options)
         res = self.ldb.search(base="", expression="", scope=SCOPE_BASE, attrs=["defaultNamingContext"])
         self.assertEquals(len(res), 1)
         self.base_dn = res[0]["defaultNamingContext"][0]
@@ -1654,14 +1580,15 @@ class SchemaTests_msDS_isRODC(samba.tests.TestCase):
 
     def test_objectClass_computer(self):
         res = self.ldb.search(self.base_dn, expression="objectClass=computer",
-                              attrs=["serverReferenceBL","msDS-isRODC"], controls=["search_options:1:2"])
+                              attrs=["serverReferenceBL", "msDS-isRODC"], controls=["search_options:1:2"])
         for ldb_msg in res:
             if "serverReferenceBL" not in ldb_msg:
                 print("Computer entry %s doesn't have a serverReferenceBL attribute" % ldb_msg['dn'])
             else:
                 self.assertTrue("msDS-isRODC" in ldb_msg)
 
-if not "://" in host:
+
+if "://" not in host:
     if os.path.isfile(host):
         host = "tdb://%s" % host
     else:

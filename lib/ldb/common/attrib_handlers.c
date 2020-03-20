@@ -147,6 +147,113 @@ static int ldb_canonicalise_Integer(struct ldb_context *ldb, void *mem_ctx,
 }
 
 /*
+ * Lexicographically ordered format for a ldap Integer
+ *
+ * [ INT64_MIN ... -3, -2, -1 | 0 | +1, +2, +3 ... INT64_MAX ]
+ *             n                o              p
+ *
+ * For human readability sake, we continue to format the key as a string
+ * (like the canonicalize) rather than store as a fixed binary representation.
+ *
+ * In order to sort the integers in the correct string order, there are three
+ * techniques we use:
+ *
+ * 1. Zero padding
+ * 2. Negative integer inversion
+ * 3. 1-byte prefixes: 'n' < 'o' < 'p'
+ *
+ * 1. To have a fixed-width representation so that 10 sorts after 2 rather than
+ * after 1, we zero pad, like this 4-byte width example:
+ *
+ *     0001, 0002, 0010
+ *
+ * INT64_MAX = 2^63 - 1 = 9223372036854775807 (19 characters long)
+ *
+ * Meaning we need to pad to 19 characters.
+ *
+ * 2. This works for positive integers, but negative integers will still be
+ * sorted backwards, for example:
+ *
+ *     -9223372036854775808 ..., -0000000000000000002, -0000000000000000001
+ *          INT64_MIN                    -2                    -1
+ *
+ *   gets sorted based on string as:
+ *
+ *     -0000000000000000001, -0000000000000000002, ... -9223372036854775808
+ *
+ * In order to fix this, we invert the negative integer range, so that they
+ * get sorted the same way as positive numbers. INT64_MIN becomes the lowest
+ * possible non-negative number (zero), and -1 becomes the highest (INT64_MAX).
+ *
+ * The actual conversion applied to negative number 'x' is:
+ *   INT64_MAX - abs(x) + 1
+ * (The +1 is needed because abs(INT64_MIN) is one greater than INT64_MAX)
+ *
+ * 3. Finally, we now have two different numbers that map to the same key, e.g.
+ * INT64_MIN maps to -0000000000000000000 and zero maps to 0000000000000000000.
+ * In order to avoid confusion, we give every number a prefix representing its
+ * sign: 'n' for negative numbers, 'o' for zero, and 'p' for positive. (Note
+ * that '+' and '-' weren't used because they sort the wrong way).
+ *
+ * The result is a range of key values that look like this:
+ *
+ *     n0000000000000000000, ... n9223372036854775807,
+ *          INT64_MIN                    -1
+ *
+ *     o0000000000000000000,
+ *            ZERO
+ *
+ *     p0000000000000000001, ... p9223372036854775807
+ *            +1                       INT64_MAX
+ */
+static int ldb_index_format_Integer(struct ldb_context *ldb,
+				    void *mem_ctx,
+				    const struct ldb_val *in,
+				    struct ldb_val *out)
+{
+	int64_t i;
+	int ret;
+	char prefix;
+	size_t len;
+
+	ret = val_to_int64(in, &i);
+	if (ret != LDB_SUCCESS) {
+		return ret;
+	}
+
+	if (i < 0) {
+		/*
+		 * i is negative, so this is subtraction rather than
+		 * wrap-around.
+		 */
+		prefix = 'n';
+		i = INT64_MAX + i + 1;
+	} else if (i > 0) {
+		prefix = 'p';
+	} else {
+		prefix = 'o';
+	}
+
+	out->data = (uint8_t *) talloc_asprintf(mem_ctx, "%c%019lld", prefix, (long long)i);
+	if (out->data == NULL) {
+		ldb_oom(ldb);
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+
+	len = talloc_array_length(out->data) - 1;
+	if (len != 20) {
+		ldb_debug(ldb, LDB_DEBUG_ERROR,
+			  __location__ ": expected index format str %s to"
+			  " have length 20 but got %zu",
+			  (char*)out->data, len);
+		return LDB_ERR_OPERATIONS_ERROR;
+	}
+
+	out->length = 20;
+	return 0;
+}
+
+/*
   compare two Integers
 */
 static int ldb_comparison_Integer(struct ldb_context *ldb, void *mem_ctx,
@@ -428,7 +535,15 @@ static const struct ldb_schema_syntax ldb_standard_syntaxes[] = {
 		.canonicalise_fn = ldb_canonicalise_Integer,
 		.comparison_fn   = ldb_comparison_Integer
 	},
-	{ 
+	{
+		.name            = LDB_SYNTAX_ORDERED_INTEGER,
+		.ldif_read_fn    = ldb_handler_copy,
+		.ldif_write_fn   = ldb_handler_copy,
+		.canonicalise_fn = ldb_canonicalise_Integer,
+		.index_format_fn = ldb_index_format_Integer,
+		.comparison_fn   = ldb_comparison_Integer
+	},
+	{
 		.name            = LDB_SYNTAX_OCTET_STRING,
 		.ldif_read_fn    = ldb_handler_copy,
 		.ldif_write_fn   = ldb_handler_copy,

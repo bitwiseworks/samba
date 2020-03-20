@@ -1697,6 +1697,10 @@ static bool cmp_fileinfo(int instance,
 		CHECK_EQUAL(attribute_tag_information.out.reparse_tag);
 		break;
 
+	case RAW_FILEINFO_NORMALIZED_NAME_INFORMATION:
+		CHECK_WSTR_EQUAL(normalized_name_info.out.fname);
+		break;
+
 	case RAW_FILEINFO_SMB2_ALL_INFORMATION:
 		CHECK_NTTIMES_EQUAL(all_info2.out.create_time);
 		CHECK_NTTIMES_EQUAL(all_info2.out.access_time);
@@ -2094,7 +2098,7 @@ static bool handler_smb_lockingx(int instance)
 	parm[0].lockx.in.mode = gen_lock_mode();
 	parm[0].lockx.in.timeout = gen_timeout();
 	do {
-		/* make sure we don't accidentially generate an oplock
+		/* make sure we don't accidentally generate an oplock
 		   break ack - otherwise the server can just block forever */
 		parm[0].lockx.in.ulock_cnt = gen_lock_count();
 		parm[0].lockx.in.lock_cnt = gen_lock_count();
@@ -2880,36 +2884,152 @@ static struct {
 	bool smb2;
 	int count, success_count;
 } gen_ops[] = {
-	{"CREATE",     handler_smb2_create,     true},
-	{"CLOSE",      handler_smb2_close,      true},
-	{"READ",       handler_smb2_read,       true},
-	{"WRITE",      handler_smb2_write,      true},
-	{"LOCK",       handler_smb2_lock,       true},
-	{"FLUSH",      handler_smb2_flush,      true},
-	{"ECHO",       handler_smb2_echo,       true},
-	{"QFILEINFO",  handler_smb2_qfileinfo,  true},
-	{"SFILEINFO",  handler_smb2_sfileinfo,  true},
+	{
+		.name    = "CREATE",
+		.handler = handler_smb2_create,
+		.smb2    = true,
+	},
+	{
+		.name    = "CLOSE",
+		.handler = handler_smb2_close,
+		.smb2    = true,
+	},
+	{
+		.name    = "READ",
+		.handler = handler_smb2_read,
+		.smb2    = true,
+	},
+	{
+		.name    = "WRITE",
+		.handler = handler_smb2_write,
+		.smb2    = true,
+	},
+	{
+		.name    = "LOCK",
+		.handler = handler_smb2_lock,
+		.smb2    = true,
+	},
+	{
+		.name    = "FLUSH",
+		.handler = handler_smb2_flush,
+		.smb2    = true,
+	},
+	{
+		.name    = "ECHO",
+		.handler = handler_smb2_echo,
+		.smb2    = true,
+	},
+	{
+		.name    = "QFILEINFO",
+		.handler = handler_smb2_qfileinfo,
+		.smb2    = true,
+	},
+	{
+		.name    = "SFILEINFO",
+		.handler = handler_smb2_sfileinfo,
+		.smb2    = true,
+	},
 
-	{"OPEN",       handler_smb_open,        false},
-	{"OPENX",      handler_smb_openx,       false},
-	{"NTCREATEX",  handler_smb_ntcreatex,   false},
-	{"CLOSE",      handler_smb_close,       false},
-	{"UNLINK",     handler_smb_unlink,      false},
-	{"MKDIR",      handler_smb_mkdir,       false},
-	{"RMDIR",      handler_smb_rmdir,       false},
-	{"RENAME",     handler_smb_rename,      false},
-	{"NTRENAME",   handler_smb_ntrename,    false},
-	{"READX",      handler_smb_readx,       false},
-	{"WRITEX",     handler_smb_writex,      false},
-	{"CHKPATH",    handler_smb_chkpath,     false},
-	{"SEEK",       handler_smb_seek,        false},
-	{"LOCKINGX",   handler_smb_lockingx,    false},
-	{"QPATHINFO",  handler_smb_qpathinfo,   false},
-	{"QFILEINFO",  handler_smb_qfileinfo,   false},
-	{"SPATHINFO",  handler_smb_spathinfo,   false},
-	{"SFILEINFO",  handler_smb_sfileinfo,   false},
-	{"NOTIFY",     handler_smb_notify,      false},
-	{"SEEK",       handler_smb_seek,        false},
+	{
+		.name    = "OPEN",
+		.handler = handler_smb_open,
+		.smb2    = false,
+	},
+	{
+		.name    = "OPENX",
+		.handler = handler_smb_openx,
+		.smb2    = false,
+	},
+	{
+		.name    = "NTCREATEX",
+		.handler = handler_smb_ntcreatex,
+		.smb2    = false,
+	},
+	{
+		.name    = "CLOSE",
+		.handler = handler_smb_close,
+		.smb2    = false,
+	},
+	{
+		.name    = "UNLINK",
+		.handler = handler_smb_unlink,
+		.smb2    = false,
+	},
+	{
+		.name    = "MKDIR",
+		.handler = handler_smb_mkdir,
+		.smb2    = false,
+	},
+	{
+		.name    = "RMDIR",
+		.handler = handler_smb_rmdir,
+		.smb2    = false,
+	},
+	{
+		.name    = "RENAME",
+		.handler = handler_smb_rename,
+		.smb2    = false,
+	},
+	{
+		.name    = "NTRENAME",
+		.handler = handler_smb_ntrename,
+		.smb2    = false,
+	},
+	{
+		.name    = "READX",
+		.handler = handler_smb_readx,
+		.smb2    = false,
+	},
+	{
+		.name    = "WRITEX",
+		.handler = handler_smb_writex,
+		.smb2    = false,
+	},
+	{
+		.name    = "CHKPATH",
+		.handler = handler_smb_chkpath,
+		.smb2    = false,
+	},
+	{
+		.name    = "SEEK",
+		.handler = handler_smb_seek,
+		.smb2    = false,
+	},
+	{
+		.name    = "LOCKINGX",
+		.handler = handler_smb_lockingx,
+		.smb2    = false,
+	},
+	{
+		.name    = "QPATHINFO",
+		.handler = handler_smb_qpathinfo,
+		.smb2    = false,
+	},
+	{
+		.name    = "QFILEINFO",
+		.handler = handler_smb_qfileinfo,
+		.smb2    = false,
+	},
+	{
+		.name    = "SPATHINFO",
+		.handler = handler_smb_spathinfo,
+		.smb2    = false,
+	},
+	{
+		.name    = "SFILEINFO",
+		.handler = handler_smb_sfileinfo,
+		.smb2    = false,
+	},
+	{
+		.name    = "NOTIFY",
+		.handler = handler_smb_notify,
+		.smb2    = false,
+	},
+	{
+		.name    = "SEEK",
+		.handler = handler_smb_seek,
+		.smb2    = false,
+	},
 };
 
 
@@ -3278,6 +3398,7 @@ int main(int argc, const char *argv[])
 		const char *share = argv[1+i];
 		if (!split_unc_name(share, &servers[i].server_name, &servers[i].share_name)) {
 			printf("Invalid share name '%s'\n", share);
+			poptFreeContext(pc);
 			talloc_free(mem_ctx);
 			return -1;
 		}
@@ -3285,6 +3406,7 @@ int main(int argc, const char *argv[])
 
 	if (username_count == 0) {
 		usage(pc);
+		poptFreeContext(pc);
 		talloc_free(mem_ctx);
 		return -1;
 	}
@@ -3306,6 +3428,7 @@ int main(int argc, const char *argv[])
 		printf("gentest failed\n");
 	}
 
+	poptFreeContext(pc);
 	talloc_free(mem_ctx);
 	return ret?0:-1;
 }

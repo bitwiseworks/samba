@@ -22,9 +22,11 @@
 #include "includes.h"
 #include "dnsserver.h"
 #include "rpc_server/common/common.h"
+#include "dns_server/dnsserver_common.h"
 #include "dsdb/samdb/samdb.h"
 #include "lib/socket/netif.h"
 #include "lib/util/util_net.h"
+#include "dnsserver_common.h"
 
 static struct DNS_ADDR_ARRAY *fill_dns_addr_array(TALLOC_CTX *mem_ctx,
 					   struct loadparm_context *lp_ctx,
@@ -69,17 +71,23 @@ static struct DNS_ADDR_ARRAY *fill_dns_addr_array(TALLOC_CTX *mem_ctx,
 	}
 
 	for (i = 0; i < num_interfaces; i++) {
+		int ret;
 		ipstr = iface_list_n_ip(ifaces, i);
 		if (is_ipaddress_v4(ipstr)) {
 			have_ipv4 = true;
 			dns_addr_array->AddrArray[i].MaxSa[0] = 0x02;
-			inet_pton(AF_INET, ipstr,
-				  &dns_addr_array->AddrArray[i].MaxSa[4]);
+			ret = inet_pton(AF_INET, ipstr,
+					&dns_addr_array->AddrArray[i].MaxSa[4]);
 		} else {
 			have_ipv6 = true;
 			dns_addr_array->AddrArray[i].MaxSa[0] = 0x17;
-			inet_pton(AF_INET6, ipstr,
-				  &dns_addr_array->AddrArray[i].MaxSa[8]);
+			ret = inet_pton(AF_INET6, ipstr,
+					&dns_addr_array->AddrArray[i].MaxSa[8]);
+		}
+		if (ret != 1) { /*yep, 1 means success for inet_pton */
+			DBG_ERR("Interface %d address (%s) is invalid\n",
+				i, ipstr);
+			goto nomem;
 		}
 	}
 
@@ -208,7 +216,6 @@ struct dnsserver_serverinfo *dnsserver_init_serverinfo(TALLOC_CTX *mem_ctx,
 	return serverinfo;
 }
 
-
 struct dnsserver_zoneinfo *dnsserver_init_zoneinfo(struct dnsserver_zone *zone,
 						struct dnsserver_serverinfo *serverinfo)
 {
@@ -217,8 +224,7 @@ struct dnsserver_zoneinfo *dnsserver_init_zoneinfo(struct dnsserver_zone *zone,
 	const char *revzone = "in-addr.arpa";
 	const char *revzone6 = "ip6.arpa";
 	int len1, len2;
-	union dnsPropertyData *prop = NULL;
-	int i=0;
+	unsigned int i = 0;
 
 	zoneinfo = talloc_zero(zone, struct dnsserver_zoneinfo);
 	if (zoneinfo == NULL) {
@@ -286,72 +292,16 @@ struct dnsserver_zoneinfo *dnsserver_init_zoneinfo(struct dnsserver_zone *zone,
 	zoneinfo->dwLastXfrResult = 0;
 
 	for(i=0; i<zone->num_props; i++){
-		prop=&(zone->tmp_props[i].data);
-		switch (zone->tmp_props[i].id) {
-		case DSPROPERTY_ZONE_TYPE:
-			zoneinfo->dwZoneType =
-				prop->zone_type;
-			break;
-		case DSPROPERTY_ZONE_ALLOW_UPDATE:
-			zoneinfo->fAllowUpdate =
-				prop->allow_update_flag;
-			break;
-		case DSPROPERTY_ZONE_NOREFRESH_INTERVAL:
-			zoneinfo->dwNoRefreshInterval =
-				prop->norefresh_hours;
-			break;
-		case DSPROPERTY_ZONE_REFRESH_INTERVAL:
-			zoneinfo->dwRefreshInterval =
-				prop->refresh_hours;
-			break;
-		case DSPROPERTY_ZONE_AGING_STATE:
-			zoneinfo->fAging =
-				prop->aging_enabled;
-			break;
-		case DSPROPERTY_ZONE_SCAVENGING_SERVERS:
-			zoneinfo->aipScavengeServers->AddrCount =
-				prop->servers.addrCount;
-			zoneinfo->aipScavengeServers->AddrArray =
-				prop->servers.addr;
-			break;
-		case DSPROPERTY_ZONE_AGING_ENABLED_TIME:
-			zoneinfo->dwAvailForScavengeTime =
-				prop->next_scavenging_cycle_hours;
-			break;
-		case DSPROPERTY_ZONE_MASTER_SERVERS:
-			zoneinfo->aipLocalMasters->AddrCount =
-				prop->master_servers.addrCount;
-			zoneinfo->aipLocalMasters->AddrArray =
-				prop->master_servers.addr;
-			break;
-		case DSPROPERTY_ZONE_EMPTY:
-		case DSPROPERTY_ZONE_SECURE_TIME:
-		case DSPROPERTY_ZONE_DELETED_FROM_HOSTNAME:
-		case DSPROPERTY_ZONE_AUTO_NS_SERVERS:
-		case DSPROPERTY_ZONE_DCPROMO_CONVERT:
-		case DSPROPERTY_ZONE_SCAVENGING_SERVERS_DA:
-		case DSPROPERTY_ZONE_MASTER_SERVERS_DA:
-		case DSPROPERTY_ZONE_NS_SERVERS_DA:
-		case DSPROPERTY_ZONE_NODE_DBFLAGS:
-			break;
+		bool valid_property;
+		valid_property = dns_zoneinfo_load_zone_property(
+		    zoneinfo, &zone->tmp_props[i]);
+		if (!valid_property) {
+			TALLOC_FREE(zoneinfo);
+			return NULL;
 		}
 	}
 
 	return zoneinfo;
-}
-
-struct dnsserver_partition *dnsserver_find_partition(struct dnsserver_partition *partitions,
-						     const char *dp_fqdn)
-{
-	struct dnsserver_partition *p = NULL;
-
-	for (p = partitions; p; p = p->next) {
-		if (strcasecmp(dp_fqdn, p->pszDpFqdn) == 0) {
-			break;
-		}
-	}
-
-	return p;
 }
 
 struct dnsserver_zone *dnsserver_find_zone(struct dnsserver_zone *zones, const char *zone_name)
@@ -359,7 +309,7 @@ struct dnsserver_zone *dnsserver_find_zone(struct dnsserver_zone *zones, const c
 	struct dnsserver_zone *z = NULL;
 
 	for (z = zones; z; z = z->next) {
-		if (strcasecmp(zone_name, z->name) == 0) {
+		if (dns_name_equal(zone_name, z->name)) {
 			break;
 		}
 	}
@@ -371,6 +321,8 @@ struct ldb_dn *dnsserver_name_to_dn(TALLOC_CTX *mem_ctx, struct dnsserver_zone *
 {
 	struct ldb_dn *dn;
 	bool ret;
+	struct ldb_val name_val =
+		data_blob_string_const(name);
 
 	dn = ldb_dn_copy(mem_ctx, z->zone_dn);
 	if (dn == NULL) {
@@ -378,9 +330,17 @@ struct ldb_dn *dnsserver_name_to_dn(TALLOC_CTX *mem_ctx, struct dnsserver_zone *
 	}
 	if (strcasecmp(name, z->name) == 0) {
 		ret = ldb_dn_add_child_fmt(dn, "DC=@");
-	} else {
-		ret = ldb_dn_add_child_fmt(dn, "DC=%s", name);
+		if (!ret) {
+			talloc_free(dn);
+			return NULL;
+		}
+		return dn;
 	}
+
+	ret = ldb_dn_add_child_val(dn,
+				   "DC",
+				   name_val);
+
 	if (!ret) {
 		talloc_free(dn);
 		return NULL;

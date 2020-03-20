@@ -26,6 +26,7 @@
 #include "registry/reg_api_util.h"
 #include "registry/reg_init_basic.h"
 #include "../libcli/security/security.h"
+#include "libcli/security/dom_sid.h"
 #include "../libcli/registry/util_reg.h"
 
 
@@ -306,12 +307,17 @@ static const char *gp_reg_groupmembership_path(TALLOC_CTX *mem_ctx,
 					       const struct dom_sid *sid,
 					       uint32_t flags)
 {
+	struct dom_sid_buf sidbuf;
+
 	if (flags & GPO_LIST_FLAG_MACHINE) {
 		return "GroupMembership";
 	}
 
-	return talloc_asprintf(mem_ctx, "%s\\%s", sid_string_tos(sid),
-			       "GroupMembership");
+	return talloc_asprintf(
+		mem_ctx,
+		"%s\\%s",
+		dom_sid_str_buf(sid, &sidbuf),
+		"GroupMembership");
 }
 
 /****************************************************************
@@ -342,10 +348,9 @@ static WERROR gp_reg_store_groupmembership(TALLOC_CTX *mem_ctx,
 {
 	struct registry_key *key = NULL;
 	WERROR werr;
-	int i = 0;
+	uint32_t i = 0;
 	const char *valname = NULL;
 	const char *path = NULL;
-	const char *val = NULL;
 	int count = 0;
 
 	path = gp_reg_groupmembership_path(mem_ctx, &token->sids[0],
@@ -359,13 +364,16 @@ static WERROR gp_reg_store_groupmembership(TALLOC_CTX *mem_ctx,
 	W_ERROR_NOT_OK_RETURN(werr);
 
 	for (i=0; i<token->num_sids; i++) {
+		struct dom_sid_buf buf;
 
 		valname = talloc_asprintf(mem_ctx, "Group%d", count++);
 		W_ERROR_HAVE_NO_MEMORY(valname);
 
-		val = sid_string_talloc(mem_ctx, &token->sids[i]);
-		W_ERROR_HAVE_NO_MEMORY(val);
-		werr = gp_store_reg_val_sz(mem_ctx, key, valname, val);
+		werr = gp_store_reg_val_sz(
+			mem_ctx,
+			key,
+			valname,
+			dom_sid_str_buf(&token->sids[i], &buf));
 		W_ERROR_NOT_OK_RETURN(werr);
 	}
 
@@ -435,11 +443,17 @@ static const char *gp_req_state_path(TALLOC_CTX *mem_ctx,
 				     const struct dom_sid *sid,
 				     uint32_t flags)
 {
+	struct dom_sid_buf sidbuf;
+
 	if (flags & GPO_LIST_FLAG_MACHINE) {
 		return GPO_REG_STATE_MACHINE;
 	}
 
-	return talloc_asprintf(mem_ctx, "%s\\%s", "State", sid_string_tos(sid));
+	return talloc_asprintf(
+		mem_ctx,
+		"%s\\%s",
+		"State",
+		dom_sid_str_buf(sid, &sidbuf));
 }
 
 /****************************************************************

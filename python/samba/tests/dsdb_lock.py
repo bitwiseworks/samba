@@ -25,6 +25,7 @@ import samba
 import gc
 import time
 
+
 class DsdbLockTestCase(SamDBTestCase):
     def test_db_lock1(self):
         basedn = self.samdb.get_default_basedn()
@@ -220,7 +221,6 @@ class DsdbLockTestCase(SamDBTestCase):
         self.assertEqual(os.WEXITSTATUS(status), 0)
         self.assertEqual(got_pid, pid)
 
-
     def _test_full_db_lock1(self, backend_path):
         (r1, w1) = os.pipe()
 
@@ -232,10 +232,9 @@ class DsdbLockTestCase(SamDBTestCase):
 
             backenddb = ldb.Ldb(backend_path)
 
-
             backenddb.transaction_start()
 
-            backenddb.add({"dn":"@DSDB_LOCK_TEST"})
+            backenddb.add({"dn": "@DSDB_LOCK_TEST"})
             backenddb.delete("@DSDB_LOCK_TEST")
 
             # Obtain a write lock
@@ -277,7 +276,6 @@ class DsdbLockTestCase(SamDBTestCase):
         backend_path = self.lp.private_path(backend_subpath)
         self._test_full_db_lock1(backend_path)
 
-
     def test_full_db_lock1_config(self):
         basedn = self.samdb.get_config_basedn()
         backend_filename = "%s.ldb" % basedn.get_casefold()
@@ -285,7 +283,6 @@ class DsdbLockTestCase(SamDBTestCase):
                                        backend_filename)
         backend_path = self.lp.private_path(backend_subpath)
         self._test_full_db_lock1(backend_path)
-
 
     def _test_full_db_lock2(self, backend_path):
         (r1, w1) = os.pipe()
@@ -335,7 +332,7 @@ class DsdbLockTestCase(SamDBTestCase):
         os.write(w1, b"started")
 
         self.assertEqual(os.read(r2, 3), b"add")
-        backenddb.add({"dn":"@DSDB_LOCK_TEST"})
+        backenddb.add({"dn": "@DSDB_LOCK_TEST"})
         backenddb.delete("@DSDB_LOCK_TEST")
         os.write(w1, b"added")
 

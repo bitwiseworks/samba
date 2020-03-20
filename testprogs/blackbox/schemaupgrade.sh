@@ -50,7 +50,7 @@ ldapcmp_ignore() {
     # objects, but we don't have the 2012 DisplaySpecifiers documentation...
     IGNORE_ATTRS="$IGNORE_ATTRS,adminContextMenu,adminPropertyPages"
 
-    $PYTHON $BINDIR/samba-tool ldapcmp tdb://$PREFIX_ABS/$2_schema/private/sam.ldb tdb://$PREFIX_ABS/$3_schema/private/sam.ldb --two --filter=$IGNORE_ATTRS
+    $PYTHON $BINDIR/samba-tool ldapcmp tdb://$PREFIX_ABS/$2_schema/private/sam.ldb tdb://$PREFIX_ABS/$3_schema/private/sam.ldb --two --filter=$IGNORE_ATTRS --skip-missing-dn
 }
 
 ldapcmp_old() {
@@ -84,11 +84,11 @@ ldapcmp_2008R2_2008R2_old() {
 }
 
 schema_upgrade() {
-	$BINDIR/samba-tool domain schemaupgrade -H tdb://$PREFIX_ABS/2008R2_schema/private/sam.ldb --schema=2012_R2
+	$PYTHON $BINDIR/samba-tool domain schemaupgrade -H tdb://$PREFIX_ABS/2008R2_schema/private/sam.ldb --schema=2012_R2
 }
 
 schema_upgrade_old() {
-	$BINDIR/samba-tool domain schemaupgrade -H tdb://$PREFIX_ABS/2008R2_old_schema/private/sam.ldb --schema=2012_R2
+	$PYTHON $BINDIR/samba-tool domain schemaupgrade -H tdb://$PREFIX_ABS/2008R2_old_schema/private/sam.ldb --schema=2012_R2
 }
 
 # double-check we cleaned up from the last test run

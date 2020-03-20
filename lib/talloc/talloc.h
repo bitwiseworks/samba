@@ -43,7 +43,7 @@ extern "C" {
  */
 
 #define TALLOC_VERSION_MAJOR 2
-#define TALLOC_VERSION_MINOR 1
+#define TALLOC_VERSION_MINOR 3
 
 int talloc_version_major(void);
 int talloc_version_minor(void);
@@ -101,7 +101,15 @@ typedef void TALLOC_CTX;
 #endif
 #endif
 
+#ifndef _DEPRECATED_
+#ifdef HAVE___ATTRIBUTE__
+#define _DEPRECATED_ __attribute__ ((deprecated))
+#else
+#define _DEPRECATED_
+#endif
+#endif
 #ifdef DOXYGEN
+
 /**
  * @brief Create a new talloc context.
  *
@@ -958,7 +966,7 @@ size_t talloc_reference_count(const void *ptr);
  *
  * - you can talloc_free() the pointer itself if it has at maximum one
  *   parent. This behaviour has been changed since the release of version
- *   2.0. Further informations in the description of "talloc_free".
+ *   2.0. Further information in the description of "talloc_free".
  *
  * For more control on which parent to remove, see talloc_unlink()
  * @param[in]  ctx      The additional parent.
@@ -999,7 +1007,7 @@ void *_talloc_reference_loc(const void *context, const void *ptr, const char *lo
  *
  * You can just use talloc_free() instead of talloc_unlink() if there
  * is at maximum one parent. This behaviour has been changed since the
- * release of version 2.0. Further informations in the description of
+ * release of version 2.0. Further information in the description of
  * "talloc_free".
  *
  * @param[in]  context  The talloc parent to remove.
@@ -1047,7 +1055,7 @@ int talloc_unlink(const void *context, void *ptr);
  *
  * @return              A talloc context, NULL on error.
  */
-void *talloc_autofree_context(void);
+void *talloc_autofree_context(void) _DEPRECATED_;
 
 /**
  * @brief Get the size of a talloc chunk.
@@ -1907,10 +1915,13 @@ void talloc_set_log_stderr(void);
  *	  move causes the new parent to exceed its limits. However
  *	  any further allocation on that hierarchy will then fail.
  *
+ * @warning talloc memlimit functionality is deprecated. Please
+ *	    consider using cgroup memory limits instead.
+ *
  * @param[in]	ctx		The talloc context to set the limit on
  * @param[in]	max_size	The (new) max_size
  */
-int talloc_set_memlimit(const void *ctx, size_t max_size);
+int talloc_set_memlimit(const void *ctx, size_t max_size) _DEPRECATED_;
 
 /* @} ******************************************************************/
 

@@ -115,6 +115,9 @@ static NTSTATUS xattr_tdb_load_attrs(TALLOC_CTX *mem_ctx,
 			      make_tdb_data(id_buf, sizeof(id_buf)),
 			      &data);
 	if (!NT_STATUS_IS_OK(status)) {
+		if (NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND)) {
+			return status;
+		}
 		return NT_STATUS_INTERNAL_DB_CORRUPTION;
 	}
 
@@ -178,9 +181,10 @@ ssize_t xattr_tdb_getattr(struct db_context *db_ctx,
 	ssize_t result = -1;
 	NTSTATUS status;
 	TALLOC_CTX *frame = talloc_stackframe();
+	struct file_id_buf buf;
 
-	DEBUG(10, ("xattr_tdb_getattr called for file %s, name %s\n",
-		   file_id_string(frame, id), name));
+	DBG_DEBUG("xattr_tdb_getattr called for file %s, name %s\n",
+		  file_id_str_buf(*id, &buf), name);
 
 	status = xattr_tdb_load_attrs(frame, db_ctx, id, &attribs);
 
@@ -226,9 +230,10 @@ int xattr_tdb_setattr(struct db_context *db_ctx,
 	uint32_t i;
 	TDB_DATA data;
 	TALLOC_CTX *frame = talloc_stackframe();
+	struct file_id_buf buf;
 
-	DEBUG(10, ("xattr_tdb_setattr called for file %s, name %s\n",
-		   file_id_string(frame, id), name));
+	DBG_DEBUG("xattr_tdb_setattr called for file %s, name %s\n",
+		  file_id_str_buf(*id, &buf), name);
 
 	rec = xattr_tdb_lock_attrs(frame, db_ctx, id);
 
@@ -316,12 +321,19 @@ ssize_t xattr_tdb_listattr(struct db_context *db_ctx,
 
 	status = xattr_tdb_load_attrs(frame, db_ctx, id, &attribs);
 
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(10, ("xattr_tdb_fetch_attrs failed: %s\n",
+	if (!NT_STATUS_IS_OK(status) &&
+	    !NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND))
+	{
+		DEBUG(0, ("xattr_tdb_fetch_attrs failed: %s\n",
 			   nt_errstr(status)));
 		errno = EINVAL;
 		TALLOC_FREE(frame);
 		return -1;
+	}
+
+	if (NT_STATUS_EQUAL(status, NT_STATUS_NOT_FOUND)) {
+		TALLOC_FREE(frame);
+		return 0;
 	}
 
 	DEBUG(10, ("xattr_tdb_listattr: Found %d xattrs\n",

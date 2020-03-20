@@ -22,6 +22,7 @@
 #include <Python.h>
 #include "python/py3compat.h"
 #include "includes.h"
+#include "python/modules.h"
 #include <pyldb.h>
 #include <pytalloc.h>
 #include "libnet.h"
@@ -40,8 +41,12 @@
 
 static void PyErr_SetDsExtendedError(enum drsuapi_DsExtendedError ext_err, const char *error_description)
 {
-	PyObject *error = PyObject_GetAttrString(PyImport_ImportModule("samba"),
-						 "DsExtendedError");
+	PyObject *mod = NULL;
+	PyObject *error = NULL;
+	mod = PyImport_ImportModule("samba");
+	if (mod) {
+		error = PyObject_GetAttrString(mod, "DsExtendedError");
+	}
 	if (error_description == NULL) {
 		switch (ext_err) {
 			/* Copied out of ndr_drsuapi.c:ndr_print_drsuapi_DsExtendedError() */
@@ -98,10 +103,17 @@ static void PyErr_SetDsExtendedError(enum drsuapi_DsExtendedError ext_err, const
 				break;
 		}
 	}
-	PyErr_SetObject(error,
+	if (error) {
+		PyObject *value =
 			Py_BuildValue(discard_const_p(char, "(i,s)"),
 				      ext_err,
-				      error_description));
+				      error_description);
+		PyErr_SetObject(error, value);
+		if (value) {
+			Py_DECREF(value);
+		}
+		Py_DECREF(error);
+	}
 }
 
 static PyObject *py_net_join_member(py_net_Object *self, PyObject *args, PyObject *kwargs)
@@ -161,7 +173,8 @@ static PyObject *py_net_change_password(py_net_Object *self, PyObject *args, PyO
 	const char *newpass = NULL;
 	const char *oldpass = NULL;
 	ZERO_STRUCT(r);
-	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "es|esss:change_password",
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, PYARG_STR_UNI
+					 "|"PYARG_STR_UNI"ss:change_password",
 					 discard_const_p(char *, kwnames),
 					 "utf8",
 					 &newpass,
@@ -312,7 +325,7 @@ static PyObject *py_net_time(py_net_Object *self, PyObject *args, PyObject *kwar
 	tm = localtime(&r.generic.out.time);
 	strftime(timestr, sizeof(timestr)-1, "%c %Z",tm);
 	
-	ret = PyStr_FromString(timestr);
+	ret = PyUnicode_FromString(timestr);
 
 	talloc_free(mem_ctx);
 
@@ -549,7 +562,7 @@ static PyObject *py_net_replicate_chunk(py_net_Object *self, PyObject *args, PyO
 	s->chunk.req5 = NULL;
 	s->chunk.req8 = NULL;
 	s->chunk.req10 = NULL;
-	if (py_req) {
+	if (py_req != Py_None) {
 		switch (req_level) {
 		case 0:
 			break;
@@ -756,17 +769,76 @@ static const char py_net_finddc_doc[] = "finddc(flags=server_type, domain=None, 
 					 "Find a DC with the specified 'server_type' bits. The 'domain' and/or 'address' have to be used as additional search criteria. Returns the whole netlogon struct";
 
 static PyMethodDef net_obj_methods[] = {
-	{"join_member", (PyCFunction)py_net_join_member, METH_VARARGS|METH_KEYWORDS, py_net_join_member_doc},
-	{"change_password", (PyCFunction)py_net_change_password, METH_VARARGS|METH_KEYWORDS, py_net_change_password_doc},
-	{"set_password", (PyCFunction)py_net_set_password, METH_VARARGS|METH_KEYWORDS, py_net_set_password_doc},
-	{"time", (PyCFunction)py_net_time, METH_VARARGS|METH_KEYWORDS, py_net_time_doc},
-	{"create_user", (PyCFunction)py_net_user_create, METH_VARARGS|METH_KEYWORDS, py_net_create_user_doc},
-	{"delete_user", (PyCFunction)py_net_user_delete, METH_VARARGS|METH_KEYWORDS, py_net_delete_user_doc},
-	{"replicate_init", (PyCFunction)py_net_replicate_init, METH_VARARGS|METH_KEYWORDS, py_net_replicate_init_doc},
-	{"replicate_chunk", (PyCFunction)py_net_replicate_chunk, METH_VARARGS|METH_KEYWORDS, py_net_replicate_chunk_doc},
-	{"replicate_decrypt", (PyCFunction)py_net_replicate_decrypt, METH_VARARGS|METH_KEYWORDS, py_net_replicate_decrypt_doc},
-	{"finddc", (PyCFunction)py_net_finddc, METH_VARARGS|METH_KEYWORDS, py_net_finddc_doc},
-	{ NULL }
+	{
+		.ml_name  = "join_member",
+		.ml_meth  = PY_DISCARD_FUNC_SIG(PyCFunction,
+				py_net_join_member),
+		.ml_flags = METH_VARARGS|METH_KEYWORDS,
+		.ml_doc   = py_net_join_member_doc
+	},
+	{
+		.ml_name  = "change_password",
+		.ml_meth  = PY_DISCARD_FUNC_SIG(PyCFunction,
+				py_net_change_password),
+		.ml_flags = METH_VARARGS|METH_KEYWORDS,
+		.ml_doc   = py_net_change_password_doc
+	},
+	{
+		.ml_name  = "set_password",
+		.ml_meth  = PY_DISCARD_FUNC_SIG(PyCFunction,
+				py_net_set_password),
+		.ml_flags = METH_VARARGS|METH_KEYWORDS,
+		.ml_doc   = py_net_set_password_doc
+	},
+	{
+		.ml_name  = "time",
+		.ml_meth  = PY_DISCARD_FUNC_SIG(PyCFunction, py_net_time),
+		.ml_flags = METH_VARARGS|METH_KEYWORDS,
+		.ml_doc   = py_net_time_doc
+	},
+	{
+		.ml_name  = "create_user",
+		.ml_meth  = PY_DISCARD_FUNC_SIG(PyCFunction,
+				py_net_user_create),
+		.ml_flags = METH_VARARGS|METH_KEYWORDS,
+		.ml_doc   = py_net_create_user_doc
+	},
+	{
+		.ml_name  = "delete_user",
+		.ml_meth  = PY_DISCARD_FUNC_SIG(PyCFunction,
+				py_net_user_delete),
+		.ml_flags = METH_VARARGS|METH_KEYWORDS,
+		.ml_doc   = py_net_delete_user_doc
+	},
+	{
+		.ml_name  = "replicate_init",
+		.ml_meth  = PY_DISCARD_FUNC_SIG(PyCFunction,
+				py_net_replicate_init),
+		.ml_flags = METH_VARARGS|METH_KEYWORDS,
+		.ml_doc   = py_net_replicate_init_doc
+	},
+	{
+		.ml_name  = "replicate_chunk",
+		.ml_meth  = PY_DISCARD_FUNC_SIG(PyCFunction,
+				py_net_replicate_chunk),
+		.ml_flags = METH_VARARGS|METH_KEYWORDS,
+		.ml_doc   = py_net_replicate_chunk_doc
+	},
+	{
+		.ml_name  = "replicate_decrypt",
+		.ml_meth  = PY_DISCARD_FUNC_SIG(PyCFunction,
+				py_net_replicate_decrypt),
+		.ml_flags = METH_VARARGS|METH_KEYWORDS,
+		.ml_doc   = py_net_replicate_decrypt_doc
+	},
+	{
+		.ml_name  = "finddc",
+		.ml_meth  = PY_DISCARD_FUNC_SIG(PyCFunction,
+				py_net_finddc),
+		.ml_flags = METH_VARARGS|METH_KEYWORDS,
+		.ml_doc   = py_net_finddc_doc
+	},
+	{ .ml_name = NULL }
 };
 
 static void py_net_dealloc(py_net_Object *self)

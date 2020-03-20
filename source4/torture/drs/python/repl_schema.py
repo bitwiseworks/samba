@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Tests various schema replication scenarios
@@ -39,10 +39,11 @@ from ldb import (
     Message,
     FLAG_MOD_ADD,
     FLAG_MOD_REPLACE
-    )
+)
 from samba.dcerpc import drsuapi, misc
 from samba.drs_utils import drs_DsBind
 from samba import dsdb
+
 
 class DrsReplSchemaTestCase(drs_base.DrsBaseTestCase):
 
@@ -65,7 +66,7 @@ class DrsReplSchemaTestCase(drs_base.DrsBaseTestCase):
         req8.destination_dsa_guid = misc.GUID(dest_dsa) if dest_dsa else misc.GUID()
         req8.source_dsa_invocation_id = misc.GUID(invocation_id)
         req8.naming_context = drsuapi.DsReplicaObjectIdentifier()
-        req8.naming_context.dn = unicode(nc_dn_str)
+        req8.naming_context.dn = str(nc_dn_str)
         req8.highwatermark = drsuapi.DsReplicaHighWaterMark()
         req8.highwatermark.tmp_highest_usn = 0
         req8.highwatermark.reserved_usn = 0
@@ -120,14 +121,14 @@ class DrsReplSchemaTestCase(drs_base.DrsBaseTestCase):
                "objectClass": ["top", "classSchema"],
                "cn": class_name,
                "lDAPDisplayName": class_ldn,
-               "governsId": "1.3.6.1.4.1.7165.4.6.2.5." \
-                + str((100000 * base_int) + random.randint(1,100000)) + ".1.5.13",
+               "governsId": "1.3.6.1.4.1.7165.4.6.2.5."
+               + str((100000 * base_int) + random.randint(1, 100000)) + ".1.5.13",
                "instanceType": "4",
                "objectClassCategory": "%d" % oc_cat,
                "subClassOf": "top",
                "systemOnly": "FALSE"}
         # allow overriding/adding attributes
-        if not attrs is None:
+        if attrs is not None:
             rec.update(attrs)
         # add it to the Schema
         try:
@@ -145,15 +146,15 @@ class DrsReplSchemaTestCase(drs_base.DrsBaseTestCase):
                "objectClass": ["top", "attributeSchema"],
                "cn": attr_name,
                "lDAPDisplayName": attr_ldn,
-               "attributeId": "1.3.6.1.4.1.7165.4.6.1.5." \
-                + str((100000 * base_int) + random.randint(1,100000)) + ".1.5.13",
+               "attributeId": "1.3.6.1.4.1.7165.4.6.1.5."
+               + str((100000 * base_int) + random.randint(1, 100000)) + ".1.5.13",
                "attributeSyntax": "2.5.5.12",
                "omSyntax": "64",
                "instanceType": "4",
                "isSingleValued": "TRUE",
                "systemOnly": "FALSE"}
         # allow overriding/adding attributes
-        if not attrs is None:
+        if attrs is not None:
             rec.update(attrs)
         # add it to the Schema
         ldb_ctx.add(rec)
@@ -244,7 +245,7 @@ class DrsReplSchemaTestCase(drs_base.DrsBaseTestCase):
            AttributeID_id in Schema cache"""
         # add new attributeSchema object
         (a_ldn, a_dn) = self._schema_new_attr(self.ldb_dc1, "attr-Link-X", 10,
-                                              attrs={'linkID':"1.2.840.113556.1.2.50",
+                                              attrs={'linkID': "1.2.840.113556.1.2.50",
                                                      "attributeSyntax": "2.5.5.1",
                                                      "omSyntax": "127"})
         # add a base classSchema class so we can use our new
@@ -283,10 +284,10 @@ class DrsReplSchemaTestCase(drs_base.DrsBaseTestCase):
         drs, drs_handle = self._ds_bind(self.dnsname_dc1)
 
         req8 = self._exop_req8(dest_dsa=None,
-                invocation_id=dc_guid_1,
-                nc_dn_str=c_dn,
-                exop=drsuapi.DRSUAPI_EXOP_REPL_OBJ,
-                replica_flags=drsuapi.DRSUAPI_DRS_SYNC_FORCED)
+                               invocation_id=dc_guid_1,
+                               nc_dn_str=c_dn,
+                               exop=drsuapi.DRSUAPI_EXOP_REPL_OBJ,
+                               replica_flags=drsuapi.DRSUAPI_DRS_SYNC_FORCED)
 
         (level, ctr) = drs.DsGetNCChanges(drs_handle, 8, req8)
 
@@ -350,7 +351,7 @@ class DrsReplSchemaTestCase(drs_base.DrsBaseTestCase):
 
         # force replication from DC1 to DC2
         self._net_drs_replicate(DC=self.dnsname_dc2, fromDC=self.dnsname_dc1, nc_dn=self.schema_dn, forced=True)
-        
+
         # check objects are replicated
         self._check_object(c_dn)
         self._check_object(a_dn)

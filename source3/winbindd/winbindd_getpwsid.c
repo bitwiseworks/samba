@@ -45,7 +45,10 @@ struct tevent_req *winbindd_getpwsid_send(TALLOC_CTX *mem_ctx,
 	/* Ensure null termination */
 	request->data.sid[sizeof(request->data.sid)-1]='\0';
 
-	DEBUG(3, ("getpwsid %s\n", request->data.sid));
+	DBG_NOTICE("[%s (%u)] getpwsid %s\n",
+		   cli->client_name,
+		   (unsigned int)cli->pid,
+		   request->data.sid);
 
 	if (!string_to_sid(&state->sid, request->data.sid)) {
 		DEBUG(1, ("Could not get convert sid %s from string\n",
@@ -84,8 +87,10 @@ NTSTATUS winbindd_getpwsid_recv(struct tevent_req *req,
 	NTSTATUS status;
 
 	if (tevent_req_is_nterror(req, &status)) {
+		struct dom_sid_buf buf;
 		DEBUG(5, ("Could not convert sid %s: %s\n",
-			  sid_string_dbg(&state->sid), nt_errstr(status)));
+			  dom_sid_str_buf(&state->sid, &buf),
+			  nt_errstr(status)));
 		return status;
 	}
 	response->data.pw = state->pw;

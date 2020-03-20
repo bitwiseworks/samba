@@ -27,12 +27,6 @@
 
 #include "tdb_private.h"
 
-/* 'right' merges can involve O(n^2) cost when combined with a
-   traverse, so they are disabled until we find a way to do them in
-   O(1) time
-*/
-#define USE_RIGHT_MERGES 0
-
 /* read a freelist record and check for simple errors */
 int tdb_rec_free_read(struct tdb_context *tdb, tdb_off_t off, struct tdb_record *rec)
 {
@@ -56,34 +50,10 @@ int tdb_rec_free_read(struct tdb_context *tdb, tdb_off_t off, struct tdb_record 
 			   rec->magic, off));
 		return -1;
 	}
-	if (tdb->methods->tdb_oob(tdb, rec->next, sizeof(*rec), 0) != 0)
+	if (tdb_oob(tdb, rec->next, sizeof(*rec), 0) != 0)
 		return -1;
 	return 0;
 }
-
-
-#if USE_RIGHT_MERGES
-/* Remove an element from the freelist.  Must have alloc lock. */
-static int remove_from_freelist(struct tdb_context *tdb, tdb_off_t off, tdb_off_t next)
-{
-	tdb_off_t last_ptr, i;
-
-	/* read in the freelist top */
-	last_ptr = FREELIST_TOP;
-	while (tdb_ofs_read(tdb, last_ptr, &i) != -1 && i != 0) {
-		if (i == off) {
-			/* We've found it! */
-			return tdb_ofs_write(tdb, last_ptr, &next);
-		}
-		/* Follow chain (next offset is at start of record) */
-		last_ptr = i;
-	}
-	tdb->ecode = TDB_ERR_CORRUPT;
-	TDB_LOG((tdb, TDB_DEBUG_FATAL,"remove_from_freelist: not on list at off=%u\n", off));
-	return -1;
-}
-#endif
-
 
 /* update a record tailer (must hold allocation lock) */
 static int update_tailer(struct tdb_context *tdb, tdb_off_t offset,
@@ -199,7 +169,7 @@ static int merge_with_left_record(struct tdb_context *tdb,
  *   0 if left was not a free record
  *   1 if left was free and successfully merged.
  *
- * The currend record is handed in with pointer and fully read record.
+ * The current record is handed in with pointer and fully read record.
  *
  * The left record pointer and struct can be retrieved as result
  * in lp and lr;
@@ -318,33 +288,6 @@ int tdb_free(struct tdb_context *tdb, tdb_off_t offset, struct tdb_record *rec)
 		goto fail;
 	}
 
-#if USE_RIGHT_MERGES
-	/* Look right first (I'm an Australian, dammit) */
-	if (offset + sizeof(*rec) + rec->rec_len + sizeof(*rec) <= tdb->map_size) {
-		tdb_off_t right = offset + sizeof(*rec) + rec->rec_len;
-		struct tdb_record r;
-
-		if (tdb->methods->tdb_read(tdb, right, &r, sizeof(r), DOCONV()) == -1) {
-			TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_free: right read failed at %u\n", right));
-			goto left;
-		}
-
-		/* If it's free, expand to include it. */
-		if (r.magic == TDB_FREE_MAGIC) {
-			if (remove_from_freelist(tdb, right, r.next) == -1) {
-				TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_free: right free failed at %u\n", right));
-				goto left;
-			}
-			rec->rec_len += sizeof(r) + r.rec_len;
-			if (update_tailer(tdb, offset, rec) == -1) {
-				TDB_LOG((tdb, TDB_DEBUG_FATAL, "tdb_free: update_tailer failed at %u\n", offset));
-				goto fail;
-			}
-		}
-	}
-left:
-#endif
-
 	ret = check_merge_with_left_record(tdb, offset, rec, NULL, NULL);
 	if (ret == -1) {
 		goto fail;
@@ -444,6 +387,8 @@ static tdb_off_t tdb_allocate_from_freelist(
 	struct tdb_context *tdb, tdb_len_t length, struct tdb_record *rec)
 {
 	tdb_off_t rec_ptr, last_ptr, newrec_ptr;
+	struct tdb_chainwalk_ctx chainwalk;
+	bool modified;
 	struct {
 		tdb_off_t rec_ptr, last_ptr;
 		tdb_len_t rec_len;
@@ -465,6 +410,9 @@ static tdb_off_t tdb_allocate_from_freelist(
 	/* read in the freelist top */
 	if (tdb_ofs_read(tdb, FREELIST_TOP, &rec_ptr) == -1)
 		return 0;
+
+	modified = false;
+	tdb_chainwalk_init(&chainwalk, rec_ptr);
 
 	bestfit.rec_ptr = 0;
 	bestfit.last_ptr = 0;
@@ -526,6 +474,8 @@ static tdb_off_t tdb_allocate_from_freelist(
 				merge_created_candidate = true;
 			}
 
+			modified = true;
+
 			continue;
 		}
 
@@ -541,6 +491,14 @@ static tdb_off_t tdb_allocate_from_freelist(
 		/* move to the next record */
 		last_ptr = rec_ptr;
 		rec_ptr = rec->next;
+
+		if (!modified) {
+			bool ok;
+			ok = tdb_chainwalk_check(tdb, &chainwalk, rec_ptr);
+			if (!ok) {
+				return 0;
+			}
+		}
 
 		/* if we've found a record that is big enough, then
 		   stop searching if its also not too big. The
@@ -597,6 +555,17 @@ static bool tdb_alloc_dead(
 	return (tdb_ofs_write(tdb, last_ptr, &rec->next) == 0);
 }
 
+static void tdb_purge_dead(struct tdb_context *tdb, uint32_t hash)
+{
+	int max_dead_records = tdb->max_dead_records;
+
+	tdb->max_dead_records = 0;
+
+	tdb_trim_dead(tdb, hash);
+
+	tdb->max_dead_records = max_dead_records;
+}
+
 /*
  * Chain "hash" is assumed to be locked
  */
@@ -605,7 +574,7 @@ tdb_off_t tdb_allocate(struct tdb_context *tdb, int hash, tdb_len_t length,
 		       struct tdb_record *rec)
 {
 	tdb_off_t ret;
-	int i;
+	uint32_t i;
 
 	if (tdb->max_dead_records == 0) {
 		/*
@@ -661,6 +630,12 @@ blocking_freelist_allocate:
 	if (tdb_lock(tdb, -1, F_WRLCK) == -1) {
 		return 0;
 	}
+	/*
+	 * Dead records can happen even if max_dead_records==0, they
+	 * are older than the max_dead_records concept: They happen if
+	 * tdb_delete happens concurrently with a traverse.
+	 */
+	tdb_purge_dead(tdb, hash);
 	ret = tdb_allocate_from_freelist(tdb, length, rec);
 	tdb_unlock(tdb, -1, F_WRLCK);
 	return ret;

@@ -3,6 +3,8 @@
 bld.SAMBA_MODULE('TORTURE_SMB2',
 	source='''
         acls.c
+        attr.c
+        block.c
         compound.c
         connect.c
         create.c
@@ -19,10 +21,13 @@ bld.SAMBA_MODULE('TORTURE_SMB2',
         lock.c
         maxfid.c
         maxwrite.c
+        multichannel.c
+        oplock_break_handler.c
         notify.c
         notify_disabled.c
         oplock.c
         read.c
+        read_write.c
         rename.c
         replay.c
         scan.c
@@ -31,6 +36,8 @@ bld.SAMBA_MODULE('TORTURE_SMB2',
         sharemode.c
         smb2.c
         streams.c
+        samba3misc.c
+        timestamps.c
         util.c
         ''',
 	subsystem='smbtorture',

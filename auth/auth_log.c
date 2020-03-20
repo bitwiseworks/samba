@@ -41,7 +41,7 @@
  * increment the major version.
  */
 #define AUTH_MAJOR 1
-#define AUTH_MINOR 0
+#define AUTH_MINOR 2
 #define AUTHZ_MAJOR 1
 #define AUTHZ_MINOR 1
 
@@ -57,6 +57,7 @@
 #include "lib/util/server_id_db.h"
 #include "lib/param/param.h"
 #include "librpc/ndr/libndr.h"
+#include "librpc/gen_ndr/windows_event_ids.h"
 #include "lib/audit_logging/audit_logging.h"
 
 /*
@@ -78,17 +79,41 @@ static const char* get_password_type(const struct auth_usersupplied_info *ui);
 static void log_json(struct imessaging_context *msg_ctx,
 		     struct loadparm_context *lp_ctx,
 		     struct json_object *object,
-		     const char *type,
 		     int debug_class,
 		     int debug_level)
 {
-	audit_log_json(type, object, debug_class, debug_level);
+	audit_log_json(object, debug_class, debug_level);
 	if (msg_ctx && lp_ctx && lpcfg_auth_event_notification(lp_ctx)) {
 		audit_message_send(msg_ctx,
 				   AUTH_EVENT_NAME,
 				   MSG_AUTH_LOG,
 				   object);
 	}
+}
+
+/*
+ * Determine the Windows logon type for the current authorisation attempt.
+ *
+ * Currently Samba only supports
+ *
+ * 2 Interactive      A user logged on to this computer.
+ * 3 Network          A user or computer logged on to this computer from
+ *                    the network.
+ * 8 NetworkCleartext A user logged on to this computer from the network.
+ *                    The user's password was passed to the authentication
+ *                    package in its unhashed form.
+ *
+ */
+static enum event_logon_type get_logon_type(
+	const struct auth_usersupplied_info *ui)
+{
+	if ((ui->logon_parameters & MSV1_0_CLEARTEXT_PASSWORD_SUPPLIED)
+	   || (ui->password_state == AUTH_PASSWORD_PLAIN)) {
+		return EVT_LOGON_NETWORK_CLEAR_TEXT;
+	} else if (ui->flags & USER_INFO_INTERACTIVE_LOGON) {
+		return EVT_LOGON_INTERACTIVE;
+	}
+	return EVT_LOGON_NETWORK;
 }
 
 /*
@@ -102,9 +127,8 @@ static void log_json(struct imessaging_context *msg_ctx,
  *  To process the resulting log lines from the commend line use jq to
  *  parse the json.
  *
- *  grep "JSON Authentication" log file |
- *  sed 's;^[^{]*;;' |
- * jq -rc  '"\(.timestamp)\t\(.Authentication.status)\t
+ *  grep "^  {" log file |
+ *  jq -rc '"\(.timestamp)\t\(.Authentication.status)\t
  *           \(.Authentication.clientDomain)\t
  *           \(.Authentication.clientAccount)
  *           \t\(.Authentication.workstation)
@@ -119,67 +143,157 @@ static void log_authentication_event_json(
 	NTSTATUS status,
 	const char *domain_name,
 	const char *account_name,
-	const char *unix_username,
 	struct dom_sid *sid,
+	enum event_id_type event_id,
 	int debug_level)
 {
-	struct json_object wrapper = json_new_object();
-	struct json_object authentication;
+	struct json_object wrapper = json_empty_object;
+	struct json_object authentication = json_empty_object;
 	char negotiate_flags[11];
-
-	json_add_timestamp(&wrapper);
-	json_add_string(&wrapper, "type", AUTH_JSON_TYPE);
+	char logon_id[19];
+	int rc = 0;
 
 	authentication = json_new_object();
-	json_add_version(&authentication, AUTH_MAJOR, AUTH_MINOR);
-	json_add_string(&authentication, "status", nt_errstr(status));
-	json_add_address(&authentication, "localAddress", ui->local_host);
-	json_add_address(&authentication, "remoteAddress", ui->remote_host);
-	json_add_string(&authentication,
-			"serviceDescription",
-			ui->service_description);
-	json_add_string(&authentication,
-			"authDescription",
-			ui->auth_description);
-	json_add_string(&authentication,
-			"clientDomain",
-			ui->client.domain_name);
-	json_add_string(&authentication,
-			"clientAccount",
-			ui->client.account_name);
-	json_add_string(&authentication,
-			"workstation",
-			ui->workstation_name);
-	json_add_string(&authentication, "becameAccount", account_name);
-	json_add_string(&authentication, "becameDomain", domain_name);
-	json_add_sid(&authentication, "becameSid", sid);
-	json_add_string(&authentication,
-			"mappedAccount",
-			ui->mapped.account_name);
-	json_add_string(&authentication,
-			"mappedDomain",
-			ui->mapped.domain_name);
-	json_add_string(&authentication,
-			"netlogonComputer",
-			ui->netlogon_trust_account.computer_name);
-	json_add_string(&authentication,
-			"netlogonTrustAccount",
-			ui->netlogon_trust_account.account_name);
+	if (json_is_invalid(&authentication)) {
+		goto failure;
+	}
+	rc = json_add_version(&authentication, AUTH_MAJOR, AUTH_MINOR);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_int(&authentication,
+			  "eventId",
+			  event_id);
+	if (rc != 0) {
+		goto failure;
+	}
+	snprintf(logon_id,
+		 sizeof( logon_id),
+		 "%"PRIx64"",
+		 ui->logon_id);
+	rc = json_add_string(&authentication, "logonId", logon_id);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_int(&authentication, "logonType", get_logon_type(ui));
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(&authentication, "status", nt_errstr(status));
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_address(&authentication, "localAddress", ui->local_host);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc =
+	    json_add_address(&authentication, "remoteAddress", ui->remote_host);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(
+	    &authentication, "serviceDescription", ui->service_description);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(
+	    &authentication, "authDescription", ui->auth_description);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(
+	    &authentication, "clientDomain", ui->client.domain_name);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(
+	    &authentication, "clientAccount", ui->client.account_name);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(
+	    &authentication, "workstation", ui->workstation_name);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(&authentication, "becameAccount", account_name);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(&authentication, "becameDomain", domain_name);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_sid(&authentication, "becameSid", sid);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(
+	    &authentication, "mappedAccount", ui->mapped.account_name);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(
+	    &authentication, "mappedDomain", ui->mapped.domain_name);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(&authentication,
+			     "netlogonComputer",
+			     ui->netlogon_trust_account.computer_name);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(&authentication,
+			     "netlogonTrustAccount",
+			     ui->netlogon_trust_account.account_name);
+	if (rc != 0) {
+		goto failure;
+	}
 	snprintf(negotiate_flags,
 		 sizeof( negotiate_flags),
 		 "0x%08X",
 		 ui->netlogon_trust_account.negotiate_flags);
-	json_add_string(&authentication,
-			"netlogonNegotiateFlags",
-			negotiate_flags);
-	json_add_int(&authentication,
-		     "netlogonSecureChannelType",
-		     ui->netlogon_trust_account.secure_channel_type);
-	json_add_sid(&authentication,
-		     "netlogonTrustAccountSid",
-		     ui->netlogon_trust_account.sid);
-	json_add_string(&authentication, "passwordType", get_password_type(ui));
-	json_add_object(&wrapper, AUTH_JSON_TYPE, &authentication);
+	rc = json_add_string(
+	    &authentication, "netlogonNegotiateFlags", negotiate_flags);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_int(&authentication,
+			  "netlogonSecureChannelType",
+			  ui->netlogon_trust_account.secure_channel_type);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_sid(&authentication,
+			  "netlogonTrustAccountSid",
+			  ui->netlogon_trust_account.sid);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(
+	    &authentication, "passwordType", get_password_type(ui));
+	if (rc != 0) {
+		goto failure;
+	}
+
+	wrapper = json_new_object();
+	if (json_is_invalid(&wrapper)) {
+		goto failure;
+	}
+	rc = json_add_timestamp(&wrapper);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(&wrapper, "type", AUTH_JSON_TYPE);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_object(&wrapper, AUTH_JSON_TYPE, &authentication);
+	if (rc != 0) {
+		goto failure;
+	}
 
 	/*
 	 * While not a general-purpose profiling solution this will
@@ -192,18 +306,28 @@ static void log_authentication_event_json(
 		struct timeval current_time = timeval_current();
 		uint64_t duration =  usec_time_diff(&current_time,
 						    start_time);
-		json_add_int(&authentication,
-			     "duration",
-			     duration);
+		rc = json_add_int(&authentication, "duration", duration);
+		if (rc != 0) {
+			goto failure;
+		}
 	}
 
 	log_json(msg_ctx,
 		 lp_ctx,
 		 &wrapper,
-		 AUTH_JSON_TYPE,
-		 DBGC_AUTH_AUDIT,
+		 DBGC_AUTH_AUDIT_JSON,
 		 debug_level);
 	json_free(&wrapper);
+	return;
+failure:
+	/*
+	 * On a failure authentication will not have been added to wrapper so it
+	 * needs to be freed to avoid a leak.
+	 *
+	 */
+	json_free(&authentication);
+	json_free(&wrapper);
+	DBG_ERR("Failed to write authentication event JSON log message\n");
 }
 
 /*
@@ -218,8 +342,7 @@ static void log_authentication_event_json(
  *  To process the resulting log lines from the commend line use jq to
  *  parse the json.
  *
- *  grep "JSON Authentication" log_file |\
- *  sed "s;^[^{]*;;" |\
+ *  grep "^  {" log_file |\
  *  jq -rc '"\(.timestamp)\t
  *           \(.Authorization.domain)\t
  *           \(.Authorization.account)\t
@@ -237,53 +360,109 @@ static void log_successful_authz_event_json(
 	struct auth_session_info *session_info,
 	int debug_level)
 {
-	struct json_object wrapper = json_new_object();
-	struct json_object authorization;
+	struct json_object wrapper = json_empty_object;
+	struct json_object authorization = json_empty_object;
 	char account_flags[11];
+	int rc = 0;
 
-	json_add_timestamp(&wrapper);
-	json_add_string(&wrapper, "type", AUTHZ_JSON_TYPE);
 	authorization = json_new_object();
-	json_add_version(&authorization, AUTHZ_MAJOR, AUTHZ_MINOR);
-	json_add_address(&authorization, "localAddress", local);
-	json_add_address(&authorization, "remoteAddress", remote);
-	json_add_string(&authorization,
-			"serviceDescription",
-			service_description);
-	json_add_string(&authorization, "authType", auth_type);
-	json_add_string(&authorization,
-			"domain",
-			session_info->info->domain_name);
-	json_add_string(&authorization,
-			"account",
-			session_info->info->account_name);
-	json_add_sid(&authorization,
-		     "sid",
-		     &session_info->security_token->sids[0]);
-	json_add_guid(&authorization,
-		      "sessionId",
-		      &session_info->unique_session_token);
-	json_add_string(&authorization,
-			"logonServer",
-			session_info->info->logon_server);
-	json_add_string(&authorization,
-			"transportProtection",
-			transport_protection);
+	if (json_is_invalid(&authorization)) {
+		goto failure;
+	}
+	rc = json_add_version(&authorization, AUTHZ_MAJOR, AUTHZ_MINOR);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_address(&authorization, "localAddress", local);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_address(&authorization, "remoteAddress", remote);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(
+	    &authorization, "serviceDescription", service_description);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(&authorization, "authType", auth_type);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(
+	    &authorization, "domain", session_info->info->domain_name);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(
+	    &authorization, "account", session_info->info->account_name);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_sid(
+	    &authorization, "sid", &session_info->security_token->sids[0]);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_guid(
+	    &authorization, "sessionId", &session_info->unique_session_token);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(
+	    &authorization, "logonServer", session_info->info->logon_server);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(
+	    &authorization, "transportProtection", transport_protection);
+	if (rc != 0) {
+		goto failure;
+	}
 
 	snprintf(account_flags,
 		 sizeof(account_flags),
 		 "0x%08X",
 		 session_info->info->acct_flags);
-	json_add_string(&authorization, "accountFlags", account_flags);
-	json_add_object(&wrapper, AUTHZ_JSON_TYPE, &authorization);
+	rc = json_add_string(&authorization, "accountFlags", account_flags);
+	if (rc != 0) {
+		goto failure;
+	}
+
+	wrapper = json_new_object();
+	if (json_is_invalid(&wrapper)) {
+		goto failure;
+	}
+	rc = json_add_timestamp(&wrapper);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_string(&wrapper, "type", AUTHZ_JSON_TYPE);
+	if (rc != 0) {
+		goto failure;
+	}
+	rc = json_add_object(&wrapper, AUTHZ_JSON_TYPE, &authorization);
+	if (rc != 0) {
+		goto failure;
+	}
 
 	log_json(msg_ctx,
 		 lp_ctx,
 		 &wrapper,
-		 AUTHZ_JSON_TYPE,
-		 DBGC_AUTH_AUDIT,
+		 DBGC_AUTH_AUDIT_JSON,
 		 debug_level);
 	json_free(&wrapper);
+	return;
+failure:
+	/*
+	 * On a failure authorization will not have been added to wrapper so it
+	 * needs to be freed to avoid a leak.
+	 *
+	 */
+	json_free(&authorization);
+	json_free(&wrapper);
+	DBG_ERR("Unable to log Authentication event JSON audit message\n");
 }
 
 #else
@@ -318,8 +497,8 @@ static void log_authentication_event_json(
 	NTSTATUS status,
 	const char *domain_name,
 	const char *account_name,
-	const char *unix_username,
 	struct dom_sid *sid,
+	enum event_id_type event_id,
 	int debug_level)
 {
 	log_no_json(msg_ctx, lp_ctx);
@@ -402,7 +581,6 @@ static void log_authentication_event_human_readable(
 	NTSTATUS status,
 	const char *domain_name,
 	const char *account_name,
-	const char *unix_username,
 	struct dom_sid *sid,
 	int debug_level)
 {
@@ -439,14 +617,13 @@ static void log_authentication_event_human_readable(
 	local = tsocket_address_string(ui->local_host, frame);
 
 	if (NT_STATUS_IS_OK(status)) {
-		char sid_buf[DOM_SID_STR_BUFLEN];
+		struct dom_sid_buf sid_buf;
 
-		dom_sid_string_buf(sid, sid_buf, sizeof(sid_buf));
 		logon_line = talloc_asprintf(frame,
 					     " became [%s]\\[%s] [%s].",
 					     log_escape(frame, domain_name),
 					     log_escape(frame, account_name),
-					     sid_buf);
+					     dom_sid_str_buf(sid, &sid_buf));
 	} else {
 		logon_line = talloc_asprintf(
 				frame,
@@ -493,14 +670,15 @@ void log_authentication_event(
 	NTSTATUS status,
 	const char *domain_name,
 	const char *account_name,
-	const char *unix_username,
 	struct dom_sid *sid)
 {
 	/* set the log level */
 	int debug_level = AUTH_FAILURE_LEVEL;
+	enum event_id_type event_id = EVT_ID_UNSUCCESSFUL_LOGON;
 
 	if (NT_STATUS_IS_OK(status)) {
 		debug_level = AUTH_SUCCESS_LEVEL;
+		event_id = EVT_ID_SUCCESSFUL_LOGON;
 		if (dom_sid_equal(sid, &global_sid_Anonymous)) {
 			debug_level = AUTH_ANONYMOUS_LEVEL;
 		}
@@ -511,7 +689,6 @@ void log_authentication_event(
 							status,
 							domain_name,
 							account_name,
-							unix_username,
 							sid,
 							debug_level);
 	}
@@ -524,8 +701,8 @@ void log_authentication_event(
 					      status,
 					      domain_name,
 					      account_name,
-					      unix_username,
 					      sid,
+					      event_id,
 					      debug_level);
 	}
 }
@@ -542,7 +719,6 @@ static void log_successful_authz_event_human_readable(
 	const struct tsocket_address *local,
 	const char *service_description,
 	const char *auth_type,
-	const char *transport_protection,
 	struct auth_session_info *session_info,
 	int debug_level)
 {
@@ -551,7 +727,7 @@ static void log_successful_authz_event_human_readable(
 	const char *ts = NULL;       /* formatted current time      */
 	char *remote_str = NULL;     /* formatted remote host       */
 	char *local_str = NULL;      /* formatted local host        */
-	char sid_buf[DOM_SID_STR_BUFLEN];
+	struct dom_sid_buf sid_buf;
 
 	frame = talloc_stackframe();
 
@@ -560,10 +736,6 @@ static void log_successful_authz_event_human_readable(
 
 	remote_str = tsocket_address_string(remote, frame);
 	local_str = tsocket_address_string(local, frame);
-
-	dom_sid_string_buf(&session_info->security_token->sids[0],
-			   sid_buf,
-			   sizeof(sid_buf));
 
 	DEBUGC(DBGC_AUTH_AUDIT, debug_level,
 	       ("Successful AuthZ: [%s,%s] user [%s]\\[%s] [%s]"
@@ -574,7 +746,8 @@ static void log_successful_authz_event_human_readable(
 		auth_type,
 		log_escape(frame, session_info->info->domain_name),
 		log_escape(frame, session_info->info->account_name),
-		sid_buf,
+		dom_sid_str_buf(&session_info->security_token->sids[0],
+				&sid_buf),
 		ts,
 		remote_str,
 		local_str));
@@ -616,7 +789,6 @@ void log_successful_authz_event(
 							  local,
 							  service_description,
 							  auth_type,
-							  transport_protection,
 							  session_info,
 							  debug_level);
 	}

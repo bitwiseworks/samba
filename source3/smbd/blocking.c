@@ -21,967 +21,763 @@
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
 #include "messages.h"
+#include "lib/util/tevent_ntstatus.h"
+#include "lib/dbwrap/dbwrap_watch.h"
+#include "librpc/gen_ndr/ndr_open_files.h"
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_LOCKING
 
-static void received_unlock_msg(struct messaging_context *msg,
-				void *private_data,
-				uint32_t msg_type,
-				struct server_id server_id,
-				DATA_BLOB *data);
-
-void brl_timeout_fn(struct tevent_context *event_ctx,
-			   struct tevent_timer *te,
-			   struct timeval now,
-			   void *private_data)
+NTSTATUS smbd_do_locks_try(
+	struct files_struct *fsp,
+	enum brl_flavour lock_flav,
+	uint16_t num_locks,
+	struct smbd_lock_element *locks,
+	uint16_t *blocker_idx,
+	struct server_id *blocking_pid,
+	uint64_t *blocking_smblctx)
 {
-	struct smbd_server_connection *sconn = talloc_get_type_abort(
-		private_data, struct smbd_server_connection);
+	NTSTATUS status = NT_STATUS_OK;
+	uint16_t i;
 
-	if (sconn->using_smb2) {
-		SMB_ASSERT(sconn->smb2.locks.brl_timeout == te);
-		TALLOC_FREE(sconn->smb2.locks.brl_timeout);
+	for (i=0; i<num_locks; i++) {
+		struct smbd_lock_element *e = &locks[i];
+
+		status = do_lock(
+			fsp,
+			locks, /* req_mem_ctx */
+			&e->req_guid,
+			e->smblctx,
+			e->count,
+			e->offset,
+			e->brltype,
+			lock_flav,
+			blocking_pid,
+			blocking_smblctx);
+		if (!NT_STATUS_IS_OK(status)) {
+			break;
+		}
+	}
+
+	if (NT_STATUS_IS_OK(status)) {
+		return NT_STATUS_OK;
+	}
+
+	*blocker_idx = i;
+
+	/*
+	 * Undo the locks we successfully got
+	 */
+	for (i = i-1; i != UINT16_MAX; i--) {
+		struct smbd_lock_element *e = &locks[i];
+		do_unlock(fsp,
+			  e->smblctx,
+			  e->count,
+			  e->offset,
+			  lock_flav);
+	}
+
+	return status;
+}
+
+static bool smbd_smb1_fsp_add_blocked_lock_req(
+	struct files_struct *fsp, struct tevent_req *req)
+{
+	size_t num_reqs = talloc_array_length(fsp->blocked_smb1_lock_reqs);
+	struct tevent_req **tmp = NULL;
+
+	tmp = talloc_realloc(
+		fsp,
+		fsp->blocked_smb1_lock_reqs,
+		struct tevent_req *,
+		num_reqs+1);
+	if (tmp == NULL) {
+		return false;
+	}
+	fsp->blocked_smb1_lock_reqs = tmp;
+	fsp->blocked_smb1_lock_reqs[num_reqs] = req;
+	return true;
+}
+
+struct smbd_smb1_do_locks_state {
+	struct tevent_context *ev;
+	struct smb_request *smbreq;
+	struct files_struct *fsp;
+	uint32_t timeout;
+	uint32_t polling_msecs;
+	uint32_t retry_msecs;
+	struct timeval endtime;
+	bool large_offset;	/* required for correct cancel */
+	enum brl_flavour lock_flav;
+	uint16_t num_locks;
+	struct smbd_lock_element *locks;
+	uint16_t blocker;
+	NTSTATUS deny_status;
+};
+
+static void smbd_smb1_do_locks_try(struct tevent_req *req);
+static void smbd_smb1_do_locks_retry(struct tevent_req *subreq);
+static void smbd_smb1_blocked_locks_cleanup(
+	struct tevent_req *req, enum tevent_req_state req_state);
+static NTSTATUS smbd_smb1_do_locks_check(
+	struct files_struct *fsp,
+	enum brl_flavour lock_flav,
+	uint16_t num_locks,
+	struct smbd_lock_element *locks,
+	uint16_t *blocker_idx,
+	struct server_id *blocking_pid,
+	uint64_t *blocking_smblctx);
+
+static void smbd_smb1_do_locks_setup_timeout(
+	struct smbd_smb1_do_locks_state *state,
+	const struct smbd_lock_element *blocker)
+{
+	struct files_struct *fsp = state->fsp;
+
+	if (!timeval_is_zero(&state->endtime)) {
+		/*
+		 * already done
+		 */
+		return;
+	}
+
+	if ((state->timeout != 0) && (state->timeout != UINT32_MAX)) {
+		/*
+		 * Windows internal resolution for blocking locks
+		 * seems to be about 200ms... Don't wait for less than
+		 * that. JRA.
+		 */
+		state->timeout = MAX(state->timeout, lp_lock_spin_time());
+	}
+
+	if (state->timeout != 0) {
+		goto set_endtime;
+	}
+
+	if (blocker == NULL) {
+		goto set_endtime;
+	}
+
+	if ((blocker->offset >= 0xEF000000) &&
+	    ((blocker->offset >> 63) == 0)) {
+		/*
+		 * This must be an optimization of an ancient
+		 * application bug...
+		 */
+		state->timeout = lp_lock_spin_time();
+	}
+
+	if ((fsp->lock_failure_seen) &&
+	    (blocker->offset == fsp->lock_failure_offset)) {
+		/*
+		 * Delay repeated lock attempts on the same
+		 * lock. Maybe a more advanced version of the
+		 * above check?
+		 */
+		DBG_DEBUG("Delaying lock request due to previous "
+			  "failure\n");
+		state->timeout = lp_lock_spin_time();
+	}
+
+set_endtime:
+	/*
+	 * Note state->timeout might still 0,
+	 * but that's ok, as we don't want to retry
+	 * in that case.
+	 */
+	state->endtime = timeval_add(&state->smbreq->request_time,
+				     state->timeout / 1000,
+				     (state->timeout % 1000) * 1000);
+}
+
+static void smbd_smb1_do_locks_update_retry_msecs(
+	struct smbd_smb1_do_locks_state *state)
+{
+	/*
+	 * The default lp_lock_spin_time() is 200ms,
+	 * we just use half of it to trigger the first retry.
+	 *
+	 * v_min is in the range of 0.001 to 10 secs
+	 * (0.1 secs by default)
+	 *
+	 * v_max is in the range of 0.01 to 100 secs
+	 * (1.0 secs by default)
+	 *
+	 * The typical steps are:
+	 * 0.1, 0.2, 0.3, 0.4, ... 1.0
+	 */
+	uint32_t v_min = MAX(2, MIN(20000, lp_lock_spin_time()))/2;
+	uint32_t v_max = 10 * v_min;
+
+	if (state->retry_msecs >= v_max) {
+		state->retry_msecs = v_max;
+		return;
+	}
+
+	state->retry_msecs += v_min;
+}
+
+static void smbd_smb1_do_locks_update_polling_msecs(
+	struct smbd_smb1_do_locks_state *state)
+{
+	/*
+	 * The default lp_lock_spin_time() is 200ms.
+	 *
+	 * v_min is in the range of 0.002 to 20 secs
+	 * (0.2 secs by default)
+	 *
+	 * v_max is in the range of 0.02 to 200 secs
+	 * (2.0 secs by default)
+	 *
+	 * The typical steps are:
+	 * 0.2, 0.4, 0.6, 0.8, ... 2.0
+	 */
+	uint32_t v_min = MAX(2, MIN(20000, lp_lock_spin_time()));
+	uint32_t v_max = 10 * v_min;
+
+	if (state->polling_msecs >= v_max) {
+		state->polling_msecs = v_max;
+		return;
+	}
+
+	state->polling_msecs += v_min;
+}
+
+struct tevent_req *smbd_smb1_do_locks_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct smb_request **smbreq, /* talloc_move()d into our state */
+	struct files_struct *fsp,
+	uint32_t lock_timeout,
+	bool large_offset,
+	enum brl_flavour lock_flav,
+	uint16_t num_locks,
+	struct smbd_lock_element *locks)
+{
+	struct tevent_req *req = NULL;
+	struct smbd_smb1_do_locks_state *state = NULL;
+	bool ok;
+
+	req = tevent_req_create(
+		mem_ctx, &state, struct smbd_smb1_do_locks_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	state->ev = ev;
+	state->smbreq = talloc_move(state, smbreq);
+	state->fsp = fsp;
+	state->timeout = lock_timeout;
+	state->large_offset = large_offset;
+	state->lock_flav = lock_flav;
+	state->num_locks = num_locks;
+	state->locks = locks;
+
+	if (lock_flav == POSIX_LOCK) {
+		/*
+		 * SMB1 posix locks always use
+		 * NT_STATUS_FILE_LOCK_CONFLICT.
+		 */
+		state->deny_status = NT_STATUS_FILE_LOCK_CONFLICT;
 	} else {
-		SMB_ASSERT(sconn->smb1.locks.brl_timeout == te);
-		TALLOC_FREE(sconn->smb1.locks.brl_timeout);
+		state->deny_status = NT_STATUS_LOCK_NOT_GRANTED;
 	}
 
-	change_to_root_user();	/* TODO: Possibly run all timed events as
-				 * root */
+	DBG_DEBUG("state=%p, state->smbreq=%p\n", state, state->smbreq);
 
-	process_blocking_lock_queue(sconn);
+	if (num_locks == 0) {
+		DBG_DEBUG("no locks\n");
+		tevent_req_done(req);
+		return tevent_req_post(req, ev);
+	}
+
+	smbd_smb1_do_locks_try(req);
+	if (!tevent_req_is_in_progress(req)) {
+		return tevent_req_post(req, ev);
+	}
+
+	ok = smbd_smb1_fsp_add_blocked_lock_req(fsp, req);
+	if (!ok) {
+		tevent_req_oom(req);
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_cleanup_fn(req, smbd_smb1_blocked_locks_cleanup);
+	return req;
 }
 
-/****************************************************************************
- We need a version of timeval_min that treats zero timval as infinite.
-****************************************************************************/
-
-struct timeval timeval_brl_min(const struct timeval *tv1,
-					const struct timeval *tv2)
+static void smbd_smb1_blocked_locks_cleanup(
+	struct tevent_req *req, enum tevent_req_state req_state)
 {
-	if (timeval_is_zero(tv1)) {
-		return *tv2;
+	struct smbd_smb1_do_locks_state *state = tevent_req_data(
+		req, struct smbd_smb1_do_locks_state);
+	struct files_struct *fsp = state->fsp;
+	struct tevent_req **blocked = fsp->blocked_smb1_lock_reqs;
+	size_t num_blocked = talloc_array_length(blocked);
+	size_t i, num_after;
+
+	DBG_DEBUG("req=%p, state=%p, req_state=%d\n",
+		  req,
+		  state,
+		  (int)req_state);
+
+	if (req_state == TEVENT_REQ_RECEIVED) {
+		DBG_DEBUG("already received\n");
+		return;
 	}
-	if (timeval_is_zero(tv2)) {
-		return *tv1;
+
+	for (i=0; i<num_blocked; i++) {
+		if (blocked[i] == req) {
+			break;
+		}
 	}
-	return timeval_min(tv1, tv2);
+	SMB_ASSERT(i<num_blocked);
+
+	num_after = num_blocked - (i+1);
+
+	if (num_after > 0) {
+		/*
+		 * The locks need to be kept in order, see
+		 * raw.lock.multilock2
+		 */
+		memmove(&blocked[i],
+			&blocked[i+1],
+			sizeof(*blocked) * num_after);
+	}
+	fsp->blocked_smb1_lock_reqs = talloc_realloc(
+		fsp, blocked, struct tevent_req *, num_blocked-1);
 }
 
-/****************************************************************************
- After a change to blocking_lock_queue, recalculate the timed_event for the
- next processing.
-****************************************************************************/
-
-static bool recalc_brl_timeout(struct smbd_server_connection *sconn)
+static NTSTATUS smbd_smb1_do_locks_check_blocked(
+	uint16_t num_blocked,
+	struct smbd_lock_element *blocked,
+	uint16_t num_locks,
+	struct smbd_lock_element *locks,
+	uint16_t *blocker_idx,
+	uint64_t *blocking_smblctx)
 {
-	struct blocking_lock_record *blr;
-	struct timeval next_timeout;
-	int max_brl_timeout = lp_parm_int(-1, "brl", "recalctime", 5);
+	uint16_t li;
 
-	TALLOC_FREE(sconn->smb1.locks.brl_timeout);
+	for (li=0; li < num_locks; li++) {
+		struct smbd_lock_element *l = &locks[li];
+		uint16_t bi;
+		bool valid;
 
-	next_timeout = timeval_zero();
+		valid = byte_range_valid(l->offset, l->count);
+		if (!valid) {
+			return NT_STATUS_INVALID_LOCK_RANGE;
+		}
 
-	for (blr = sconn->smb1.locks.blocking_lock_queue; blr; blr = blr->next) {
-		if (timeval_is_zero(&blr->expire_time)) {
+		for (bi = 0; bi < num_blocked; bi++) {
+			struct smbd_lock_element *b = &blocked[li];
+			bool overlap;
+
+			/* Read locks never conflict. */
+			if (l->brltype == READ_LOCK && b->brltype == READ_LOCK) {
+				continue;
+			}
+
+			overlap = byte_range_overlap(l->offset,
+						     l->count,
+						     b->offset,
+						     b->count);
+			if (!overlap) {
+				continue;
+			}
+
+			*blocker_idx = li;
+			*blocking_smblctx = b->smblctx;
+			return NT_STATUS_LOCK_NOT_GRANTED;
+		}
+	}
+
+	return NT_STATUS_OK;
+}
+
+static NTSTATUS smbd_smb1_do_locks_check(
+	struct files_struct *fsp,
+	enum brl_flavour lock_flav,
+	uint16_t num_locks,
+	struct smbd_lock_element *locks,
+	uint16_t *blocker_idx,
+	struct server_id *blocking_pid,
+	uint64_t *blocking_smblctx)
+{
+	struct tevent_req **blocked = fsp->blocked_smb1_lock_reqs;
+	size_t num_blocked = talloc_array_length(blocked);
+	NTSTATUS status;
+	size_t bi;
+
+	/*
+	 * We check the pending/blocked requests
+	 * from the oldest to the youngest request.
+	 *
+	 * Note due to the retry logic the current request
+	 * might already be in the list.
+	 */
+
+	for (bi = 0; bi < num_blocked; bi++) {
+		struct smbd_smb1_do_locks_state *blocked_state =
+			tevent_req_data(blocked[bi],
+			struct smbd_smb1_do_locks_state);
+
+		if (blocked_state->locks == locks) {
+			SMB_ASSERT(blocked_state->num_locks == num_locks);
+			SMB_ASSERT(blocked_state->lock_flav == lock_flav);
+
 			/*
-			 * If we're blocked on pid 0xFFFFFFFFFFFFFFFFLL this is
-			 * a POSIX lock, so calculate a timeout of
-			 * 10 seconds into the future.
+			 * We found ourself...
 			 */
-                        if (blr->blocking_smblctx == 0xFFFFFFFFFFFFFFFFLL) {
-				struct timeval psx_to = timeval_current_ofs(10, 0);
-				next_timeout = timeval_brl_min(&next_timeout, &psx_to);
-                        }
+			break;
+		}
 
+		status = smbd_smb1_do_locks_check_blocked(
+				blocked_state->num_locks,
+				blocked_state->locks,
+				num_locks,
+				locks,
+				blocker_idx,
+				blocking_smblctx);
+		if (!NT_STATUS_IS_OK(status)) {
+			*blocking_pid = messaging_server_id(
+					fsp->conn->sconn->msg_ctx);
+			return status;
+		}
+	}
+
+	status = smbd_do_locks_try(
+		fsp,
+		lock_flav,
+		num_locks,
+		locks,
+		blocker_idx,
+		blocking_pid,
+		blocking_smblctx);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	return NT_STATUS_OK;
+}
+
+static void smbd_smb1_do_locks_try(struct tevent_req *req)
+{
+	struct smbd_smb1_do_locks_state *state = tevent_req_data(
+		req, struct smbd_smb1_do_locks_state);
+	struct files_struct *fsp = state->fsp;
+	struct share_mode_lock *lck;
+	struct timeval endtime = { 0 };
+	struct server_id blocking_pid = { 0 };
+	uint64_t blocking_smblctx = 0;
+	struct tevent_req *subreq = NULL;
+	NTSTATUS status;
+	bool ok;
+	bool expired;
+
+	lck = get_existing_share_mode_lock(state, fsp->file_id);
+	if (tevent_req_nomem(lck, req)) {
+		DBG_DEBUG("Could not get share mode lock\n");
+		return;
+	}
+
+	status = smbd_smb1_do_locks_check(
+		fsp,
+		state->lock_flav,
+		state->num_locks,
+		state->locks,
+		&state->blocker,
+		&blocking_pid,
+		&blocking_smblctx);
+	if (NT_STATUS_IS_OK(status)) {
+		goto done;
+	}
+	if (NT_STATUS_EQUAL(status, NT_STATUS_RETRY)) {
+		/*
+		 * We got NT_STATUS_RETRY,
+		 * we reset polling_msecs so that
+		 * that the retries based on LOCK_NOT_GRANTED
+		 * will later start with small intervalls again.
+		 */
+		state->polling_msecs = 0;
+
+		/*
+		 * The backend wasn't able to decide yet.
+		 * We need to wait even for non-blocking
+		 * locks.
+		 *
+		 * The backend uses blocking_smblctx == UINT64_MAX
+		 * to indicate that we should use retry timers.
+		 *
+		 * It uses blocking_smblctx == 0 to indicate
+		 * it will use share_mode_wakeup_waiters()
+		 * to wake us. Note that unrelated changes in
+		 * locking.tdb may cause retries.
+		 */
+
+		if (blocking_smblctx != UINT64_MAX) {
+			SMB_ASSERT(blocking_smblctx == 0);
+			goto setup_retry;
+		}
+
+		smbd_smb1_do_locks_update_retry_msecs(state);
+
+		DBG_DEBUG("Waiting for a backend decision. "
+			  "Retry in %"PRIu32" msecs\n",
+			  state->retry_msecs);
+
+		/*
+		 * We completely ignore state->endtime here
+		 * we we'll wait for a backend decision forever.
+		 * If the backend is smart enough to implement
+		 * some NT_STATUS_RETRY logic, it has to
+		 * switch to any other status after in order
+		 * to avoid waiting forever.
+		 */
+		endtime = timeval_current_ofs_msec(state->retry_msecs);
+		goto setup_retry;
+	}
+	if (!ERROR_WAS_LOCK_DENIED(status)) {
+		goto done;
+	}
+	/*
+	 * We got LOCK_NOT_GRANTED, make sure
+	 * a following STATUS_RETRY will start
+	 * with short intervalls again.
+	 */
+	state->retry_msecs = 0;
+
+	smbd_smb1_do_locks_setup_timeout(state, &state->locks[state->blocker]);
+	DBG_DEBUG("timeout=%"PRIu32", blocking_smblctx=%"PRIu64"\n",
+		  state->timeout,
+		  blocking_smblctx);
+
+	/*
+	 * The client specified timeout expired
+	 * avoid further retries.
+	 *
+	 * Otherwise keep waiting either waiting
+	 * for changes in locking.tdb or the polling
+	 * mode timers waiting for posix locks.
+	 *
+	 * If the endtime is not expired yet,
+	 * it means we'll retry after a timeout.
+	 * In that case we'll have to return
+	 * NT_STATUS_FILE_LOCK_CONFLICT
+	 * instead of NT_STATUS_LOCK_NOT_GRANTED.
+	 */
+	expired = timeval_expired(&state->endtime);
+	if (expired) {
+		status = state->deny_status;
+		goto done;
+	}
+	state->deny_status = NT_STATUS_FILE_LOCK_CONFLICT;
+
+	endtime = state->endtime;
+
+	if (blocking_smblctx == UINT64_MAX) {
+		struct timeval tmp;
+
+		smbd_smb1_do_locks_update_polling_msecs(state);
+
+		DBG_DEBUG("Blocked on a posix lock. Retry in %"PRIu32" msecs\n",
+			  state->polling_msecs);
+
+		tmp = timeval_current_ofs_msec(state->polling_msecs);
+		endtime = timeval_min(&endtime, &tmp);
+	}
+
+setup_retry:
+	subreq = share_mode_watch_send(
+		state, state->ev, lck->data->id, blocking_pid);
+	if (tevent_req_nomem(subreq, req)) {
+		goto done;
+	}
+	TALLOC_FREE(lck);
+	tevent_req_set_callback(subreq, smbd_smb1_do_locks_retry, req);
+
+	if (timeval_is_zero(&endtime)) {
+		return;
+	}
+
+	ok = tevent_req_set_endtime(subreq, state->ev, endtime);
+	if (!ok) {
+		status = NT_STATUS_NO_MEMORY;
+		goto done;
+	}
+	return;
+done:
+	TALLOC_FREE(lck);
+	smbd_smb1_brl_finish_by_req(req, status);
+}
+
+static void smbd_smb1_do_locks_retry(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+	struct smbd_smb1_do_locks_state *state = tevent_req_data(
+		req, struct smbd_smb1_do_locks_state);
+	NTSTATUS status;
+	bool ok;
+
+	/*
+	 * Make sure we run as the user again
+	 */
+	ok = change_to_user_and_service_by_fsp(state->fsp);
+	if (!ok) {
+		tevent_req_nterror(req, NT_STATUS_ACCESS_DENIED);
+		return;
+	}
+
+	status = share_mode_watch_recv(subreq, NULL, NULL);
+	TALLOC_FREE(subreq);
+
+	DBG_DEBUG("share_mode_watch_recv returned %s\n",
+		  nt_errstr(status));
+
+	/*
+	 * We ignore any errors here, it's most likely
+	 * we just get NT_STATUS_OK or NT_STATUS_IO_TIMEOUT.
+	 *
+	 * In any case we can just give it a retry.
+	 */
+
+	smbd_smb1_do_locks_try(req);
+}
+
+NTSTATUS smbd_smb1_do_locks_recv(struct tevent_req *req)
+{
+	struct smbd_smb1_do_locks_state *state = tevent_req_data(
+		req, struct smbd_smb1_do_locks_state);
+	NTSTATUS status = NT_STATUS_OK;
+	bool err;
+
+	err = tevent_req_is_nterror(req, &status);
+
+	DBG_DEBUG("err=%d, status=%s\n", (int)err, nt_errstr(status));
+
+	if (tevent_req_is_nterror(req, &status)) {
+		struct files_struct *fsp = state->fsp;
+		struct smbd_lock_element *blocker =
+			&state->locks[state->blocker];
+
+		DBG_DEBUG("Setting lock_failure_offset=%"PRIu64"\n",
+			  blocker->offset);
+
+		fsp->lock_failure_seen = true;
+		fsp->lock_failure_offset = blocker->offset;
+		return status;
+	}
+
+	tevent_req_received(req);
+
+	return NT_STATUS_OK;
+}
+
+bool smbd_smb1_do_locks_extract_smbreq(
+	struct tevent_req *req,
+	TALLOC_CTX *mem_ctx,
+	struct smb_request **psmbreq)
+{
+	struct smbd_smb1_do_locks_state *state = tevent_req_data(
+		req, struct smbd_smb1_do_locks_state);
+
+	DBG_DEBUG("req=%p, state=%p, state->smbreq=%p\n",
+		  req,
+		  state,
+		  state->smbreq);
+
+	if (state->smbreq == NULL) {
+		return false;
+	}
+	*psmbreq = talloc_move(mem_ctx, &state->smbreq);
+	return true;
+}
+
+void smbd_smb1_brl_finish_by_req(struct tevent_req *req, NTSTATUS status)
+{
+	DBG_DEBUG("req=%p, status=%s\n", req, nt_errstr(status));
+
+	if (NT_STATUS_IS_OK(status)) {
+		tevent_req_done(req);
+	} else {
+		tevent_req_nterror(req, status);
+	}
+}
+
+bool smbd_smb1_brl_finish_by_lock(
+	struct files_struct *fsp,
+	bool large_offset,
+	enum brl_flavour lock_flav,
+	struct smbd_lock_element lock,
+	NTSTATUS finish_status)
+{
+	struct tevent_req **blocked = fsp->blocked_smb1_lock_reqs;
+	size_t num_blocked = talloc_array_length(blocked);
+	size_t i;
+
+	DBG_DEBUG("num_blocked=%zu\n", num_blocked);
+
+	for (i=0; i<num_blocked; i++) {
+		struct tevent_req *req = blocked[i];
+		struct smbd_smb1_do_locks_state *state = tevent_req_data(
+			req, struct smbd_smb1_do_locks_state);
+		uint16_t j;
+
+		DBG_DEBUG("i=%zu, req=%p\n", i, req);
+
+		if ((state->large_offset != large_offset) ||
+		    (state->lock_flav != lock_flav)) {
 			continue;
 		}
 
-		next_timeout = timeval_brl_min(&next_timeout, &blr->expire_time);
-	}
+		for (j=0; j<state->num_locks; j++) {
+			struct smbd_lock_element *l = &state->locks[j];
 
-	if (timeval_is_zero(&next_timeout)) {
-		DEBUG(10, ("Next timeout = Infinite.\n"));
-		return True;
-	}
-
-	/*
-	 to account for unclean shutdowns by clients we need a
-	 maximum timeout that we use for checking pending locks. If
-	 we have any pending locks at all, then check if the pending
-	 lock can continue at least every brl:recalctime seconds
-	 (default 5 seconds).
-
-	 This saves us needing to do a message_send_all() in the
-	 SIGCHLD handler in the parent daemon. That
-	 message_send_all() caused O(n^2) work to be done when IP
-	 failovers happened in clustered Samba, which could make the
-	 entire system unusable for many minutes.
-	*/
-
-	if (max_brl_timeout > 0) {
-		struct timeval min_to = timeval_current_ofs(max_brl_timeout, 0);
-		next_timeout = timeval_min(&next_timeout, &min_to);
-	}
-
-	if (DEBUGLVL(10)) {
-		struct timeval cur, from_now;
-
-		cur = timeval_current();
-		from_now = timeval_until(&cur, &next_timeout);
-		DEBUG(10, ("Next timeout = %d.%d seconds from now.\n",
-		    (int)from_now.tv_sec, (int)from_now.tv_usec));
-	}
-
-	/*
-	 * brl_timeout_fn() calls change_to_root_user()
-	 * so we can use sconn->root_ev_ctx.
-	 */
-	sconn->smb1.locks.brl_timeout = tevent_add_timer(sconn->root_ev_ctx,
-							 NULL, next_timeout,
-							 brl_timeout_fn, sconn);
-	if (sconn->smb1.locks.brl_timeout == NULL) {
-		return False;
-	}
-
-	return True;
-}
-
-
-/****************************************************************************
- Function to push a blocking lock request onto the lock queue.
-****************************************************************************/
-
-bool push_blocking_lock_request( struct byte_range_lock *br_lck,
-		struct smb_request *req,
-		files_struct *fsp,
-		int lock_timeout,
-		int lock_num,
-		uint64_t smblctx,
-		enum brl_type lock_type,
-		enum brl_flavour lock_flav,
-		uint64_t offset,
-		uint64_t count,
-		uint64_t blocking_smblctx)
-{
-	struct smbd_server_connection *sconn = req->sconn;
-	struct blocking_lock_record *blr;
-	NTSTATUS status;
-
-	if (req->smb2req) {
-		return push_blocking_lock_request_smb2(br_lck,
-				req,
-				fsp,
-				lock_timeout,
-				lock_num,
-				smblctx,
-				lock_type,
-				lock_flav,
-				offset,
-				count,
-				blocking_smblctx);
-	}
-
-	if(req_is_in_chain(req)) {
-		DEBUG(0,("push_blocking_lock_request: cannot queue a chained request (currently).\n"));
-		return False;
-	}
-
-	/*
-	 * Now queue an entry on the blocking lock queue. We setup
-	 * the expiration time here.
-	 */
-
-	blr = talloc(NULL, struct blocking_lock_record);
-	if (blr == NULL) {
-		DEBUG(0,("push_blocking_lock_request: Malloc fail !\n" ));
-		return False;
-	}
-
-	blr->next = NULL;
-	blr->prev = NULL;
-
-	blr->fsp = fsp;
-	if (lock_timeout == -1) {
-		blr->expire_time.tv_sec = 0;
-		blr->expire_time.tv_usec = 0; /* Never expire. */
-	} else {
-		blr->expire_time = timeval_current_ofs_msec(lock_timeout);
-	}
-	blr->lock_num = lock_num;
-	blr->smblctx = smblctx;
-	blr->blocking_smblctx = blocking_smblctx;
-	blr->lock_flav = lock_flav;
-	blr->lock_type = lock_type;
-	blr->offset = offset;
-	blr->count = count;
-
-	/* Specific brl_lock() implementations can fill this in. */
-	blr->blr_private = NULL;
-
-	/* Add a pending lock record for this. */
-	status = brl_lock(req->sconn->msg_ctx,
-			br_lck,
-			smblctx,
-			messaging_server_id(req->sconn->msg_ctx),
-			offset,
-			count,
-			lock_type == READ_LOCK ? PENDING_READ_LOCK : PENDING_WRITE_LOCK,
-			blr->lock_flav,
-			True,
-			NULL);
-
-	if (!NT_STATUS_IS_OK(status)) {
-		DEBUG(0,("push_blocking_lock_request: failed to add PENDING_LOCK record.\n"));
-		TALLOC_FREE(blr);
-		return False;
-	}
-
-	SMB_PERFCOUNT_DEFER_OP(&req->pcd, &req->pcd);
-	blr->req = talloc_move(blr, &req);
-
-	DLIST_ADD_END(sconn->smb1.locks.blocking_lock_queue, blr);
-	recalc_brl_timeout(sconn);
-
-	/* Ensure we'll receive messages when this is unlocked. */
-	if (!sconn->smb1.locks.blocking_lock_unlock_state) {
-		messaging_register(sconn->msg_ctx, sconn,
-				   MSG_SMB_UNLOCK, received_unlock_msg);
-		sconn->smb1.locks.blocking_lock_unlock_state = true;
-	}
-
-	DEBUG(3,("push_blocking_lock_request: lock request blocked with "
-		"expiry time (%u sec. %u usec) (+%d msec) for %s, name = %s\n",
-		(unsigned int)blr->expire_time.tv_sec,
-		(unsigned int)blr->expire_time.tv_usec, lock_timeout,
-		fsp_fnum_dbg(blr->fsp), fsp_str_dbg(blr->fsp)));
-
-	return True;
-}
-
-/****************************************************************************
- Return a lockingX success SMB.
-*****************************************************************************/
-
-static void reply_lockingX_success(struct blocking_lock_record *blr)
-{
-	struct smb_request *req = blr->req;
-
-	reply_outbuf(req, 2, 0);
-	SSVAL(req->outbuf, smb_vwv0, 0xff); /* andx chain ends */
-	SSVAL(req->outbuf, smb_vwv1, 0);    /* no andx offset */
-
-	/*
-	 * As this message is a lockingX call we must handle
-	 * any following chained message correctly.
-	 * This is normally handled in construct_reply(),
-	 * but as that calls switch_message, we can't use
-	 * that here and must set up the chain info manually.
-	 */
-
-	if (!srv_send_smb(req->xconn,
-			(char *)req->outbuf,
-			true, req->seqnum+1,
-			IS_CONN_ENCRYPTED(req->conn)||req->encrypted,
-			&req->pcd)) {
-		exit_server_cleanly("construct_reply: srv_send_smb failed.");
-	}
-
-	TALLOC_FREE(req->outbuf);
-}
-
-/****************************************************************************
- Return a generic lock fail error blocking call.
-*****************************************************************************/
-
-static void generic_blocking_lock_error(struct blocking_lock_record *blr, NTSTATUS status)
-{
-	/* whenever a timeout is given w2k maps LOCK_NOT_GRANTED to
-	   FILE_LOCK_CONFLICT! (tridge) */
-	if (NT_STATUS_EQUAL(status, NT_STATUS_LOCK_NOT_GRANTED)) {
-		status = NT_STATUS_FILE_LOCK_CONFLICT;
-	}
-
-	if (NT_STATUS_EQUAL(status, NT_STATUS_FILE_LOCK_CONFLICT)) {
-		/* Store the last lock error. */
-		files_struct *fsp = blr->fsp;
-
-		if (fsp) {
-			fsp->last_lock_failure.context.smblctx = blr->smblctx;
-			fsp->last_lock_failure.context.tid = fsp->conn->cnum;
-			fsp->last_lock_failure.context.pid =
-				messaging_server_id(fsp->conn->sconn->msg_ctx);
-			fsp->last_lock_failure.start = blr->offset;
-			fsp->last_lock_failure.size = blr->count;
-			fsp->last_lock_failure.fnum = fsp->fnum;
-			fsp->last_lock_failure.lock_type = READ_LOCK; /* Don't care. */
-			fsp->last_lock_failure.lock_flav = blr->lock_flav;
+			if ((lock.smblctx == l->smblctx) &&
+			    (lock.offset == l->offset) &&
+			    (lock.count == l->count)) {
+				smbd_smb1_brl_finish_by_req(
+					req, finish_status);
+				return true;
+			}
 		}
-	}
-
-	reply_nterror(blr->req, status);
-	if (!srv_send_smb(blr->req->xconn, (char *)blr->req->outbuf,
-			  true, blr->req->seqnum+1,
-			  blr->req->encrypted, NULL)) {
-		exit_server_cleanly("generic_blocking_lock_error: srv_send_smb failed.");
-	}
-	TALLOC_FREE(blr->req->outbuf);
-}
-
-/****************************************************************************
- Return a lock fail error for a lockingX call. Undo all the locks we have
- obtained first.
-*****************************************************************************/
-
-static void undo_locks_obtained(struct blocking_lock_record *blr)
-{
-	files_struct *fsp = blr->fsp;
-	uint16_t num_ulocks = SVAL(blr->req->vwv+6, 0);
-	uint64_t count = (uint64_t)0, offset = (uint64_t) 0;
-	uint64_t smblctx;
-	unsigned char locktype = CVAL(blr->req->vwv+3, 0);
-	bool large_file_format = (locktype & LOCKING_ANDX_LARGE_FILES);
-	uint8_t *data;
-	int i;
-
-	data = discard_const_p(uint8_t, blr->req->buf)
-		+ ((large_file_format ? 20 : 10)*num_ulocks);
-
-	/*
-	 * Data now points at the beginning of the list
-	 * of smb_lkrng structs.
-	 */
-
-	/*
-	 * Ensure we don't do a remove on the lock that just failed,
-	 * as under POSIX rules, if we have a lock already there, we
-	 * will delete it (and we shouldn't) .....
-	 */
-
-	for(i = blr->lock_num - 1; i >= 0; i--) {
-
-		smblctx = get_lock_pid( data, i, large_file_format);
-		count = get_lock_count( data, i, large_file_format);
-		offset = get_lock_offset( data, i, large_file_format);
-
-		/*
-		 * We know err cannot be set as if it was the lock
-		 * request would never have been queued. JRA.
-		 */
-
-		do_unlock(fsp->conn->sconn->msg_ctx,
-			fsp,
-			smblctx,
-			count,
-			offset,
-			WINDOWS_LOCK);
-	}
-}
-
-/****************************************************************************
- Return a lock fail error.
-*****************************************************************************/
-
-static void blocking_lock_reply_error(struct blocking_lock_record *blr, NTSTATUS status)
-{
-	DEBUG(10, ("Replying with error=%s. BLR = %p\n", nt_errstr(status), blr));
-
-	switch(blr->req->cmd) {
-	case SMBlockingX:
-		/*
-		 * This code can be called during the rundown of a
-		 * file after it was already closed. In that case,
-		 * blr->fsp==NULL and we do not need to undo any
-		 * locks, they are already gone.
-		 */
-		if (blr->fsp != NULL) {
-			undo_locks_obtained(blr);
-		}
-		generic_blocking_lock_error(blr, status);
-		break;
-	case SMBtrans2:
-	case SMBtranss2:
-		reply_nterror(blr->req, status);
-
-		/*
-		 * construct_reply_common has done us the favor to pre-fill
-		 * the command field with SMBtranss2 which is wrong :-)
-		 */
-		SCVAL(blr->req->outbuf,smb_com,SMBtrans2);
-
-		if (!srv_send_smb(blr->req->xconn,
-				  (char *)blr->req->outbuf,
-				  true, blr->req->seqnum+1,
-				  IS_CONN_ENCRYPTED(blr->fsp->conn),
-				  NULL)) {
-			exit_server_cleanly("blocking_lock_reply_error: "
-					    "srv_send_smb failed.");
-		}
-		TALLOC_FREE(blr->req->outbuf);
-		break;
-	default:
-		DEBUG(0,("blocking_lock_reply_error: PANIC - unknown type on blocking lock queue - exiting.!\n"));
-		exit_server("PANIC - unknown type on blocking lock queue");
-	}
-}
-
-/****************************************************************************
- Utility function that returns true if a lock timed out.
-*****************************************************************************/
-
-static bool lock_timed_out(const struct blocking_lock_record *blr)
-{
-	struct timeval tv_curr;
-
-	if (timeval_is_zero(&blr->expire_time)) {
-		return false; /* Never times out. */
-	}
-
-	tv_curr = timeval_current();
-	if (timeval_compare(&blr->expire_time, &tv_curr) <= 0) {
-		return true;
 	}
 	return false;
 }
 
-/****************************************************************************
- Attempt to finish off getting all pending blocking locks for a lockingX call.
- Returns True if we want to be removed from the list.
-*****************************************************************************/
-
-static bool process_lockingX(struct blocking_lock_record *blr)
+static struct files_struct *smbd_smb1_brl_finish_by_mid_fn(
+	struct files_struct *fsp, void *private_data)
 {
-	unsigned char locktype = CVAL(blr->req->vwv+3, 0);
-	files_struct *fsp = blr->fsp;
-	uint16_t num_ulocks = SVAL(blr->req->vwv+6, 0);
-	uint16_t num_locks = SVAL(blr->req->vwv+7, 0);
-	bool large_file_format = (locktype & LOCKING_ANDX_LARGE_FILES);
-	uint8_t *data;
-	NTSTATUS status = NT_STATUS_OK;
-	bool lock_timeout = lock_timed_out(blr);
+	struct tevent_req **blocked = fsp->blocked_smb1_lock_reqs;
+	size_t num_blocked = talloc_array_length(blocked);
+	uint64_t mid = *((uint64_t *)private_data);
+	size_t i;
 
-	data = discard_const_p(uint8_t, blr->req->buf)
-		+ ((large_file_format ? 20 : 10)*num_ulocks);
+	DBG_DEBUG("fsp=%p, num_blocked=%zu\n", fsp, num_blocked);
 
-	/*
-	 * Data now points at the beginning of the list
-	 * of smb_lkrng structs.
-	 */
+	for (i=0; i<num_blocked; i++) {
+		struct tevent_req *req = blocked[i];
+		struct smbd_smb1_do_locks_state *state = tevent_req_data(
+			req, struct smbd_smb1_do_locks_state);
+		struct smb_request *smbreq = state->smbreq;
 
-	for(; blr->lock_num < num_locks; blr->lock_num++) {
-		struct byte_range_lock *br_lck = NULL;
-
-		/*
-		 * Ensure the blr record gets updated with
-		 * any lock we might end up blocked on.
-		 */
-
-		blr->smblctx = get_lock_pid( data, blr->lock_num, large_file_format);
-		blr->count = get_lock_count( data, blr->lock_num, large_file_format);
-		blr->offset = get_lock_offset( data, blr->lock_num, large_file_format);
-
-		/*
-		 * We know err cannot be set as if it was the lock
-		 * request would never have been queued. JRA.
-		 */
-		errno = 0;
-		br_lck = do_lock(fsp->conn->sconn->msg_ctx,
-				fsp,
-				blr->smblctx,
-				blr->count,
-				blr->offset,
-				((locktype & LOCKING_ANDX_SHARED_LOCK) ?
-					READ_LOCK : WRITE_LOCK),
-				WINDOWS_LOCK,
-				True,
-				&status,
-				&blr->blocking_smblctx);
-
-		if (ERROR_WAS_LOCK_DENIED(status) && !lock_timeout) {
-			/*
-			 * If we didn't timeout, but still need to wait,
-			 * re-add the pending lock entry whilst holding
-			 * the brlock db lock.
-			 */
-			NTSTATUS status1 =
-				brl_lock(blr->fsp->conn->sconn->msg_ctx,
-					br_lck,
-					blr->smblctx,
-					messaging_server_id(
-						blr->fsp->conn->sconn->msg_ctx),
-					blr->offset,
-					blr->count,
-					blr->lock_type == READ_LOCK ?
-						PENDING_READ_LOCK :
-						PENDING_WRITE_LOCK,
-						blr->lock_flav,
-					true, /* Blocking lock. */
-					NULL);
-
-			if (!NT_STATUS_IS_OK(status1)) {
-				DEBUG(0,("failed to add PENDING_LOCK "
-					"record.\n"));
-			}
-		}
-
-		TALLOC_FREE(br_lck);
-
-		if (NT_STATUS_IS_ERR(status)) {
-			break;
+		if (smbreq->mid == mid) {
+			tevent_req_nterror(req, NT_STATUS_FILE_LOCK_CONFLICT);
+			return fsp;
 		}
 	}
 
-	if(blr->lock_num == num_locks) {
-		/*
-		 * Success - we got all the locks.
-		 */
-
-		DEBUG(3,("process_lockingX file = %s, %s, type=%d "
-			 "num_locks=%d\n", fsp_str_dbg(fsp), fsp_fnum_dbg(fsp),
-			 (unsigned int)locktype, num_locks));
-
-		reply_lockingX_success(blr);
-		return True;
-	}
-
-	if (!ERROR_WAS_LOCK_DENIED(status)) {
-		/*
-		 * We have other than a "can't get lock"
-		 * error. Free any locks we had and return an error.
-		 * Return True so we get dequeued.
-		 */
-		blocking_lock_reply_error(blr, status);
-		return True;
-	}
-
-	/*
-	 * Return an error to the client if we timed out.
-	 */
-	if (lock_timeout) {
-		blocking_lock_reply_error(blr,NT_STATUS_FILE_LOCK_CONFLICT);
-		return true;
-	}
-
-	/*
-	 * Still can't get all the locks - keep waiting.
-	 */
-
-	DEBUG(10, ("process_lockingX: only got %d locks of %d needed for "
-		   "file %s, %s. Waiting....\n",
-		   blr->lock_num, num_locks, fsp_str_dbg(fsp),
-		   fsp_fnum_dbg(fsp)));
-
-	return False;
+	return NULL;
 }
 
-/****************************************************************************
- Attempt to get the posix lock request from a SMBtrans2 call.
- Returns True if we want to be removed from the list.
-*****************************************************************************/
+/*
+ * This walks the list of fsps, we store the blocked reqs attached to
+ * them. It can be expensive, but this is legacy SMB1 and trying to
+ * remember looking at traces I don't reall many of those calls.
+ */
 
-static bool process_trans2(struct blocking_lock_record *blr)
-{
-	char params[2];
-	NTSTATUS status;
-	bool lock_timeout = lock_timed_out(blr);
-
-	struct byte_range_lock *br_lck = do_lock(
-						blr->fsp->conn->sconn->msg_ctx,
-						blr->fsp,
-						blr->smblctx,
-						blr->count,
-						blr->offset,
-						blr->lock_type,
-						blr->lock_flav,
-						True,
-						&status,
-						&blr->blocking_smblctx);
-	if (ERROR_WAS_LOCK_DENIED(status) && !lock_timeout) {
-		/*
-		 * If we didn't timeout, but still need to wait,
-		 * re-add the pending lock entry whilst holding
-		 * the brlock db lock.
-		 */
-		NTSTATUS status1 =
-			brl_lock(blr->fsp->conn->sconn->msg_ctx,
-				br_lck,
-				blr->smblctx,
-				messaging_server_id(
-					blr->fsp->conn->sconn->msg_ctx),
-				blr->offset,
-				blr->count,
-				blr->lock_type == READ_LOCK ?
-					PENDING_READ_LOCK :
-					PENDING_WRITE_LOCK,
-				blr->lock_flav,
-				true, /* Blocking lock. */
-				NULL);
-
-		if (!NT_STATUS_IS_OK(status1)) {
-			DEBUG(0,("failed to add PENDING_LOCK record.\n"));
-		}
-	}
-
-	TALLOC_FREE(br_lck);
-
-	if (!NT_STATUS_IS_OK(status)) {
-		if (ERROR_WAS_LOCK_DENIED(status)) {
-			if (lock_timeout) {
-				/*
-				 * Return an error if we timed out
-				 * and return true to get dequeued.
-				 */
-				blocking_lock_reply_error(blr,
-					NT_STATUS_FILE_LOCK_CONFLICT);
-				return true;
-			}
-			/* Still can't get the lock, just keep waiting. */
-			return False;
-		}
-		/*
-		 * We have other than a "can't get lock"
-		 * error. Send an error and return True so we get dequeued.
-		 */
-		blocking_lock_reply_error(blr, status);
-		return True;
-	}
-
-	/* We finally got the lock, return success. */
-
-	SSVAL(params,0,0);
-	/* Fake up max_data_bytes here - we know it fits. */
-	send_trans2_replies(blr->fsp->conn, blr->req, NT_STATUS_OK, params, 2, NULL, 0, 0xffff);
-	return True;
-}
-
-
-/****************************************************************************
- Process a blocking lock SMB.
- Returns True if we want to be removed from the list.
-*****************************************************************************/
-
-static bool blocking_lock_record_process(struct blocking_lock_record *blr)
-{
-	switch(blr->req->cmd) {
-		case SMBlockingX:
-			return process_lockingX(blr);
-		case SMBtrans2:
-		case SMBtranss2:
-			return process_trans2(blr);
-		default:
-			DEBUG(0,("blocking_lock_record_process: PANIC - unknown type on blocking lock queue - exiting.!\n"));
-			exit_server("PANIC - unknown type on blocking lock queue");
-	}
-	return False; /* Keep compiler happy. */
-}
-
-/****************************************************************************
- Cancel entries by fnum from the blocking lock pending queue.
- Called when a file is closed.
-*****************************************************************************/
-
-void smbd_cancel_pending_lock_requests_by_fid(files_struct *fsp,
-					      struct byte_range_lock *br_lck,
-					      enum file_close_type close_type)
-{
-	struct smbd_server_connection *sconn = fsp->conn->sconn;
-	struct blocking_lock_record *blr, *blr_cancelled, *next = NULL;
-
-	if (sconn->using_smb2) {
-		cancel_pending_lock_requests_by_fid_smb2(fsp,
-					br_lck,
-					close_type);
-		return;
-	}
-
-	for(blr = sconn->smb1.locks.blocking_lock_queue; blr; blr = next) {
-		unsigned char locktype = 0;
-
-		next = blr->next;
-		if (blr->fsp->fnum != fsp->fnum) {
-			continue;
-		}
-
-		if (blr->req->cmd == SMBlockingX) {
-			locktype = CVAL(blr->req->vwv+3, 0);
-		}
-
-		DEBUG(10, ("remove_pending_lock_requests_by_fid - removing "
-			   "request type %d for file %s, %s\n",
-			   blr->req->cmd, fsp_str_dbg(fsp), fsp_fnum_dbg(fsp)));
-
-		blr_cancelled = blocking_lock_cancel_smb1(fsp,
-				     blr->smblctx,
-				     blr->offset,
-				     blr->count,
-				     blr->lock_flav,
-				     locktype,
-				     NT_STATUS_RANGE_NOT_LOCKED);
-
-		SMB_ASSERT(blr_cancelled == blr);
-
-		brl_lock_cancel(br_lck,
-				blr->smblctx,
-				messaging_server_id(sconn->msg_ctx),
-				blr->offset,
-				blr->count,
-				blr->lock_flav);
-
-		/* We're closing the file fsp here, so ensure
-		 * we don't have a dangling pointer. */
-		blr->fsp = NULL;
-	}
-}
-
-/****************************************************************************
- Delete entries by mid from the blocking lock pending queue. Always send reply.
- Only called from the SMB1 cancel code.
-*****************************************************************************/
-
-void remove_pending_lock_requests_by_mid_smb1(
+bool smbd_smb1_brl_finish_by_mid(
 	struct smbd_server_connection *sconn, uint64_t mid)
 {
-	struct blocking_lock_record *blr, *next = NULL;
-
-	for(blr = sconn->smb1.locks.blocking_lock_queue; blr; blr = next) {
-		files_struct *fsp;
-		struct byte_range_lock *br_lck;
-
-		next = blr->next;
-
-		if (blr->req->mid != mid) {
-			continue;
-		}
-
-		fsp = blr->fsp;
-		br_lck = brl_get_locks(talloc_tos(), fsp);
-
-		if (br_lck) {
-			DEBUG(10, ("remove_pending_lock_requests_by_mid_smb1 - "
-				   "removing request type %d for file %s, %s\n",
-				   blr->req->cmd, fsp_str_dbg(fsp),
-				   fsp_fnum_dbg(fsp)));
-
-			brl_lock_cancel(br_lck,
-					blr->smblctx,
-					messaging_server_id(sconn->msg_ctx),
-					blr->offset,
-					blr->count,
-					blr->lock_flav);
-			TALLOC_FREE(br_lck);
-		}
-
-		blocking_lock_reply_error(blr,NT_STATUS_FILE_LOCK_CONFLICT);
-		DLIST_REMOVE(sconn->smb1.locks.blocking_lock_queue, blr);
-		TALLOC_FREE(blr);
-	}
-}
-
-/****************************************************************************
- Is this mid a blocking lock request on the queue ?
- Currently only called from the SMB1 unix extensions POSIX lock code.
-*****************************************************************************/
-
-bool blocking_lock_was_deferred_smb1(
-	struct smbd_server_connection *sconn, uint64_t mid)
-{
-	struct blocking_lock_record *blr, *next = NULL;
-
-	for(blr = sconn->smb1.locks.blocking_lock_queue; blr; blr = next) {
-		next = blr->next;
-		if(blr->req->mid == mid) {
-			return True;
-		}
-	}
-	return False;
-}
-
-/****************************************************************************
-  Set a flag as an unlock request affects one of our pending locks.
-*****************************************************************************/
-
-static void received_unlock_msg(struct messaging_context *msg,
-				void *private_data,
-				uint32_t msg_type,
-				struct server_id server_id,
-				DATA_BLOB *data)
-{
-	struct smbd_server_connection *sconn =
-		talloc_get_type_abort(private_data,
-		struct smbd_server_connection);
-
-	DEBUG(10,("received_unlock_msg\n"));
-	process_blocking_lock_queue(sconn);
-}
-
-/****************************************************************************
- Process the blocking lock queue. Note that this is only called as root.
-*****************************************************************************/
-
-void process_blocking_lock_queue(struct smbd_server_connection *sconn)
-{
-	struct blocking_lock_record *blr, *next = NULL;
-
-	if (sconn->using_smb2) {
-		process_blocking_lock_queue_smb2(sconn, timeval_current());
-		return;
-	}
-
-	/*
-	 * Go through the queue and see if we can get any of the locks.
-	 */
-
-	for (blr = sconn->smb1.locks.blocking_lock_queue; blr; blr = next) {
-		struct byte_range_lock *br_lck = NULL;
-
-		next = blr->next;
-
-		/*
-		 * Go through the remaining locks and try and obtain them.
-		 * The call returns True if all locks were obtained successfully
-		 * and False if we still need to wait.
-		 */
-
-		DEBUG(10, ("Processing BLR = %p\n", blr));
-
-		/*
-		 * Connections with pending locks are not marked as idle.
-		 */
-		blr->fsp->conn->lastused_count++;
-
-		/*
-		 * Remove the pending lock we're waiting on.
-		 * If we need to keep waiting blocking_lock_record_process()
-		 * will re-add it.
-		 */
-
-		br_lck = brl_get_locks(talloc_tos(), blr->fsp);
-		if (br_lck) {
-			brl_lock_cancel(br_lck,
-				blr->smblctx,
-				messaging_server_id(sconn->msg_ctx),
-				blr->offset,
-				blr->count,
-				blr->lock_flav);
-		}
-		TALLOC_FREE(br_lck);
-
-		if(!blocking_lock_record_process(blr)) {
-			DEBUG(10, ("still waiting for lock. BLR = %p\n", blr));
-			continue;
-		}
-
-		DEBUG(10, ("BLR_process returned true: removing BLR = %p\n",
-			blr));
-
-		DLIST_REMOVE(sconn->smb1.locks.blocking_lock_queue, blr);
-		TALLOC_FREE(blr);
-	}
-
-	recalc_brl_timeout(sconn);
-}
-
-/****************************************************************************
- Handle a cancel message. Lock already moved onto the cancel queue.
-*****************************************************************************/
-
-#define MSG_BLOCKING_LOCK_CANCEL_SIZE (sizeof(struct blocking_lock_record *) + sizeof(NTSTATUS))
-
-static void process_blocking_lock_cancel_message(struct messaging_context *ctx,
-						 void *private_data,
-						 uint32_t msg_type,
-						 struct server_id server_id,
-						 DATA_BLOB *data)
-{
-	NTSTATUS err;
-	const char *msg = (const char *)data->data;
-	struct blocking_lock_record *blr;
-	struct smbd_server_connection *sconn =
-		talloc_get_type_abort(private_data,
-		struct smbd_server_connection);
-
-	if (data->data == NULL) {
-		smb_panic("process_blocking_lock_cancel_message: null msg");
-	}
-
-	if (data->length != MSG_BLOCKING_LOCK_CANCEL_SIZE) {
-		DEBUG(0, ("process_blocking_lock_cancel_message: "
-			  "Got invalid msg len %d\n", (int)data->length));
-		smb_panic("process_blocking_lock_cancel_message: bad msg");
-        }
-
-	memcpy(&blr, msg, sizeof(blr));
-	memcpy(&err, &msg[sizeof(blr)], sizeof(NTSTATUS));
-
-	DEBUG(10,("process_blocking_lock_cancel_message: returning error %s\n",
-		nt_errstr(err) ));
-
-	blocking_lock_reply_error(blr, err);
-	DLIST_REMOVE(sconn->smb1.locks.blocking_lock_cancelled_queue, blr);
-	TALLOC_FREE(blr);
-}
-
-/****************************************************************************
- Send ourselves a blocking lock cancelled message. Handled asynchronously above.
- Returns the blocking_lock_record that is being cancelled.
- Only called from the SMB1 code.
-*****************************************************************************/
-
-struct blocking_lock_record *blocking_lock_cancel_smb1(files_struct *fsp,
-			uint64_t smblctx,
-			uint64_t offset,
-			uint64_t count,
-			enum brl_flavour lock_flav,
-			unsigned char locktype,
-                        NTSTATUS err)
-{
-	struct smbd_server_connection *sconn = fsp->conn->sconn;
-	char msg[MSG_BLOCKING_LOCK_CANCEL_SIZE];
-	struct blocking_lock_record *blr;
-
-	if (!sconn->smb1.locks.blocking_lock_cancel_state) {
-		/* Register our message. */
-		messaging_register(sconn->msg_ctx, sconn,
-				   MSG_SMB_BLOCKING_LOCK_CANCEL,
-				   process_blocking_lock_cancel_message);
-
-		sconn->smb1.locks.blocking_lock_cancel_state = True;
-	}
-
-	for (blr = sconn->smb1.locks.blocking_lock_queue; blr; blr = blr->next) {
-		if (fsp == blr->fsp &&
-				smblctx == blr->smblctx &&
-				offset == blr->offset &&
-				count == blr->count &&
-				lock_flav == blr->lock_flav) {
-			break;
-		}
-	}
-
-	if (!blr) {
-		return NULL;
-	}
-
-	/* Check the flags are right. */
-	if (blr->req->cmd == SMBlockingX &&
-		(locktype & LOCKING_ANDX_LARGE_FILES) !=
-			(CVAL(blr->req->vwv+3, 0) & LOCKING_ANDX_LARGE_FILES)) {
-		return NULL;
-	}
-
-	/* Move to cancelled queue. */
-	DLIST_REMOVE(sconn->smb1.locks.blocking_lock_queue, blr);
-	DLIST_ADD(sconn->smb1.locks.blocking_lock_cancelled_queue, blr);
-
-	/* Create the message. */
-	memcpy(msg, &blr, sizeof(blr));
-	memcpy(&msg[sizeof(blr)], &err, sizeof(NTSTATUS));
-
-	messaging_send_buf(sconn->msg_ctx, messaging_server_id(sconn->msg_ctx),
-			   MSG_SMB_BLOCKING_LOCK_CANCEL,
-			   (uint8_t *)&msg, sizeof(msg));
-
-	return blr;
+	struct files_struct *found = files_forall(
+		sconn, smbd_smb1_brl_finish_by_mid_fn, &mid);
+	return (found != NULL);
 }

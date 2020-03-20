@@ -4,18 +4,23 @@ bld.SAMBA3_SUBSYSTEM('NFS4_ACLS',
                     source='nfs4_acls.c',
                     deps='samba-util tdb')
 
+bld.SAMBA3_BINARY('test_nfs4_acls',
+                  source='test_nfs4_acls.c',
+                  deps='smbd_base cmocka',
+                  for_selftest=True)
+
 bld.SAMBA3_SUBSYSTEM('vfs_acl_common',
-                     source='vfs_acl_common.c')
+                     source='vfs_acl_common.c',
+                     deps='gnutls')
 
 bld.SAMBA3_SUBSYSTEM('POSIXACL_XATTR',
                  source='posixacl_xattr.c',
                  enabled=(bld.SAMBA3_IS_ENABLED_MODULE('vfs_ceph') or bld.SAMBA3_IS_ENABLED_MODULE('vfs_glusterfs')),
                  deps='acl attr')
 
-bld.SAMBA3_LIBRARY('non_posix_acls',
+bld.SAMBA3_SUBSYSTEM('non_posix_acls',
                    source='non_posix_acls.c',
-                   deps='samba-util vfs',
-                   private_library=True)
+                   deps='samba-util vfs')
 
 bld.SAMBA3_SUBSYSTEM('VFS_VIRUSFILTER_UTILS',
                    source='vfs_virusfilter_utils.c',
@@ -34,9 +39,14 @@ bld.SAMBA3_SUBSYSTEM('OFFLOAD_TOKEN',
                     source='offload_token.c',
                     deps='samba-util')
 
-bld.SAMBA3_SUBSYSTEM('STRING_REPLACE',
-                    source='string_replace.c')
+bld.SAMBA3_SUBSYSTEM('HASH_INODE',
+                    source='hash_inode.c',
+                    deps='gnutls')
 
+#
+# This is always be static, see
+# source3/wscript: required_static_modules
+#
 bld.SAMBA3_MODULE('vfs_default',
                  subsystem='vfs',
                  source='vfs_default.c',
@@ -44,6 +54,18 @@ bld.SAMBA3_MODULE('vfs_default',
                  init_function='',
                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_default'),
                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_default'))
+
+#
+# This is always be static, see
+# source3/wscript: required_static_modules
+#
+bld.SAMBA3_MODULE('vfs_not_implemented',
+                 subsystem='vfs',
+                 source='vfs_not_implemented.c',
+                 deps='samba-util',
+                 init_function='',
+                 internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_not_implemented'),
+                 enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_not_implemented'))
 
 bld.SAMBA3_MODULE('vfs_audit',
                  subsystem='vfs',
@@ -93,18 +115,10 @@ bld.SAMBA3_MODULE('vfs_recycle',
                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_recycle'),
                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_recycle'))
 
-bld.SAMBA3_MODULE('vfs_netatalk',
-                 subsystem='vfs',
-                 source='vfs_netatalk.c',
-                 deps='samba-util',
-                 init_function='',
-                 internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_netatalk'),
-                 enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_netatalk'))
-
 bld.SAMBA3_MODULE('vfs_fruit',
                  subsystem='vfs',
                  source='vfs_fruit.c',
-                 deps='samba-util OFFLOAD_TOKEN STRING_REPLACE',
+                 deps='samba-util OFFLOAD_TOKEN STRING_REPLACE HASH_INODE ADOUBLE',
                  init_function='',
                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_fruit'),
                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_fruit'))
@@ -227,31 +241,46 @@ bld.SAMBA3_MODULE('vfs_zfsacl',
                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_zfsacl'),
                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_zfsacl'))
 
-xdr_buf_hack = 'sed -e "s@^\([ \t]*register int32_t \*buf\);@\\1 = buf;@"'
-
-bld.SAMBA_GENERATOR('nfs41acl-xdr-c',
-                    source='nfs41acl.x',
-                    target='nfs41acl_xdr.c',
-                    rule='rpcgen -c ${SRC} | ' + xdr_buf_hack + ' > ${TGT}')
-
 bld.SAMBA_GENERATOR('nfs41acl-h',
                     source='nfs41acl.x',
                     target='nfs41acl.h',
                     rule='rpcgen -h ${SRC} > ${TGT}')
 
-vfs_nfs4acl_xattr_source = '''
-                           vfs_nfs4acl_xattr.c
-                           nfs4acl_xattr_ndr.c
-                           nfs4acl_xattr_xdr.c
-                           '''
 
 if bld.CONFIG_SET("HAVE_RPC_XDR_H"):
-    vfs_nfs4acl_xattr_source += ' nfs41acl_xdr.c'
+    xdr_buf_hack = 'sed -e "s@^\([ \t]*register int32_t \*buf\);@\\1 = buf;@"'
+
+    # By default rpcgen assumes that the input file, generated header and
+    # source file are located in the same directory, which is extracted from
+    # the provided path to the input file.
+    # However if the build directory is not under the source tree, ${SRC} will
+    # be a long relative path through a common parent directory, resulting
+    # in an invalid path used in #include for the header.
+    # In order to fix that, the input file is first copied to the output build
+    # directory and then rpcgen is called with the proper path.
+    bld.SAMBA_GENERATOR('nfs41acl-xdr-c',
+                        source='nfs41acl.x',
+                        target='nfs41acl_xdr.c',
+                        rule='cp -f ${SRC} ${TGT[0].parent} && rpcgen -c ' \
+                             '${TGT[0].path_from(tsk.get_cwd())[:-len(tsk.outputs[0].name)] + tsk.inputs[0].name} | ' + \
+                             xdr_buf_hack + ' > ${TGT}')
+
+    bld.SAMBA_SUBSYSTEM('VFS_NFS4_XDR',
+                        source='nfs41acl_xdr.c',
+                        deps='NFS4_ACLS NDR_NFS4ACL tirpc')
+else:
+    bld.SET_TARGET_TYPE('VFS_NFS4_XDR', 'EMPTY')
 
 bld.SAMBA3_MODULE('vfs_nfs4acl_xattr',
                   subsystem='vfs',
-                  source=vfs_nfs4acl_xattr_source,
-                  deps='NFS4_ACLS sunacl NDR_NFS4ACL',
+                  source = '''
+                           vfs_nfs4acl_xattr.c
+                           nfs4acl_xattr_ndr.c
+                           nfs4acl_xattr_xdr.c
+                           nfs4acl_xattr_nfs.c
+                           nfs4acl_xattr_util.c
+                           ''',
+                  deps='NFS4_ACLS sunacl NDR_NFS4ACL VFS_NFS4_XDR',
                   init_function='',
                   internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_nfs4acl_xattr'),
                   enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_nfs4acl_xattr'))
@@ -281,7 +310,7 @@ bld.SAMBA3_MODULE('vfs_catia',
 bld.SAMBA3_MODULE('vfs_streams_xattr',
                  subsystem='vfs',
                  source='vfs_streams_xattr.c',
-                 deps='samba-util',
+                 deps='samba-util HASH_INODE',
                  init_function='',
                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_streams_xattr'),
                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_streams_xattr'))
@@ -366,6 +395,14 @@ bld.SAMBA3_MODULE('vfs_aio_pthread',
                  init_function='',
                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_aio_pthread'),
                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_aio_pthread'))
+
+bld.SAMBA3_MODULE('vfs_io_uring',
+                 subsystem='vfs',
+                 source='vfs_io_uring.c',
+                 deps='samba-util tevent uring',
+                 init_function='',
+                 internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_io_uring'),
+                 enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_io_uring'))
 
 bld.SAMBA3_MODULE('vfs_preopen',
                  subsystem='vfs',
@@ -489,7 +526,16 @@ bld.SAMBA3_MODULE('vfs_ceph',
                  init_function='',
                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_ceph'),
                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_ceph'),
-                 cflags=bld.CONFIG_GET('CCFLAGS_CEPHFS'))
+                 cflags=bld.CONFIG_GET('CFLAGS_CEPHFS'),
+                 includes=bld.CONFIG_GET('CPPPATH_CEPHFS'))
+
+bld.SAMBA3_MODULE('vfs_ceph_snapshots',
+                 subsystem='vfs',
+                 source='vfs_ceph_snapshots.c',
+                 deps='samba-util',
+                 init_function='',
+                 internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_ceph_snapshots'),
+                 enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_ceph_snapshots'))
 
 bld.SAMBA3_MODULE('vfs_glusterfs',
                   subsystem='vfs',
@@ -498,6 +544,14 @@ bld.SAMBA3_MODULE('vfs_glusterfs',
                   init_function='',
                   internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_glusterfs'),
                   enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_glusterfs'))
+
+bld.SAMBA3_MODULE('vfs_glusterfs_fuse',
+                  subsystem='vfs',
+                  source='vfs_glusterfs_fuse.c',
+                  deps='',
+                  init_function='',
+                  internal_module=bld.SAMBA3_IS_STATIC_MODULE('vfs_glusterfs_fuse'),
+                  enabled=bld.SAMBA3_IS_ENABLED_MODULE('vfs_glusterfs_fuse'))
 
 bld.SAMBA3_MODULE('vfs_worm',
                   subsystem='vfs',

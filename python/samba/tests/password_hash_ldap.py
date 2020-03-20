@@ -46,11 +46,14 @@ from samba.ndr import ndr_unpack
 from samba.dcerpc import drsblobs, drsuapi, misc
 from samba import drs_utils, net
 from samba.credentials import Credentials
+from samba.compat import text_type
 import binascii
 import os
 
+
 def attid_equal(a1, a2):
     return (a1 & 0xffffffff) == (a2 & 0xffffffff)
+
 
 class PassWordHashLDAPTests(PassWordHashTests):
 
@@ -70,7 +73,7 @@ class PassWordHashLDAPTests(PassWordHashTests):
         req8.destination_dsa_guid          = null_guid
         req8.source_dsa_invocation_id      = null_guid
         req8.naming_context                = drsuapi.DsReplicaObjectIdentifier()
-        req8.naming_context.dn             = unicode(dn)
+        req8.naming_context.dn             = text_type(dn)
 
         req8.highwatermark = drsuapi.DsReplicaHighWaterMark()
         req8.highwatermark.tmp_highest_usn = 0
@@ -104,7 +107,6 @@ class PassWordHashLDAPTests(PassWordHashTests):
                 net_ctx = net.Net(self.creds)
                 net_ctx.replicate_decrypt(drs, attr, 0)
                 sc_blob = attr.value_ctr.values[0].blob
-
 
         sc = ndr_unpack(drsblobs.supplementalCredentialsBlob, sc_blob)
         return sc

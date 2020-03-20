@@ -22,7 +22,7 @@
 */
 
 #include "includes.h"
-#include "popt_common.h"
+#include "popt_common_cmdline.h"
 #include "rpc_client/cli_pipe.h"
 #include "../librpc/gen_ndr/ndr_lsa.h"
 #include "rpc_client/cli_lsarpc.h"
@@ -40,6 +40,7 @@ static int test_args;
 static int sddl;
 static int query_sec_info = -1;
 static int set_sec_info = -1;
+static bool want_mxac;
 
 static const char *domain_sid = NULL;
 
@@ -104,6 +105,7 @@ done:
 static struct dom_sid *get_domain_sid(struct cli_state *cli)
 {
 	NTSTATUS status;
+	struct dom_sid_buf buf;
 
 	struct dom_sid *sid = talloc(talloc_tos(), struct dom_sid);
 	if (sid == NULL) {
@@ -126,7 +128,7 @@ static struct dom_sid *get_domain_sid(struct cli_state *cli)
 
 	}
 
-	DEBUG(2,("Domain SID: %s\n", sid_string_dbg(sid)));
+	DEBUG(2,("Domain SID: %s\n", dom_sid_str_buf(sid, &buf)));
 	return sid;
 }
 
@@ -359,11 +361,32 @@ static bool set_secdesc(struct cli_state *cli, const char *filename,
 }
 
 /*****************************************************
+get maximum access for a file
+*******************************************************/
+static int cacl_mxac(struct cli_state *cli, const char *filename)
+{
+	NTSTATUS status;
+	uint32_t mxac;
+
+	status = cli_query_mxac(cli, filename, &mxac);
+	if (!NT_STATUS_IS_OK(status)) {
+		printf("Failed to get mxac: %s\n", nt_errstr(status));
+		return EXIT_FAILED;
+	}
+
+	printf("Maximum access: 0x%x\n", mxac);
+
+	return EXIT_OK;
+}
+
+
+/*****************************************************
 dump the acls for a file
 *******************************************************/
 static int cacl_dump(struct cli_state *cli, const char *filename, bool numeric)
 {
 	struct security_descriptor *sd;
+	int ret;
 
 	if (test_args) {
 		return EXIT_OK;
@@ -383,6 +406,13 @@ static int cacl_dump(struct cli_state *cli, const char *filename, bool numeric)
 		TALLOC_FREE(str);
 	} else {
 		sec_desc_print(cli, stdout, sd, numeric);
+	}
+
+	if (want_mxac) {
+		ret = cacl_mxac(cli, filename);
+		if (ret != EXIT_OK) {
+			return ret;
+		}
 	}
 
 	return EXIT_OK;
@@ -790,24 +820,133 @@ int main(int argc, char *argv[])
 
 	struct poptOption long_options[] = {
 		POPT_AUTOHELP
-		{ "delete", 'D', POPT_ARG_STRING, NULL, 'D', "Delete an acl", "ACL" },
-		{ "modify", 'M', POPT_ARG_STRING, NULL, 'M', "Modify an acl", "ACL" },
-		{ "add", 'a', POPT_ARG_STRING, NULL, 'a', "Add an acl", "ACL" },
-		{ "set", 'S', POPT_ARG_STRING, NULL, 'S', "Set acls", "ACLS" },
-		{ "chown", 'C', POPT_ARG_STRING, NULL, 'C', "Change ownership of a file", "USERNAME" },
-		{ "chgrp", 'G', POPT_ARG_STRING, NULL, 'G', "Change group ownership of a file", "GROUPNAME" },
-		{ "inherit", 'I', POPT_ARG_STRING, NULL, 'I', "Inherit allow|remove|copy" },
-		{ "numeric", 0, POPT_ARG_NONE, &numeric, 1, "Don't resolve sids or masks to names" },
-		{ "sddl", 0, POPT_ARG_NONE, &sddl, 1, "Output and input acls in sddl format" },
-		{ "query-security-info", 0, POPT_ARG_INT, &query_sec_info, 1,
-		  "The security-info flags for queries"
+		{
+			.longName   = "delete",
+			.shortName  = 'D',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = NULL,
+			.val        = 'D',
+			.descrip    = "Delete an acl",
+			.argDescrip = "ACL",
 		},
-		{ "set-security-info", 0, POPT_ARG_INT, &set_sec_info, 1,
-		  "The security-info flags for modifications"
+		{
+			.longName   = "modify",
+			.shortName  = 'M',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = NULL,
+			.val        = 'M',
+			.descrip    = "Modify an acl",
+			.argDescrip = "ACL",
 		},
-		{ "test-args", 't', POPT_ARG_NONE, &test_args, 1, "Test arguments"},
-		{ "domain-sid", 0, POPT_ARG_STRING, &domain_sid, 0, "Domain SID for sddl", "SID"},
-		{ "max-protocol", 'm', POPT_ARG_STRING, NULL, 'm', "Set the max protocol level", "LEVEL" },
+		{
+			.longName   = "add",
+			.shortName  = 'a',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = NULL,
+			.val        = 'a',
+			.descrip    = "Add an acl",
+			.argDescrip = "ACL",
+		},
+		{
+			.longName   = "set",
+			.shortName  = 'S',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = NULL,
+			.val        = 'S',
+			.descrip    = "Set acls",
+			.argDescrip = "ACLS",
+		},
+		{
+			.longName   = "chown",
+			.shortName  = 'C',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = NULL,
+			.val        = 'C',
+			.descrip    = "Change ownership of a file",
+			.argDescrip = "USERNAME",
+		},
+		{
+			.longName   = "chgrp",
+			.shortName  = 'G',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = NULL,
+			.val        = 'G',
+			.descrip    = "Change group ownership of a file",
+			.argDescrip = "GROUPNAME",
+		},
+		{
+			.longName   = "inherit",
+			.shortName  = 'I',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = NULL,
+			.val        = 'I',
+			.descrip    = "Inherit allow|remove|copy",
+		},
+		{
+			.longName   = "numeric",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = &numeric,
+			.val        = 1,
+			.descrip    = "Don't resolve sids or masks to names",
+		},
+		{
+			.longName   = "sddl",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = &sddl,
+			.val        = 1,
+			.descrip    = "Output and input acls in sddl format",
+		},
+		{
+			.longName   = "query-security-info",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_INT,
+			.arg        = &query_sec_info,
+			.val        = 1,
+			.descrip    = "The security-info flags for queries"
+		},
+		{
+			.longName   = "set-security-info",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_INT,
+			.arg        = &set_sec_info,
+			.val        = 1,
+			.descrip    = "The security-info flags for modifications"
+		},
+		{
+			.longName   = "test-args",
+			.shortName  = 't',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = &test_args,
+			.val        = 1,
+			.descrip    = "Test arguments"
+		},
+		{
+			.longName   = "domain-sid",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &domain_sid,
+			.val        = 0,
+			.descrip    = "Domain SID for sddl",
+			.argDescrip = "SID"},
+		{
+			.longName   = "max-protocol",
+			.shortName  = 'm',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = NULL,
+			.val        = 'm',
+			.descrip    = "Set the max protocol level",
+			.argDescrip = "LEVEL",
+		},
+		{
+			.longName   = "maximum-access",
+			.shortName  = 'x',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'x',
+			.descrip    = "Query maximum persmissions",
+		},
 		POPT_COMMON_SAMBA
 		POPT_COMMON_CONNECTION
 		POPT_COMMON_CREDENTIALS
@@ -873,6 +1012,9 @@ int main(int argc, char *argv[])
 		case 'm':
 			lp_set_cmdline("client max protocol", poptGetOptArg(pc));
 			break;
+		case 'x':
+			want_mxac = true;
+			break;
 		}
 	}
 
@@ -908,8 +1050,8 @@ int main(int argc, char *argv[])
 		return -1;
 	}
 	share = strchr_m(server,'\\');
-	if (!share) {
-		printf("Invalid argument: %s\n", share);
+	if (share == NULL) {
+		printf("Invalid argument\n");
 		return -1;
 	}
 

@@ -78,7 +78,11 @@ static void fault_report(int sig)
 
 	DEBUGSEP(0);
 	DEBUG(0,("INTERNAL ERROR: Signal %d in pid %d (%s)",sig,(int)getpid(),SAMBA_VERSION_STRING));
-	DEBUG(0,("\nPlease read the Trouble-Shooting section of the Samba HOWTO\n"));
+	DEBUG(0,("\nIf you are running a recent Samba version, and "
+		 "if you think this problem is not yet fixed in the "
+		 "latest versions, please consider reporting this "
+		 "bug, see "
+		 "https://wiki.samba.org/index.php/Bug_Reporting\n"));
 	DEBUGSEP(0);
 
 	smb_panic("internal error");
@@ -248,7 +252,7 @@ void log_stack_trace(void)
 libunwind_failed:
 	DEBUG(0, ("unable to produce a stack trace with libunwind\n"));
 
-#elif HAVE_BACKTRACE_SYMBOLS
+#elif defined(HAVE_BACKTRACE_SYMBOLS)
 	void *backtrace_stack[BACKTRACE_STACK_SIZE];
 	size_t backtrace_size;
 	char **backtrace_strings;
@@ -261,10 +265,10 @@ libunwind_failed:
 		  (unsigned long)backtrace_size));
 
 	if (backtrace_strings) {
-		int i;
+		size_t i;
 
 		for (i = 0; i < backtrace_size; i++)
-			DEBUGADD(0, (" #%u %s\n", i, backtrace_strings[i]));
+			DEBUGADD(0, (" #%zu %s\n", i, backtrace_strings[i]));
 
 		/* Leak the backtrace_strings, rather than risk what free() might do */
 	}

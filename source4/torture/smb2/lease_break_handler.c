@@ -73,6 +73,18 @@ bool torture_lease_handler(struct smb2_transport *transport,
 }
 
 /*
+ * A lease break handler which ignores incoming lease break requests
+ * To be used in cases where the client is expected to ignore incoming
+ * lease break requests
+ */
+bool torture_lease_ignore_handler(struct smb2_transport *transport,
+			   const struct smb2_lease_break *lb,
+			   void *private_data)
+{
+	return true;
+}
+
+/*
    Timer handler function notifies the registering function that time is up
 */
 static void timeout_cb(struct tevent_context *ev,
@@ -96,8 +108,8 @@ void torture_wait_for_lease_break(struct torture_context *tctx)
 	bool timesup = false;
 	int old_count = lease_break_info.count;
 
-	/* Wait .1 seconds for an lease break */
-	ne = tevent_timeval_current_ofs(0, 100000);
+	/* Wait 1 second for an lease break */
+	ne = tevent_timeval_current_ofs(0, 1000000);
 
 	te = tevent_add_timer(tctx->ev, tmp_ctx, ne, timeout_cb, &timesup);
 	if (te == NULL) {
@@ -124,11 +136,3 @@ done:
 
 	return;
 }
-
- void torture_reset_lease_break_info(struct torture_context *tctx,
-				     struct lease_break_info *r)
-{
-	ZERO_STRUCTP(r);
-	r->tctx = tctx;
-}
-

@@ -29,7 +29,7 @@ DEBUG = logger.debug
 WARN = logger.warning
 
 
-#colours for prettier logs
+# colours for prettier logs
 from samba.colour import C_NORMAL, REV_RED
 from samba.colour import DARK_RED, RED
 from samba.colour import DARK_GREEN, GREEN
@@ -42,6 +42,7 @@ from samba.colour import GREY, WHITE
 
 def _color_debug(*args, **kwargs):
     DEBUG('%s%s%s' % (kwargs['color'], args[0], C_NORMAL), *args[1:])
+
 
 _globals = globals()
 for _color in ('DARK_RED', 'RED', 'DARK_GREEN', 'GREEN', 'YELLOW',

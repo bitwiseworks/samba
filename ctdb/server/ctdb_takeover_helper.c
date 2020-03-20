@@ -160,7 +160,6 @@ static void get_public_ips_done(struct tevent_req *subreq)
 						&reply);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		found_errors = false;
 		for (i = 0; i < state->count; i++) {
 			if (err_list[i] != 0) {
 				uint32_t pnn = state->pnns[i];
@@ -169,7 +168,6 @@ static void get_public_ips_done(struct tevent_req *subreq)
 				      "node %u, ret=%d\n", pnn, err_list[i]);
 
 				state->ban_credits[pnn]++;
-				found_errors = true;
 			}
 		}
 
@@ -466,7 +464,7 @@ static struct tevent_req *take_ip_send(TALLOC_CTX *mem_ctx,
 		struct take_ip_one_state *substate;
 		struct ctdb_public_ip ip;
 
-		if (tmp_ip->pnn == -1) {
+		if (tmp_ip->pnn == CTDB_UNKNOWN_PNN) {
 			/* IP will be unassigned */
 			continue;
 		}
@@ -692,7 +690,7 @@ struct takeover_state {
 	struct tevent_context *ev;
 	struct ctdb_client_context *client;
 	struct timeval timeout;
-	int num_nodes;
+	unsigned int num_nodes;
 	uint32_t *pnns_connected;
 	int num_connected;
 	uint32_t *pnns_active;
@@ -1076,8 +1074,8 @@ void takeover_failed(struct tevent_req *req, int ret)
 		req, struct takeover_state);
 	struct tevent_req *subreq;
 	uint32_t max_pnn = CTDB_UNKNOWN_PNN;
-	int max_credits = 0;
-	int pnn;
+	unsigned int max_credits = 0;
+	uint32_t pnn;
 
 	/* Check that bans are enabled */
 	if (state->tun_list->enable_bans == 0) {

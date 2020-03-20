@@ -74,6 +74,7 @@ NTSTATUS dom_sid_lookup_predefined_sid(const struct dom_sid *sid,
 				       enum lsa_SidType *type,
 				       const struct dom_sid **authority_sid,
 				       const char **authority_name);
+bool dom_sid_lookup_is_predefined_domain(const char *domain);
 
 int dom_sid_compare_auth(const struct dom_sid *sid1,
 			 const struct dom_sid *sid2);
@@ -99,9 +100,10 @@ bool dom_sid_in_domain(const struct dom_sid *domain_sid,
 bool dom_sid_is_valid_account_domain(const struct dom_sid *sid);
 
 #define DOM_SID_STR_BUFLEN (15*11+25)
-int dom_sid_string_buf(const struct dom_sid *sid, char *buf, int buflen);
 char *dom_sid_string(TALLOC_CTX *mem_ctx, const struct dom_sid *sid);
 
+struct dom_sid_buf { char buf[DOM_SID_STR_BUFLEN]; };
+char *dom_sid_str_buf(const struct dom_sid *sid, struct dom_sid_buf *dst);
 
 const char *sid_type_lookup(uint32_t sid_type);
 const struct security_token *get_system_token(void);
@@ -110,7 +112,7 @@ bool sid_split_rid(struct dom_sid *sid, uint32_t *rid);
 bool sid_peek_rid(const struct dom_sid *sid, uint32_t *rid);
 bool sid_peek_check_rid(const struct dom_sid *exp_dom_sid, const struct dom_sid *sid, uint32_t *rid);
 void sid_copy(struct dom_sid *dst, const struct dom_sid *src);
-bool sid_parse(const uint8_t *inbuf, size_t len, struct dom_sid *sid);
+ssize_t sid_parse(const uint8_t *inbuf, size_t len, struct dom_sid *sid);
 int sid_compare_domain(const struct dom_sid *sid1, const struct dom_sid *sid2);
 NTSTATUS add_sid_to_array(TALLOC_CTX *mem_ctx, const struct dom_sid *sid,
 			  struct dom_sid **sids, uint32_t *num);

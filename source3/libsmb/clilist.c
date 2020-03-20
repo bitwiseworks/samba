@@ -25,6 +25,66 @@
 #include "../libcli/smb/smbXcli_base.h"
 
 /****************************************************************************
+ Check if a returned directory name is safe.
+****************************************************************************/
+
+static NTSTATUS is_bad_name(bool windows_names, const char *name)
+{
+	const char *bad_name_p = NULL;
+
+	bad_name_p = strchr(name, '/');
+	if (bad_name_p != NULL) {
+		/*
+		 * Windows and POSIX names can't have '/'.
+		 * Server is attacking us.
+		 */
+		return NT_STATUS_INVALID_NETWORK_RESPONSE;
+	}
+	if (windows_names) {
+		bad_name_p = strchr(name, '\\');
+		if (bad_name_p != NULL) {
+			/*
+			 * Windows names can't have '\\'.
+			 * Server is attacking us.
+			 */
+			return NT_STATUS_INVALID_NETWORK_RESPONSE;
+		}
+	}
+	return NT_STATUS_OK;
+}
+
+/****************************************************************************
+ Check if a returned directory name is safe. Disconnect if server is
+ sending bad names.
+****************************************************************************/
+
+NTSTATUS is_bad_finfo_name(const struct cli_state *cli,
+			const struct file_info *finfo)
+{
+	NTSTATUS status = NT_STATUS_OK;
+	bool windows_names = true;
+
+	if (cli->requested_posix_capabilities & CIFS_UNIX_POSIX_PATHNAMES_CAP) {
+		windows_names = false;
+	}
+	if (finfo->name != NULL) {
+		status = is_bad_name(windows_names, finfo->name);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("bad finfo->name\n");
+			return status;
+		}
+	}
+	if (finfo->short_name != NULL) {
+		status = is_bad_name(windows_names, finfo->short_name);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("bad finfo->short_name\n");
+			return status;
+		}
+	}
+	return NT_STATUS_OK;
+}
+
+/****************************************************************************
  Calculate a safe next_entry_offset.
 ****************************************************************************/
 
@@ -492,6 +552,13 @@ static NTSTATUS cli_list_old_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
 			TALLOC_FREE(finfo);
 			return NT_STATUS_NO_MEMORY;
 		}
+
+		status = is_bad_finfo_name(state->cli, finfo);
+		if (!NT_STATUS_IS_OK(status)) {
+			smbXcli_conn_disconnect(state->cli->conn, status);
+			TALLOC_FREE(finfo);
+			return status;
+		}
 	}
 	*pfinfo = finfo;
 	return NT_STATUS_OK;
@@ -506,7 +573,7 @@ NTSTATUS cli_list_old(struct cli_state *cli, const char *mask,
 	struct tevent_context *ev;
 	struct tevent_req *req;
 	NTSTATUS status = NT_STATUS_NO_MEMORY;
-	struct file_info *finfo;
+	struct file_info *finfo = NULL;
 	size_t i, num_finfo;
 
 	if (smbXcli_conn_has_async_calls(cli->conn)) {
@@ -727,6 +794,14 @@ static void cli_list_trans_done(struct tevent_req *subreq)
 			ff_eos = true;
 			break;
 		}
+
+		status = is_bad_finfo_name(state->cli, finfo);
+		if (!NT_STATUS_IS_OK(status)) {
+			smbXcli_conn_disconnect(state->cli->conn, status);
+			tevent_req_nterror(req, status);
+			return;
+		}
+
 		if (!state->first && (state->mask[0] != '\0') &&
 		    strcsequal(finfo->name, state->mask)) {
 			DEBUG(1, ("Error: Looping in FIND_NEXT as name %s has "
@@ -967,7 +1042,7 @@ NTSTATUS cli_list(struct cli_state *cli, const char *mask, uint16_t attribute,
 	struct tevent_req *req;
 	NTSTATUS status = NT_STATUS_NO_MEMORY;
 	struct file_info *finfo;
-	size_t i, num_finfo;
+	size_t i, num_finfo = 0;
 	uint16_t info_level;
 
 	if (smbXcli_conn_protocol(cli->conn) >= PROTOCOL_SMB2_02) {

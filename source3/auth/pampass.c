@@ -291,6 +291,8 @@ static int smb_pam_passchange_conv(int num_msg,
 	struct smb_pam_userdata *udp = (struct smb_pam_userdata *)appdata_ptr;
 	struct chat_struct *pw_chat;
 	struct chat_struct *t;
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	bool found; 
 	*resp = NULL;
 
@@ -299,7 +301,7 @@ static int smb_pam_passchange_conv(int num_msg,
 	if (num_msg <= 0)
 		return PAM_CONV_ERR;
 
-	if ((pw_chat = make_pw_chat(lp_passwd_chat(talloc_tos()))) == NULL)
+	if ((pw_chat = make_pw_chat(lp_passwd_chat(talloc_tos(), lp_sub))) == NULL)
 		return PAM_CONV_ERR;
 
 	/*
@@ -488,7 +490,7 @@ static bool smb_pam_start(pam_handle_t **pamh, const char *user, const char *rho
 		return False;
 	}
 
-#if HAVE_PAM_RHOST
+#ifdef HAVE_PAM_RHOST
 	DEBUG(4,("smb_pam_start: PAM: setting rhost to: %s\n", rhost));
 	pam_error = pam_set_item(*pamh, PAM_RHOST, rhost);
 	if(!smb_pam_error_handler(*pamh, pam_error, "set rhost failed", 0)) {
@@ -497,7 +499,7 @@ static bool smb_pam_start(pam_handle_t **pamh, const char *user, const char *rho
 		return False;
 	}
 #endif
-#if HAVE_PAM_TTY
+#ifdef HAVE_PAM_TTY
 	DEBUG(4,("smb_pam_start: PAM: setting tty\n"));
 	pam_error = pam_set_item(*pamh, PAM_TTY, "samba");
 	if (!smb_pam_error_handler(*pamh, pam_error, "set tty failed", 0)) {
@@ -642,7 +644,7 @@ static bool smb_internal_pam_session(pam_handle_t *pamh, const char *user, const
 {
 	int pam_error;
 
-#if HAVE_PAM_TTY
+#ifdef HAVE_PAM_TTY
 	DEBUG(4,("smb_internal_pam_session: PAM: tty set to: %s\n", tty));
 	pam_error = pam_set_item(pamh, PAM_TTY, tty);
 	if (!smb_pam_error_handler(pamh, pam_error, "set tty failed", 0))

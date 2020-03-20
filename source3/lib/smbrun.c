@@ -185,14 +185,9 @@ static int smbrun_internal(const char *cmd, int *outfd, bool sanitize,
 		}
 	}
 
-#ifndef __INSURE__
 	/* close all other file descriptors, leaving only 0, 1 and 2. 0 and
 	   2 point to /dev/null from the startup code */
-	{
-	int fd;
-	for (fd=3;fd<256;fd++) close(fd);
-	}
-#endif
+	closefrom(3);
 
 	{
 		char *newcmd = NULL;
@@ -359,14 +354,9 @@ int smbrunsecret(const char *cmd, const char *secret)
 		}
 	}
 
-#ifndef __INSURE__
 	/* close all other file descriptors, leaving only 0, 1 and 2. 0 and
 	   2 point to /dev/null from the startup code */
-	{
-		int fd;
-		for (fd = 3; fd < 256; fd++) close(fd);
-	}
-#endif
+	closefrom(3);
 
 #ifdef __OS2__
 	execl("/@unixroot/usr/bin/sh", "sh", "-c", cmd, NULL);  

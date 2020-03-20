@@ -284,7 +284,7 @@ PROTOCOL_CTDB4_TEST(struct ctdb_req_dmaster, ctdb_req_dmaster,
 PROTOCOL_CTDB4_TEST(struct ctdb_reply_dmaster, ctdb_reply_dmaster,
 			CTDB_REPLY_DMASTER);
 
-#define NUM_CONTROLS	154
+#define NUM_CONTROLS	156
 
 PROTOCOL_CTDB2_TEST(struct ctdb_req_control_data, ctdb_req_control_data);
 PROTOCOL_CTDB2_TEST(struct ctdb_reply_control_data, ctdb_reply_control_data);
@@ -328,7 +328,7 @@ int main(int argc, char *argv[])
 		CTDB_SRVID_DISABLE_RECOVERIES,
 		CTDB_SRVID_DISABLE_IP_CHECK,
 	};
-	int i;
+	size_t i;
 
 	if (argc == 2) {
 		int seed = atoi(argv[1]);

@@ -79,6 +79,7 @@ TDB_DATA dbwrap_record_get_key(const struct db_record *rec)
 
 TDB_DATA dbwrap_record_get_value(const struct db_record *rec)
 {
+	SMB_ASSERT(rec->value_valid);
 	return rec->value;
 }
 
@@ -86,6 +87,12 @@ NTSTATUS dbwrap_record_storev(struct db_record *rec,
 			      const TDB_DATA *dbufs, int num_dbufs, int flags)
 {
 	NTSTATUS status;
+
+	/*
+	 * Invalidate before rec->storev() is called, give
+	 * rec->storev() the chance to re-validate rec->value.
+	 */
+	rec->value_valid = false;
 
 	status = rec->storev(rec, dbufs, num_dbufs, flags);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -102,6 +109,12 @@ NTSTATUS dbwrap_record_store(struct db_record *rec, TDB_DATA data, int flags)
 NTSTATUS dbwrap_record_delete(struct db_record *rec)
 {
 	NTSTATUS status;
+
+	/*
+	 * Invalidate before rec->delete_rec() is called, give
+	 * rec->delete_rec() the chance to re-validate rec->value.
+	 */
+	rec->value_valid = false;
 
 	status = rec->delete_rec(rec);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -307,7 +320,10 @@ struct dbwrap_store_state {
 	NTSTATUS status;
 };
 
-static void dbwrap_store_fn(struct db_record *rec, void *private_data)
+static void dbwrap_store_fn(
+	struct db_record *rec,
+	TDB_DATA value,
+	void *private_data)
 {
 	struct dbwrap_store_state *state = private_data;
 	state->status = dbwrap_record_store(rec, state->data, state->flags);
@@ -331,7 +347,10 @@ struct dbwrap_delete_state {
 	NTSTATUS status;
 };
 
-static void dbwrap_delete_fn(struct db_record *rec, void *private_data)
+static void dbwrap_delete_fn(
+	struct db_record *rec,
+	TDB_DATA value,
+	void *private_data)
 {
 	struct dbwrap_delete_state *state = private_data;
 	state->status = dbwrap_record_delete(rec);
@@ -339,7 +358,7 @@ static void dbwrap_delete_fn(struct db_record *rec, void *private_data)
 
 NTSTATUS dbwrap_delete(struct db_context *db, TDB_DATA key)
 {
-	struct dbwrap_delete_state state;
+	struct dbwrap_delete_state state = { .status = NT_STATUS_NOT_FOUND };
 	NTSTATUS status;
 
 	status = dbwrap_do_locked(db, key, dbwrap_delete_fn, &state);
@@ -457,7 +476,7 @@ struct tevent_req *dbwrap_parse_record_send(
 
 	/*
 	 * Copy the key into our state ensuring the key data buffer is always
-	 * available to the all dbwrap backend over the entire lifetime of the
+	 * available to all the dbwrap backends over the entire lifetime of the
 	 * async request. Otherwise the caller might have free'd the key buffer.
 	 */
 	if (key.dsize > sizeof(state->_keybuf)) {
@@ -505,7 +524,6 @@ static void dbwrap_parse_record_done(struct tevent_req *subreq)
 	}
 
 	tevent_req_done(req);
-	return;
 }
 
 NTSTATUS dbwrap_parse_record_recv(struct tevent_req *req)
@@ -515,13 +533,14 @@ NTSTATUS dbwrap_parse_record_recv(struct tevent_req *req)
 
 NTSTATUS dbwrap_do_locked(struct db_context *db, TDB_DATA key,
 			  void (*fn)(struct db_record *rec,
+				     TDB_DATA value,
 				     void *private_data),
 			  void *private_data)
 {
 	struct db_record *rec;
 
 	if (db->do_locked != NULL) {
-		struct db_context **lockptr;
+		struct db_context **lockptr = NULL;
 		NTSTATUS status;
 
 		if (db->lock_order != DBWRAP_LOCK_ORDER_NONE) {
@@ -530,7 +549,8 @@ NTSTATUS dbwrap_do_locked(struct db_context *db, TDB_DATA key,
 
 		status = db->do_locked(db, key, fn, private_data);
 
-		if (db->lock_order != DBWRAP_LOCK_ORDER_NONE) {
+		if (db->lock_order != DBWRAP_LOCK_ORDER_NONE &&
+		    lockptr != NULL) {
 			dbwrap_lock_order_unlock(db, lockptr);
 		}
 
@@ -542,7 +562,13 @@ NTSTATUS dbwrap_do_locked(struct db_context *db, TDB_DATA key,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	fn(rec, private_data);
+	/*
+	 * Invalidate rec->value, nobody shall assume it's set from
+	 * within dbwrap_do_locked().
+	 */
+	rec->value_valid = false;
+
+	fn(rec, rec->value, private_data);
 
 	TALLOC_FREE(rec);
 
@@ -635,16 +661,14 @@ static ssize_t tdb_data_buf(const TDB_DATA *dbufs, int num_dbufs,
 
 	for (i=0; i<num_dbufs; i++) {
 		size_t thislen = dbufs[i].dsize;
-		size_t tmp;
 
-		tmp = needed + thislen;
-		if (tmp < needed) {
+		needed += thislen;
+		if (needed < thislen) {
 			/* wrap */
 			return -1;
 		}
-		needed = tmp;
 
-		if (needed <= buflen) {
+		if (p != NULL && (thislen != 0) && (needed <= buflen)) {
 			memcpy(p, dbufs[i].dptr, thislen);
 			p += thislen;
 		}

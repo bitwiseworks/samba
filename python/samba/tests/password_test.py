@@ -19,7 +19,7 @@
 #
 
 import samba.tests
-from samba.samdb import SamDB
+
 
 class PasswordCommon:
 
@@ -57,4 +57,3 @@ class PasswordTestCase(samba.tests.TestCase):
             samdb = self.ldb
 
         PasswordCommon.allow_password_changes(self, samdb)
-

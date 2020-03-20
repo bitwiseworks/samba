@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # This tests the password changes over LDAP for AD implementations
 #
@@ -65,6 +65,7 @@ creds.set_gensec_features(creds.get_gensec_features() | gensec.FEATURE_SEAL)
 #
 # Tests start here
 #
+
 
 class PasswordTests(PasswordTestCase):
 
@@ -139,7 +140,7 @@ add: userPassword
         self.ldb.enable_account("(sAMAccountName=testuser)")
 
         # Open a second LDB connection with the user credentials. Use the
-        # command line credentials for informations like the domain, the realm
+        # command line credentials for information like the domain, the realm
         # and the workstation.
         creds2 = Credentials()
         creds2.set_username("testuser")
@@ -148,7 +149,7 @@ add: userPassword
         creds2.set_realm(creds.get_realm())
         creds2.set_workstation(creds.get_workstation())
         creds2.set_gensec_features(creds2.get_gensec_features()
-                                                          | gensec.FEATURE_SEAL)
+                                   | gensec.FEATURE_SEAL)
         self.ldb2 = SamDB(url=host, credentials=creds2, lp=lp)
 
     def test_unicodePwd_hash_set(self):
@@ -158,7 +159,7 @@ add: userPassword
         m = Message()
         m.dn = Dn(self.ldb, "cn=testuser,cn=users," + self.base_dn)
         m["unicodePwd"] = MessageElement("XXXXXXXXXXXXXXXX", FLAG_MOD_REPLACE,
-          "unicodePwd")
+                                         "unicodePwd")
         try:
             self.ldb.modify(m)
             self.fail()
@@ -191,7 +192,7 @@ unicodePwd: YYYYYYYYYYYYYYYY
         m = Message()
         m.dn = Dn(self.ldb, "cn=testuser,cn=users," + self.base_dn)
         m["unicodePwd"] = MessageElement("\"thatsAcomplPASS2\"".encode('utf-16-le'),
-          FLAG_MOD_REPLACE, "unicodePwd")
+                                         FLAG_MOD_REPLACE, "unicodePwd")
         self.ldb.modify(m)
 
     def test_unicodePwd_clear_change(self):
@@ -245,7 +246,7 @@ unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS2\"".encode('utf-16-le')).
         m = Message()
         m.dn = Dn(self.ldb, "cn=testuser,cn=users," + self.base_dn)
         m["dBCSPwd"] = MessageElement("XXXXXXXXXXXXXXXX", FLAG_MOD_REPLACE,
-          "dBCSPwd")
+                                      "dBCSPwd")
         try:
             self.ldb.modify(m)
             self.fail()
@@ -279,7 +280,7 @@ dBCSPwd: YYYYYYYYYYYYYYYY
         m = Message()
         m.dn = Dn(self.ldb, "cn=testuser,cn=users," + self.base_dn)
         m["userPassword"] = MessageElement("thatsAcomplPASS2", FLAG_MOD_REPLACE,
-          "userPassword")
+                                           "userPassword")
         self.ldb.modify(m)
 
     def test_userPassword_clear_change(self):
@@ -336,7 +337,7 @@ userPassword: thatsAcomplPASS2
             m = Message()
             m.dn = Dn(self.ldb, "cn=testuser,cn=users," + self.base_dn)
             m["clearTextPassword"] = MessageElement("thatsAcomplPASS2".encode('utf-16-le'),
-              FLAG_MOD_REPLACE, "clearTextPassword")
+                                                    FLAG_MOD_REPLACE, "clearTextPassword")
             self.ldb.modify(m)
             # this passes against s4
         except LdbError as e10:
@@ -649,7 +650,7 @@ userPassword: thatsAcomplPASS2
 add: unicodePwd
 unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS3\"".encode('utf-16-le')).decode('utf8') + """
 """)
-             # this passes against s4
+            # this passes against s4
         except LdbError as e30:
             (num, _) = e30.args
             self.assertEquals(num, ERR_ATTRIBUTE_OR_VALUE_EXISTS)
@@ -663,7 +664,7 @@ unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS3\"".encode('utf-16-le')).
 add: userPassword
 userPassword: thatsAcomplPASS4
 """)
-             # this passes against s4
+            # this passes against s4
         except LdbError as e31:
             (num, _) = e31.args
             self.assertEquals(num, ERR_NO_SUCH_ATTRIBUTE)
@@ -695,14 +696,14 @@ userPassword: thatsAcomplPASS4
         self.ldb.add({
              "dn": "cn=testuser2,cn=users," + self.base_dn,
              "objectclass": "user",
-             "userPassword": ["thatsAcomplPASS1", "thatsAcomplPASS2"] })
+             "userPassword": ["thatsAcomplPASS1", "thatsAcomplPASS2"]})
 
         # This surprisingly should work
         delete_force(self.ldb, "cn=testuser2,cn=users," + self.base_dn)
         self.ldb.add({
              "dn": "cn=testuser2,cn=users," + self.base_dn,
              "objectclass": "user",
-             "userPassword": ["thatsAcomplPASS1", "thatsAcomplPASS1"] })
+             "userPassword": ["thatsAcomplPASS1", "thatsAcomplPASS1"]})
 
     def test_empty_passwords(self):
         print("Performs some empty passwords testing")
@@ -711,7 +712,7 @@ userPassword: thatsAcomplPASS4
             self.ldb.add({
                  "dn": "cn=testuser2,cn=users," + self.base_dn,
                  "objectclass": "user",
-                 "unicodePwd": [] })
+                 "unicodePwd": []})
             self.fail()
         except LdbError as e32:
             (num, _) = e32.args
@@ -721,7 +722,7 @@ userPassword: thatsAcomplPASS4
             self.ldb.add({
                  "dn": "cn=testuser2,cn=users," + self.base_dn,
                  "objectclass": "user",
-                 "dBCSPwd": [] })
+                 "dBCSPwd": []})
             self.fail()
         except LdbError as e33:
             (num, _) = e33.args
@@ -731,7 +732,7 @@ userPassword: thatsAcomplPASS4
             self.ldb.add({
                  "dn": "cn=testuser2,cn=users," + self.base_dn,
                  "objectclass": "user",
-                 "userPassword": [] })
+                 "userPassword": []})
             self.fail()
         except LdbError as e34:
             (num, _) = e34.args
@@ -741,12 +742,12 @@ userPassword: thatsAcomplPASS4
             self.ldb.add({
                  "dn": "cn=testuser2,cn=users," + self.base_dn,
                  "objectclass": "user",
-                 "clearTextPassword": [] })
+                 "clearTextPassword": []})
             self.fail()
         except LdbError as e35:
             (num, _) = e35.args
             self.assertTrue(num == ERR_CONSTRAINT_VIOLATION or
-                            num == ERR_NO_SUCH_ATTRIBUTE) # for Windows
+                            num == ERR_NO_SUCH_ATTRIBUTE)  # for Windows
 
         delete_force(self.ldb, "cn=testuser2,cn=users," + self.base_dn)
 
@@ -789,7 +790,7 @@ userPassword: thatsAcomplPASS4
         except LdbError as e39:
             (num, _) = e39.args
             self.assertTrue(num == ERR_CONSTRAINT_VIOLATION or
-                            num == ERR_NO_SUCH_ATTRIBUTE) # for Windows
+                            num == ERR_NO_SUCH_ATTRIBUTE)  # for Windows
 
         m = Message()
         m.dn = Dn(self.ldb, "cn=testuser,cn=users," + self.base_dn)
@@ -830,7 +831,7 @@ userPassword: thatsAcomplPASS4
         except LdbError as e43:
             (num, _) = e43.args
             self.assertTrue(num == ERR_UNWILLING_TO_PERFORM or
-                            num == ERR_NO_SUCH_ATTRIBUTE) # for Windows
+                            num == ERR_NO_SUCH_ATTRIBUTE)  # for Windows
 
         m = Message()
         m.dn = Dn(self.ldb, "cn=testuser,cn=users," + self.base_dn)
@@ -871,7 +872,7 @@ userPassword: thatsAcomplPASS4
         except LdbError as e47:
             (num, _) = e47.args
             self.assertTrue(num == ERR_CONSTRAINT_VIOLATION or
-                            num == ERR_NO_SUCH_ATTRIBUTE) # for Windows
+                            num == ERR_NO_SUCH_ATTRIBUTE)  # for Windows
 
     def test_plain_userPassword(self):
         print("Performs testing about the standard 'userPassword' behaviour")
@@ -879,40 +880,40 @@ userPassword: thatsAcomplPASS4
         # Delete the "dSHeuristics"
         self.ldb.set_dsheuristics(None)
 
-        time.sleep(1) # This switching time is strictly needed!
+        time.sleep(1)  # This switching time is strictly needed!
 
         m = Message()
         m.dn = Dn(self.ldb, "cn=testuser,cn=users," + self.base_dn)
         m["userPassword"] = MessageElement("myPassword", FLAG_MOD_ADD,
-          "userPassword")
+                                           "userPassword")
         self.ldb.modify(m)
 
         res = self.ldb.search("cn=testuser,cn=users," + self.base_dn,
-                         scope=SCOPE_BASE, attrs=["userPassword"])
+                              scope=SCOPE_BASE, attrs=["userPassword"])
         self.assertTrue(len(res) == 1)
         self.assertTrue("userPassword" in res[0])
-        self.assertEquals(res[0]["userPassword"][0], "myPassword")
+        self.assertEquals(str(res[0]["userPassword"][0]), "myPassword")
 
         m = Message()
         m.dn = Dn(self.ldb, "cn=testuser,cn=users," + self.base_dn)
         m["userPassword"] = MessageElement("myPassword2", FLAG_MOD_REPLACE,
-          "userPassword")
+                                           "userPassword")
         self.ldb.modify(m)
 
         res = self.ldb.search("cn=testuser,cn=users," + self.base_dn,
-                         scope=SCOPE_BASE, attrs=["userPassword"])
+                              scope=SCOPE_BASE, attrs=["userPassword"])
         self.assertTrue(len(res) == 1)
         self.assertTrue("userPassword" in res[0])
-        self.assertEquals(res[0]["userPassword"][0], "myPassword2")
+        self.assertEquals(str(res[0]["userPassword"][0]), "myPassword2")
 
         m = Message()
         m.dn = Dn(self.ldb, "cn=testuser,cn=users," + self.base_dn)
         m["userPassword"] = MessageElement([], FLAG_MOD_DELETE,
-          "userPassword")
+                                           "userPassword")
         self.ldb.modify(m)
 
         res = self.ldb.search("cn=testuser,cn=users," + self.base_dn,
-                         scope=SCOPE_BASE, attrs=["userPassword"])
+                              scope=SCOPE_BASE, attrs=["userPassword"])
         self.assertTrue(len(res) == 1)
         self.assertFalse("userPassword" in res[0])
 
@@ -922,14 +923,14 @@ userPassword: thatsAcomplPASS4
         m = Message()
         m.dn = Dn(self.ldb, "cn=testuser,cn=users," + self.base_dn)
         m["userPassword"] = MessageElement("myPassword3", FLAG_MOD_REPLACE,
-          "userPassword")
+                                           "userPassword")
         self.ldb.modify(m)
 
         res = self.ldb.search("cn=testuser,cn=users," + self.base_dn,
-                         scope=SCOPE_BASE, attrs=["userPassword"])
+                              scope=SCOPE_BASE, attrs=["userPassword"])
         self.assertTrue(len(res) == 1)
         self.assertTrue("userPassword" in res[0])
-        self.assertEquals(res[0]["userPassword"][0], "myPassword3")
+        self.assertEquals(str(res[0]["userPassword"][0]), "myPassword3")
 
         # Set the test "dSHeuristics" to deactivate "userPassword" pwd changes
         self.ldb.set_dsheuristics("000000002")
@@ -937,14 +938,14 @@ userPassword: thatsAcomplPASS4
         m = Message()
         m.dn = Dn(self.ldb, "cn=testuser,cn=users," + self.base_dn)
         m["userPassword"] = MessageElement("myPassword4", FLAG_MOD_REPLACE,
-          "userPassword")
+                                           "userPassword")
         self.ldb.modify(m)
 
         res = self.ldb.search("cn=testuser,cn=users," + self.base_dn,
-                         scope=SCOPE_BASE, attrs=["userPassword"])
+                              scope=SCOPE_BASE, attrs=["userPassword"])
         self.assertTrue(len(res) == 1)
         self.assertTrue("userPassword" in res[0])
-        self.assertEquals(res[0]["userPassword"][0], "myPassword4")
+        self.assertEquals(str(res[0]["userPassword"][0]), "myPassword4")
 
         # Reset the test "dSHeuristics" (reactivate "userPassword" pwd changes)
         self.ldb.set_dsheuristics("000000001")
@@ -967,7 +968,7 @@ userPassword: thatsAcomplPASS4
         m = Message()
         m.dn = Dn(ldb1, "cn=testuser,cn=users," + self.base_dn)
         m["userPassword"] = MessageElement("thatsAcomplPASS1", FLAG_MOD_REPLACE,
-          "userPassword")
+                                           "userPassword")
         ldb1.modify(m)
 
         res = ldb1.search("cn=testuser,cn=users," + self.base_dn,
@@ -1005,7 +1006,7 @@ userPassword: thatsAcomplPASS4
         m = Message()
         m.dn = Dn(ldb2, "cn=testuser,cn=users," + self.base_dn)
         m["userPassword"] = MessageElement("thatsAcomplPASS2", FLAG_MOD_REPLACE,
-          "userPassword")
+                                           "userPassword")
         ldb2.modify(m)
 
         res = ldb2.search("cn=testuser,cn=users," + self.base_dn,
@@ -1041,7 +1042,7 @@ userPassword: thatsAcomplPASS4
         # userPassword can be read
         self.assertTrue(len(res) == 1)
         self.assertTrue("userPassword" in res[0])
-        self.assertEquals(res[0]["userPassword"][0], "thatsAcomplPASS2")
+        self.assertEquals(str(res[0]["userPassword"][0]), "thatsAcomplPASS2")
 
         # Reset the test "dSHeuristics" (reactivate "userPassword" pwd changes)
         self.ldb.set_dsheuristics("000000001")
@@ -1087,7 +1088,8 @@ delete: userPassword
 add: userPassword
 userPassword: thatsAcomplPASS1
 """)
-        except LdbError, (num, msg):
+        except LdbError as e:
+            (num, msg) = e.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         else:
             self.fail()
@@ -1103,9 +1105,10 @@ delete: clearTextPassword
 add: clearTextPassword
 clearTextPassword: thatsAcomplPASS2
 """)
-        except LdbError, (num, msg):
+        except LdbError as e:
+            (num, msg) = e.args
             self.assertTrue(num == ERR_CONSTRAINT_VIOLATION or
-                            num == ERR_NO_SUCH_ATTRIBUTE) # for Windows
+                            num == ERR_NO_SUCH_ATTRIBUTE)  # for Windows
         else:
             self.fail()
 
@@ -1120,7 +1123,8 @@ delete: unicodePwd
 add: unicodePwd
 unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS3\"".encode('utf-16-le')).decode('utf8') + """
 """)
-        except LdbError, (num, msg):
+        except LdbError as e:
+            (num, msg) = e.args
             self.assertEquals(num, ERR_CONSTRAINT_VIOLATION)
         else:
             self.fail()
@@ -1132,7 +1136,8 @@ unicodePwd:: """ + base64.b64encode("\"thatsAcomplPASS3\"".encode('utf-16-le')).
         # Close the second LDB connection (with the user credentials)
         self.ldb2 = None
 
-if not "://" in host:
+
+if "://" not in host:
     if os.path.isfile(host):
         host = "tdb://%s" % host
     else:

@@ -24,12 +24,6 @@
 
 static PyTypeObject TallocObject_Type;
 
-#if PY_MAJOR_VERSION >= 3
-#define PyStr_FromFormat PyUnicode_FromFormat
-#else
-#define PyStr_FromFormat PyString_FromFormat
-#endif
-
 /* print a talloc tree report for a talloc python object */
 static PyObject *pytalloc_report_full(PyObject *self, PyObject *args)
 {
@@ -47,7 +41,8 @@ static PyObject *pytalloc_report_full(PyObject *self, PyObject *args)
 }
 
 /* enable null tracking */
-static PyObject *pytalloc_enable_null_tracking(PyObject *self)
+static PyObject *pytalloc_enable_null_tracking(PyObject *self,
+		PyObject *Py_UNUSED(ignored))
 {
 	talloc_enable_null_tracking();
 	return Py_None;
@@ -86,7 +81,7 @@ static PyObject *pytalloc_default_repr(PyObject *obj)
 	pytalloc_Object *talloc_obj = (pytalloc_Object *)obj;
 	PyTypeObject *type = (PyTypeObject*)PyObject_Type(obj);
 
-	return PyStr_FromFormat("<%s talloc object at %p>",
+	return PyUnicode_FromFormat("<%s talloc object at %p>",
 				type->tp_name, talloc_obj->ptr);
 }
 
@@ -166,7 +161,7 @@ static PyObject *pytalloc_base_default_repr(PyObject *obj)
 	pytalloc_BaseObject *talloc_obj = (pytalloc_BaseObject *)obj;
 	PyTypeObject *type = (PyTypeObject*)PyObject_Type(obj);
 
-	return PyStr_FromFormat("<%s talloc based object at %p>",
+	return PyUnicode_FromFormat("<%s talloc based object at %p>",
 				type->tp_name, talloc_obj->ptr);
 }
 
@@ -281,12 +276,22 @@ static PyObject *module_init(void)
 		return NULL;
 
 	Py_INCREF(&TallocObject_Type);
-	PyModule_AddObject(m, "Object", (PyObject *)&TallocObject_Type);
+	if (PyModule_AddObject(m, "Object", (PyObject *)&TallocObject_Type)) {
+		goto err;
+	}
 	Py_INCREF(&TallocBaseObject_Type);
-	PyModule_AddObject(m, "BaseObject", (PyObject *)&TallocBaseObject_Type);
+	if (PyModule_AddObject(m, "BaseObject", (PyObject *)&TallocBaseObject_Type)) {
+		goto err;
+	}
 	Py_INCREF(&TallocGenericObject_Type);
-	PyModule_AddObject(m, "GenericObject", (PyObject *)&TallocGenericObject_Type);
+	if (PyModule_AddObject(m, "GenericObject", (PyObject *)&TallocGenericObject_Type)) {
+		goto err;
+	}
 	return m;
+
+err:
+	Py_DECREF(m);
+	return NULL;
 }
 
 #if PY_MAJOR_VERSION >= 3

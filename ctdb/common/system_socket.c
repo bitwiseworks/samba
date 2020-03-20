@@ -3,6 +3,8 @@
 
    Copyright (C) Ronnie Sahlberg  2007
    Copyright (C) Andrew Tridgell  2007
+   Copyright (C) Marc Dequènes (Duck) 2009
+   Copyright (C) Volker Lendecke 2012
 
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
@@ -112,141 +114,6 @@ bool ctdb_sys_have_ip(ctdb_sock_addr *_addr)
 	return ret == 0;
 }
 
-static bool parse_ipv4(const char *s, unsigned port, struct sockaddr_in *sin)
-{
-	sin->sin_family = AF_INET;
-	sin->sin_port   = htons(port);
-
-	if (inet_pton(AF_INET, s, &sin->sin_addr) != 1) {
-		DBG_ERR("Failed to translate %s into sin_addr\n", s);
-		return false;
-	}
-
-#ifdef HAVE_SOCK_SIN_LEN
-	sin->sin_len = sizeof(*sin);
-#endif
-	return true;
-}
-
-static bool parse_ipv6(const char *s,
-		       const char *ifaces,
-		       unsigned port,
-		       ctdb_sock_addr *saddr)
-{
-	saddr->ip6.sin6_family   = AF_INET6;
-	saddr->ip6.sin6_port     = htons(port);
-	saddr->ip6.sin6_flowinfo = 0;
-	saddr->ip6.sin6_scope_id = 0;
-
-	if (inet_pton(AF_INET6, s, &saddr->ip6.sin6_addr) != 1) {
-		DBG_ERR("Failed to translate %s into sin6_addr\n", s);
-		return false;
-	}
-
-	if (ifaces && IN6_IS_ADDR_LINKLOCAL(&saddr->ip6.sin6_addr)) {
-		if (strchr(ifaces, ',')) {
-			DBG_ERR("Link local address %s "
-				"is specified for multiple ifaces %s\n",
-				s, ifaces);
-			return false;
-		}
-		saddr->ip6.sin6_scope_id = if_nametoindex(ifaces);
-	}
-
-#ifdef HAVE_SOCK_SIN6_LEN
-	saddr->ip6.sin6_len = sizeof(*saddr);
-#endif
-	return true;
-}
-
-static bool parse_ip(const char *addr,
-		     const char *ifaces,
-		     unsigned port,
-		     ctdb_sock_addr *saddr)
-{
-	char *p;
-	bool ret;
-
-	ZERO_STRUCTP(saddr); /* valgrind :-) */
-
-	/*
-	 * IPv4 or IPv6 address?
-	 *
-	 * Use rindex() because we need the right-most ':' below for
-	 * IPv4-mapped IPv6 addresses anyway...
-	 */
-	p = rindex(addr, ':');
-	if (p == NULL) {
-		ret = parse_ipv4(addr, port, &saddr->ip);
-	} else {
-		uint8_t ipv4_mapped_prefix[12] = {
-			0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff
-		};
-
-		ret = parse_ipv6(addr, ifaces, port, saddr);
-		if (! ret) {
-			return ret;
-		}
-
-		/*
-		 * Check for IPv4-mapped IPv6 address
-		 * (e.g. ::ffff:192.0.2.128) - reparse as IPv4 if
-		 * necessary
-		 */
-		if (memcmp(&saddr->ip6.sin6_addr.s6_addr[0],
-			   ipv4_mapped_prefix,
-			   sizeof(ipv4_mapped_prefix)) == 0) {
-			/* Reparse as IPv4 */
-			ret = parse_ipv4(p+1, port, &saddr->ip);
-		}
-	}
-
-	return ret;
-}
-
-/*
- * Parse an ip/mask pair
- */
-bool parse_ip_mask(const char *str,
-		   const char *ifaces,
-		   ctdb_sock_addr *addr,
-		   unsigned *mask)
-{
-	char *p;
-	char s[64]; /* Much longer than INET6_ADDRSTRLEN */
-	char *endp = NULL;
-	ssize_t len;
-	bool ret;
-
-	ZERO_STRUCT(*addr);
-
-	len = strlcpy(s, str, sizeof(s));
-	if (len >= sizeof(s)) {
-		DBG_ERR("Address %s is unreasonably long\n", str);
-		return false;
-	}
-
-	p = rindex(s, '/');
-	if (p == NULL) {
-		DBG_ERR("Address %s does not contain a mask\n", s);
-		return false;
-	}
-
-	*mask = strtoul(p+1, &endp, 10);
-	if (endp == NULL || *endp != 0) {
-		/* trailing garbage */
-		DBG_ERR("Trailing garbage after the mask in %s\n", s);
-		return false;
-	}
-	*p = 0;
-
-
-	/* now is this a ipv4 or ipv6 address ?*/
-	ret = parse_ip(s, ifaces, 0, addr);
-
-	return ret;
-}
-
 /*
  * simple TCP checksum - assumes data is multiple of 2 bytes long
  */
@@ -303,226 +170,326 @@ static uint16_t ip6_checksum(uint16_t *data, size_t n, struct ip6_hdr *ip6)
 
 #ifdef HAVE_PACKETSOCKET
 
-int ctdb_sys_send_arp(const ctdb_sock_addr *addr, const char *iface)
+/*
+ * Create IPv4 ARP requests/replies or IPv6 neighbour advertisement
+ * packets
+ */
+
+#define ARP_STRUCT_SIZE sizeof(struct ether_header) + \
+			sizeof(struct ether_arp)
+
+#define IP6_NA_STRUCT_SIZE sizeof(struct ether_header) + \
+			   sizeof(struct ip6_hdr) + \
+			   sizeof(struct nd_neighbor_advert) + \
+			   sizeof(struct nd_opt_hdr) + \
+			   sizeof(struct ether_addr)
+
+#define ARP_BUFFER_SIZE MAX(ARP_STRUCT_SIZE, 64)
+
+#define IP6_NA_BUFFER_SIZE MAX(IP6_NA_STRUCT_SIZE, 64)
+
+static int arp_build(uint8_t *buffer,
+		     size_t buflen,
+		     const struct sockaddr_in *addr,
+		     const struct ether_addr *hwaddr,
+		     bool reply,
+		     struct ether_addr **ether_dhost,
+		     size_t *len)
 {
-	int s, ret;
-	struct sockaddr_ll sall;
+	size_t l = ARP_BUFFER_SIZE;
 	struct ether_header *eh;
+	struct ether_arp *ea;
 	struct arphdr *ah;
+
+	if (addr->sin_family != AF_INET) {
+		return EINVAL;
+	}
+
+	if (buflen < l) {
+		return EMSGSIZE;
+	}
+
+	memset(buffer, 0 , l);
+
+	eh = (struct ether_header *)buffer;
+	memset(eh->ether_dhost, 0xff, ETH_ALEN);
+	memcpy(eh->ether_shost, hwaddr, ETH_ALEN);
+	eh->ether_type = htons(ETHERTYPE_ARP);
+
+	ea = (struct ether_arp *)(buffer + sizeof(struct ether_header));
+	ah = &ea->ea_hdr;
+	ah->ar_hrd = htons(ARPHRD_ETHER);
+	ah->ar_pro = htons(ETH_P_IP);
+	ah->ar_hln = ETH_ALEN;
+	ah->ar_pln = sizeof(ea->arp_spa);
+
+	if (! reply) {
+		ah->ar_op  = htons(ARPOP_REQUEST);
+		memcpy(ea->arp_sha, hwaddr, ETH_ALEN);
+		memcpy(ea->arp_spa, &addr->sin_addr, sizeof(ea->arp_spa));
+		memset(ea->arp_tha, 0, ETH_ALEN);
+		memcpy(ea->arp_tpa, &addr->sin_addr, sizeof(ea->arp_tpa));
+	} else {
+		ah->ar_op  = htons(ARPOP_REPLY);
+		memcpy(ea->arp_sha, hwaddr, ETH_ALEN);
+		memcpy(ea->arp_spa, &addr->sin_addr, sizeof(ea->arp_spa));
+		memcpy(ea->arp_tha, hwaddr, ETH_ALEN);
+		memcpy(ea->arp_tpa, &addr->sin_addr, sizeof(ea->arp_tpa));
+	}
+
+	*ether_dhost = (struct ether_addr *)eh->ether_dhost;
+	*len = l;
+	return 0;
+}
+
+static int ip6_na_build(uint8_t *buffer,
+			size_t buflen,
+			const struct sockaddr_in6 *addr,
+			const struct ether_addr *hwaddr,
+			struct ether_addr **ether_dhost,
+			size_t *len)
+{
+	size_t l = IP6_NA_BUFFER_SIZE;
+	struct ether_header *eh;
 	struct ip6_hdr *ip6;
 	struct nd_neighbor_advert *nd_na;
 	struct nd_opt_hdr *nd_oh;
-	struct ifreq if_hwaddr;
-	/* Size of IPv6 neighbor advertisement (with option) */
-	unsigned char buffer[sizeof(struct ether_header) +
-			     sizeof(struct ip6_hdr) +
-			     sizeof(struct nd_neighbor_advert) +
-			     sizeof(struct nd_opt_hdr) + ETH_ALEN];
-	char *ptr;
-	char bdcast[] = {0xff,0xff,0xff,0xff,0xff,0xff};
-	struct ifreq ifr;
+	struct ether_addr *ea;
+	int ret;
 
-	ZERO_STRUCT(sall);
-	ZERO_STRUCT(ifr);
-	ZERO_STRUCT(if_hwaddr);
+	if (addr->sin6_family != AF_INET6) {
+		return EINVAL;
+	}
+
+	if (buflen < l) {
+		return EMSGSIZE;
+	}
+
+	memset(buffer, 0 , l);
+
+	eh = (struct ether_header *)buffer;
+	/*
+	 * Ethernet multicast: 33:33:00:00:00:01 (see RFC2464,
+	 * section 7) - note memset 0 above!
+	 */
+	eh->ether_dhost[0] = 0x33;
+	eh->ether_dhost[1] = 0x33;
+	eh->ether_dhost[5] = 0x01;
+	memcpy(eh->ether_shost, hwaddr, ETH_ALEN);
+	eh->ether_type = htons(ETHERTYPE_IP6);
+
+	ip6 = (struct ip6_hdr *)(buffer + sizeof(struct ether_header));
+	ip6->ip6_vfc  = 6 << 4;
+	ip6->ip6_plen = htons(sizeof(struct nd_neighbor_advert) +
+			      sizeof(struct nd_opt_hdr) +
+			      ETH_ALEN);
+	ip6->ip6_nxt  = IPPROTO_ICMPV6;
+	ip6->ip6_hlim = 255;
+	ip6->ip6_src  = addr->sin6_addr;
+	/* all-nodes multicast */
+
+	ret = inet_pton(AF_INET6, "ff02::1", &ip6->ip6_dst);
+	if (ret != 1) {
+		return EIO;
+	}
+
+	nd_na = (struct nd_neighbor_advert *)(buffer +
+					      sizeof(struct ether_header) +
+					      sizeof(struct ip6_hdr));
+	nd_na->nd_na_type = ND_NEIGHBOR_ADVERT;
+	nd_na->nd_na_code = 0;
+	nd_na->nd_na_flags_reserved = ND_NA_FLAG_OVERRIDE;
+	nd_na->nd_na_target = addr->sin6_addr;
+
+	/* Option: Target link-layer address */
+	nd_oh = (struct nd_opt_hdr *)(buffer +
+				      sizeof(struct ether_header) +
+				      sizeof(struct ip6_hdr) +
+				      sizeof(struct nd_neighbor_advert));
+	nd_oh->nd_opt_type = ND_OPT_TARGET_LINKADDR;
+	nd_oh->nd_opt_len = 1;  /* multiple of 8 octets */
+
+	ea = (struct ether_addr *)(buffer +
+				   sizeof(struct ether_header) +
+				   sizeof(struct ip6_hdr) +
+				   sizeof(struct nd_neighbor_advert) +
+				   sizeof(struct nd_opt_hdr));
+	memcpy(ea, hwaddr, ETH_ALEN);
+
+	nd_na->nd_na_cksum = ip6_checksum((uint16_t *)nd_na,
+					  ntohs(ip6->ip6_plen),
+					  ip6);
+
+	*ether_dhost = (struct ether_addr *)eh->ether_dhost;
+	*len = l;
+	return 0;
+}
+
+int ctdb_sys_send_arp(const ctdb_sock_addr *addr, const char *iface)
+{
+	int s;
+	struct sockaddr_ll sall = {0};
+	struct ifreq if_hwaddr = {
+		.ifr_ifru = {
+			.ifru_flags = 0
+		},
+	};
+	uint8_t buffer[MAX(ARP_BUFFER_SIZE, IP6_NA_BUFFER_SIZE)];
+	struct ifreq ifr = {
+		.ifr_ifru = {
+			.ifru_flags = 0
+		},
+	};
+	struct ether_addr *hwaddr = NULL;
+	struct ether_addr *ether_dhost = NULL;
+	size_t len = 0;
+	int ret = 0;
+
+	s = socket(AF_PACKET, SOCK_RAW, 0);
+	if (s == -1) {
+		ret = errno;
+		DBG_ERR("Failed to open raw socket\n");
+		return ret;
+	}
+	DBG_DEBUG("Created SOCKET FD:%d for sending arp\n", s);
+
+	/* Find interface */
+	strlcpy(ifr.ifr_name, iface, sizeof(ifr.ifr_name));
+	if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) {
+		ret = errno;
+		DBG_ERR("Interface '%s' not found\n", iface);
+		goto fail;
+	}
+
+	/* Get MAC address */
+	strlcpy(if_hwaddr.ifr_name, iface, sizeof(if_hwaddr.ifr_name));
+	ret = ioctl(s, SIOCGIFHWADDR, &if_hwaddr);
+	if ( ret < 0 ) {
+		ret = errno;
+		DBG_ERR("ioctl failed\n");
+		goto fail;
+	}
+	if (ARPHRD_LOOPBACK == if_hwaddr.ifr_hwaddr.sa_family) {
+		ret = 0;
+		D_DEBUG("Ignoring loopback arp request\n");
+		goto fail;
+	}
+	if (if_hwaddr.ifr_hwaddr.sa_family != ARPHRD_ETHER) {
+		ret = EINVAL;
+		DBG_ERR("Not an ethernet address family (0x%x)\n",
+			if_hwaddr.ifr_hwaddr.sa_family);
+		goto fail;;
+	}
+
+	/* Set up most of destination address structure */
+	sall.sll_family = AF_PACKET;
+	sall.sll_halen = sizeof(struct ether_addr);
+	sall.sll_protocol = htons(ETH_P_ALL);
+	sall.sll_ifindex = ifr.ifr_ifindex;
+
+	/* For clarity */
+	hwaddr = (struct ether_addr *)if_hwaddr.ifr_hwaddr.sa_data;
 
 	switch (addr->ip.sin_family) {
 	case AF_INET:
-		s = socket(AF_PACKET, SOCK_RAW, 0);
-		if (s == -1){
-			DBG_ERR("Failed to open raw socket\n");
-			return -1;
+		/* Send gratuitous ARP */
+		ret = arp_build(buffer,
+				sizeof(buffer),
+				&addr->ip,
+				hwaddr,
+				false,
+				&ether_dhost,
+				&len);
+		if (ret != 0) {
+			DBG_ERR("Failed to build ARP request\n");
+			goto fail;
 		}
 
-		DBG_DEBUG("Created SOCKET FD:%d for sending arp\n", s);
-		strlcpy(ifr.ifr_name, iface, sizeof(ifr.ifr_name));
-		if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) {
-			DBG_ERR("Interface '%s' not found\n", iface);
-			close(s);
-			return -1;
-		}
+		memcpy(&sall.sll_addr[0], ether_dhost, sall.sll_halen);
 
-		/* get the mac address */
-		strlcpy(if_hwaddr.ifr_name, iface, sizeof(if_hwaddr.ifr_name));
-		ret = ioctl(s, SIOCGIFHWADDR, &if_hwaddr);
-		if ( ret < 0 ) {
-			close(s);
-			DBG_ERR("ioctl failed\n");
-			return -1;
-		}
-		if (ARPHRD_LOOPBACK == if_hwaddr.ifr_hwaddr.sa_family) {
-			D_DEBUG("Ignoring loopback arp request\n");
-			close(s);
-			return 0;
-		}
-		if (if_hwaddr.ifr_hwaddr.sa_family != ARPHRD_ETHER) {
-			close(s);
-			errno = EINVAL;
-			DBG_ERR("Not an ethernet address family (0x%x)\n",
-				if_hwaddr.ifr_hwaddr.sa_family);
-			return -1;
-		}
-
-
-		memset(buffer, 0 , 64);
-		eh = (struct ether_header *)buffer;
-		memset(eh->ether_dhost, 0xff, ETH_ALEN);
-		memcpy(eh->ether_shost, if_hwaddr.ifr_hwaddr.sa_data, ETH_ALEN);
-		eh->ether_type = htons(ETHERTYPE_ARP);
-
-		ah = (struct arphdr *)&buffer[sizeof(struct ether_header)];
-		ah->ar_hrd = htons(ARPHRD_ETHER);
-		ah->ar_pro = htons(ETH_P_IP);
-		ah->ar_hln = ETH_ALEN;
-		ah->ar_pln = 4;
-
-		/* send a gratious arp */
-		ah->ar_op  = htons(ARPOP_REQUEST);
-		ptr = (char *)&ah[1];
-		memcpy(ptr, if_hwaddr.ifr_hwaddr.sa_data, ETH_ALEN);
-		ptr+=ETH_ALEN;
-		memcpy(ptr, &addr->ip.sin_addr, 4);
-		ptr+=4;
-		memset(ptr, 0, ETH_ALEN);
-		ptr+=ETH_ALEN;
-		memcpy(ptr, &addr->ip.sin_addr, 4);
-		ptr+=4;
-
-		sall.sll_family = AF_PACKET;
-		sall.sll_halen = 6;
-		memcpy(&sall.sll_addr[0], bdcast, sall.sll_halen);
-		sall.sll_protocol = htons(ETH_P_ALL);
-		sall.sll_ifindex = ifr.ifr_ifindex;
-		ret = sendto(s,buffer, 64, 0,
-			     (struct sockaddr *)&sall, sizeof(sall));
-		if (ret < 0 ){
-			close(s);
+		ret = sendto(s,
+			     buffer,
+			     len,
+			     0,
+			     (struct sockaddr *)&sall,
+			     sizeof(sall));
+		if (ret < 0 ) {
+			ret = errno;
 			DBG_ERR("Failed sendto\n");
-			return -1;
+			goto fail;
 		}
 
-		/* send unsolicited arp reply broadcast */
-		ah->ar_op  = htons(ARPOP_REPLY);
-		ptr = (char *)&ah[1];
-		memcpy(ptr, if_hwaddr.ifr_hwaddr.sa_data, ETH_ALEN);
-		ptr+=ETH_ALEN;
-		memcpy(ptr, &addr->ip.sin_addr, 4);
-		ptr+=4;
-		memcpy(ptr, if_hwaddr.ifr_hwaddr.sa_data, ETH_ALEN);
-		ptr+=ETH_ALEN;
-		memcpy(ptr, &addr->ip.sin_addr, 4);
-		ptr+=4;
+		/* Send unsolicited ARP reply */
+		ret = arp_build(buffer,
+				sizeof(buffer),
+				&addr->ip,
+				hwaddr,
+				true,
+				&ether_dhost,
+				&len);
+		if (ret != 0) {
+			DBG_ERR("Failed to build ARP reply\n");
+			goto fail;
+		}
 
-		ret = sendto(s, buffer, 64, 0,
-			     (struct sockaddr *)&sall, sizeof(sall));
-		if (ret < 0 ){
+		memcpy(&sall.sll_addr[0], ether_dhost, sall.sll_halen);
+
+		ret = sendto(s,
+			     buffer,
+			     len,
+			     0,
+			     (struct sockaddr *)&sall,
+			     sizeof(sall));
+		if (ret < 0 ) {
+			ret = errno;
 			DBG_ERR("Failed sendto\n");
-			close(s);
-			return -1;
+			goto fail;
 		}
 
 		close(s);
 		break;
+
 	case AF_INET6:
-		s = socket(AF_PACKET, SOCK_RAW, 0);
-		if (s == -1){
-			DBG_ERR("Failed to open raw socket\n");
-			return -1;
+		ret = ip6_na_build(buffer,
+				   sizeof(buffer),
+				   &addr->ip6,
+				   hwaddr,
+				   &ether_dhost,
+				   &len);
+		if (ret != 0) {
+			DBG_ERR("Failed to build IPv6 neighbor advertisement\n");
+			goto fail;
 		}
 
-		DBG_DEBUG("Created SOCKET FD:%d for sending arp\n", s);
-		strlcpy(ifr.ifr_name, iface, sizeof(ifr.ifr_name));
-		if (ioctl(s, SIOCGIFINDEX, &ifr) < 0) {
-			DBG_ERR("Interface '%s' not found\n", iface);
-			close(s);
-			return -1;
-		}
+		memcpy(&sall.sll_addr[0], ether_dhost, sall.sll_halen);
 
-		/* get the mac address */
-		strlcpy(if_hwaddr.ifr_name, iface, sizeof(if_hwaddr.ifr_name));
-		ret = ioctl(s, SIOCGIFHWADDR, &if_hwaddr);
-		if ( ret < 0 ) {
-			close(s);
-			DBG_ERR("ioctl failed\n");
-			return -1;
-		}
-		if (ARPHRD_LOOPBACK == if_hwaddr.ifr_hwaddr.sa_family) {
-			DBG_DEBUG("Ignoring loopback arp request\n");
-			close(s);
-			return 0;
-		}
-		if (if_hwaddr.ifr_hwaddr.sa_family != ARPHRD_ETHER) {
-			close(s);
-			errno = EINVAL;
-			DBG_ERR("Not an ethernet address family (0x%x)\n",
-				if_hwaddr.ifr_hwaddr.sa_family);
-			return -1;
-		}
-
-		memset(buffer, 0 , sizeof(buffer));
-		eh = (struct ether_header *)buffer;
-		/*
-		 * Ethernet multicast: 33:33:00:00:00:01 (see RFC2464,
-		 * section 7) - note zeroes above!
-		 */
-		eh->ether_dhost[0] = eh->ether_dhost[1] = 0x33;
-		eh->ether_dhost[5] = 0x01;
-		memcpy(eh->ether_shost, if_hwaddr.ifr_hwaddr.sa_data, ETH_ALEN);
-		eh->ether_type = htons(ETHERTYPE_IP6);
-
-		ip6 = (struct ip6_hdr *)(eh+1);
-		ip6->ip6_vfc  = 0x60;
-		ip6->ip6_plen = htons(sizeof(*nd_na) +
-				      sizeof(struct nd_opt_hdr) +
-				      ETH_ALEN);
-		ip6->ip6_nxt  = IPPROTO_ICMPV6;
-		ip6->ip6_hlim = 255;
-		ip6->ip6_src  = addr->ip6.sin6_addr;
-		/* all-nodes multicast */
-
-		ret = inet_pton(AF_INET6, "ff02::1", &ip6->ip6_dst);
-		if (ret != 1) {
-			close(s);
-			DBG_ERR("Failed inet_pton\n");
-			return -1;
-		}
-
-		nd_na = (struct nd_neighbor_advert *)(ip6+1);
-		nd_na->nd_na_type = ND_NEIGHBOR_ADVERT;
-		nd_na->nd_na_code = 0;
-		nd_na->nd_na_flags_reserved = ND_NA_FLAG_OVERRIDE;
-		nd_na->nd_na_target = addr->ip6.sin6_addr;
-		/* Option: Target link-layer address */
-		nd_oh = (struct nd_opt_hdr *)(nd_na+1);
-		nd_oh->nd_opt_type = ND_OPT_TARGET_LINKADDR;
-		nd_oh->nd_opt_len = 1;
-		memcpy(&(nd_oh+1)[0], if_hwaddr.ifr_hwaddr.sa_data, ETH_ALEN);
-
-		nd_na->nd_na_cksum = ip6_checksum((uint16_t *)nd_na,
-						  ntohs(ip6->ip6_plen), ip6);
-
-		sall.sll_family = AF_PACKET;
-		sall.sll_halen = 6;
-		memcpy(&sall.sll_addr[0], &eh->ether_dhost[0], sall.sll_halen);
-		sall.sll_protocol = htons(ETH_P_ALL);
-		sall.sll_ifindex = ifr.ifr_ifindex;
-		ret = sendto(s, buffer, sizeof(buffer),
-			     0, (struct sockaddr *)&sall, sizeof(sall));
-		if (ret < 0 ){
-			close(s);
+		ret = sendto(s,
+			     buffer,
+			     len,
+			     0,
+			     (struct sockaddr *)&sall,
+			     sizeof(sall));
+		if (ret < 0 ) {
+			ret = errno;
 			DBG_ERR("Failed sendto\n");
-			return -1;
+			goto fail;
 		}
 
 		close(s);
 		break;
+
 	default:
+		ret = EINVAL;
 		DBG_ERR("Not an ipv4/ipv6 address (family is %u)\n",
 			addr->ip.sin_family);
-		return -1;
+		goto fail;
 	}
 
 	return 0;
+
+fail:
+	close(s);
+	return ret;
 }
 
 #else /* HAVE_PACKETSOCKET */
@@ -530,11 +497,125 @@ int ctdb_sys_send_arp(const ctdb_sock_addr *addr, const char *iface)
 int ctdb_sys_send_arp(const ctdb_sock_addr *addr, const char *iface)
 {
 	/* Not implemented */
-	errno = ENOSYS;
-	return -1;
+	return ENOSYS;
 }
 
 #endif /* HAVE_PACKETSOCKET */
+
+
+#define IP4_TCP_BUFFER_SIZE sizeof(struct ip) + \
+			    sizeof(struct tcphdr)
+
+#define IP6_TCP_BUFFER_SIZE sizeof(struct ip6_hdr) + \
+			    sizeof(struct tcphdr)
+
+static int tcp4_build(uint8_t *buf,
+		      size_t buflen,
+		      const struct sockaddr_in *src,
+		      const struct sockaddr_in *dst,
+		      uint32_t seq,
+		      uint32_t ack,
+		      int rst,
+		      size_t *len)
+{
+	size_t l = IP4_TCP_BUFFER_SIZE;
+	struct {
+		struct ip ip;
+		struct tcphdr tcp;
+	} *ip4pkt;
+
+	if (l != sizeof(*ip4pkt)) {
+		return EMSGSIZE;
+	}
+
+	if (buflen < l) {
+		return EMSGSIZE;
+	}
+
+	ip4pkt = (void *)buf;
+	memset(ip4pkt, 0, l);
+
+	ip4pkt->ip.ip_v     = 4;
+	ip4pkt->ip.ip_hl    = sizeof(ip4pkt->ip)/sizeof(uint32_t);
+	ip4pkt->ip.ip_len   = htons(sizeof(ip4pkt));
+	ip4pkt->ip.ip_ttl   = 255;
+	ip4pkt->ip.ip_p     = IPPROTO_TCP;
+	ip4pkt->ip.ip_src.s_addr = src->sin_addr.s_addr;
+	ip4pkt->ip.ip_dst.s_addr = dst->sin_addr.s_addr;
+	ip4pkt->ip.ip_sum   = 0;
+
+	ip4pkt->tcp.th_sport = src->sin_port;
+	ip4pkt->tcp.th_dport = dst->sin_port;
+	ip4pkt->tcp.th_seq   = seq;
+	ip4pkt->tcp.th_ack   = ack;
+	ip4pkt->tcp.th_flags = 0;
+	ip4pkt->tcp.th_flags |= TH_ACK;
+	if (rst) {
+		ip4pkt->tcp.th_flags |= TH_RST;
+	}
+	ip4pkt->tcp.th_off   = sizeof(ip4pkt->tcp)/sizeof(uint32_t);
+	/* this makes it easier to spot in a sniffer */
+	ip4pkt->tcp.th_win   = htons(1234);
+	ip4pkt->tcp.th_sum   = ip_checksum((uint16_t *)&ip4pkt->tcp,
+					   sizeof(ip4pkt->tcp),
+					   &ip4pkt->ip);
+
+	*len = l;
+	return 0;
+}
+
+static int tcp6_build(uint8_t *buf,
+		      size_t buflen,
+		      const struct sockaddr_in6 *src,
+		      const struct sockaddr_in6 *dst,
+		      uint32_t seq,
+		      uint32_t ack,
+		      int rst,
+		      size_t *len)
+{
+	size_t l = IP6_TCP_BUFFER_SIZE;
+	struct {
+		struct ip6_hdr ip6;
+		struct tcphdr tcp;
+	} *ip6pkt;
+
+	if (l != sizeof(*ip6pkt)) {
+		return EMSGSIZE;
+	}
+
+	if (buflen < l) {
+		return EMSGSIZE;
+	}
+
+	ip6pkt = (void *)buf;
+	memset(ip6pkt, 0, l);
+
+	ip6pkt->ip6.ip6_vfc  = 6 << 4;
+	ip6pkt->ip6.ip6_plen = htons(sizeof(struct tcphdr));
+	ip6pkt->ip6.ip6_nxt  = IPPROTO_TCP;
+	ip6pkt->ip6.ip6_hlim = 64;
+	ip6pkt->ip6.ip6_src  = src->sin6_addr;
+	ip6pkt->ip6.ip6_dst  = dst->sin6_addr;
+
+	ip6pkt->tcp.th_sport = src->sin6_port;
+	ip6pkt->tcp.th_dport = dst->sin6_port;
+	ip6pkt->tcp.th_seq   = seq;
+	ip6pkt->tcp.th_ack   = ack;
+	ip6pkt->tcp.th_flags = 0;
+	ip6pkt->tcp.th_flags |= TH_ACK;
+	if (rst) {
+		ip6pkt->tcp.th_flags |= TH_RST;
+	}
+	ip6pkt->tcp.th_off    = sizeof(ip6pkt->tcp)/sizeof(uint32_t);
+	/* this makes it easier to spot in a sniffer */
+	ip6pkt->tcp.th_win   = htons(1234);
+	ip6pkt->tcp.th_sum   = ip6_checksum((uint16_t *)&ip6pkt->tcp,
+					    sizeof(ip6pkt->tcp),
+					    &ip6pkt->ip6);
+
+	*len = l;
+	return 0;
+}
 
 /*
  * Send tcp segment from the specified IP/port to the specified
@@ -553,48 +634,28 @@ int ctdb_sys_send_tcp(const ctdb_sock_addr *dest,
 		      uint32_t ack,
 		      int rst)
 {
-	int s;
+	uint8_t buf[MAX(IP4_TCP_BUFFER_SIZE, IP6_TCP_BUFFER_SIZE)];
+	size_t len = 0;
 	int ret;
+	int s;
 	uint32_t one = 1;
-	uint16_t tmpport;
-	ctdb_sock_addr *tmpdest;
-	struct {
-		struct ip ip;
-		struct tcphdr tcp;
-	} ip4pkt;
-	struct {
-		struct ip6_hdr ip6;
-		struct tcphdr tcp;
-	} ip6pkt;
+	struct sockaddr_in6 tmpdest = { 0 };
 	int saved_errno;
 
 	switch (src->ip.sin_family) {
 	case AF_INET:
-		ZERO_STRUCT(ip4pkt);
-		ip4pkt.ip.ip_v     = 4;
-		ip4pkt.ip.ip_hl    = sizeof(ip4pkt.ip)/4;
-		ip4pkt.ip.ip_len   = htons(sizeof(ip4pkt));
-		ip4pkt.ip.ip_ttl   = 255;
-		ip4pkt.ip.ip_p     = IPPROTO_TCP;
-		ip4pkt.ip.ip_src.s_addr    = src->ip.sin_addr.s_addr;
-		ip4pkt.ip.ip_dst.s_addr    = dest->ip.sin_addr.s_addr;
-		ip4pkt.ip.ip_sum   = 0;
-
-		ip4pkt.tcp.th_sport = src->ip.sin_port;
-		ip4pkt.tcp.th_dport = dest->ip.sin_port;
-		ip4pkt.tcp.th_seq   = seq;
-		ip4pkt.tcp.th_ack   = ack;
-		ip4pkt.tcp.th_flags = 0;
-		ip4pkt.tcp.th_flags |= TH_ACK;
-		if (rst) {
-			ip4pkt.tcp.th_flags |= TH_RST;
+		ret = tcp4_build(buf,
+				 sizeof(buf),
+				 &src->ip,
+				 &dest->ip,
+				 seq,
+				 ack,
+				 rst,
+				 &len);
+		if (ret != 0) {
+			DBG_ERR("Failed to build TCP packet (%d)\n", ret);
+			return ret;
 		}
-		ip4pkt.tcp.th_off   = sizeof(ip4pkt.tcp)/4;
-		/* this makes it easier to spot in a sniffer */
-		ip4pkt.tcp.th_win   = htons(1234);
-		ip4pkt.tcp.th_sum   = ip_checksum((uint16_t *)&ip4pkt.tcp,
-						  sizeof(ip4pkt.tcp),
-						  &ip4pkt.ip);
 
 		/* open a raw socket to send this segment from */
 		s = socket(AF_INET, SOCK_RAW, IPPROTO_RAW);
@@ -612,40 +673,37 @@ int ctdb_sys_send_tcp(const ctdb_sock_addr *dest,
 			return -1;
 		}
 
-		ret = sendto(s, &ip4pkt, sizeof(ip4pkt), 0,
+		ret = sendto(s,
+			     buf,
+			     len,
+			     0,
 			     (const struct sockaddr *)&dest->ip,
 			     sizeof(dest->ip));
 		saved_errno = errno;
 		close(s);
-		if (ret != sizeof(ip4pkt)) {
+		if (ret == -1) {
 			D_ERR("Failed sendto (%s)\n", strerror(saved_errno));
 			return -1;
 		}
-		break;
-	case AF_INET6:
-		ZERO_STRUCT(ip6pkt);
-		ip6pkt.ip6.ip6_vfc  = 0x60;
-		ip6pkt.ip6.ip6_plen = htons(20);
-		ip6pkt.ip6.ip6_nxt  = IPPROTO_TCP;
-		ip6pkt.ip6.ip6_hlim = 64;
-		ip6pkt.ip6.ip6_src  = src->ip6.sin6_addr;
-		ip6pkt.ip6.ip6_dst  = dest->ip6.sin6_addr;
-
-		ip6pkt.tcp.th_sport = src->ip6.sin6_port;
-		ip6pkt.tcp.th_dport = dest->ip6.sin6_port;
-		ip6pkt.tcp.th_seq   = seq;
-		ip6pkt.tcp.th_ack   = ack;
-		ip6pkt.tcp.th_flags = 0;
-		ip6pkt.tcp.th_flags |= TH_RST;
-		if (rst) {
-			ip6pkt.tcp.th_flags |= TH_RST;
+		if ((size_t)ret != len) {
+			DBG_ERR("Failed sendto - didn't send full packet\n");
+			return -1;
 		}
-		ip6pkt.tcp.th_off    = sizeof(ip6pkt.tcp)/4;
-		/* this makes it easier to spot in a sniffer */
-		ip6pkt.tcp.th_win   = htons(1234);
-		ip6pkt.tcp.th_sum   = ip6_checksum((uint16_t *)&ip6pkt.tcp,
-						   sizeof(ip6pkt.tcp),
-						   &ip6pkt.ip6);
+		break;
+
+	case AF_INET6:
+		ret = tcp6_build(buf,
+				 sizeof(buf),
+				 &src->ip6,
+				 &dest->ip6,
+				 seq,
+				 ack,
+				 rst,
+				 &len);
+		if (ret != 0) {
+			DBG_ERR("Failed to build TCP packet (%d)\n", ret);
+			return ret;
+		}
 
 		s = socket(AF_INET6, SOCK_RAW, IPPROTO_RAW);
 		if (s == -1) {
@@ -653,22 +711,27 @@ int ctdb_sys_send_tcp(const ctdb_sock_addr *dest,
 			return -1;
 
 		}
-		/* sendto() don't like if the port is set and the socket is
-		   in raw mode.
-		*/
-		tmpdest = discard_const(dest);
-		tmpport = tmpdest->ip6.sin6_port;
+		/*
+		 * sendto() on an IPv6 raw socket requires the port to
+		 * be either 0 or a protocol value
+		 */
+		tmpdest = dest->ip6;
+		tmpdest.sin6_port = 0;
 
-		tmpdest->ip6.sin6_port = 0;
-		ret = sendto(s, &ip6pkt, sizeof(ip6pkt), 0,
-			     (const struct sockaddr *)&dest->ip6,
-			     sizeof(dest->ip6));
+		ret = sendto(s,
+			     buf,
+			     len,
+			     0,
+			     (const struct sockaddr *)&tmpdest,
+			     sizeof(tmpdest));
 		saved_errno = errno;
-		tmpdest->ip6.sin6_port = tmpport;
 		close(s);
-
-		if (ret != sizeof(ip6pkt)) {
+		if (ret == -1) {
 			D_ERR("Failed sendto (%s)\n", strerror(saved_errno));
+			return -1;
+		}
+		if ((size_t)ret != len) {
+			DBG_ERR("Failed sendto - didn't send full packet\n");
 			return -1;
 		}
 		break;
@@ -687,6 +750,117 @@ int ctdb_sys_send_tcp(const ctdb_sock_addr *dest,
  * If AF_PACKET is available then use a raw socket otherwise use pcap.
  * wscript has checked to make sure that pcap is available if needed.
  */
+
+static int tcp4_extract(const uint8_t *ip_pkt,
+			size_t pktlen,
+			struct sockaddr_in *src,
+			struct sockaddr_in *dst,
+			uint32_t *ack_seq,
+			uint32_t *seq,
+			int *rst,
+			uint16_t *window)
+{
+	const struct ip *ip;
+	const struct tcphdr *tcp;
+
+	if (pktlen < sizeof(struct ip)) {
+		return EMSGSIZE;
+	}
+
+	ip = (const struct ip *)ip_pkt;
+
+	/* IPv4 only */
+	if (ip->ip_v != 4) {
+		return ENOMSG;
+	}
+	/* Don't look at fragments */
+	if ((ntohs(ip->ip_off)&0x1fff) != 0) {
+		return ENOMSG;
+	}
+	/* TCP only */
+	if (ip->ip_p != IPPROTO_TCP) {
+		return ENOMSG;
+	}
+
+	/* Ensure there is enough of the packet to gather required fields */
+	if (pktlen <
+	    (ip->ip_hl * sizeof(uint32_t)) + offsetof(struct tcphdr, th_sum)) {
+		return EMSGSIZE;
+	}
+
+	tcp = (const struct tcphdr *)(ip_pkt + (ip->ip_hl * sizeof(uint32_t)));
+
+	src->sin_family      = AF_INET;
+	src->sin_addr.s_addr = ip->ip_src.s_addr;
+	src->sin_port        = tcp->th_sport;
+
+	dst->sin_family      = AF_INET;
+	dst->sin_addr.s_addr = ip->ip_dst.s_addr;
+	dst->sin_port        = tcp->th_dport;
+
+	*ack_seq             = tcp->th_ack;
+	*seq                 = tcp->th_seq;
+	if (window != NULL) {
+		*window = tcp->th_win;
+	}
+	if (rst != NULL) {
+		*rst = tcp->th_flags & TH_RST;
+	}
+
+	return 0;
+}
+
+static int tcp6_extract(const uint8_t *ip_pkt,
+			size_t pktlen,
+			struct sockaddr_in6 *src,
+			struct sockaddr_in6 *dst,
+			uint32_t *ack_seq,
+			uint32_t *seq,
+			int *rst,
+			uint16_t *window)
+{
+	const struct ip6_hdr *ip6;
+	const struct tcphdr *tcp;
+
+	/* Ensure there is enough of the packet to gather required fields */
+	if (pktlen < sizeof(struct ip6_hdr) + offsetof(struct tcphdr, th_sum)) {
+		return EMSGSIZE;
+	}
+
+	ip6 = (const struct ip6_hdr *)ip_pkt;
+
+	/* IPv6 only */
+	if ((ip6->ip6_vfc >> 4) != 6){
+		return ENOMSG;
+	}
+
+	/* TCP only */
+	if (ip6->ip6_nxt != IPPROTO_TCP) {
+		return ENOMSG;
+	}
+
+	tcp = (const struct tcphdr *)(ip_pkt + sizeof(struct ip6_hdr));
+
+	src->sin6_family = AF_INET6;
+	src->sin6_port   = tcp->th_sport;
+	src->sin6_addr   = ip6->ip6_src;
+
+	dst->sin6_family = AF_INET6;
+	dst->sin6_port   = tcp->th_dport;
+	dst->sin6_addr   = ip6->ip6_dst;
+
+	*ack_seq             = tcp->th_ack;
+	*seq                 = tcp->th_seq;
+	if (window != NULL) {
+		*window = tcp->th_win;
+	}
+	if (rst != NULL) {
+		*rst = tcp->th_flags & TH_RST;
+	}
+
+	return 0;
+}
+
 
 #ifdef HAVE_AF_PACKET
 
@@ -741,17 +915,17 @@ int ctdb_sys_read_tcp_packet(int s, void *private_data,
 			     int *rst,
 			     uint16_t *window)
 {
-	int ret;
-#define RCVPKTSIZE 100
-	char pkt[RCVPKTSIZE];
+	ssize_t nread;
+	uint8_t pkt[100]; /* Large enough for simple ACK/RST packets */
 	struct ether_header *eth;
-	struct iphdr *ip;
-	struct ip6_hdr *ip6;
-	struct tcphdr *tcp;
+	int ret;
 
-	ret = recv(s, pkt, RCVPKTSIZE, MSG_TRUNC);
-	if (ret < sizeof(*eth)+sizeof(*ip)) {
-		return -1;
+	nread = recv(s, pkt, sizeof(pkt), MSG_TRUNC);
+	if (nread == -1) {
+		return errno;
+	}
+	if ((size_t)nread < sizeof(*eth)) {
+		return EMSGSIZE;
 	}
 
 	ZERO_STRUCTP(src);
@@ -762,81 +936,29 @@ int ctdb_sys_read_tcp_packet(int s, void *private_data,
 
 	/* we want either IPv4 or IPv6 */
 	if (ntohs(eth->ether_type) == ETHERTYPE_IP) {
-		/* IP */
-		ip = (struct iphdr *)(eth+1);
+		ret = tcp4_extract(pkt + sizeof(struct ether_header),
+				   (size_t)nread - sizeof(struct ether_header),
+				   &src->ip,
+				   &dst->ip,
+				   ack_seq,
+				   seq,
+				   rst,
+				   window);
+		return ret;
 
-		/* We only want IPv4 packets */
-		if (ip->version != 4) {
-			return -1;
-		}
-		/* Dont look at fragments */
-		if ((ntohs(ip->frag_off)&0x1fff) != 0) {
-			return -1;
-		}
-		/* we only want TCP */
-		if (ip->protocol != IPPROTO_TCP) {
-			return -1;
-		}
-
-		/* make sure its not a short packet */
-		if (offsetof(struct tcphdr, th_ack) + 4 +
-		    (ip->ihl*4) + sizeof(*eth) > ret) {
-			return -1;
-		}
-		/* TCP */
-		tcp = (struct tcphdr *)((ip->ihl*4) + (char *)ip);
-
-		/* tell the caller which one we've found */
-		src->ip.sin_family      = AF_INET;
-		src->ip.sin_addr.s_addr = ip->saddr;
-		src->ip.sin_port        = tcp->th_sport;
-		dst->ip.sin_family      = AF_INET;
-		dst->ip.sin_addr.s_addr = ip->daddr;
-		dst->ip.sin_port        = tcp->th_dport;
-		*ack_seq                = tcp->th_ack;
-		*seq                    = tcp->th_seq;
-		if (window != NULL) {
-			*window = tcp->th_win;
-		}
-		if (rst != NULL) {
-			*rst = tcp->th_flags & TH_RST;
-		}
-
-		return 0;
 	} else if (ntohs(eth->ether_type) == ETHERTYPE_IP6) {
-		/* IP6 */
-		ip6 = (struct ip6_hdr *)(eth+1);
-
-		/* we only want TCP */
-		if (ip6->ip6_nxt != IPPROTO_TCP) {
-			return -1;
-		}
-
-		/* TCP */
-		tcp = (struct tcphdr *)(ip6+1);
-
-		/* tell the caller which one we've found */
-		src->ip6.sin6_family = AF_INET6;
-		src->ip6.sin6_port   = tcp->th_sport;
-		src->ip6.sin6_addr   = ip6->ip6_src;
-
-		dst->ip6.sin6_family = AF_INET6;
-		dst->ip6.sin6_port   = tcp->th_dport;
-		dst->ip6.sin6_addr   = ip6->ip6_dst;
-
-		*ack_seq             = tcp->th_ack;
-		*seq                 = tcp->th_seq;
-		if (window != NULL) {
-			*window = tcp->th_win;
-		}
-		if (rst != NULL) {
-			*rst = tcp->th_flags & TH_RST;
-		}
-
-		return 0;
+		ret = tcp6_extract(pkt + sizeof(struct ether_header),
+				   (size_t)nread - sizeof(struct ether_header),
+				   &src->ip6,
+				   &dst->ip6,
+				   ack_seq,
+				   seq,
+				   rst,
+				   window);
+		return ret;
 	}
 
-	return -1;
+	return ENOMSG;
 }
 
 #else /* HAVE_AF_PACKET */
@@ -875,17 +997,13 @@ int ctdb_sys_read_tcp_packet(int s,
 {
 	int ret;
 	struct ether_header *eth;
-	struct ip *ip;
-	struct ip6_hdr *ip6;
-	struct tcphdr *tcp;
-	struct ctdb_killtcp_connection *conn;
 	struct pcap_pkthdr pkthdr;
 	const u_char *buffer;
 	pcap_t *pt = (pcap_t *)private_data;
 
 	buffer=pcap_next(pt, &pkthdr);
 	if (buffer==NULL) {
-		return -1;
+		return ENOMSG;
 	}
 
 	ZERO_STRUCTP(src);
@@ -896,81 +1014,31 @@ int ctdb_sys_read_tcp_packet(int s,
 
 	/* we want either IPv4 or IPv6 */
 	if (eth->ether_type == htons(ETHERTYPE_IP)) {
-		/* IP */
-		ip = (struct ip *)(eth+1);
+		ret = tcp4_extract(buffer + sizeof(struct ether_header),
+				   (size_t)(pkthdr.caplen -
+					    sizeof(struct ether_header)),
+				   &src->ip,
+				   &dst->ip,
+				   ack_seq,
+				   seq,
+				   rst,
+				   window);
+		return ret;
 
-		/* We only want IPv4 packets */
-		if (ip->ip_v != 4) {
-			return -1;
-		}
-		/* Dont look at fragments */
-		if ((ntohs(ip->ip_off)&0x1fff) != 0) {
-			return -1;
-		}
-		/* we only want TCP */
-		if (ip->ip_p != IPPROTO_TCP) {
-			return -1;
-		}
-
-		/* make sure its not a short packet */
-		if (offsetof(struct tcphdr, th_ack) + 4 +
-		    (ip->ip_hl*4) > pkthdr.len) {
-			return -1;
-		}
-		/* TCP */
-		tcp = (struct tcphdr *)((ip->ip_hl*4) + (char *)ip);
-
-		/* tell the caller which one we've found */
-		src->ip.sin_family      = AF_INET;
-		src->ip.sin_addr.s_addr = ip->ip_src.s_addr;
-		src->ip.sin_port        = tcp->th_sport;
-		dst->ip.sin_family      = AF_INET;
-		dst->ip.sin_addr.s_addr = ip->ip_dst.s_addr;
-		dst->ip.sin_port        = tcp->th_dport;
-		*ack_seq                = tcp->th_ack;
-		*seq                    = tcp->th_seq;
-		if (window != NULL) {
-			*window = tcp->th_win;
-		}
-		if (rst != NULL) {
-			*rst = tcp->th_flags & TH_RST;
-		}
-
-		return 0;
 	} else if (eth->ether_type == htons(ETHERTYPE_IP6)) {
-			/* IP6 */
-		ip6 = (struct ip6_hdr *)(eth+1);
-
-		/* we only want TCP */
-		if (ip6->ip6_nxt != IPPROTO_TCP) {
-			return -1;
-		}
-
-		/* TCP */
-		tcp = (struct tcphdr *)(ip6+1);
-
-		/* tell the caller which one we've found */
-		src->ip6.sin6_family = AF_INET6;
-		src->ip6.sin6_port   = tcp->th_sport;
-		src->ip6.sin6_addr   = ip6->ip6_src;
-
-		dst->ip6.sin6_family = AF_INET6;
-		dst->ip6.sin6_port   = tcp->th_dport;
-		dst->ip6.sin6_addr   = ip6->ip6_dst;
-
-		*ack_seq             = tcp->th_ack;
-		*seq                 = tcp->th_seq;
-		if (window != NULL) {
-			*window = tcp->th_win;
-		}
-		if (rst != NULL) {
-			*rst = tcp->th_flags & TH_RST;
-		}
-
-		return 0;
+		ret = tcp6_extract(buffer + sizeof(struct ether_header),
+				   (size_t)(pkthdr.caplen -
+					    sizeof(struct ether_header)),
+				   &src->ip6,
+				   &dst->ip6,
+				   ack_seq,
+				   seq,
+				   rst,
+				   window);
+		return ret;
 	}
 
-	return -1;
+	return ENOMSG;
 }
 
 #endif /* HAVE_AF_PACKET */

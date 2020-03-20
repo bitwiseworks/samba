@@ -40,6 +40,7 @@
  */
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <setjmp.h>
 #include <cmocka.h>
 
@@ -57,6 +58,7 @@
 
 #include "../ldb_tdb/ldb_tdb.h"
 #include "../ldb_mdb/ldb_mdb.h"
+#include "../ldb_key_value/ldb_kv.h"
 
 #define TEST_BE  "mdb"
 
@@ -414,17 +416,17 @@ static void test_ldb_add_dn_no_guid_mode(void **state)
 static struct MDB_env *get_mdb_env(struct ldb_context *ldb)
 {
 	void *data = NULL;
-	struct ltdb_private *ltdb = NULL;
+	struct ldb_kv_private *ldb_kv = NULL;
 	struct lmdb_private *lmdb = NULL;
 	struct MDB_env *env = NULL;
 
 	data = ldb_module_get_private(ldb->modules);
 	assert_non_null(data);
 
-	ltdb = talloc_get_type(data, struct ltdb_private);
-	assert_non_null(ltdb);
+	ldb_kv = talloc_get_type(data, struct ldb_kv_private);
+	assert_non_null(ldb_kv);
 
-	lmdb = ltdb->lmdb_private;
+	lmdb = ldb_kv->lmdb_private;
 	assert_non_null(lmdb);
 
 	env = lmdb->env;

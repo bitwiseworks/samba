@@ -337,7 +337,7 @@ cli_set_user_quota(struct cli_state *cli, int quota_fnum, SMB_NTQUOTA_LIST *qtl)
 	uint16_t setup[1];
 	uint8_t params[2];
 	DATA_BLOB data = data_blob_null;
-	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
+	NTSTATUS status;
 
 	if (!cli || !qtl) {
 		smb_panic("cli_set_user_quota() called with NULL Pointer!");
@@ -353,9 +353,7 @@ cli_set_user_quota(struct cli_state *cli, int quota_fnum, SMB_NTQUOTA_LIST *qtl)
 		 * smb1 doesn't send NT_STATUS_NO_MORE_ENTRIES so swallow
 		 * this status.
 		 */
-		if (NT_STATUS_EQUAL(status, NT_STATUS_NO_MORE_ENTRIES)) {
-			status = NT_STATUS_OK;
-		} else {
+		if (!NT_STATUS_EQUAL(status, NT_STATUS_NO_MORE_ENTRIES)) {
 			goto cleanup;
 		}
 	}
@@ -587,13 +585,19 @@ NTSTATUS fill_quota_buffer(TALLOC_CTX *mem_ctx,
 			      SMB_NTQUOTA_LIST **end_ptr)
 {
 	int ndr_flags = NDR_SCALARS | NDR_BUFFERS;
-	struct ndr_push *qndr = ndr_push_init_ctx(mem_ctx);
+	struct ndr_push *qndr = NULL;
 	uint32_t start_offset = 0;
 	uint32_t padding = 0;
 	if (qlist == NULL) {
 		/* We must push at least one. */
 		return NT_STATUS_NO_MORE_ENTRIES;
 	}
+
+	qndr = ndr_push_init_ctx(mem_ctx);
+	if (qndr == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
+
 	for (;qlist != NULL; qlist = qlist->next) {
 		struct file_quota_information info = {0};
 		enum ndr_err_code err;

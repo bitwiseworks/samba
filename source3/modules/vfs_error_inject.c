@@ -28,6 +28,8 @@ struct unix_error_map {
 	int error;
 } unix_error_map_array[] = {
 	{	"ESTALE",	ESTALE	},
+	{	"EBADF",	EBADF	},
+	{	"EINTR",	EINTR	},
 };
 
 static int find_unix_error_from_string(const char *err_str)
@@ -88,8 +90,42 @@ static int vfs_error_inject_chdir(vfs_handle_struct *handle,
 	return SMB_VFS_NEXT_CHDIR(handle, smb_fname);
 }
 
+static ssize_t vfs_error_inject_pwrite(vfs_handle_struct *handle,
+				       files_struct *fsp,
+				       const void *data,
+				       size_t n,
+				       off_t offset)
+{
+	int error;
+
+	error = inject_unix_error("pwrite", handle);
+	if (error != 0) {
+		errno = error;
+		return -1;
+	}
+
+	return SMB_VFS_NEXT_PWRITE(handle, fsp, data, n, offset);
+}
+
+static int vfs_error_inject_open(
+	struct vfs_handle_struct *handle,
+	struct smb_filename *smb_fname,
+	files_struct *fsp,
+	int flags,
+	mode_t mode)
+{
+	int error = inject_unix_error("open", handle);
+	if (error != 0) {
+		errno = error;
+		return -1;
+	}
+	return SMB_VFS_NEXT_OPEN(handle, smb_fname, fsp, flags, mode);
+}
+
 static struct vfs_fn_pointers vfs_error_inject_fns = {
 	.chdir_fn = vfs_error_inject_chdir,
+	.pwrite_fn = vfs_error_inject_pwrite,
+	.open_fn = vfs_error_inject_open,
 };
 
 static_decl_vfs;

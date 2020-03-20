@@ -778,6 +778,7 @@ struct dns_tree *dns_build_tree(TALLOC_CTX *mem_ctx, const char *name, struct ld
 
 	root = dns_tree_init(mem_ctx, nlist[rootcount-1], NULL);
 	if (root == NULL) {
+		talloc_free(nlist);
 		return NULL;
 	}
 
@@ -794,11 +795,17 @@ struct dns_tree *dns_build_tree(TALLOC_CTX *mem_ctx, const char *name, struct ld
 	/* Add all names in the result in a tree */
 	for (i=0; i<res->count; i++) {
 		ptr = ldb_msg_find_attr_as_string(res->msgs[i], "name", NULL);
+		if (ptr == NULL) {
+			DBG_ERR("dnsserver: dns record has no name (%s)",
+				ldb_dn_get_linearized(res->msgs[i]->dn));
+			goto failed;
+		}
 
-		if (strcmp(ptr, "@") == 0) {
-			base->data = res->msgs[i];
-			continue;
-		} else if (strcasecmp(ptr, name) == 0) {
+		/*
+		 * This might be the sub-domain in the zone being
+		 * requested, or @ for the root of the zone
+		 */
+		if (strcasecmp(ptr, name) == 0) {
 			base->data = res->msgs[i];
 			continue;
 		}
@@ -844,6 +851,7 @@ struct dns_tree *dns_build_tree(TALLOC_CTX *mem_ctx, const char *name, struct ld
 	return root;
 
 failed:
+	talloc_free(nlist);
 	talloc_free(root);
 	return NULL;
 }
@@ -868,6 +876,7 @@ static void _dns_add_name(TALLOC_CTX *mem_ctx, const char *name, char ***add_nam
 
 	ptr[count] = talloc_strdup(mem_ctx, name);
 	if (ptr[count] == NULL) {
+		talloc_free(ptr);
 		return;
 	}
 
@@ -963,6 +972,12 @@ WERROR dns_fill_records_array(TALLOC_CTX *mem_ctx,
 	}
 
 	ptr = ldb_msg_find_attr_as_string(msg, "name", NULL);
+	if (ptr == NULL) {
+		DBG_ERR("dnsserver: dns record has no name (%s)",
+			ldb_dn_get_linearized(msg->dn));
+		return WERR_INTERNAL_DB_ERROR;
+	}
+
 	el = ldb_msg_find_element(msg, "dnsRecord");
 	if (el == NULL || el->values == 0) {
 		return WERR_OK;
@@ -1051,8 +1066,8 @@ WERROR dns_fill_records_array(TALLOC_CTX *mem_ctx,
 }
 
 
-int dns_name_compare(const struct ldb_message **m1, const struct ldb_message **m2,
-				char *search_name)
+int dns_name_compare(struct ldb_message * const *m1, struct ldb_message * const *m2,
+		     const char *search_name)
 {
 	const char *name1, *name2;
 	const char *ptr1, *ptr2;
@@ -1061,21 +1076,6 @@ int dns_name_compare(const struct ldb_message **m1, const struct ldb_message **m
 	name2 = ldb_msg_find_attr_as_string(*m2, "name", NULL);
 	if (name1 == NULL || name2 == NULL) {
 		return 0;
-	}
-
-	/* '@' record and the search_name record gets preference */
-	if (name1[0] == '@') {
-		return -1;
-	}
-	if (search_name && strcasecmp(name1, search_name) == 0) {
-		return -1;
-	}
-
-	if (name2[0] == '@') {
-		return 1;
-	}
-	if (search_name && strcasecmp(name2, search_name) == 0) {
-		return 1;
 	}
 
 	/* Compare the last components of names.

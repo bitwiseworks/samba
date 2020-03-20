@@ -178,7 +178,7 @@ static int read_block( REGF_FILE *file, prs_struct *ps, uint32_t file_offset, ui
 			return False;
 		}
 		if ( (returned == 0) && (bytes_read < block_size) ) {
-			DEBUG(0,("read_block: not a vald registry file ?\n" ));
+			DEBUG(0,("read_block: not a valid registry file ?\n" ));
 			return False;
 		}	
 		
@@ -305,7 +305,7 @@ static bool prs_hbin_block( const char *desc, prs_struct *ps, int depth, REGF_HB
 {
 	uint32_t block_size2;
 
-	prs_debug(ps, depth, desc, "prs_regf_block");
+	prs_debug(ps, depth, desc, "prs_hbin_block");
 	depth++;
 	
 	if ( !prs_uint8s( True, "header", ps, depth, (uint8_t*)hbin->header, sizeof( hbin->header )) )
@@ -482,7 +482,7 @@ static bool read_regf_block( REGF_FILE *file )
 	
 	prs_mem_free( &ps );
 	
-	if ( file->checksum !=  checksum ) {
+	if ( file->checksum != checksum && !file->ignore_checksums) {
 		DEBUG(0,("read_regf_block: invalid checksum\n" ));
 		return False;
 	}
@@ -519,7 +519,7 @@ static REGF_HBIN* read_hbin_block( REGF_FILE *file, off_t offset )
 	   previous 4 bytes contains the amount of free space remaining 
 	   in the hbin block. */
 
-	/* remember that the record_size is in the 4 bytes preceeding the record itself */
+	/* remember that the record_size is in the 4 bytes preceding the record itself */
 
 	if ( !prs_set_offset( &hbin->ps, file->data_offset+HBIN_HDR_SIZE-sizeof(uint32_t) ) )
 		return NULL;
@@ -552,7 +552,8 @@ static REGF_HBIN* read_hbin_block( REGF_FILE *file, off_t offset )
 		if ( !prs_uint32( "header", &hbin->ps, 0, &header ) )
 			return NULL;
 		
-		SMB_ASSERT( record_size != 0 );
+		if (record_size == 0)
+			return NULL;
 
 		if ( record_size & 0x80000000 ) {
 			/* absolute_value(record_size) */
@@ -1019,7 +1020,7 @@ static bool hbin_prs_key( REGF_FILE *file, REGF_HBIN *hbin, REGF_NK_REC *nk )
 	int depth = 0;
 	REGF_HBIN *sub_hbin;
 	
-	prs_debug(&hbin->ps, depth, "", "fetch_key");
+	prs_debug(&hbin->ps, depth, "", "prs_key");
 	depth++;
 
 	/* get the initial nk record */
@@ -1127,12 +1128,16 @@ static bool next_record( REGF_HBIN *hbin, const char *hdr, bool *eob )
 		if ( !prs_uint8s( True, "header", ps, 0, header, REC_HDR_SIZE ) )
 			return False;
 
-		if ( record_size & 0x80000000 ) {
+		if (record_size & 0x80000000) {
 			/* absolute_value(record_size) */
 			record_size = (record_size ^ 0xffffffff) + 1;
 		}
 
-		if ( memcmp( header, hdr, REC_HDR_SIZE ) == 0 ) {
+		if (record_size < sizeof(REC_HDR_SIZE)) {
+			return false;
+		}
+
+		if (memcmp(header, hdr, REC_HDR_SIZE) == 0) {
 			found = True;
 			curr_off += sizeof(uint32_t);
 		}
@@ -1237,8 +1242,9 @@ out:
 	}
 	ZERO_STRUCTP( rb );
 	rb->fd = -1;
+	rb->ignore_checksums = false;
 	
-	if ( !(rb->mem_ctx = talloc_init( "read_regf_block" )) ) {
+	if ( !(rb->mem_ctx = talloc_init( "regfio_open" )) ) {
 		regfio_close( rb );
 		return NULL;
 	}
@@ -1433,12 +1439,19 @@ REGF_NK_REC* regfio_rootkey( REGF_FILE *file )
 
 	/* see if there is anything left to report */
 	
-	if ( !nk || (nk->subkeys_off==REGF_OFFSET_NONE) || (nk->subkey_index >= nk->num_subkeys) )
+	if (nk == NULL ||
+	    nk->subkeys.hashes == NULL ||
+	    nk->subkey_index >= nk->subkeys.num_keys ||
+	    (nk->subkeys_off == REGF_OFFSET_NONE) ||
+	    (nk->subkey_index >= nk->num_subkeys)) {
 		return NULL;
+	}
 
 	/* find the HBIN block which should contain the nk record */
-	
-	if ( !(hbin = lookup_hbin_block( file, nk->subkeys.hashes[nk->subkey_index].nk_off )) ) {
+
+	hbin = lookup_hbin_block(file,
+				 nk->subkeys.hashes[nk->subkey_index].nk_off);
+	if (hbin == NULL) {
 		DEBUG(0,("hbin_prs_key: Failed to find HBIN block containing offset [0x%x]\n", 
 			nk->subkeys.hashes[nk->subkey_index].nk_off));
 		return NULL;

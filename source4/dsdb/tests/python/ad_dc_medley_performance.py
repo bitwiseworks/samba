@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from __future__ import print_function
 
@@ -42,6 +42,9 @@ from ldb import ERR_NO_SUCH_OBJECT
 
 parser = optparse.OptionParser("ad_dc_performance.py [options] <host>")
 sambaopts = options.SambaOptions(parser)
+sambaopts.add_option("-p", "--use-paged-search", action="store_true",
+                     help="Use paged search module")
+
 parser.add_option_group(sambaopts)
 parser.add_option_group(options.VersionOptions(parser))
 
@@ -53,7 +56,6 @@ if not ANCIENT_SAMBA:
 credopts = options.CredentialsOptions(parser)
 parser.add_option_group(credopts)
 opts, args = parser.parse_args()
-
 
 if len(args) < 1:
     parser.print_usage()
@@ -87,6 +89,7 @@ class GlobalState(object):
     test_number = 0
     active_links = set()
 
+
 class UserTests(samba.tests.TestCase):
 
     def add_if_possible(self, *args, **kwargs):
@@ -102,8 +105,13 @@ class UserTests(samba.tests.TestCase):
         super(UserTests, self).setUp()
         self.state = GlobalState  # the class itself, not an instance
         self.lp = lp
+
+        kwargs = {}
+        if opts.use_paged_search:
+            kwargs["options"] = ["modules:paged_searches"]
+
         self.ldb = SamDB(host, credentials=creds,
-                         session_info=system_session(lp), lp=lp)
+                         session_info=system_session(lp), lp=lp, **kwargs)
         self.base_dn = self.ldb.domain_dn()
         self.ou = "OU=pid%s,%s" % (os.getpid(), self.base_dn)
         self.ou_users = "OU=users,%s" % self.ou
@@ -201,7 +209,7 @@ class UserTests(samba.tests.TestCase):
     def _test_indexed_search(self):
         expressions = ['(objectclass=group)',
                        '(samaccountname=Administrator)'
-        ]
+                       ]
         for expression in expressions:
             t = time.time()
             for i in range(4000):
@@ -233,7 +241,8 @@ class UserTests(samba.tests.TestCase):
                 self.ldb.search(pattern % i,
                                 scope=SCOPE_BASE,
                                 attrs=['cn'])
-            except LdbError as (num, msg):
+            except LdbError as e:
+                (num, msg) = e
                 if num != ERR_NO_SUCH_OBJECT:
                     raise
 
@@ -254,7 +263,7 @@ class UserTests(samba.tests.TestCase):
     def _test_complex_search(self, n=100):
         classes = ['samaccountname', 'objectCategory', 'dn', 'member']
         values = ['*', '*t*', 'g*', 'user']
-        comparators = ['=', '<=', '>='] # '~=' causes error
+        comparators = ['=', '<=', '>=']  # '~=' causes error
         maybe_not = ['!(', '']
         joiners = ['&', '|']
 
@@ -420,7 +429,7 @@ class UserTests(samba.tests.TestCase):
         lines = ["dn: CN=g%d,%s" % (g, self.ou_groups),
                  "objectclass: group"]
 
-        for i in xrange(self.state.next_user_id):
+        for i in range(self.state.next_user_id):
             if random.random() <= link_chance:
                 lines.append("member: cn=u%d,%s" % (i, self.ou_users))
                 self.state.active_links.add((i, g))

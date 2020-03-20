@@ -101,7 +101,7 @@ static int script_args(TALLOC_CTX *mem_ctx, const char *event_str,
 		       const char *arg_str, const char ***out)
 {
 	const char **argv;
-	int argc;
+	size_t argc;
 	size_t len;
 
 	/* Preallocate argv array to avoid reallocation. */
@@ -146,7 +146,7 @@ static int script_args(TALLOC_CTX *mem_ctx, const char *event_str,
 	}
 
 	argv[argc] = NULL;
-	argc += 1;
+	/* argc += 1 */
 
 	*out = argv;
 	return 0;
@@ -285,9 +285,10 @@ int run_event_list(struct run_event_context *run_ctx,
 		   TALLOC_CTX *mem_ctx,
 		   struct run_event_script_list **output)
 {
-	struct event_script_list *s_list;
-	struct run_event_script_list *script_list;
-	int ret, i;
+	struct event_script_list *s_list = NULL;
+	struct run_event_script_list *script_list = NULL;
+	unsigned int i;
+	int ret;
 
 	ret = event_script_get_list(mem_ctx,
 				    run_event_script_dir(run_ctx),
@@ -518,7 +519,7 @@ struct run_event_state {
 	struct run_event_script_list *script_list;
 	const char **argv;
 	struct tevent_req *script_subreq;
-	int index;
+	unsigned int index;
 	bool cancelled;
 };
 

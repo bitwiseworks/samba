@@ -14,14 +14,14 @@ bld.SAMBA3_SUBSYSTEM('AUTH_COMMON',
 			      server_info.c
 			      server_info_sam.c
 			      user_info.c''',
-                     deps='TOKEN_UTIL DCUTIL USER_UTIL')
+                     deps='TOKEN_UTIL DCUTIL USER_UTIL common_auth')
 
 bld.SAMBA3_LIBRARY('auth',
                    source='''auth.c
                    user_krb5.c
                    auth_ntlmssp.c
                    auth_generic.c''',
-                   deps='''PLAINTEXT_AUTH SLCACHE DCUTIL TOKEN_UTIL AUTH_COMMON libcli_netlogon3 samba-hostconfig''',
+                   deps='''PLAINTEXT_AUTH SLCACHE DCUTIL TOKEN_UTIL AUTH_COMMON libcli_netlogon3 samba-hostconfig MESSAGING''',
                    private_library=True)
 
 bld.SAMBA3_MODULE('auth_sam',
@@ -52,13 +52,6 @@ bld.SAMBA3_MODULE('auth_builtin',
                  deps='samba-util',
                  init_function='',
                  internal_module=True)
-
-bld.SAMBA3_MODULE('auth_script',
-                 subsystem='auth',
-                 source='auth_script.c',
-                 init_function='',
-                 internal_module=bld.SAMBA3_IS_STATIC_MODULE('auth_script'),
-                 enabled=bld.SAMBA3_IS_ENABLED_MODULE('auth_script'))
 
 bld.SAMBA3_MODULE('auth_samba4',
                   subsystem='auth',

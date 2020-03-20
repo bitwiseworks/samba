@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Tombstone reanimation tests
 #
@@ -31,6 +31,7 @@ from samba.dcerpc import security
 from samba.dcerpc import drsblobs
 from samba.dcerpc.drsuapi import *
 from samba.tests.password_test import PasswordCommon
+from samba.compat import get_string
 
 import samba.tests
 from ldb import (SCOPE_BASE, FLAG_MOD_ADD, FLAG_MOD_DELETE, FLAG_MOD_REPLACE, Dn, Message,
@@ -58,7 +59,7 @@ class RestoredObjectAttributesBaseTestCase(samba.tests.TestCase):
         super(RestoredObjectAttributesBaseTestCase, self).tearDown()
 
     def GUID_string(self, guid):
-        return self.samdb.schema_format_value("objectGUID", guid)
+        return get_string(self.samdb.schema_format_value("objectGUID", guid))
 
     def search_guid(self, guid, attrs=["*"]):
         res = self.samdb.search(base="<GUID=%s>" % self.GUID_string(guid),
@@ -97,7 +98,7 @@ class RestoredObjectAttributesBaseTestCase(samba.tests.TestCase):
             if orig_val is None:
                 continue
             if not isinstance(orig_val, MessageElement):
-                orig_val = MessageElement(str(orig_val), 0, attr    )
+                orig_val = MessageElement(str(orig_val), 0, attr)
             m = Message()
             m.add(orig_val)
             orig_ldif = self.samdb.write_ldif(m, 0)
@@ -129,12 +130,19 @@ class RestoredObjectAttributesBaseTestCase(samba.tests.TestCase):
             if expected_val == "**":
                 # "**" values means "any"
                 continue
-            self.assertEqual(expected_val, str(actual_val),
+            # if expected_val is e.g. ldb.bytes we can't depend on
+            # str(actual_value) working, we may just get a decoding
+            # error. Better to just compare raw values
+            if not isinstance(expected_val, str):
+                actual_val = actual_val[0]
+            else:
+                actual_val = str(actual_val)
+            self.assertEqual(expected_val, actual_val,
                              "Unexpected value (%s) for '%s', expected (%s)" % (
-                             str(actual_val), name, expected_val))
+                             repr(actual_val), name, repr(expected_val)))
 
     def _check_metadata(self, metadata, expected):
-        repl = ndr_unpack(drsblobs.replPropertyMetaDataBlob, str(metadata[0]))
+        repl = ndr_unpack(drsblobs.replPropertyMetaDataBlob, metadata[0])
 
         repl_array = []
         for o in repl.ctr.array:
@@ -261,7 +269,7 @@ class BaseRestoreObjectTestCase(RestoredObjectAttributesBaseTestCase):
         objDeleted1 = self.search_guid(guid1)
         self.restore_deleted_object(self.samdb, objDeleted1.dn, usr1, {"url": "www.samba.org"})
         objLive2 = self.search_dn(usr1)
-        self.assertEqual(objLive2["url"][0], "www.samba.org")
+        self.assertEqual(str(objLive2["url"][0]), "www.samba.org")
         samba.tests.delete_force(self.samdb, usr1)
 
     def test_undelete_newuser(self):
@@ -338,14 +346,14 @@ class BaseRestoreObjectTestCase(RestoredObjectAttributesBaseTestCase):
         except LdbError as e4:
             (num, _) = e4.args
             self.assertEquals(num, ERR_OPERATIONS_ERROR)
-        #try to undelete from config to base dn
+        # try to undelete from config to base dn
         try:
             self.restore_deleted_object(self.samdb, objDeleted2.dn, c4)
             self.fail()
         except LdbError as e5:
             (num, _) = e5.args
             self.assertEquals(num, ERR_OPERATIONS_ERROR)
-        #assert undeletion will work in same nc
+        # assert undeletion will work in same nc
         self.restore_deleted_object(self.samdb, objDeleted1.dn, c4)
         self.restore_deleted_object(self.samdb, objDeleted2.dn, c3)
 
@@ -553,6 +561,7 @@ class RestoreUserObjectTestCase(RestoredObjectAttributesBaseTestCase):
         self.assertAttributesExists(self._expected_user_restore_attributes(username, guid, sid, usr_dn, "Person"), obj_restore)
         self._check_metadata(obj_restore_rmd["replPropertyMetaData"],
                              self._expected_user_restore_metadata())
+
 
 class RestoreUserPwdObjectTestCase(RestoredObjectAttributesBaseTestCase):
     """Test cases for delete/reanimate user objects with password"""
@@ -762,6 +771,7 @@ class RestoreUserPwdObjectTestCase(RestoredObjectAttributesBaseTestCase):
         self._check_metadata(obj_restore_rmd["replPropertyMetaData"],
                              self._expected_userpw_restore_metadata())
 
+
 class RestoreGroupObjectTestCase(RestoredObjectAttributesBaseTestCase):
     """Test different scenarios for delete/reanimate group objects"""
 
@@ -817,7 +827,7 @@ class RestoreGroupObjectTestCase(RestoredObjectAttributesBaseTestCase):
                 'uSNChanged': '**',
                 'instanceType': '4',
                 'adminCount': '0',
-                'cn': groupname }
+                'cn': groupname}
 
     def test_plain_group(self):
         print("Test restored Group attributes")
@@ -882,7 +892,7 @@ class RestoreContainerObjectTestCase(RestoredObjectAttributesBaseTestCase):
                 'uSNCreated': '**',
                 'uSNChanged': '**',
                 'instanceType': '4',
-                rdn.lower(): name }
+                rdn.lower(): name}
 
     def _create_test_ou(self, rdn, name=None, description=None):
         ou_dn = "OU=%s,%s" % (rdn, self.base_dn)

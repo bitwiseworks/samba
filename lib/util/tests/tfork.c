@@ -267,7 +267,7 @@ static bool test_tfork_process_hierarchy(struct torture_context *tctx)
 
 		ret = sscanf(line, "%d", &ppid);
 		torture_assert_goto(tctx, ret == 1, ok, child_fail, "sscanf failed\n");
-		torture_assert_goto(tctx, ppid == pid, ok, child_fail, "process hierachy not rooted at caller\n");
+		torture_assert_goto(tctx, ppid == pid, ok, child_fail, "process hierarchy not rooted at caller\n");
 
 		_exit(0);
 
@@ -470,11 +470,28 @@ static bool test_tfork_threads(struct torture_context *tctx)
 	bool ok = true;
 	const int num_threads = 64;
 	pthread_t threads[num_threads];
+	sigset_t set;
 	int i;
 
 #ifndef HAVE_PTHREAD
 	torture_skip(tctx, "no pthread support\n");
 #endif
+
+	/*
+	 * Be nasty and taste for the worst case: ensure all threads start with
+	 * SIGCHLD unblocked so we have the most fun with SIGCHLD being
+	 * delivered to a random thread. :)
+	 */
+	sigemptyset(&set);
+	sigaddset(&set, SIGCHLD);
+#ifdef HAVE_PTHREAD
+	ret = pthread_sigmask(SIG_UNBLOCK, &set, NULL);
+#else
+	ret = sigprocmask(SIG_UNBLOCK, &set, NULL);
+#endif
+	if (ret != 0) {
+		return false;
+	}
 
 	for (i = 0; i < num_threads; i++) {
 		ret = pthread_create(&threads[i], NULL, tfork_thread, NULL);
@@ -540,11 +557,21 @@ static bool test_tfork_event_file_handle(struct torture_context *tctx)
 
 	struct tfork *t1 = NULL;
 	pid_t child1;
-	struct pollfd poll1[] = { {-1, POLLIN} };
+	struct pollfd poll1[] = {
+		{
+			.fd = -1,
+			.events = POLLIN,
+		},
+	};
 
 	struct tfork *t2 = NULL;
 	pid_t child2;
-	struct pollfd poll2[] = { {-1, POLLIN} };
+	struct pollfd poll2[] = {
+		{
+			.fd = -1,
+			.events = POLLIN,
+		},
+	};
 
 
 	t1 = tfork_create();
@@ -629,6 +656,9 @@ static bool test_tfork_event_file_handle(struct torture_context *tctx)
 			    "tfork process 2 event fd not readable\n");
 
 done:
+	free(t1);
+	free(t2);
+
 	return ok;
 }
 
@@ -713,7 +743,7 @@ static bool test_tfork_status_handle(struct torture_context *tctx)
 	status = tfork_status(&t2, false);
 	ok = status == -1;
 	torture_assert_goto(tctx, ok, ok, done,
-			    "tfork status avaiable for non terminated "
+			    "tfork status available for non terminated "
 			    "process 2\n");
 	/* Is the event fd open? */
 	fd = dup(ev2_fd);

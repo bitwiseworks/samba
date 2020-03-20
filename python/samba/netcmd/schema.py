@@ -26,7 +26,8 @@ from samba.netcmd import (
     CommandError,
     SuperCommand,
     Option
-    )
+)
+
 
 class cmd_schema_attribute_modify(Command):
     """Modify attribute settings in the schema partition.
@@ -37,7 +38,7 @@ class cmd_schema_attribute_modify(Command):
     so be sure to view the current content before making changes.
 
     Example1:
-    samba-tool schema attribute modify uid \
+    samba-tool schema attribute modify uid \\
         --searchflags="fATTINDEX,fPRESERVEONDELETE"
 
     This alters the uid attribute to be indexed and to be preserved when
@@ -75,13 +76,13 @@ class cmd_schema_attribute_modify(Command):
         "sambaopts": options.SambaOptions,
         "versionopts": options.VersionOptions,
         "credopts": options.CredentialsOptions,
-        }
+    }
 
     takes_options = [
         Option("--searchflags", help="Search Flags for the attribute", type=str),
         Option("-H", "--URL", help="LDB URL for database or target server",
-                type=str, metavar="URL", dest="H"),
-        ]
+               type=str, metavar="URL", dest="H"),
+    ]
 
     takes_args = ["attribute"]
 
@@ -99,7 +100,7 @@ class cmd_schema_attribute_modify(Command):
             flags = searchflags.split(',')
             # We have to normalise all the values. To achieve this predictably
             # we title case (Fattrindex), then swapcase (fATTINDEX)
-            flags = [ x.capitalize().swapcase() for x in flags ]
+            flags = [x.capitalize().swapcase() for x in flags]
             for flag in flags:
                 if flag not in bitFields['searchflags'].keys():
                     raise CommandError("Unknown flag '%s', please see --help" % flag)
@@ -111,7 +112,7 @@ class cmd_schema_attribute_modify(Command):
         creds = credopts.get_credentials(lp)
 
         samdb = SamDB(url=H, session_info=system_session(),
-            credentials=creds, lp=lp)
+                      credentials=creds, lp=lp)
 
         schema_dn = samdb.schema_dn()
         # For now we make assumptions about the CN
@@ -128,6 +129,7 @@ class cmd_schema_attribute_modify(Command):
         samdb.set_schema_update_now()
         self.outf.write("modified %s" % attr_dn)
 
+
 class cmd_schema_attribute_show(Command):
     """Show details about an attribute from the schema.
 
@@ -140,12 +142,12 @@ class cmd_schema_attribute_show(Command):
         "sambaopts": options.SambaOptions,
         "versionopts": options.VersionOptions,
         "credopts": options.CredentialsOptions,
-        }
+    }
 
     takes_options = [
         Option("-H", "--URL", help="LDB URL for database or target server",
-                type=str, metavar="URL", dest="H"),
-        ]
+               type=str, metavar="URL", dest="H"),
+    ]
 
     takes_args = ["attribute"]
 
@@ -154,7 +156,7 @@ class cmd_schema_attribute_show(Command):
         creds = credopts.get_credentials(lp)
 
         samdb = SamDB(url=H, session_info=system_session(),
-            credentials=creds, lp=lp)
+                      credentials=creds, lp=lp)
 
         schema_dn = samdb.schema_dn()
 
@@ -203,6 +205,7 @@ class cmd_schema_attribute_show(Command):
         user_ldif = samdb.write_ldif(res[0], ldb.CHANGETYPE_NONE)
         self.outf.write(user_ldif)
 
+
 class cmd_schema_attribute_show_oc(Command):
     """Show what objectclasses MAY or MUST contain an attribute.
 
@@ -215,12 +218,12 @@ class cmd_schema_attribute_show_oc(Command):
         "sambaopts": options.SambaOptions,
         "versionopts": options.VersionOptions,
         "credopts": options.CredentialsOptions,
-        }
+    }
 
     takes_options = [
         Option("-H", "--URL", help="LDB URL for database or target server",
-                type=str, metavar="URL", dest="H"),
-        ]
+               type=str, metavar="URL", dest="H"),
+    ]
 
     takes_args = ["attribute"]
 
@@ -229,19 +232,19 @@ class cmd_schema_attribute_show_oc(Command):
         creds = credopts.get_credentials(lp)
 
         samdb = SamDB(url=H, session_info=system_session(),
-            credentials=creds, lp=lp)
+                      credentials=creds, lp=lp)
 
         schema_dn = samdb.schema_dn()
 
         may_filt = '(&(objectClass=classSchema)' \
-         '(|(mayContain={0})(systemMayContain={0})))'.format(attribute)
+            '(|(mayContain={0})(systemMayContain={0})))'.format(attribute)
         must_filt = '(&(objectClass=classSchema)' \
-         '(|(mustContain={0})(systemMustContain={0})))'.format(attribute)
+            '(|(mustContain={0})(systemMustContain={0})))'.format(attribute)
 
         may_res = samdb.search(base=schema_dn, scope=ldb.SCOPE_SUBTREE,
-                           expression=may_filt, attrs=['cn'])
+                               expression=may_filt, attrs=['cn'])
         must_res = samdb.search(base=schema_dn, scope=ldb.SCOPE_SUBTREE,
-                           expression=must_filt, attrs=['cn'])
+                                expression=must_filt, attrs=['cn'])
 
         self.outf.write('--- MAY contain ---\n')
         for msg in may_res:
@@ -265,12 +268,12 @@ class cmd_schema_objectclass_show(Command):
         "sambaopts": options.SambaOptions,
         "versionopts": options.VersionOptions,
         "credopts": options.CredentialsOptions,
-        }
+    }
 
     takes_options = [
         Option("-H", "--URL", help="LDB URL for database or target server",
-                type=str, metavar="URL", dest="H"),
-        ]
+               type=str, metavar="URL", dest="H"),
+    ]
 
     takes_args = ["objectclass"]
 
@@ -279,7 +282,7 @@ class cmd_schema_objectclass_show(Command):
         creds = credopts.get_credentials(lp)
 
         samdb = SamDB(url=H, session_info=system_session(),
-            credentials=creds, lp=lp)
+                      credentials=creds, lp=lp)
 
         schema_dn = samdb.schema_dn()
 
@@ -293,6 +296,7 @@ class cmd_schema_objectclass_show(Command):
             user_ldif = samdb.write_ldif(msg, ldb.CHANGETYPE_NONE)
             self.outf.write(user_ldif)
 
+
 class cmd_schema_attribute(SuperCommand):
     """Query and manage attributes in the schema partition."""
     subcommands = {}
@@ -300,10 +304,12 @@ class cmd_schema_attribute(SuperCommand):
     subcommands["show"] = cmd_schema_attribute_show()
     subcommands["show_oc"] = cmd_schema_attribute_show_oc()
 
+
 class cmd_schema_objectclass(SuperCommand):
     """Query and manage objectclasses in the schema partition."""
     subcommands = {}
     subcommands["show"] = cmd_schema_objectclass_show()
+
 
 class cmd_schema(SuperCommand):
     """Schema querying and management."""

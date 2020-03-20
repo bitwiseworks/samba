@@ -1,4 +1,4 @@
-def set_options(opt):
+def options(opt):
     ''' This is a bit strange, but disable is the flag, not enable. '''
     opt.add_option('--disable-fault-handling', action='store_true', dest='disable_fault_handling', help=('disable the fault handlers'), default=False)
 
@@ -20,4 +20,4 @@ def set_options(opt):
 
     opt.add_option('--with-gpfs',
                    help=("Directory under which gpfs headers are installed"),
-                   action="store", dest='gpfs_headers_dir', default="/usr/lpp/mmfs/include/")
+                   action="store", dest='gpfs_headers_dir')

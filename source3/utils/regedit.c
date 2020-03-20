@@ -18,7 +18,7 @@
  */
 
 #include "includes.h"
-#include "popt_common.h"
+#include "popt_common_cmdline.h"
 #include "lib/util/data_blob.h"
 #include "lib/registry/registry.h"
 #include "regedit.h"
@@ -787,6 +787,7 @@ int main(int argc, const char **argv)
 		fprintf(stderr, "Unable to open registry: %s\n",
 			win_errstr(rv));
 		TALLOC_FREE(frame);
+		poptFreeContext(pc);
 
 		return 1;
 	}
@@ -794,6 +795,7 @@ int main(int argc, const char **argv)
 	display_window(frame, ctx);
 
 	TALLOC_FREE(frame);
+	poptFreeContext(pc);
 
 	return 0;
 }

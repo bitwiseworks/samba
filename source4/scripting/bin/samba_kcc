@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Compute our KCC topology
 #
@@ -20,6 +20,7 @@
 #
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
+from __future__ import print_function
 
 import os
 import sys
@@ -249,7 +250,6 @@ parser.add_option("--forget-intersite-links", default=False,
                   help="pretend not to know the existing intersite topology",
                   action="store_true")
 
-
 opts, args = parser.parse_args()
 
 
@@ -278,13 +278,17 @@ if opts.now:
             pass
     else:
         # else happens if break doesn't --> no match
-        print >> sys.stderr, "could not parse time '%s'" % opts.now
+        print("could not parse time '%s'" % (opts.now), file = sys.stderr)
         sys.exit(1)
     unix_now = int(time.mktime(now_tuple))
 else:
     unix_now = int(time.time())
 
 lp = sambaopts.get_loadparm()
+# only log warnings/errors by default, unless the user has specified otherwise
+if opts.debug is None:
+    lp.set('log level', '1')
+
 creds = credopts.get_credentials(lp, fallback_machine=True)
 
 if opts.dburl is None:
@@ -328,7 +332,7 @@ if opts.test_all_reps_from:
     sys.exit()
 
 if opts.list_valid_dsas:
-    print '\n'.join(kcc.list_dsas())
+    print('\n'.join(kcc.list_dsas()))
     sys.exit()
 
 try:
@@ -338,5 +342,5 @@ try:
     sys.exit(rc)
 
 except GraphError as e:
-    print e
+    print( e)
     sys.exit(1)

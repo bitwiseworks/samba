@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Filter out arcs in a dotty graph that are at or below a certain
 # node.  This is useful for visualising parts of the dependency graph.
@@ -7,7 +7,8 @@
 # Command line stuff
 
 from __future__ import print_function
-import sys, sre
+import sys
+import re
 
 if len(sys.argv) != 2:
     print('Usage: depfilter.py NODE')
@@ -22,9 +23,9 @@ lines = sys.stdin.readlines()
 graph = {}
 
 for arc in lines[1:-1]:
-    match = sre.search('"(.*)" -> "(.*)"', arc)
+    match = re.search('"(.*)" -> "(.*)"', arc)
     n1, n2 = match.group(1), match.group(2)
-    if not graph.has_key(n1):
+    if n1 not in graph:
         graph[n1] = []
     graph[n1].append(n2)
 
@@ -32,11 +33,13 @@ for arc in lines[1:-1]:
 
 subgraph = {}
 
+
 def add_deps(node):
-    if graph.has_key(node) and not subgraph.has_key(node):
+    if node in graph and node not in subgraph:
         subgraph[node] = graph[node]
         for n in graph[node]:
             add_deps(n)
+
 
 add_deps(top)
 

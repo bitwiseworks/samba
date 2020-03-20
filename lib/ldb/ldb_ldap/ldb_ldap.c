@@ -141,7 +141,7 @@ static int lldb_add_msg_attr(struct ldb_context *ldb,
 			     struct ldb_message *msg, 
 			     const char *attr, struct berval **bval)
 {
-	int count, i;
+	int count, i, ret;
 	struct ldb_message_element *el;
 
 	count = ldap_count_values_len(bval);
@@ -150,25 +150,12 @@ static int lldb_add_msg_attr(struct ldb_context *ldb,
 		return -1;
 	}
 
-	el = talloc_realloc(msg, msg->elements, struct ldb_message_element, 
-			      msg->num_elements + 1);
-	if (!el) {
+	ret = ldb_msg_add_empty(msg, attr, 0, &el);
+	if (ret != LDB_SUCCESS) {
 		errno = ENOMEM;
 		return -1;
 	}
 
-	msg->elements = el;
-
-	el = &msg->elements[msg->num_elements];
-
-	el->name = talloc_strdup(msg->elements, attr);
-	if (!el->name) {
-		errno = ENOMEM;
-		return -1;
-	}
-	el->flags = 0;
-
-	el->num_values = 0;
 	el->values = talloc_array(msg->elements, struct ldb_val, count);
 	if (!el->values) {
 		errno = ENOMEM;
@@ -492,7 +479,7 @@ static bool lldb_parse_result(struct lldb_context *ac, LDAPMessage *result)
 	char *errmsgp = NULL;
 	LDAPMessage *msg;
 	int type;
-	struct ldb_message *ldbmsg;
+	struct ldb_message *ldbmsg = NULL;
 	char *referral;
 	bool callback_failed;
 	bool request_done;
@@ -537,10 +524,6 @@ static bool lldb_parse_result(struct lldb_context *ac, LDAPMessage *result)
 				break;
 			}
 			ldap_memfree(dn);
-
-			ldbmsg->num_elements = 0;
-			ldbmsg->elements = NULL;
-
 			/* loop over all attributes */
 			for (attr=ldap_first_attribute(lldb->ldap, msg, &berptr);
 			     attr;

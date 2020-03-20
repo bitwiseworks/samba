@@ -523,9 +523,15 @@ int sock_daemon_add_unix(struct sock_daemon_context *sockd,
 	return 0;
 }
 
-void sock_daemon_set_startup_fd(struct sock_daemon_context *sockd, int fd)
+bool sock_daemon_set_startup_fd(struct sock_daemon_context *sockd, int fd)
 {
+	if (! set_close_on_exec(fd)) {
+		D_ERR("Failed to set close-on-exec on startup fd\n");
+		return false;
+	}
+
 	sockd->startup_fd = fd;
+	return true;
 }
 
 /*
@@ -887,7 +893,7 @@ static void sock_daemon_run_socket_fail(struct tevent_req *subreq)
 		subreq, struct tevent_req);
 	struct sock_daemon_run_state *state = tevent_req_data(
 		req, struct sock_daemon_run_state);
-	const char *sockpath = NULL;
+	const char *sockpath = "INVALID";
 	int ret = 0;
 	bool status;
 

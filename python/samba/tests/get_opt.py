@@ -25,8 +25,9 @@ from samba.getopt import (
     DONT_USE_KERBEROS,
     MUST_USE_KERBEROS,
     parse_kerberos_arg,
-    )
+)
 import samba.tests
+
 
 class KerberosOptionTests(samba.tests.TestCase):
 
@@ -52,4 +53,4 @@ class KerberosOptionTests(samba.tests.TestCase):
 
     def test_parse_invalid(self):
         self.assertRaises(optparse.OptionValueError,
-            parse_kerberos_arg, "blah?", "--kerberos")
+                          parse_kerberos_arg, "blah?", "--kerberos")

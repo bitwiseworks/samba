@@ -209,15 +209,6 @@ NTSTATUS dcerpc_pipe_auth(TALLOC_CTX *mem_ctx,
 			  const struct ndr_interface_table *table,
 			  struct cli_credentials *credentials,
 			  struct loadparm_context *lp_ctx);
-NTSTATUS dcerpc_secondary_connection(struct dcerpc_pipe *p,
-				     struct dcerpc_pipe **p2,
-				     const struct dcerpc_binding *b);
-NTSTATUS dcerpc_bind_auth_schannel(TALLOC_CTX *tmp_ctx, 
-				   struct dcerpc_pipe *p,
-				   const struct ndr_interface_table *table,
-				   struct cli_credentials *credentials,
-				   struct loadparm_context *lp_ctx,
-				   uint8_t auth_level);
 NTSTATUS dcerpc_init(void);
 struct composite_context *dcerpc_secondary_smb_send(struct dcecli_connection *c1,
 						    struct dcecli_connection *c2,
@@ -267,9 +258,5 @@ NTSTATUS dcerpc_secondary_auth_connection(struct dcerpc_pipe *p,
 
 struct composite_context* dcerpc_secondary_connection_send(struct dcerpc_pipe *p,
 							   const struct dcerpc_binding *b);
-void dcerpc_log_packet(const char *lockdir, 
-		       const struct ndr_interface_table *ndr,
-		       uint32_t opnum, uint32_t flags,
-		       const DATA_BLOB *pkt);
 
 #endif /* __S4_DCERPC_H__ */

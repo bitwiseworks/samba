@@ -55,7 +55,7 @@ static bool server_id_from_py(PyObject *object, struct server_id *server_id)
 		unsigned long long pid;
 		int task_id, vnn;
 
-		if (!PyArg_ParseTuple(object, "KII", &pid, &task_id, &vnn)) {
+		if (!PyArg_ParseTuple(object, "Kii", &pid, &task_id, &vnn)) {
 			return false;
 		}
 		server_id->pid = pid;
@@ -65,14 +65,14 @@ static bool server_id_from_py(PyObject *object, struct server_id *server_id)
 	} else if (PyTuple_Size(object) == 2) {
 		unsigned long long pid;
 		int task_id;
-		if (!PyArg_ParseTuple(object, "KI", &pid, &task_id))
+		if (!PyArg_ParseTuple(object, "Ki", &pid, &task_id))
 			return false;
 		*server_id = cluster_id(pid, task_id);
 		return true;
 	} else {
 		unsigned long long pid = getpid();
 		int task_id;
-		if (!PyArg_ParseTuple(object, "I", &task_id))
+		if (!PyArg_ParseTuple(object, "i", &task_id))
 			return false;
 		*server_id = cluster_id(pid, task_id);
 		return true;
@@ -157,7 +157,7 @@ static PyObject *py_imessaging_send(PyObject *self, PyObject *args, PyObject *kw
 	const char *kwnames[] = { "target", "msg_type", "data", NULL };
 	Py_ssize_t length;
 
-	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "Ois#:send", 
+	if (!PyArg_ParseTupleAndKeywords(args, kwargs, "OIs#:send",
 		discard_const_p(char *, kwnames), &target, &msg_type, &data.data, &length)) {
 
 		return NULL;
@@ -177,14 +177,24 @@ static PyObject *py_imessaging_send(PyObject *self, PyObject *args, PyObject *kw
 	Py_RETURN_NONE;
 }
 
-static void py_msg_callback_wrapper(struct imessaging_context *msg, void *private_data,
-			       uint32_t msg_type, 
-			       struct server_id server_id, DATA_BLOB *data)
+static void py_msg_callback_wrapper(struct imessaging_context *msg,
+				    void *private_data,
+				    uint32_t msg_type,
+				    struct server_id server_id,
+				    size_t num_fds,
+				    int *fds,
+				    DATA_BLOB *data)
 {
 	PyObject *py_server_id, *callback_and_tuple = (PyObject *)private_data;
 	PyObject *callback, *py_private;
 
 	struct server_id *p_server_id = talloc(NULL, struct server_id);
+
+	if (num_fds != 0) {
+		DBG_WARNING("Received %zu fds, ignoring message\n", num_fds);
+		return;
+	}
+
 	if (!p_server_id) {
 		PyErr_NoMemory();
 		return;
@@ -259,8 +269,6 @@ static PyObject *py_imessaging_deregister(PyObject *self, PyObject *args, PyObje
 
 	imessaging_deregister(iface->msg_ctx, msg_type, callback);
 
-	Py_DECREF(callback);
-
 	Py_RETURN_NONE;
 }
 
@@ -310,7 +318,7 @@ static PyObject *py_imessaging_loop_once(PyObject *self, PyObject *args, PyObjec
 	Py_RETURN_NONE;
 }
 
-static PyObject *py_irpc_add_name(PyObject *self, PyObject *args, PyObject *kwargs)
+static PyObject *py_irpc_add_name(PyObject *self, PyObject *args)
 {
 	imessaging_Object *iface = (imessaging_Object *)self;
 	char *server_name;
@@ -329,7 +337,7 @@ static PyObject *py_irpc_add_name(PyObject *self, PyObject *args, PyObject *kwar
 	Py_RETURN_NONE;
 }
 
-static PyObject *py_irpc_remove_name(PyObject *self, PyObject *args, PyObject *kwargs)
+static PyObject *py_irpc_remove_name(PyObject *self, PyObject *args)
 {
 	imessaging_Object *iface = (imessaging_Object *)self;
 	char *server_name;
@@ -343,7 +351,7 @@ static PyObject *py_irpc_remove_name(PyObject *self, PyObject *args, PyObject *k
 	Py_RETURN_NONE;
 }
 
-static PyObject *py_irpc_servers_byname(PyObject *self, PyObject *args, PyObject *kwargs)
+static PyObject *py_irpc_servers_byname(PyObject *self, PyObject *args)
 {
 	imessaging_Object *iface = (imessaging_Object *)self;
 	char *server_name;
@@ -397,7 +405,8 @@ static PyObject *py_irpc_servers_byname(PyObject *self, PyObject *args, PyObject
 	return pylist;
 }
 
-static PyObject *py_irpc_all_servers(PyObject *self, PyObject *args, PyObject *kwargs)
+static PyObject *py_irpc_all_servers(PyObject *self,
+		PyObject *Py_UNUSED(ignored))
 {
 	imessaging_Object *iface = (imessaging_Object *)self;
 	PyObject *pylist;
@@ -437,16 +446,22 @@ static PyObject *py_irpc_all_servers(PyObject *self, PyObject *args, PyObject *k
 }
 
 static PyMethodDef py_imessaging_methods[] = {
-	{ "send", (PyCFunction)py_imessaging_send, METH_VARARGS|METH_KEYWORDS,
+	{ "send", PY_DISCARD_FUNC_SIG(PyCFunction, py_imessaging_send),
+		METH_VARARGS|METH_KEYWORDS,
 		"S.send(target, msg_type, data) -> None\nSend a message" },
-	{ "register", (PyCFunction)py_imessaging_register, METH_VARARGS|METH_KEYWORDS,
+	{ "register", PY_DISCARD_FUNC_SIG(PyCFunction, py_imessaging_register),
+		METH_VARARGS|METH_KEYWORDS,
 		"S.register((callback, context), msg_type=None) -> msg_type\nRegister a message handler.  "
 	        "The callback and context must be supplied as a two-element tuple." },
-	{ "deregister", (PyCFunction)py_imessaging_deregister, METH_VARARGS|METH_KEYWORDS,
+	{ "deregister", PY_DISCARD_FUNC_SIG(PyCFunction,
+					    py_imessaging_deregister),
+		METH_VARARGS|METH_KEYWORDS,
 		"S.deregister((callback, context), msg_type) -> None\nDeregister a message handler "
 	        "The callback and context must be supplied as the exact same two-element tuple "
 	        "as was used as registration time." },
-	{ "loop_once", (PyCFunction)py_imessaging_loop_once, METH_VARARGS|METH_KEYWORDS,
+	{ "loop_once", PY_DISCARD_FUNC_SIG(PyCFunction,
+					   py_imessaging_loop_once),
+		METH_VARARGS|METH_KEYWORDS,
 		"S.loop_once(timeout) -> None\n"
 	        "Loop on the internal event context until we get an event "
 	        "(which might be a message calling the callback), "
@@ -486,9 +501,12 @@ static PyObject *py_imessaging_server_id(PyObject *obj, void *closure)
 }
 
 static PyGetSetDef py_imessaging_getset[] = {
-	{ discard_const_p(char, "server_id"), py_imessaging_server_id, NULL,
-	  discard_const_p(char, "local server id") },
-	{ NULL },
+	{
+		.name = discard_const_p(char, "server_id"),
+		.get  = py_imessaging_server_id,
+		.doc  = discard_const_p(char, "local server id")
+	},
+	{ .name = NULL },
 };
 
 

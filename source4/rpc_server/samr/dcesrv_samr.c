@@ -41,12 +41,12 @@
 #include "lib/util/tsort.h"
 #include "libds/common/flag_mapping.h"
 
-#define DCESRV_INTERFACE_SAMR_BIND(call, iface) \
-       dcesrv_interface_samr_bind(call, iface)
-static NTSTATUS dcesrv_interface_samr_bind(struct dcesrv_call_state *dce_call,
+#define DCESRV_INTERFACE_SAMR_BIND(context, iface) \
+       dcesrv_interface_samr_bind(context, iface)
+static NTSTATUS dcesrv_interface_samr_bind(struct dcesrv_connection_context *context,
 					     const struct dcesrv_interface *iface)
 {
-	return dcesrv_interface_bind_reject_connect(dce_call, iface);
+	return dcesrv_interface_bind_reject_connect(context, iface);
 }
 
 /* these query macros make samr_Query[User|Group|Alias]Info a bit easier to read */
@@ -145,7 +145,62 @@ static NTSTATUS dcesrv_interface_samr_bind(struct dcesrv_call_state *dce_call,
 	}								\
 } while (0)
 
+/*
+ * Clear a GUID cache
+ */
+static void clear_guid_cache(struct samr_guid_cache *cache)
+{
+	cache->handle = 0;
+	cache->size = 0;
+	TALLOC_FREE(cache->entries);
+}
 
+/*
+ * initialize a GUID cache
+ */
+static void initialize_guid_cache(struct samr_guid_cache *cache)
+{
+	cache->handle = 0;
+	cache->size = 0;
+	cache->entries = NULL;
+}
+
+static NTSTATUS load_guid_cache(
+	struct samr_guid_cache *cache,
+	struct samr_domain_state *d_state,
+	unsigned int ldb_cnt,
+	struct ldb_message **res)
+{
+	NTSTATUS status = NT_STATUS_OK;
+	unsigned int i;
+	TALLOC_CTX *frame = talloc_stackframe();
+
+	clear_guid_cache(cache);
+
+	/*
+	 * Store the GUID's in the cache.
+	 */
+	cache->handle = 0;
+	cache->size = ldb_cnt;
+	cache->entries = talloc_array(d_state, struct GUID, ldb_cnt);
+	if (cache->entries == NULL) {
+		clear_guid_cache(cache);
+		status = NT_STATUS_NO_MEMORY;
+		goto exit;
+	}
+
+	/*
+	 * Extract a list of the GUIDs for all the matching objects
+	 * we cache just the GUIDS to reduce the memory overhead of
+	 * the result cache.
+	 */
+	for (i = 0; i < ldb_cnt; i++) {
+		cache->entries[i] = samdb_result_guid(res[i], "objectGUID");
+	}
+exit:
+	TALLOC_FREE(frame);
+	return status;
+}
 
 /*
   samr_Connect
@@ -155,6 +210,8 @@ static NTSTATUS dcesrv_interface_samr_bind(struct dcesrv_call_state *dce_call,
 static NTSTATUS dcesrv_samr_Connect(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
 			     struct samr_Connect *r)
 {
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
 	struct samr_connect_state *c_state;
 	struct dcesrv_handle *handle;
 
@@ -169,7 +226,7 @@ static NTSTATUS dcesrv_samr_Connect(struct dcesrv_call_state *dce_call, TALLOC_C
 	c_state->sam_ctx = samdb_connect(c_state,
 					 dce_call->event_ctx,
 					 dce_call->conn->dce_ctx->lp_ctx,
-					 dce_call->conn->auth_state.session_info,
+					 session_info,
 					 dce_call->conn->remote_address,
 					 0);
 	if (c_state->sam_ctx == NULL) {
@@ -178,7 +235,7 @@ static NTSTATUS dcesrv_samr_Connect(struct dcesrv_call_state *dce_call, TALLOC_C
 	}
 
 
-	handle = dcesrv_handle_new(dce_call->context, SAMR_HANDLE_CONNECT);
+	handle = dcesrv_handle_create(dce_call, SAMR_HANDLE_CONNECT);
 	if (!handle) {
 		talloc_free(c_state);
 		return NT_STATUS_NO_MEMORY;
@@ -384,6 +441,7 @@ static NTSTATUS dcesrv_samr_OpenDomain(struct dcesrv_call_state *dce_call, TALLO
 	const char * const dom_attrs[] = { "cn", NULL};
 	struct ldb_message **dom_msgs;
 	int ret;
+	unsigned int i;
 
 	ZERO_STRUCTP(r->out.domain_handle);
 
@@ -432,10 +490,15 @@ static NTSTATUS dcesrv_samr_OpenDomain(struct dcesrv_call_state *dce_call, TALLO
 	d_state->connect_state = talloc_reference(d_state, c_state);
 	d_state->sam_ctx = c_state->sam_ctx;
 	d_state->access_mask = r->in.access_mask;
+	d_state->domain_users_cached = NULL;
 
 	d_state->lp_ctx = dce_call->conn->dce_ctx->lp_ctx;
 
-	h_domain = dcesrv_handle_new(dce_call->context, SAMR_HANDLE_DOMAIN);
+	for (i = 0; i < SAMR_LAST_CACHE; i++) {
+		initialize_guid_cache(&d_state->guid_caches[i]);
+	}
+
+	h_domain = dcesrv_handle_create(dce_call, SAMR_HANDLE_DOMAIN);
 	if (!h_domain) {
 		talloc_free(d_state);
 		return NT_STATUS_NO_MEMORY;
@@ -478,6 +541,10 @@ static NTSTATUS dcesrv_samr_info_DomGeneralInformation(struct samr_domain_state 
 						       struct ldb_message **dom_msgs,
 						       struct samr_DomGeneralInformation *info)
 {
+	size_t count = 0;
+	const enum ldb_scope scope = LDB_SCOPE_SUBTREE;
+	int ret = 0;
+
 	/* MS-SAMR 2.2.4.1 - ReplicaSourceNodeName: "domainReplica" attribute */
 	info->primary.string = ldb_msg_find_attr_as_string(dom_msgs[0],
 							   "domainReplica",
@@ -516,21 +583,62 @@ static NTSTATUS dcesrv_samr_info_DomGeneralInformation(struct samr_domain_state 
 		break;
 	}
 
-	info->num_users = samdb_search_count(state->sam_ctx, mem_ctx,
-					     state->domain_dn,
-					     "(objectClass=user)");
-	info->num_groups = samdb_search_count(state->sam_ctx, mem_ctx,
-					      state->domain_dn,
-					      "(&(objectClass=group)(|(groupType=%d)(groupType=%d)))",
-					      GTYPE_SECURITY_UNIVERSAL_GROUP,
-					      GTYPE_SECURITY_GLOBAL_GROUP);
-	info->num_aliases = samdb_search_count(state->sam_ctx, mem_ctx,
-					       state->domain_dn,
-					       "(&(objectClass=group)(|(groupType=%d)(groupType=%d)))",
-					       GTYPE_SECURITY_BUILTIN_LOCAL_GROUP,
-					       GTYPE_SECURITY_DOMAIN_LOCAL_GROUP);
+	/*
+	 * Users are not meant to be in BUILTIN
+	 * so to speed up the query we do not filter on domain_sid
+	 */
+	ret = dsdb_domain_count(
+		state->sam_ctx,
+		&count,
+		state->domain_dn,
+		NULL,
+		scope,
+		"(objectClass=user)");
+	if (ret != LDB_SUCCESS || count > UINT32_MAX) {
+		goto error;
+	}
+	info->num_users = count;
+
+	/*
+	 * Groups are not meant to be in BUILTIN
+	 * so to speed up the query we do not filter on domain_sid
+	 */
+	ret = dsdb_domain_count(
+		state->sam_ctx,
+		&count,
+		state->domain_dn,
+		NULL,
+		scope,
+		"(&(objectClass=group)(|(groupType=%d)(groupType=%d)))",
+		GTYPE_SECURITY_UNIVERSAL_GROUP,
+		GTYPE_SECURITY_GLOBAL_GROUP);
+	if (ret != LDB_SUCCESS || count > UINT32_MAX) {
+		goto error;
+	}
+	info->num_groups = count;
+
+	ret = dsdb_domain_count(
+		state->sam_ctx,
+		&count,
+		state->domain_dn,
+		state->domain_sid,
+		scope,
+		"(&(objectClass=group)(|(groupType=%d)(groupType=%d)))",
+		GTYPE_SECURITY_BUILTIN_LOCAL_GROUP,
+		GTYPE_SECURITY_DOMAIN_LOCAL_GROUP);
+	if (ret != LDB_SUCCESS || count > UINT32_MAX) {
+		goto error;
+	}
+	info->num_aliases = count;
 
 	return NT_STATUS_OK;
+
+error:
+	if (count > UINT32_MAX) {
+		return NT_STATUS_INTEGER_OVERFLOW;
+	}
+	return dsdb_ldb_err_to_ntstatus(ret);
+
 }
 
 /*
@@ -1043,7 +1151,7 @@ static NTSTATUS dcesrv_samr_CreateDomainGroup(struct dcesrv_call_state *dce_call
 	a_state->account_name = talloc_steal(a_state, groupname);
 
 	/* create the policy handle */
-	g_handle = dcesrv_handle_new(dce_call->context, SAMR_HANDLE_GROUP);
+	g_handle = dcesrv_handle_create(dce_call, SAMR_HANDLE_GROUP);
 	if (!g_handle) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -1065,6 +1173,63 @@ static int compare_SamEntry(struct samr_SamEntry *e1, struct samr_SamEntry *e2)
 	return e1->idx - e2->idx;
 }
 
+static int compare_msgRid(struct ldb_message **m1, struct ldb_message **m2) {
+	struct dom_sid *sid1 = NULL;
+	struct dom_sid *sid2 = NULL;
+	uint32_t rid1;
+	uint32_t rid2;
+	int res = 0;
+	NTSTATUS status;
+	TALLOC_CTX *frame = talloc_stackframe();
+
+	sid1 = samdb_result_dom_sid(frame, *m1, "objectSid");
+	sid2 = samdb_result_dom_sid(frame, *m2, "objectSid");
+
+	/*
+	 * If entries don't have a SID we want to sort them to the end of
+	 * the list.
+	 */
+	if (sid1 == NULL && sid2 == NULL) {
+		res = 0;
+		goto exit;
+	} else if (sid2 == NULL) {
+		res = 1;
+		goto exit;
+	} else if (sid1 == NULL) {
+		res = -1;
+		goto exit;
+	}
+
+	/*
+	 * Get and compare the rids, if we fail to extract a rid treat it as a
+	 * missing SID and sort to the end of the list
+	 */
+	status = dom_sid_split_rid(NULL, sid1, NULL, &rid1);
+	if (!NT_STATUS_IS_OK(status)) {
+		res = 1;
+		goto exit;
+	}
+
+	status = dom_sid_split_rid(NULL, sid2, NULL, &rid2);
+	if (!NT_STATUS_IS_OK(status)) {
+		res = -1;
+		goto exit;
+	}
+
+	if (rid1 == rid2) {
+		res = 0;
+	}
+	else if (rid1 > rid2) {
+		res = 1;
+	}
+	else {
+		res = -1;
+	}
+exit:
+	TALLOC_FREE(frame);
+	return res;
+}
+
 /*
   samr_EnumDomainGroups
 */
@@ -1074,11 +1239,17 @@ static NTSTATUS dcesrv_samr_EnumDomainGroups(struct dcesrv_call_state *dce_call,
 	struct dcesrv_handle *h;
 	struct samr_domain_state *d_state;
 	struct ldb_message **res;
-	int i, ldb_cnt;
-	uint32_t first, count;
+	uint32_t i;
+	uint32_t count;
+	uint32_t results;
+	uint32_t max_entries;
+	uint32_t remaining_entries;
+	uint32_t resume_handle;
 	struct samr_SamEntry *entries;
 	const char * const attrs[] = { "objectSid", "sAMAccountName", NULL };
+	const char * const cache_attrs[] = { "objectSid", "objectGUID", NULL };
 	struct samr_SamArray *sam;
+	struct samr_guid_cache *cache = NULL;
 
 	*r->out.resume_handle = 0;
 	*r->out.sam = NULL;
@@ -1087,77 +1258,192 @@ static NTSTATUS dcesrv_samr_EnumDomainGroups(struct dcesrv_call_state *dce_call,
 	DCESRV_PULL_HANDLE(h, r->in.domain_handle, SAMR_HANDLE_DOMAIN);
 
 	d_state = h->data;
+	cache = &d_state->guid_caches[SAMR_ENUM_DOMAIN_GROUPS_CACHE];
 
-	/* search for all domain groups in this domain. This could possibly be
-	   cached and resumed based on resume_key */
-	ldb_cnt = samdb_search_domain(d_state->sam_ctx, mem_ctx,
-				      d_state->domain_dn, &res, attrs,
-				      d_state->domain_sid,
-				      "(&(|(groupType=%d)(groupType=%d))(objectClass=group))",
-				      GTYPE_SECURITY_UNIVERSAL_GROUP,
-				      GTYPE_SECURITY_GLOBAL_GROUP);
-	if (ldb_cnt < 0) {
-		return NT_STATUS_INTERNAL_DB_CORRUPTION;
-	}
-
-	/* convert to SamEntry format */
-	entries = talloc_array(mem_ctx, struct samr_SamEntry, ldb_cnt);
-	if (!entries) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	count = 0;
-
-	for (i=0;i<ldb_cnt;i++) {
-		struct dom_sid *group_sid;
-
-		group_sid = samdb_result_dom_sid(mem_ctx, res[i],
-						 "objectSid");
-		if (group_sid == NULL) {
+	/*
+	 * If the resume_handle is zero, query the database and cache the
+	 * matching GUID's
+	 */
+	if (*r->in.resume_handle == 0) {
+		NTSTATUS status;
+		int ldb_cnt;
+		clear_guid_cache(cache);
+		/*
+		 * search for all domain groups in this domain.
+		 */
+		ldb_cnt = samdb_search_domain(
+		    d_state->sam_ctx,
+		    mem_ctx,
+		    d_state->domain_dn,
+		    &res,
+		    cache_attrs,
+		    d_state->domain_sid,
+		    "(&(|(groupType=%d)(groupType=%d))(objectClass=group))",
+		    GTYPE_SECURITY_UNIVERSAL_GROUP,
+		    GTYPE_SECURITY_GLOBAL_GROUP);
+		if (ldb_cnt < 0) {
 			return NT_STATUS_INTERNAL_DB_CORRUPTION;
 		}
+		/*
+		 * Sort the results into RID order, while the spec states there
+		 * is no order, Windows appears to sort the results by RID and
+		 * so it is possible that there are clients that depend on
+		 * this ordering
+		 */
+		TYPESAFE_QSORT(res, ldb_cnt, compare_msgRid);
 
-		entries[count].idx =
-			group_sid->sub_auths[group_sid->num_auths-1];
-		entries[count].name.string =
-			ldb_msg_find_attr_as_string(res[i], "sAMAccountName", "");
-		count += 1;
+		/*
+		 * cache the sorted GUID's
+		 */
+		status = load_guid_cache(cache, d_state, ldb_cnt, res);
+		TALLOC_FREE(res);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
+		cache->handle = 0;
 	}
 
-	/* sort the results by rid */
-	TYPESAFE_QSORT(entries, count, compare_SamEntry);
 
-	/* find the first entry to return */
-	for (first=0;
-	     first<count && entries[first].idx <= *r->in.resume_handle;
-	     first++) ;
+	/*
+	 * If the resume handle is out of range we return an empty response
+	 * and invalidate the cache.
+	 *
+	 * From the specification:
+	 * Servers SHOULD validate that EnumerationContext is an expected
+	 * value for the server's implementation. Windows does NOT validate
+	 * the input, though the result of malformed information merely results
+	 * in inconsistent output to the client.
+	 */
+	if (*r->in.resume_handle >= cache->size) {
+		clear_guid_cache(cache);
+		sam = talloc(mem_ctx, struct samr_SamArray);
+		if (!sam) {
+			return NT_STATUS_NO_MEMORY;
+		}
+		sam->entries = NULL;
+		sam->count = 0;
 
-	/* return the rest, limit by max_size. Note that we
-	   use the w2k3 element size value of 54 */
-	*r->out.num_entries = count - first;
-	*r->out.num_entries = MIN(*r->out.num_entries,
-				 1+(r->in.max_size/SAMR_ENUM_USERS_MULTIPLIER));
-
-	sam = talloc(mem_ctx, struct samr_SamArray);
-	if (!sam) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	sam->entries = entries+first;
-	sam->count = *r->out.num_entries;
-
-	*r->out.sam = sam;
-
-	if (first == count) {
+		*r->out.sam = sam;
+		*r->out.resume_handle = 0;
 		return NT_STATUS_OK;
 	}
 
-	if (*r->out.num_entries < count - first) {
-		*r->out.resume_handle = entries[first+*r->out.num_entries-1].idx;
-		return STATUS_MORE_ENTRIES;
+
+	/*
+	 * Calculate the number of entries to return limit by max_size.
+	 * Note that we use the w2k3 element size value of 54
+	 */
+	max_entries = 1 + (r->in.max_size/SAMR_ENUM_USERS_MULTIPLIER);
+	remaining_entries = cache->size - *r->in.resume_handle;
+	results = MIN(remaining_entries, max_entries);
+
+	/*
+	 * Process the list of result GUID's.
+	 * Read the details of each object and populate the Entries
+	 * for the current level.
+	 */
+	count = 0;
+	resume_handle = *r->in.resume_handle;
+	entries = talloc_array(mem_ctx, struct samr_SamEntry, results);
+	if (entries == NULL) {
+		clear_guid_cache(cache);
+		return NT_STATUS_NO_MEMORY;
+	}
+	for (i = 0; i < results; i++) {
+		struct dom_sid *objectsid;
+		uint32_t rid;
+		struct ldb_result *rec;
+		const uint32_t idx = *r->in.resume_handle + i;
+		int ret;
+		NTSTATUS status;
+		const char *name = NULL;
+		resume_handle++;
+		/*
+		 * Read an object from disk using the GUID as the key
+		 *
+		 * If the object can not be read, or it does not have a SID
+		 * it is ignored.
+		 *
+		 * As a consequence of this, if all the remaining GUID's
+		 * have been deleted an empty result will be returned.
+		 * i.e. even if the previous call returned a non zero
+		 * resume_handle it is possible for no results to be returned.
+		 *
+		 */
+		ret = dsdb_search_by_dn_guid(d_state->sam_ctx,
+					     mem_ctx,
+					     &rec,
+					     &cache->entries[idx],
+					     attrs,
+					     0);
+		if (ret == LDB_ERR_NO_SUCH_OBJECT) {
+			struct GUID_txt_buf guid_buf;
+			DBG_WARNING(
+			    "GUID [%s] not found\n",
+			    GUID_buf_string(&cache->entries[idx], &guid_buf));
+			continue;
+		} else if (ret != LDB_SUCCESS) {
+			clear_guid_cache(cache);
+			return NT_STATUS_INTERNAL_DB_CORRUPTION;
+		}
+
+		objectsid = samdb_result_dom_sid(mem_ctx,
+						 rec->msgs[0],
+						 "objectSID");
+		if (objectsid == NULL) {
+			struct GUID_txt_buf guid_buf;
+			DBG_WARNING(
+			    "objectSID for GUID [%s] not found\n",
+			    GUID_buf_string(&cache->entries[idx], &guid_buf));
+			continue;
+		}
+		status = dom_sid_split_rid(NULL,
+					   objectsid,
+					   NULL,
+					   &rid);
+		if (!NT_STATUS_IS_OK(status)) {
+			struct dom_sid_buf sid_buf;
+			struct GUID_txt_buf guid_buf;
+			DBG_WARNING(
+			    "objectSID [%s] for GUID [%s] invalid\n",
+			    dom_sid_str_buf(objectsid, &sid_buf),
+			    GUID_buf_string(&cache->entries[idx], &guid_buf));
+			continue;
+		}
+
+		entries[count].idx = rid;
+		name = ldb_msg_find_attr_as_string(
+		    rec->msgs[0], "sAMAccountName", "");
+		entries[count].name.string = talloc_strdup(entries, name);
+		count++;
 	}
 
-	return NT_STATUS_OK;
+	sam = talloc(mem_ctx, struct samr_SamArray);
+	if (!sam) {
+		clear_guid_cache(cache);
+		return NT_STATUS_NO_MEMORY;
+	}
+
+	sam->entries = entries;
+	sam->count = count;
+
+	*r->out.sam = sam;
+	*r->out.resume_handle = resume_handle;
+	*r->out.num_entries = count;
+
+	/*
+	 * Signal no more results by returning zero resume handle,
+	 * the cache is also cleared at this point
+	 */
+	if (*r->out.resume_handle >= cache->size) {
+		*r->out.resume_handle = 0;
+		clear_guid_cache(cache);
+		return NT_STATUS_OK;
+	}
+	/*
+	 * There are more results to be returned.
+	 */
+	return STATUS_MORE_ENTRIES;
 }
 
 
@@ -1221,7 +1507,7 @@ static NTSTATUS dcesrv_samr_CreateUser2(struct dcesrv_call_state *dce_call, TALL
 	}
 
 	/* create the policy handle */
-	u_handle = dcesrv_handle_new(dce_call->context, SAMR_HANDLE_USER);
+	u_handle = dcesrv_handle_create(dce_call, SAMR_HANDLE_USER);
 	if (!u_handle) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -1262,21 +1548,178 @@ static NTSTATUS dcesrv_samr_CreateUser(struct dcesrv_call_state *dce_call, TALLO
 	return dcesrv_samr_CreateUser2(dce_call, mem_ctx, &r2);
 }
 
+struct enum_dom_users_ctx {
+	struct samr_SamEntry *entries;
+	uint32_t num_entries;
+	uint32_t acct_flags;
+	struct dom_sid *domain_sid;
+};
+
+static int user_iterate_callback(struct ldb_request *req,
+				 struct ldb_reply *ares);
+
 /*
-  samr_EnumDomainUsers
-*/
-static NTSTATUS dcesrv_samr_EnumDomainUsers(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
-				     struct samr_EnumDomainUsers *r)
+ * Iterate users and add all those that match a domain SID and pass an acct
+ * flags check to an array of SamEntry objects.
+ */
+static int user_iterate_callback(struct ldb_request *req,
+				 struct ldb_reply *ares)
+{
+	struct enum_dom_users_ctx *ac =\
+		talloc_get_type(req->context, struct enum_dom_users_ctx);
+	int ret = LDB_ERR_OPERATIONS_ERROR;
+
+	if (!ares) {
+		return ldb_request_done(req, LDB_ERR_OPERATIONS_ERROR);
+	}
+	if (ares->error != LDB_SUCCESS) {
+		return ldb_request_done(req, ares->error);
+	}
+
+	switch (ares->type) {
+	case LDB_REPLY_ENTRY:
+	{
+		struct ldb_message *msg = ares->message;
+		const struct ldb_val *val;
+		struct samr_SamEntry *ent;
+		struct dom_sid objectsid;
+		uint32_t rid;
+		size_t entries_array_len = 0;
+		NTSTATUS status;
+		ssize_t sid_size;
+
+		if (ac->acct_flags && ((samdb_result_acct_flags(msg, NULL) &
+					ac->acct_flags) == 0)) {
+			ret = LDB_SUCCESS;
+			break;
+		}
+
+		val = ldb_msg_find_ldb_val(msg, "objectSID");
+		if (val == NULL) {
+			DBG_WARNING("objectSID for DN %s not found\n",
+				    ldb_dn_get_linearized(msg->dn));
+			ret = ldb_request_done(req, LDB_ERR_OPERATIONS_ERROR);
+			break;
+		}
+
+		sid_size = sid_parse(val->data, val->length, &objectsid);
+		if (sid_size == -1) {
+			struct dom_sid_buf sid_buf;
+			DBG_WARNING("objectsid [%s] for DN [%s] invalid\n",
+				    dom_sid_str_buf(&objectsid, &sid_buf),
+				    ldb_dn_get_linearized(msg->dn));
+			ret = ldb_request_done(req, LDB_ERR_OPERATIONS_ERROR);
+			break;
+		}
+
+		if (!dom_sid_in_domain(ac->domain_sid, &objectsid)) {
+			/* Ignore if user isn't in the domain */
+			ret = LDB_SUCCESS;
+			break;
+		}
+
+		status = dom_sid_split_rid(ares, &objectsid, NULL, &rid);
+		if (!NT_STATUS_IS_OK(status)) {
+			struct dom_sid_buf sid_buf;
+			DBG_WARNING("Couldn't split RID from "
+				    "SID [%s] of DN [%s]\n",
+				    dom_sid_str_buf(&objectsid, &sid_buf),
+				    ldb_dn_get_linearized(msg->dn));
+			ret = ldb_request_done(req, LDB_ERR_OPERATIONS_ERROR);
+			break;
+		}
+
+		entries_array_len = talloc_array_length(ac->entries);
+		if (ac->num_entries >= entries_array_len) {
+			if (entries_array_len * 2 < entries_array_len) {
+				ret = ldb_request_done(req,
+					LDB_ERR_OPERATIONS_ERROR);
+				break;
+			}
+			ac->entries = talloc_realloc(ac,
+						     ac->entries,
+						     struct samr_SamEntry,
+						     entries_array_len * 2);
+			if (ac->entries == NULL) {
+				ret = ldb_request_done(req,
+					LDB_ERR_OPERATIONS_ERROR);
+				break;
+			}
+		}
+
+		ent = &(ac->entries[ac->num_entries++]);
+		val = ldb_msg_find_ldb_val(msg, "samaccountname");
+		if (val == NULL) {
+			DBG_WARNING("samaccountname attribute not found\n");
+			ret = ldb_request_done(req, LDB_ERR_OPERATIONS_ERROR);
+			break;
+		}
+		ent->name.string = talloc_steal(ac->entries,
+					        (char *)val->data);
+		ent->idx = rid;
+		ret = LDB_SUCCESS;
+		break;
+	}
+	case LDB_REPLY_DONE:
+	{
+		if (ac->num_entries != 0 &&
+		    ac->num_entries != talloc_array_length(ac->entries)) {
+			ac->entries = talloc_realloc(ac,
+						     ac->entries,
+						     struct samr_SamEntry,
+						     ac->num_entries);
+			if (ac->entries == NULL) {
+				ret = ldb_request_done(req,
+					LDB_ERR_OPERATIONS_ERROR);
+				break;
+			}
+		}
+		ret = ldb_request_done(req, LDB_SUCCESS);
+		break;
+	}
+	case LDB_REPLY_REFERRAL:
+	{
+		ret = LDB_SUCCESS;
+		break;
+	}
+	default:
+		/* Doesn't happen */
+		ret = LDB_ERR_OPERATIONS_ERROR;
+	}
+	TALLOC_FREE(ares);
+
+	return ret;
+}
+
+/*
+ * samr_EnumDomainUsers
+ * The previous implementation did an initial search and stored a list of
+ * matching GUIDs on the connection handle's domain state, then did direct
+ * GUID lookups for each record in a page indexed by resume_handle. That
+ * approach was memory efficient, requiring only 16 bytes per record, but
+ * was too slow for winbind which needs this RPC call for getpwent.
+ *
+ * Now we use an iterate pattern to populate a cached list of the rids and
+ * names for each record. This improves runtime performance but requires
+ * about 200 bytes per record which will mean for a 100k database we use
+ * about 2MB, which is fine. The speedup achieved by this new approach is
+ * around 50%.
+ */
+static NTSTATUS dcesrv_samr_EnumDomainUsers(struct dcesrv_call_state *dce_call,
+					    TALLOC_CTX *mem_ctx,
+					    struct samr_EnumDomainUsers *r)
 {
 	struct dcesrv_handle *h;
 	struct samr_domain_state *d_state;
-	struct ldb_message **res;
-	int i, ldb_cnt;
-	uint32_t first, count;
+	uint32_t results;
+	uint32_t max_entries;
+	uint32_t num_entries;
+	uint32_t remaining_entries;
 	struct samr_SamEntry *entries;
 	const char * const attrs[] = { "objectSid", "sAMAccountName",
 		"userAccountControl", NULL };
 	struct samr_SamArray *sam;
+	struct ldb_request *req;
 
 	*r->out.resume_handle = 0;
 	*r->out.sam = NULL;
@@ -1285,73 +1728,140 @@ static NTSTATUS dcesrv_samr_EnumDomainUsers(struct dcesrv_call_state *dce_call, 
 	DCESRV_PULL_HANDLE(h, r->in.domain_handle, SAMR_HANDLE_DOMAIN);
 
 	d_state = h->data;
+	entries = d_state->domain_users_cached;
 
-	/* search for all domain users in this domain. This could possibly be
-	   cached and resumed on resume_key */
-	ldb_cnt = samdb_search_domain(d_state->sam_ctx, mem_ctx,
-				      d_state->domain_dn,
-				      &res, attrs,
-				      d_state->domain_sid,
-				      "(objectClass=user)");
-	if (ldb_cnt < 0) {
-		return NT_STATUS_INTERNAL_DB_CORRUPTION;
-	}
-
-	/* convert to SamEntry format */
-	entries = talloc_array(mem_ctx, struct samr_SamEntry, ldb_cnt);
-	if (!entries) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	count = 0;
-
-	for (i=0;i<ldb_cnt;i++) {
-		/* Check if a mask has been requested */
-		if (r->in.acct_flags
-		    && ((samdb_result_acct_flags(res[i], NULL) & r->in.acct_flags) == 0)) {
-			continue;
+	/*
+	 * If the resume_handle is zero, query the database and cache the
+	 * matching entries.
+	 */
+	if (*r->in.resume_handle == 0) {
+		int ret;
+		struct enum_dom_users_ctx *ac;
+		if (entries != NULL) {
+			talloc_free(entries);
+			d_state->domain_users_cached = NULL;
 		}
-		entries[count].idx = samdb_result_rid_from_sid(mem_ctx, res[i],
-							       "objectSid", 0);
-		entries[count].name.string = ldb_msg_find_attr_as_string(res[i],
-								 "sAMAccountName", "");
-		count += 1;
+
+		ac = talloc(mem_ctx, struct enum_dom_users_ctx);
+		ac->num_entries = 0;
+		ac->domain_sid = d_state->domain_sid;
+		ac->entries = talloc_array(ac,
+					   struct samr_SamEntry,
+					   100);
+		if (ac->entries == NULL) {
+			talloc_free(ac);
+			return NT_STATUS_NO_MEMORY;
+		}
+		ac->acct_flags = r->in.acct_flags;
+
+		ret = ldb_build_search_req(&req,
+					   d_state->sam_ctx,
+					   mem_ctx,
+					   d_state->domain_dn,
+					   LDB_SCOPE_SUBTREE,
+					   "(objectClass=user)",
+					   attrs,
+					   NULL,
+					   ac,
+					   user_iterate_callback,
+					   NULL);
+		if (ret != LDB_SUCCESS) {
+			talloc_free(ac);
+			return dsdb_ldb_err_to_ntstatus(ret);
+		}
+
+		ret = ldb_request(d_state->sam_ctx, req);
+		if (ret != LDB_SUCCESS) {
+			talloc_free(ac);
+			return dsdb_ldb_err_to_ntstatus(ret);
+		}
+
+		ret = ldb_wait(req->handle, LDB_WAIT_ALL);
+		if (ret != LDB_SUCCESS) {
+			return dsdb_ldb_err_to_ntstatus(ret);
+		}
+
+		if (ac->num_entries == 0) {
+			DBG_WARNING("No users in domain %s",
+				    ldb_dn_get_linearized(d_state->domain_dn));
+			talloc_free(ac);
+			return NT_STATUS_OK;
+		}
+
+		entries = talloc_steal(d_state, ac->entries);
+		d_state->domain_users_cached = entries;
+		num_entries = ac->num_entries;
+		talloc_free(ac);
+
+		/*
+		 * Sort the entries into RID order, while the spec states there
+		 * is no order, Windows appears to sort the results by RID and
+		 * so it is possible that there are clients that depend on
+		 * this ordering
+		 */
+		TYPESAFE_QSORT(entries, num_entries, compare_SamEntry);
+	} else {
+		num_entries = talloc_array_length(entries);
 	}
 
-	/* sort the results by rid */
-	TYPESAFE_QSORT(entries, count, compare_SamEntry);
+	/*
+	 * If the resume handle is out of range we return an empty response
+	 * and invalidate the cache.
+	 *
+	 * From the specification:
+	 * Servers SHOULD validate that EnumerationContext is an expected
+	 * value for the server's implementation. Windows does NOT validate
+	 * the input, though the result of malformed information merely results
+	 * in inconsistent output to the client.
+	 */
+	if (*r->in.resume_handle >= num_entries) {
+		talloc_free(entries);
+		d_state->domain_users_cached = NULL;
+		sam = talloc(mem_ctx, struct samr_SamArray);
+		if (!sam) {
+			return NT_STATUS_NO_MEMORY;
+		}
+		sam->entries = NULL;
+		sam->count = 0;
 
-	/* find the first entry to return */
-	for (first=0;
-	     first<count && entries[first].idx <= *r->in.resume_handle;
-	     first++) ;
-
-	/* return the rest, limit by max_size. Note that we
-	   use the w2k3 element size value of 54 */
-	*r->out.num_entries = count - first;
-	*r->out.num_entries = MIN(*r->out.num_entries,
-				 1+(r->in.max_size/SAMR_ENUM_USERS_MULTIPLIER));
-
-	sam = talloc(mem_ctx, struct samr_SamArray);
-	if (!sam) {
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	sam->entries = entries+first;
-	sam->count = *r->out.num_entries;
-
-	*r->out.sam = sam;
-
-	if (first == count) {
+		*r->out.sam = sam;
+		*r->out.resume_handle = 0;
 		return NT_STATUS_OK;
 	}
 
-	if (*r->out.num_entries < count - first) {
-		*r->out.resume_handle = entries[first+*r->out.num_entries-1].idx;
-		return STATUS_MORE_ENTRIES;
+	/*
+	 * Calculate the number of entries to return limit by max_size.
+	 * Note that we use the w2k3 element size value of 54
+	 */
+	max_entries = 1 + (r->in.max_size / SAMR_ENUM_USERS_MULTIPLIER);
+	remaining_entries = num_entries - *r->in.resume_handle;
+	results = MIN(remaining_entries, max_entries);
+
+	sam = talloc(mem_ctx, struct samr_SamArray);
+	if (!sam) {
+		d_state->domain_users_cached = NULL;
+		return NT_STATUS_NO_MEMORY;
 	}
 
-	return NT_STATUS_OK;
+	sam->entries = entries + *r->in.resume_handle;
+	sam->count = results;
+
+	*r->out.sam = sam;
+	*r->out.resume_handle = *r->in.resume_handle + results;
+	*r->out.num_entries = results;
+
+	/*
+	 * Signal no more results by returning zero resume handle,
+	 * the cache is also cleared at this point
+	 */
+	if (*r->out.resume_handle >= num_entries) {
+		*r->out.resume_handle = 0;
+		return NT_STATUS_OK;
+	}
+	/*
+	 * There are more results to be returned.
+	 */
+	return STATUS_MORE_ENTRIES;
 }
 
 
@@ -1406,7 +1916,7 @@ static NTSTATUS dcesrv_samr_CreateDomAlias(struct dcesrv_call_state *dce_call, T
 	a_state->account_name = talloc_steal(a_state, alias_name);
 
 	/* create the policy handle */
-	a_handle = dcesrv_handle_new(dce_call->context, SAMR_HANDLE_ALIAS);
+	a_handle = dcesrv_handle_create(dce_call, SAMR_HANDLE_ALIAS);
 	if (a_handle == NULL)
 		return NT_STATUS_NO_MEMORY;
 
@@ -1532,7 +2042,6 @@ static NTSTATUS dcesrv_samr_GetAliasMembership(struct dcesrv_call_state *dce_cal
 	struct ldb_message **res;
 	uint32_t i;
 	int count = 0;
-	char membersidstr[DOM_SID_STR_BUFLEN];
 
 	DCESRV_PULL_HANDLE(h, r->in.domain_handle, SAMR_HANDLE_DOMAIN);
 
@@ -1548,11 +2057,13 @@ static NTSTATUS dcesrv_samr_GetAliasMembership(struct dcesrv_call_state *dce_cal
 	}
 
 	for (i=0; i<r->in.sids->num_sids; i++) {
-		dom_sid_string_buf(r->in.sids->sids[i].sid,
-				   membersidstr, sizeof(membersidstr));
+		struct dom_sid_buf buf;
 
-		filter = talloc_asprintf_append(filter, "(member=<SID=%s>)",
-						membersidstr);
+		filter = talloc_asprintf_append(
+			filter,
+			"(member=<SID=%s>)",
+			dom_sid_str_buf(r->in.sids->sids[i].sid, &buf));
+
 		if (filter == NULL) {
 			return NT_STATUS_NO_MEMORY;
 		}
@@ -1796,7 +2307,7 @@ static NTSTATUS dcesrv_samr_OpenGroup(struct dcesrv_call_state *dce_call, TALLOC
 	}
 
 	/* create the policy handle */
-	g_handle = dcesrv_handle_new(dce_call->context, SAMR_HANDLE_GROUP);
+	g_handle = dcesrv_handle_create(dce_call, SAMR_HANDLE_GROUP);
 	if (!g_handle) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -2256,7 +2767,7 @@ static NTSTATUS dcesrv_samr_OpenAlias(struct dcesrv_call_state *dce_call, TALLOC
 	}
 
 	/* create the policy handle */
-	g_handle = dcesrv_handle_new(dce_call->context, SAMR_HANDLE_ALIAS);
+	g_handle = dcesrv_handle_create(dce_call, SAMR_HANDLE_ALIAS);
 	if (!g_handle) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -2639,7 +3150,7 @@ static NTSTATUS dcesrv_samr_OpenUser(struct dcesrv_call_state *dce_call, TALLOC_
 	}
 
 	/* create the policy handle */
-	u_handle = dcesrv_handle_new(dce_call->context, SAMR_HANDLE_USER);
+	u_handle = dcesrv_handle_create(dce_call, SAMR_HANDLE_USER);
 	if (!u_handle) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -3706,167 +4217,114 @@ static NTSTATUS dcesrv_samr_GetGroupsForUser(struct dcesrv_call_state *dce_call,
 	return NT_STATUS_OK;
 }
 
-
 /*
-  samr_QueryDisplayInfo
-*/
+ * samr_QueryDisplayInfo
+ *
+ * A cache of the GUID's matching the last query is maintained
+ * in the SAMR_QUERY_DISPLAY_INFO_CACHE guid_cache maintained o
+ * n the dcesrv_handle.
+ */
 static NTSTATUS dcesrv_samr_QueryDisplayInfo(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
 		       struct samr_QueryDisplayInfo *r)
 {
 	struct dcesrv_handle *h;
 	struct samr_domain_state *d_state;
 	struct ldb_result *res;
-	unsigned int i;
-	uint32_t count;
-	const char * const attrs[] = { "objectSid", "sAMAccountName",
-		"displayName", "description", "userAccountControl",
-		"pwdLastSet", NULL };
+	uint32_t i;
+	uint32_t results = 0;
+	uint32_t count = 0;
+	const char *const cache_attrs[] = {"objectGUID", NULL};
+	const char *const attrs[] = {
+	    "objectSID", "sAMAccountName", "displayName", "description", NULL};
 	struct samr_DispEntryFull *entriesFull = NULL;
 	struct samr_DispEntryFullGroup *entriesFullGroup = NULL;
 	struct samr_DispEntryAscii *entriesAscii = NULL;
 	struct samr_DispEntryGeneral *entriesGeneral = NULL;
 	const char *filter;
 	int ret;
+	NTSTATUS status;
+	struct samr_guid_cache *cache = NULL;
 
 	DCESRV_PULL_HANDLE(h, r->in.domain_handle, SAMR_HANDLE_DOMAIN);
 
 	d_state = h->data;
 
-	switch (r->in.level) {
-	case 1:
-	case 4:
-		filter = talloc_asprintf(mem_ctx, "(&(objectclass=user)"
-					 "(sAMAccountType=%d))",
-					 ATYPE_NORMAL_ACCOUNT);
-		break;
-	case 2:
-		filter = talloc_asprintf(mem_ctx, "(&(objectclass=user)"
-					 "(sAMAccountType=%d))",
-					 ATYPE_WORKSTATION_TRUST);
-		break;
-	case 3:
-	case 5:
-		filter = talloc_asprintf(mem_ctx,
-					 "(&(|(groupType=%d)(groupType=%d))"
-					 "(objectClass=group))",
-					 GTYPE_SECURITY_UNIVERSAL_GROUP,
-					 GTYPE_SECURITY_GLOBAL_GROUP);
-		break;
-	default:
-		return NT_STATUS_INVALID_INFO_CLASS;
-	}
+	cache = &d_state->guid_caches[SAMR_QUERY_DISPLAY_INFO_CACHE];
+	/*
+	 * Can the cached results be used?
+	 * The cache is discarded if the start index is zero, or the requested
+	 * level is different from that in the cache.
+	 */
+	if ((r->in.start_idx == 0) || (r->in.level != cache->handle)) {
+		/*
+		 * The cached results can not be used, so will need to query
+		 * the database.
+		 */
 
-	/* search for all requested objects in all domains. This could
-	   possibly be cached and resumed based on resume_key */
-	ret = dsdb_search(d_state->sam_ctx, mem_ctx, &res, ldb_get_default_basedn(d_state->sam_ctx),
-			  LDB_SCOPE_SUBTREE, attrs, 0, "%s", filter);
-	if (ret != LDB_SUCCESS) {
-		return NT_STATUS_INTERNAL_DB_CORRUPTION;
-	}
-	if ((res->count == 0) || (r->in.max_entries == 0)) {
-		return NT_STATUS_OK;
-	}
-
-	switch (r->in.level) {
-	case 1:
-		entriesGeneral = talloc_array(mem_ctx,
-					      struct samr_DispEntryGeneral,
-					      res->count);
-		break;
-	case 2:
-		entriesFull = talloc_array(mem_ctx,
-					   struct samr_DispEntryFull,
-					   res->count);
-		break;
-	case 3:
-		entriesFullGroup = talloc_array(mem_ctx,
-						struct samr_DispEntryFullGroup,
-						res->count);
-		break;
-	case 4:
-	case 5:
-		entriesAscii = talloc_array(mem_ctx,
-					    struct samr_DispEntryAscii,
-					    res->count);
-		break;
-	}
-
-	if ((entriesGeneral == NULL) && (entriesFull == NULL) &&
-	    (entriesAscii == NULL) && (entriesFullGroup == NULL))
-		return NT_STATUS_NO_MEMORY;
-
-	count = 0;
-
-	for (i = 0; i < res->count; i++) {
-		struct dom_sid *objectsid;
-
-		objectsid = samdb_result_dom_sid(mem_ctx, res->msgs[i],
-						 "objectSid");
-		if (objectsid == NULL)
-			continue;
-
-		switch(r->in.level) {
+		/*
+		 * Get the search filter for the current level
+		 */
+		switch (r->in.level) {
 		case 1:
-			entriesGeneral[count].idx = count + 1;
-			entriesGeneral[count].rid =
-				objectsid->sub_auths[objectsid->num_auths-1];
-			entriesGeneral[count].acct_flags =
-				samdb_result_acct_flags(res->msgs[i], NULL);
-			entriesGeneral[count].account_name.string =
-				ldb_msg_find_attr_as_string(res->msgs[i],
-							    "sAMAccountName", "");
-			entriesGeneral[count].full_name.string =
-				ldb_msg_find_attr_as_string(res->msgs[i],
-							    "displayName", "");
-			entriesGeneral[count].description.string =
-				ldb_msg_find_attr_as_string(res->msgs[i],
-							    "description", "");
+		case 4:
+			filter = talloc_asprintf(mem_ctx,
+						 "(&(objectclass=user)"
+						 "(sAMAccountType=%d))",
+						 ATYPE_NORMAL_ACCOUNT);
 			break;
 		case 2:
-			entriesFull[count].idx = count + 1;
-			entriesFull[count].rid =
-				objectsid->sub_auths[objectsid->num_auths-1];
-
-			/* No idea why we need to or in ACB_NORMAL here, but this is what Win2k3 seems to do... */
-			entriesFull[count].acct_flags =
-				samdb_result_acct_flags(res->msgs[i],
-							NULL) | ACB_NORMAL;
-			entriesFull[count].account_name.string =
-				ldb_msg_find_attr_as_string(res->msgs[i],
-							    "sAMAccountName", "");
-			entriesFull[count].description.string =
-				ldb_msg_find_attr_as_string(res->msgs[i],
-							    "description", "");
+			filter = talloc_asprintf(mem_ctx,
+						 "(&(objectclass=user)"
+						 "(sAMAccountType=%d))",
+						 ATYPE_WORKSTATION_TRUST);
 			break;
 		case 3:
-			entriesFullGroup[count].idx = count + 1;
-			entriesFullGroup[count].rid =
-				objectsid->sub_auths[objectsid->num_auths-1];
-			/* We get a "7" here for groups */
-			entriesFullGroup[count].acct_flags
-				= SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT | SE_GROUP_ENABLED;
-			entriesFullGroup[count].account_name.string =
-				ldb_msg_find_attr_as_string(res->msgs[i],
-							    "sAMAccountName", "");
-			entriesFullGroup[count].description.string =
-				ldb_msg_find_attr_as_string(res->msgs[i],
-							    "description", "");
-			break;
-		case 4:
 		case 5:
-			entriesAscii[count].idx = count + 1;
-			entriesAscii[count].account_name.string =
-				ldb_msg_find_attr_as_string(res->msgs[i],
-							    "sAMAccountName", "");
+			filter =
+			    talloc_asprintf(mem_ctx,
+					    "(&(|(groupType=%d)(groupType=%d))"
+					    "(objectClass=group))",
+					    GTYPE_SECURITY_UNIVERSAL_GROUP,
+					    GTYPE_SECURITY_GLOBAL_GROUP);
 			break;
+		default:
+			return NT_STATUS_INVALID_INFO_CLASS;
+		}
+		clear_guid_cache(cache);
+
+		/*
+		 * search for all requested objects in all domains.
+		 */
+		ret = dsdb_search(d_state->sam_ctx,
+				  mem_ctx,
+				  &res,
+				  ldb_get_default_basedn(d_state->sam_ctx),
+				  LDB_SCOPE_SUBTREE,
+				  cache_attrs,
+				  0,
+				  "%s",
+				  filter);
+		if (ret != LDB_SUCCESS) {
+			return NT_STATUS_INTERNAL_DB_CORRUPTION;
+		}
+		if ((res->count == 0) || (r->in.max_entries == 0)) {
+			return NT_STATUS_OK;
 		}
 
-		count += 1;
+		status = load_guid_cache(cache, d_state, res->count, res->msgs);
+		TALLOC_FREE(res);
+		if (!NT_STATUS_IS_OK(status)) {
+			return status;
+		}
+		cache->handle = r->in.level;
 	}
+	*r->out.total_size = cache->size;
 
-	*r->out.total_size = count;
-
-	if (r->in.start_idx >= count) {
+	/*
+	 * if there are no entries or the requested start index is greater
+	 * than the number of entries, we return an empty response.
+	 */
+	if (r->in.start_idx >= cache->size) {
 		*r->out.returned_size = 0;
 		switch(r->in.level) {
 		case 1:
@@ -3890,40 +4348,202 @@ static NTSTATUS dcesrv_samr_QueryDisplayInfo(struct dcesrv_call_state *dce_call,
 			r->out.info->info5.entries = NULL;
 			break;
 		}
-	} else {
-		*r->out.returned_size = MIN(count - r->in.start_idx,
-					   r->in.max_entries);
-		switch(r->in.level) {
-		case 1:
-			r->out.info->info1.count = *r->out.returned_size;
-			r->out.info->info1.entries =
-				&(entriesGeneral[r->in.start_idx]);
-			break;
-		case 2:
-			r->out.info->info2.count = *r->out.returned_size;
-			r->out.info->info2.entries =
-				&(entriesFull[r->in.start_idx]);
-			break;
-		case 3:
-			r->out.info->info3.count = *r->out.returned_size;
-			r->out.info->info3.entries =
-				&(entriesFullGroup[r->in.start_idx]);
-			break;
-		case 4:
-			r->out.info->info4.count = *r->out.returned_size;
-			r->out.info->info4.entries =
-				&(entriesAscii[r->in.start_idx]);
-			break;
-		case 5:
-			r->out.info->info5.count = *r->out.returned_size;
-			r->out.info->info5.entries =
-				&(entriesAscii[r->in.start_idx]);
-			break;
-		}
+		return NT_STATUS_OK;
 	}
 
-	return (*r->out.returned_size < (count - r->in.start_idx)) ?
-		STATUS_MORE_ENTRIES : NT_STATUS_OK;
+	/*
+	 * Allocate an array of the appropriate result structures for the
+	 * current query level.
+	 *
+	 * r->in.start_idx is always < cache->size due to the check above
+	 */
+	results = MIN((cache->size - r->in.start_idx), r->in.max_entries);
+	switch (r->in.level) {
+	case 1:
+		entriesGeneral = talloc_array(
+		    mem_ctx, struct samr_DispEntryGeneral, results);
+		break;
+	case 2:
+		entriesFull =
+		    talloc_array(mem_ctx, struct samr_DispEntryFull, results);
+		break;
+	case 3:
+		entriesFullGroup = talloc_array(
+		    mem_ctx, struct samr_DispEntryFullGroup, results);
+		break;
+	case 4:
+	case 5:
+		entriesAscii =
+		    talloc_array(mem_ctx, struct samr_DispEntryAscii, results);
+		break;
+	}
+
+	if ((entriesGeneral == NULL) && (entriesFull == NULL) &&
+	    (entriesAscii == NULL) && (entriesFullGroup == NULL))
+		return NT_STATUS_NO_MEMORY;
+
+	/*
+	 * Process the list of result GUID's.
+	 * Read the details of each object and populate the result structure
+	 * for the current level.
+	 */
+	count = 0;
+	for (i = 0; i < results; i++) {
+		struct dom_sid *objectsid;
+		struct ldb_result *rec;
+		const uint32_t idx = r->in.start_idx + i;
+		uint32_t rid;
+
+		/*
+		 * Read an object from disk using the GUID as the key
+		 *
+		 * If the object can not be read, or it does not have a SID
+		 * it is ignored.  In this case the number of entries returned
+		 * will be less than the requested size, there will also be
+		 * a gap in the idx numbers in the returned elements e.g. if
+		 * there are 3 GUIDs a, b, c in the cache and b is deleted from
+		 * disk then details for a, and c will be returned with
+		 * idx values of 1 and 3 respectively.
+		 *
+		 */
+		ret = dsdb_search_by_dn_guid(d_state->sam_ctx,
+					     mem_ctx,
+					     &rec,
+					     &cache->entries[idx],
+					     attrs,
+					     0);
+		if (ret == LDB_ERR_NO_SUCH_OBJECT) {
+			struct GUID_txt_buf guid_buf;
+			char *guid_str =
+				GUID_buf_string(&cache->entries[idx],
+						&guid_buf);
+			DBG_WARNING("GUID [%s] not found\n", guid_str);
+			continue;
+		} else if (ret != LDB_SUCCESS) {
+			clear_guid_cache(cache);
+			return NT_STATUS_INTERNAL_DB_CORRUPTION;
+		}
+		objectsid = samdb_result_dom_sid(mem_ctx,
+						 rec->msgs[0],
+						 "objectSID");
+		if (objectsid == NULL) {
+			struct GUID_txt_buf guid_buf;
+			DBG_WARNING(
+			    "objectSID for GUID [%s] not found\n",
+			    GUID_buf_string(&cache->entries[idx], &guid_buf));
+			continue;
+		}
+		status = dom_sid_split_rid(NULL,
+					   objectsid,
+					   NULL,
+					   &rid);
+		if (!NT_STATUS_IS_OK(status)) {
+			struct dom_sid_buf sid_buf;
+			struct GUID_txt_buf guid_buf;
+			DBG_WARNING(
+			    "objectSID [%s] for GUID [%s] invalid\n",
+			    dom_sid_str_buf(objectsid, &sid_buf),
+			    GUID_buf_string(&cache->entries[idx], &guid_buf));
+			continue;
+		}
+
+		/*
+		 * Populate the result structure for the current object
+		 */
+		switch(r->in.level) {
+		case 1:
+
+			entriesGeneral[count].idx = idx + 1;
+			entriesGeneral[count].rid = rid;
+
+			entriesGeneral[count].acct_flags =
+			    samdb_result_acct_flags(rec->msgs[0], NULL);
+			entriesGeneral[count].account_name.string =
+			    ldb_msg_find_attr_as_string(
+				rec->msgs[0], "sAMAccountName", "");
+			entriesGeneral[count].full_name.string =
+			    ldb_msg_find_attr_as_string(
+				rec->msgs[0], "displayName", "");
+			entriesGeneral[count].description.string =
+			    ldb_msg_find_attr_as_string(
+				rec->msgs[0], "description", "");
+			break;
+		case 2:
+			entriesFull[count].idx = idx + 1;
+			entriesFull[count].rid = rid;
+
+			/*
+			 * No idea why we need to or in ACB_NORMAL here,
+			 * but this is what Win2k3 seems to do...
+			 */
+			entriesFull[count].acct_flags =
+			    samdb_result_acct_flags(rec->msgs[0], NULL) |
+			    ACB_NORMAL;
+			entriesFull[count].account_name.string =
+			    ldb_msg_find_attr_as_string(
+				rec->msgs[0], "sAMAccountName", "");
+			entriesFull[count].description.string =
+			    ldb_msg_find_attr_as_string(
+				rec->msgs[0], "description", "");
+			break;
+		case 3:
+			entriesFullGroup[count].idx = idx + 1;
+			entriesFullGroup[count].rid = rid;
+
+			/*
+			 * We get a "7" here for groups
+			 */
+			entriesFullGroup[count].acct_flags =
+			    SE_GROUP_MANDATORY | SE_GROUP_ENABLED_BY_DEFAULT |
+			    SE_GROUP_ENABLED;
+			entriesFullGroup[count].account_name.string =
+			    ldb_msg_find_attr_as_string(
+				rec->msgs[0], "sAMAccountName", "");
+			entriesFullGroup[count].description.string =
+			    ldb_msg_find_attr_as_string(
+				rec->msgs[0], "description", "");
+			break;
+		case 4:
+		case 5:
+			entriesAscii[count].idx = idx + 1;
+			entriesAscii[count].account_name.string =
+			    ldb_msg_find_attr_as_string(
+				rec->msgs[0], "sAMAccountName", "");
+			break;
+		}
+		count++;
+	}
+
+	/*
+	 * Build the response based on the request level.
+	 */
+	*r->out.returned_size = count;
+	switch(r->in.level) {
+	case 1:
+		r->out.info->info1.count = count;
+		r->out.info->info1.entries = entriesGeneral;
+		break;
+	case 2:
+		r->out.info->info2.count = count;
+		r->out.info->info2.entries = entriesFull;
+		break;
+	case 3:
+		r->out.info->info3.count = count;
+		r->out.info->info3.entries = entriesFullGroup;
+		break;
+	case 4:
+		r->out.info->info4.count = count;
+		r->out.info->info4.entries = entriesAscii;
+		break;
+	case 5:
+		r->out.info->info5.count = count;
+		r->out.info->info5.entries = entriesAscii;
+		break;
+	}
+
+	return ((r->in.start_idx + results) < cache->size)
+		   ? STATUS_MORE_ENTRIES
+		   : NT_STATUS_OK;
 }
 
 
@@ -4057,10 +4677,11 @@ static NTSTATUS dcesrv_samr_QueryDomainInfo2(struct dcesrv_call_state *dce_call,
 	struct samr_QueryDomainInfo r1;
 	NTSTATUS status;
 
-	ZERO_STRUCT(r1.out);
-	r1.in.domain_handle = r->in.domain_handle;
-	r1.in.level  = r->in.level;
-	r1.out.info  = r->out.info;
+	r1 = (struct samr_QueryDomainInfo) {
+		.in.domain_handle = r->in.domain_handle,
+		.in.level  = r->in.level,
+		.out.info  = r->out.info,
+	};
 
 	status = dcesrv_samr_QueryDomainInfo(dce_call, mem_ctx, &r1);
 
@@ -4100,14 +4721,16 @@ static NTSTATUS dcesrv_samr_QueryDisplayInfo2(struct dcesrv_call_state *dce_call
 	struct samr_QueryDisplayInfo q;
 	NTSTATUS result;
 
-	q.in.domain_handle = r->in.domain_handle;
-	q.in.level = r->in.level;
-	q.in.start_idx = r->in.start_idx;
-	q.in.max_entries = r->in.max_entries;
-	q.in.buf_size = r->in.buf_size;
-	q.out.total_size = r->out.total_size;
-	q.out.returned_size = r->out.returned_size;
-	q.out.info = r->out.info;
+	q = (struct samr_QueryDisplayInfo) {
+		.in.domain_handle = r->in.domain_handle,
+		.in.level = r->in.level,
+		.in.start_idx = r->in.start_idx,
+		.in.max_entries = r->in.max_entries,
+		.in.buf_size = r->in.buf_size,
+		.out.total_size = r->out.total_size,
+		.out.returned_size = r->out.returned_size,
+		.out.info = r->out.info,
+	};
 
 	result = dcesrv_samr_QueryDisplayInfo(dce_call, mem_ctx, &q);
 
@@ -4134,14 +4757,16 @@ static NTSTATUS dcesrv_samr_QueryDisplayInfo3(struct dcesrv_call_state *dce_call
 	struct samr_QueryDisplayInfo q;
 	NTSTATUS result;
 
-	q.in.domain_handle = r->in.domain_handle;
-	q.in.level = r->in.level;
-	q.in.start_idx = r->in.start_idx;
-	q.in.max_entries = r->in.max_entries;
-	q.in.buf_size = r->in.buf_size;
-	q.out.total_size = r->out.total_size;
-	q.out.returned_size = r->out.returned_size;
-	q.out.info = r->out.info;
+	q = (struct samr_QueryDisplayInfo) {
+		.in.domain_handle = r->in.domain_handle,
+		.in.level = r->in.level,
+		.in.start_idx = r->in.start_idx,
+		.in.max_entries = r->in.max_entries,
+		.in.buf_size = r->in.buf_size,
+		.out.total_size = r->out.total_size,
+		.out.returned_size = r->out.returned_size,
+		.out.info = r->out.info,
+	};
 
 	result = dcesrv_samr_QueryDisplayInfo(dce_call, mem_ctx, &q);
 
@@ -4180,6 +4805,8 @@ static NTSTATUS dcesrv_samr_RemoveMultipleMembersFromAlias(struct dcesrv_call_st
 static NTSTATUS dcesrv_samr_GetDomPwInfo(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
 				  struct samr_GetDomPwInfo *r)
 {
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
 	struct ldb_message **msgs;
 	int ret;
 	const char * const attrs[] = {"minPwdLength", "pwdProperties", NULL };
@@ -4190,7 +4817,7 @@ static NTSTATUS dcesrv_samr_GetDomPwInfo(struct dcesrv_call_state *dce_call, TAL
 	sam_ctx = samdb_connect(mem_ctx,
 				dce_call->event_ctx,
 				dce_call->conn->dce_ctx->lp_ctx,
-				dce_call->conn->auth_state.session_info,
+				session_info,
 				dce_call->conn->remote_address,
 				0);
 	if (sam_ctx == NULL) {
@@ -4232,9 +4859,11 @@ static NTSTATUS dcesrv_samr_Connect2(struct dcesrv_call_state *dce_call, TALLOC_
 {
 	struct samr_Connect c;
 
-	c.in.system_name = NULL;
-	c.in.access_mask = r->in.access_mask;
-	c.out.connect_handle = r->out.connect_handle;
+	c = (struct samr_Connect) {
+		.in.system_name = NULL,
+		.in.access_mask = r->in.access_mask,
+		.out.connect_handle = r->out.connect_handle,
+	};
 
 	return dcesrv_samr_Connect(dce_call, mem_ctx, &c);
 }
@@ -4250,9 +4879,11 @@ static NTSTATUS dcesrv_samr_SetUserInfo2(struct dcesrv_call_state *dce_call, TAL
 {
 	struct samr_SetUserInfo r2;
 
-	r2.in.user_handle = r->in.user_handle;
-	r2.in.level = r->in.level;
-	r2.in.info = r->in.info;
+	r2 = (struct samr_SetUserInfo) {
+		.in.user_handle = r->in.user_handle,
+		.in.level = r->in.level,
+		.in.info = r->in.info,
+	};
 
 	return dcesrv_samr_SetUserInfo(dce_call, mem_ctx, &r2);
 }
@@ -4287,9 +4918,11 @@ static NTSTATUS dcesrv_samr_Connect3(struct dcesrv_call_state *dce_call, TALLOC_
 {
 	struct samr_Connect c;
 
-	c.in.system_name = NULL;
-	c.in.access_mask = r->in.access_mask;
-	c.out.connect_handle = r->out.connect_handle;
+	c = (struct samr_Connect) {
+		.in.system_name = NULL,
+		.in.access_mask = r->in.access_mask,
+		.out.connect_handle = r->out.connect_handle,
+	};
 
 	return dcesrv_samr_Connect(dce_call, mem_ctx, &c);
 }
@@ -4303,9 +4936,11 @@ static NTSTATUS dcesrv_samr_Connect4(struct dcesrv_call_state *dce_call, TALLOC_
 {
 	struct samr_Connect c;
 
-	c.in.system_name = NULL;
-	c.in.access_mask = r->in.access_mask;
-	c.out.connect_handle = r->out.connect_handle;
+	c = (struct samr_Connect) {
+		.in.system_name = NULL,
+		.in.access_mask = r->in.access_mask,
+		.out.connect_handle = r->out.connect_handle,
+	};
 
 	return dcesrv_samr_Connect(dce_call, mem_ctx, &c);
 }
@@ -4320,9 +4955,11 @@ static NTSTATUS dcesrv_samr_Connect5(struct dcesrv_call_state *dce_call, TALLOC_
 	struct samr_Connect c;
 	NTSTATUS status;
 
-	c.in.system_name = NULL;
-	c.in.access_mask = r->in.access_mask;
-	c.out.connect_handle = r->out.connect_handle;
+	c = (struct samr_Connect) {
+		.in.system_name = NULL,
+		.in.access_mask = r->in.access_mask,
+		.out.connect_handle = r->out.connect_handle,
+	};
 
 	status = dcesrv_samr_Connect(dce_call, mem_ctx, &c);
 
@@ -4379,24 +5016,30 @@ static NTSTATUS dcesrv_samr_ValidatePassword(struct dcesrv_call_state *dce_call,
 {
 	struct samr_GetDomPwInfo r2;
 	struct samr_PwInfo pwInfo;
+	const char *account = NULL;
 	DATA_BLOB password;
 	enum samr_ValidationStatus res;
 	NTSTATUS status;
 	enum dcerpc_transport_t transport =
 		dcerpc_binding_get_transport(dce_call->conn->endpoint->ep_description);
+	enum dcerpc_AuthLevel auth_level = DCERPC_AUTH_LEVEL_NONE;
 
 	if (transport != NCACN_IP_TCP && transport != NCALRPC) {
 		DCESRV_FAULT(DCERPC_FAULT_ACCESS_DENIED);
 	}
 
-	if (dce_call->conn->auth_state.auth_level != DCERPC_AUTH_LEVEL_PRIVACY) {
+	dcesrv_call_auth_info(dce_call, NULL, &auth_level);
+	if (auth_level != DCERPC_AUTH_LEVEL_PRIVACY) {
 		DCESRV_FAULT(DCERPC_FAULT_ACCESS_DENIED);
 	}
 
 	(*r->out.rep) = talloc_zero(mem_ctx, union samr_ValidatePasswordRep);
 
-	r2.in.domain_name = NULL;
-	r2.out.info = &pwInfo;
+	r2 = (struct samr_GetDomPwInfo) {
+		.in.domain_name = NULL,
+		.out.info = &pwInfo,
+	};
+
 	status = dcesrv_samr_GetDomPwInfo(dce_call, mem_ctx, &r2);
 	if (!NT_STATUS_IS_OK(status)) {
 		return status;
@@ -4408,20 +5051,28 @@ static NTSTATUS dcesrv_samr_ValidatePassword(struct dcesrv_call_state *dce_call,
 		return NT_STATUS_NOT_SUPPORTED;
 	break;
 	case NetValidatePasswordChange:
+		account = r->in.req->req2.account.string;
 		password = data_blob_const(r->in.req->req2.password.string,
 					   r->in.req->req2.password.length);
 		res = samdb_check_password(mem_ctx,
 					   dce_call->conn->dce_ctx->lp_ctx,
+					   account,
+					   NULL, /* userPrincipalName */
+					   NULL, /* displayName/full_name */
 					   &password,
 					   pwInfo.password_properties,
 					   pwInfo.min_password_length);
 		(*r->out.rep)->ctr2.status = res;
 	break;
 	case NetValidatePasswordReset:
+		account = r->in.req->req3.account.string;
 		password = data_blob_const(r->in.req->req3.password.string,
 					   r->in.req->req3.password.length);
 		res = samdb_check_password(mem_ctx,
 					   dce_call->conn->dce_ctx->lp_ctx,
+					   account,
+					   NULL, /* userPrincipalName */
+					   NULL, /* displayName/full_name */
 					   &password,
 					   pwInfo.password_properties,
 					   pwInfo.min_password_length);

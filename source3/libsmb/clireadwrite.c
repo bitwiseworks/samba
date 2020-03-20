@@ -580,7 +580,7 @@ static void cli_pull_chunk_done(struct tevent_req *subreq)
 		struct cli_pull_state);
 	NTSTATUS status;
 	size_t expected = chunk->total_size - chunk->tmp_size;
-	ssize_t received;
+	ssize_t received = 0;
 	uint8_t *buf = NULL;
 
 	chunk->subreq = NULL;
@@ -700,7 +700,133 @@ NTSTATUS cli_pull(struct cli_state *cli, uint16_t fnum,
 	return status;
 }
 
-static NTSTATUS cli_read_sink(char *buf, size_t n, void *priv)
+struct cli_read_state {
+	struct cli_state *cli;
+	char *buf;
+	size_t buflen;
+	size_t received;
+};
+
+static void cli_read_done(struct tevent_req *subreq);
+
+struct tevent_req *cli_read_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct cli_state *cli,
+	uint16_t fnum,
+	char *buf,
+	off_t offset,
+	size_t size)
+{
+	struct tevent_req *req, *subreq;
+	struct cli_read_state *state;
+
+	req = tevent_req_create(mem_ctx, &state, struct cli_read_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	state->cli = cli;
+	state->buf = buf;
+	state->buflen = size;
+
+	if (smbXcli_conn_protocol(state->cli->conn) >= PROTOCOL_SMB2_02) {
+		uint32_t max_size;
+		bool ok;
+
+		ok = smb2cli_conn_req_possible(state->cli->conn, &max_size);
+		if (!ok) {
+			tevent_req_nterror(
+				req,
+				NT_STATUS_INSUFFICIENT_RESOURCES);
+			return tevent_req_post(req, ev);
+		}
+
+		/*
+		 * downgrade depending on the available credits
+		 */
+		size = MIN(max_size, size);
+
+		subreq = cli_smb2_read_send(
+			state, ev, cli, fnum, offset, size);
+		if (tevent_req_nomem(subreq, req)) {
+			return tevent_req_post(req, ev);
+		}
+	} else {
+		bool ok;
+		ok = smb1cli_conn_req_possible(state->cli->conn);
+		if (!ok) {
+			tevent_req_nterror(
+				req,
+				NT_STATUS_INSUFFICIENT_RESOURCES);
+			return tevent_req_post(req, ev);
+		}
+
+		subreq = cli_read_andx_send(
+			state, ev, cli, fnum, offset, size);
+		if (tevent_req_nomem(subreq, req)) {
+			return tevent_req_post(req, ev);
+		}
+	}
+
+	tevent_req_set_callback(subreq, cli_read_done, req);
+
+	return req;
+}
+
+static void cli_read_done(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+	struct cli_read_state *state = tevent_req_data(
+		req, struct cli_read_state);
+	NTSTATUS status;
+	ssize_t received;
+	uint8_t *buf = NULL;
+
+	if (smbXcli_conn_protocol(state->cli->conn) >= PROTOCOL_SMB2_02) {
+		status = cli_smb2_read_recv(subreq, &received, &buf);
+	} else {
+		status = cli_read_andx_recv(subreq, &received, &buf);
+	}
+
+	if (NT_STATUS_EQUAL(status, NT_STATUS_END_OF_FILE)) {
+		received = 0;
+		status = NT_STATUS_OK;
+	}
+	if (tevent_req_nterror(req, status)) {
+		return;
+	}
+	if ((buf == NULL) || (received < 0) || (received > state->buflen)) {
+		state->received = 0;
+		tevent_req_nterror(req, NT_STATUS_UNEXPECTED_IO_ERROR);
+		return;
+	}
+
+	memcpy(state->buf, buf, received);
+	state->received = received;
+	tevent_req_done(req);
+}
+
+NTSTATUS cli_read_recv(struct tevent_req *req, size_t *received)
+{
+	struct cli_read_state *state = tevent_req_data(
+		req, struct cli_read_state);
+	NTSTATUS status;
+
+	if (tevent_req_is_nterror(req, &status)) {
+		return status;
+	}
+	if (received != NULL) {
+		*received = state->received;
+	}
+	return NT_STATUS_OK;
+}
+
+/*
+ * Helper function for cli_pull(). This takes a chunk of data (buf) read from
+ * a remote file and copies it into the return buffer (priv).
+ */
+NTSTATUS cli_read_sink(char *buf, size_t n, void *priv)
 {
 	char **pbuf = (char **)priv;
 	memcpy(*pbuf, buf, n);
@@ -713,7 +839,7 @@ NTSTATUS cli_read(struct cli_state *cli, uint16_t fnum,
 		 size_t *nread)
 {
 	NTSTATUS status;
-	off_t ret;
+	off_t ret = 0;
 
 	status = cli_pull(cli, fnum, offset, size, size,
 			  cli_read_sink, &buf, &ret);
@@ -943,7 +1069,131 @@ NTSTATUS cli_write_andx_recv(struct tevent_req *req, size_t *pwritten)
 	return NT_STATUS_OK;
 }
 
-struct cli_writeall_state {
+struct cli_write_state {
+	struct cli_state *cli;
+	size_t written;
+};
+
+static void cli_write_done(struct tevent_req *subreq);
+
+/*
+ * Used to write to a file remotely.
+ * This is similar in functionality to cli_push_send(), except this is a more
+ * finer-grain API. For example, if the data we want to write exceeds the max
+ * write size of the underlying connection, then it's the caller's
+ * responsibility to handle this.
+ * For writing a small amount of data to file, this is a simpler API to use.
+ */
+struct tevent_req *cli_write_send(TALLOC_CTX *mem_ctx,
+				  struct tevent_context *ev,
+				  struct cli_state *cli, uint16_t fnum,
+				  uint16_t mode, const uint8_t *buf,
+				  off_t offset, size_t size)
+{
+	struct tevent_req *req = NULL;
+	struct cli_write_state *state = NULL;
+	struct tevent_req *subreq = NULL;
+
+	req = tevent_req_create(mem_ctx, &state, struct cli_write_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	state->cli = cli;
+
+	if (smbXcli_conn_protocol(cli->conn) >= PROTOCOL_SMB2_02) {
+		uint32_t max_size;
+		bool ok;
+
+		ok = smb2cli_conn_req_possible(state->cli->conn, &max_size);
+		if (!ok) {
+			tevent_req_nterror(
+				req,
+				NT_STATUS_INSUFFICIENT_RESOURCES);
+			return tevent_req_post(req, ev);
+		}
+
+		/*
+		 * downgrade depending on the available credits
+		 */
+		size = MIN(max_size, size);
+
+		subreq = cli_smb2_write_send(state,
+					     ev,
+					     cli,
+					     fnum,
+					     mode,
+					     buf,
+					     offset,
+					     size);
+	} else {
+		bool ok;
+
+		ok = smb1cli_conn_req_possible(state->cli->conn);
+		if (!ok) {
+			tevent_req_nterror(
+				req,
+				NT_STATUS_INSUFFICIENT_RESOURCES);
+			return tevent_req_post(req, ev);
+		}
+
+		subreq = cli_write_andx_send(state,
+					     ev,
+					     cli,
+					     fnum,
+					     mode,
+					     buf,
+					     offset,
+					     size);
+	}
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, cli_write_done, req);
+
+	return req;
+}
+
+static void cli_write_done(struct tevent_req *subreq)
+{
+	struct tevent_req *req =
+		tevent_req_callback_data(subreq,
+		struct tevent_req);
+	struct cli_write_state *state =
+		tevent_req_data(req,
+		struct cli_write_state);
+	NTSTATUS status;
+
+	if (smbXcli_conn_protocol(state->cli->conn) >= PROTOCOL_SMB2_02) {
+		status = cli_smb2_write_recv(subreq, &state->written);
+	} else {
+		status = cli_write_andx_recv(subreq, &state->written);
+	}
+	TALLOC_FREE(subreq);
+	if (tevent_req_nterror(req, status)) {
+		return;
+	}
+	tevent_req_done(req);
+}
+
+NTSTATUS cli_write_recv(struct tevent_req *req, size_t *pwritten)
+{
+	struct cli_write_state *state =
+		tevent_req_data(req,
+		struct cli_write_state);
+	NTSTATUS status;
+
+	if (tevent_req_is_nterror(req, &status)) {
+		tevent_req_received(req);
+		return status;
+	}
+	if (pwritten != NULL) {
+		*pwritten = state->written;
+	}
+	tevent_req_received(req);
+	return NT_STATUS_OK;
+}
+
+struct cli_smb1_writeall_state {
 	struct tevent_context *ev;
 	struct cli_state *cli;
 	uint16_t fnum;
@@ -954,20 +1204,21 @@ struct cli_writeall_state {
 	size_t written;
 };
 
-static void cli_writeall_written(struct tevent_req *req);
+static void cli_smb1_writeall_written(struct tevent_req *req);
 
-static struct tevent_req *cli_writeall_send(TALLOC_CTX *mem_ctx,
-					    struct tevent_context *ev,
-					    struct cli_state *cli,
-					    uint16_t fnum,
-					    uint16_t mode,
-					    const uint8_t *buf,
-					    off_t offset, size_t size)
+static struct tevent_req *cli_smb1_writeall_send(TALLOC_CTX *mem_ctx,
+						 struct tevent_context *ev,
+						 struct cli_state *cli,
+						 uint16_t fnum,
+						 uint16_t mode,
+						 const uint8_t *buf,
+						 off_t offset, size_t size)
 {
 	struct tevent_req *req, *subreq;
-	struct cli_writeall_state *state;
+	struct cli_smb1_writeall_state *state;
 
-	req = tevent_req_create(mem_ctx, &state, struct cli_writeall_state);
+	req = tevent_req_create(mem_ctx, &state,
+				struct cli_smb1_writeall_state);
 	if (req == NULL) {
 		return NULL;
 	}
@@ -986,18 +1237,18 @@ static struct tevent_req *cli_writeall_send(TALLOC_CTX *mem_ctx,
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
-	tevent_req_set_callback(subreq, cli_writeall_written, req);
+	tevent_req_set_callback(subreq, cli_smb1_writeall_written, req);
 	return req;
 }
 
-static void cli_writeall_written(struct tevent_req *subreq)
+static void cli_smb1_writeall_written(struct tevent_req *subreq)
 {
 	struct tevent_req *req = tevent_req_callback_data(
 		subreq, struct tevent_req);
-	struct cli_writeall_state *state = tevent_req_data(
-		req, struct cli_writeall_state);
+	struct cli_smb1_writeall_state *state = tevent_req_data(
+		req, struct cli_smb1_writeall_state);
 	NTSTATUS status;
-	size_t written, to_write;
+	size_t written = 0, to_write;
 
 	status = cli_write_andx_recv(subreq, &written);
 	TALLOC_FREE(subreq);
@@ -1026,11 +1277,102 @@ static void cli_writeall_written(struct tevent_req *subreq)
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
-	tevent_req_set_callback(subreq, cli_writeall_written, req);
+	tevent_req_set_callback(subreq, cli_smb1_writeall_written, req);
 }
 
-static NTSTATUS cli_writeall_recv(struct tevent_req *req,
-				  size_t *pwritten)
+static NTSTATUS cli_smb1_writeall_recv(struct tevent_req *req,
+				       size_t *pwritten)
+{
+	struct cli_smb1_writeall_state *state = tevent_req_data(
+		req, struct cli_smb1_writeall_state);
+	NTSTATUS status;
+
+	if (tevent_req_is_nterror(req, &status)) {
+		return status;
+	}
+	if (pwritten != NULL) {
+		*pwritten = state->written;
+	}
+	return NT_STATUS_OK;
+}
+
+struct cli_writeall_state {
+	struct cli_state *cli;
+	size_t written;
+};
+
+static void cli_writeall_done(struct tevent_req *subreq);
+
+struct tevent_req *cli_writeall_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct cli_state *cli,
+	uint16_t fnum,
+	uint16_t mode,
+	const uint8_t *buf,
+	off_t offset,
+	size_t size)
+{
+	struct tevent_req *req, *subreq;
+	struct cli_writeall_state *state;
+
+	req = tevent_req_create(mem_ctx, &state, struct cli_writeall_state);
+	if (req == NULL) {
+		return NULL;
+	}
+	state->cli = cli;
+
+	if (smbXcli_conn_protocol(cli->conn) >= PROTOCOL_SMB2_02) {
+		subreq = cli_smb2_writeall_send(
+			state,
+			ev,
+			cli,
+			fnum,
+			mode,
+			buf,
+			offset,
+			size);
+	} else {
+		subreq = cli_smb1_writeall_send(
+			state,
+			ev,
+			cli,
+			fnum,
+			mode,
+			buf,
+			offset,
+			size);
+	}
+
+	if (tevent_req_nomem(subreq, req)) {
+		return tevent_req_post(req, ev);
+	}
+	tevent_req_set_callback(subreq, cli_writeall_done, req);
+
+	return req;
+}
+
+static void cli_writeall_done(struct tevent_req *subreq)
+{
+	struct tevent_req *req = tevent_req_callback_data(
+		subreq, struct tevent_req);
+	struct cli_writeall_state *state = tevent_req_data(
+		req, struct cli_writeall_state);
+	NTSTATUS status;
+
+	if (smbXcli_conn_protocol(state->cli->conn) >= PROTOCOL_SMB2_02) {
+		status = cli_smb2_writeall_recv(subreq, &state->written);
+	} else {
+		status = cli_smb1_writeall_recv(subreq, &state->written);
+	}
+	TALLOC_FREE(subreq);
+	if (tevent_req_nterror(req, status)) {
+		return;
+	}
+	tevent_req_done(req);
+}
+
+NTSTATUS cli_writeall_recv(struct tevent_req *req, size_t *pwritten)
 {
 	struct cli_writeall_state *state = tevent_req_data(
 		req, struct cli_writeall_state);
@@ -1044,6 +1386,7 @@ static NTSTATUS cli_writeall_recv(struct tevent_req *req,
 	}
 	return NT_STATUS_OK;
 }
+
 
 NTSTATUS cli_writeall(struct cli_state *cli, uint16_t fnum, uint16_t mode,
 		      const uint8_t *buf, off_t offset, size_t size,
@@ -1065,24 +1408,14 @@ NTSTATUS cli_writeall(struct cli_state *cli, uint16_t fnum, uint16_t mode,
 	if (ev == NULL) {
 		goto fail;
 	}
-	if (smbXcli_conn_protocol(cli->conn) >= PROTOCOL_SMB2_02) {
-		req = cli_smb2_writeall_send(frame, ev, cli, fnum, mode,
-					     buf, offset, size);
-	} else {
-		req = cli_writeall_send(frame, ev, cli, fnum, mode,
-					buf, offset, size);
-	}
+	req = cli_writeall_send(frame, ev, cli, fnum, mode, buf, offset, size);
 	if (req == NULL) {
 		goto fail;
 	}
 	if (!tevent_req_poll_ntstatus(req, ev, &status)) {
 		goto fail;
 	}
-	if (smbXcli_conn_protocol(cli->conn) >= PROTOCOL_SMB2_02) {
-		status = cli_smb2_writeall_recv(req, pwritten);
-	} else {
-		status = cli_writeall_recv(req, pwritten);
-	}
+	status = cli_writeall_recv(req, pwritten);
  fail:
 	TALLOC_FREE(frame);
 	return status;
@@ -1134,6 +1467,16 @@ static void cli_push_setup_chunks(struct tevent_req *req);
 static void cli_push_chunk_ship(struct cli_push_chunk *chunk);
 static void cli_push_chunk_done(struct tevent_req *subreq);
 
+/*
+ * Used to write to a file remotely.
+ * This is similar in functionality to cli_write_send(), except this API
+ * handles writing a large file by breaking the data into chunks (so we don't
+ * exceed the max write size of the underlying connection). To do this, the
+ * (*source) callback handles copying the underlying file data into a message
+ * buffer, one chunk at a time.
+ * This API is recommended when writing a potentially large amount of data,
+ * e.g. when copying a file (or doing a 'put').
+ */
 struct tevent_req *cli_push_send(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 				 struct cli_state *cli,
 				 uint16_t fnum, uint16_t mode,
@@ -1462,8 +1805,10 @@ static NTSTATUS cli_splice_fallback(TALLOC_CTX *frame,
 	*written = 0;
 
 	while (remaining) {
+		size_t to_read = MIN(remaining, SPLICE_BLOCK_SIZE);
+
 		status = cli_read(srccli, src_fnum,
-				  (char *)buf, src_offset, SPLICE_BLOCK_SIZE,
+				  (char *)buf, src_offset, to_read,
 				  &nread);
 		if (!NT_STATUS_IS_OK(status)) {
 			return status;

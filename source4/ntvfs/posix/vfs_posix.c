@@ -58,8 +58,6 @@ static void pvfs_setup_options(struct pvfs_state *pvfs)
 		pvfs->flags |= PVFS_FLAG_CI_FILESYSTEM;
 	if (share_bool_option(scfg, PVFS_FAKE_OPLOCKS, PVFS_FAKE_OPLOCKS_DEFAULT))
 		pvfs->flags |= PVFS_FLAG_FAKE_OPLOCKS;
-	if (share_bool_option(scfg, PVFS_AIO, false))
-		pvfs->flags |= PVFS_FLAG_LINUX_AIO;
 
 #if defined(O_DIRECTORY) && defined(O_NOFOLLOW)
 	/* set PVFS_PERM_OVERRIDE by default only if the system
@@ -92,7 +90,7 @@ static void pvfs_setup_options(struct pvfs_state *pvfs)
 							PVFS_SEARCH_INACTIVITY,
 							PVFS_SEARCH_INACTIVITY_DEFAULT);
 
-#if HAVE_XATTR_SUPPORT
+#ifdef HAVE_XATTR_SUPPORT
 	if (share_bool_option(scfg, PVFS_XATTR, PVFS_XATTR_DEFAULT))
 		pvfs->flags |= PVFS_FLAG_XATTR_ENABLE;
 #endif
@@ -123,7 +121,6 @@ static void pvfs_setup_options(struct pvfs_state *pvfs)
 			pvfs, eadb, 50000,
 			lpcfg_tdb_flags(pvfs->ntvfs->ctx->lp_ctx, TDB_DEFAULT),
 			O_RDWR|O_CREAT, 0600);
-		TALLOC_FREE(eadb);
 		if (pvfs->ea_db != NULL) {
 			pvfs->flags |= PVFS_FLAG_XATTR_ENABLE;
 		} else {
@@ -131,6 +128,7 @@ static void pvfs_setup_options(struct pvfs_state *pvfs)
 				 eadb, strerror(errno)));
 			pvfs->flags &= ~PVFS_FLAG_XATTR_ENABLE;
 		}
+		TALLOC_FREE(eadb);
 	}
 
 	if (pvfs->flags & PVFS_FLAG_XATTR_ENABLE) {

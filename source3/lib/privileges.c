@@ -74,7 +74,8 @@ static uint64_t map_old_SE_PRIV(unsigned char *dptr)
 static bool get_privileges( const struct dom_sid *sid, uint64_t *mask )
 {
 	struct db_context *db = get_account_pol_db();
-	fstring tmp, keystr;
+	struct dom_sid_buf tmp;
+	fstring keystr;
 	TDB_DATA data;
 	NTSTATUS status;
 
@@ -89,13 +90,13 @@ static bool get_privileges( const struct dom_sid *sid, uint64_t *mask )
 
 	/* PRIV_<SID> (NULL terminated) as the key */
 
-	fstr_sprintf(keystr, "%s%s", PRIVPREFIX, sid_to_fstring(tmp, sid));
+	fstr_sprintf(keystr, "%s%s", PRIVPREFIX, dom_sid_str_buf(sid, &tmp));
 
 	status = dbwrap_fetch_bystring(db, talloc_tos(), keystr, &data);
 
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(4, ("get_privileges: No privileges assigned to SID "
-			  "[%s]\n", sid_string_dbg(sid)));
+			  "[%s]\n", tmp.buf));
 		return False;
 	}
 
@@ -105,7 +106,7 @@ static bool get_privileges( const struct dom_sid *sid, uint64_t *mask )
 	} else {
 		if (data.dsize != sizeof( uint64_t ) ) {
 			DEBUG(3, ("get_privileges: Invalid privileges record assigned to SID "
-				  "[%s]\n", sid_string_dbg(sid)));
+				  "[%s]\n", tmp.buf));
 			return False;
 		}
 
@@ -125,7 +126,8 @@ static bool set_privileges( const struct dom_sid *sid, uint64_t mask )
 {
 	struct db_context *db = get_account_pol_db();
 	uint8_t privbuf[8];
-	fstring tmp, keystr;
+	struct dom_sid_buf tmp;
+	fstring keystr;
 	TDB_DATA data;
 
 	if ( !lp_enable_privileges() )
@@ -141,7 +143,7 @@ static bool set_privileges( const struct dom_sid *sid, uint64_t mask )
 
 	/* PRIV_<SID> (NULL terminated) as the key */
 
-	fstr_sprintf(keystr, "%s%s", PRIVPREFIX, sid_to_fstring(tmp, sid));
+	fstr_sprintf(keystr, "%s%s", PRIVPREFIX, dom_sid_str_buf(sid, &tmp));
 
 	/* This writes the 64 bit bitmask out in little endian format */
 	SBVAL(privbuf,0,mask);
@@ -166,13 +168,16 @@ bool get_privileges_for_sids(uint64_t *privileges, struct dom_sid *slist, int sc
 	*privileges = 0;
 
 	for ( i=0; i<scount; i++ ) {
+		struct dom_sid_buf buf;
+
 		/* don't add unless we actually have a privilege assigned */
 
 		if ( !get_privileges( &slist[i], &mask ) )
 			continue;
 
 		DEBUG(5,("get_privileges_for_sids: sid = %s\nPrivilege "
-			 "set: 0x%llx\n", sid_string_dbg(&slist[i]),
+			 "set: 0x%llx\n",
+			 dom_sid_str_buf(&slist[i], &buf),
 			 (unsigned long long)mask));
 
 		*privileges |= mask;
@@ -339,6 +344,7 @@ NTSTATUS privilege_enum_sids(enum sec_privilege privilege, TALLOC_CTX *mem_ctx,
 static bool grant_privilege_bitmap(const struct dom_sid *sid, const uint64_t priv_mask)
 {
 	uint64_t old_mask, new_mask;
+	struct dom_sid_buf buf;
 
 	ZERO_STRUCT( old_mask );
 	ZERO_STRUCT( new_mask );
@@ -350,7 +356,7 @@ static bool grant_privilege_bitmap(const struct dom_sid *sid, const uint64_t pri
 
 	new_mask |= priv_mask;
 
-	DEBUG(10,("grant_privilege: %s\n", sid_string_dbg(sid)));
+	DEBUG(10,("grant_privilege: %s\n", dom_sid_str_buf(sid, &buf)));
 
 	DEBUGADD( 10, ("original privilege mask: 0x%llx\n", (unsigned long long)new_mask));
 
@@ -396,13 +402,14 @@ bool grant_privilege_set(const struct dom_sid *sid, struct lsa_PrivilegeSet *set
 static bool revoke_privilege_bitmap(const struct dom_sid *sid, const uint64_t priv_mask)
 {
 	uint64_t mask;
+	struct dom_sid_buf buf;
 
 	/* if the user has no privileges, then we can't revoke any */
 
 	if ( !get_privileges( sid, &mask ) )
 		return True;
 
-	DEBUG(10,("revoke_privilege: %s\n", sid_string_dbg(sid)));
+	DEBUG(10,("revoke_privilege: %s\n", dom_sid_str_buf(sid, &buf)));
 
 	DEBUGADD( 10, ("original privilege mask: 0x%llx\n", (unsigned long long)mask));
 
@@ -469,7 +476,8 @@ NTSTATUS privilege_create_account(const struct dom_sid *sid )
 NTSTATUS privilege_delete_account(const struct dom_sid *sid)
 {
 	struct db_context *db = get_account_pol_db();
-	fstring tmp, keystr;
+	struct dom_sid_buf tmp;
+	fstring keystr;
 
 	if (!lp_enable_privileges()) {
 		return NT_STATUS_OK;
@@ -485,7 +493,7 @@ NTSTATUS privilege_delete_account(const struct dom_sid *sid)
 
 	/* PRIV_<SID> (NULL terminated) as the key */
 
-	fstr_sprintf(keystr, "%s%s", PRIVPREFIX, sid_to_fstring(tmp, sid));
+	fstr_sprintf(keystr, "%s%s", PRIVPREFIX, dom_sid_str_buf(sid, &tmp));
 
 	return dbwrap_delete_bystring(db, keystr);
 }

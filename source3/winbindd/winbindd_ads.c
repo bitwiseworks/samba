@@ -110,7 +110,10 @@ static ADS_STATUS ads_cached_connection_connect(ADS_STRUCT **adsp,
 	/* we don't want this to affect the users ccache */
 	setenv("KRB5CCNAME", WINBIND_CCACHE_NAME, 1);
 
-	ads = ads_init(target_realm, target_dom_name, ldap_server);
+	ads = ads_init(target_realm,
+		       target_dom_name,
+		       ldap_server,
+		       ADS_SASL_SEAL);
 	if (!ads) {
 		DEBUG(1,("ads_init for domain %s failed\n", target_dom_name));
 		return ADS_ERROR(LDAP_NO_MEMORY);
@@ -381,10 +384,10 @@ static NTSTATUS query_user_list(struct winbindd_domain *domain,
 		}
 
 		if (!dom_sid_in_domain(&domain->sid, &user_sid)) {
-			fstring sidstr, domstr;
+			struct dom_sid_buf sidstr, domstr;
 			DBG_WARNING("Got sid %s in domain %s\n",
-				    sid_to_fstring(sidstr, &user_sid),
-				    sid_to_fstring(domstr, &domain->sid));
+				    dom_sid_str_buf(&user_sid, &sidstr),
+				    dom_sid_str_buf(&domain->sid, &domstr));
 			continue;
 		}
 
@@ -500,8 +503,8 @@ static NTSTATUS enum_dom_groups(struct winbindd_domain *domain,
 		struct dom_sid sid;
 		uint32_t rid;
 
-		name = ads_pull_username(ads, mem_ctx, msg);
-		gecos = ads_pull_string(ads, mem_ctx, msg, "name");
+		name = ads_pull_username(ads, (*info), msg);
+		gecos = ads_pull_string(ads, (*info), msg, "name");
 		if (!ads_pull_sid(ads, msg, "objectSid", &sid)) {
 			DEBUG(1,("No sid for %s !?\n", name));
 			continue;
@@ -512,8 +515,8 @@ static NTSTATUS enum_dom_groups(struct winbindd_domain *domain,
 			continue;
 		}
 
-		fstrcpy((*info)[i].acct_name, name);
-		fstrcpy((*info)[i].acct_desc, gecos);
+		(*info)[i].acct_name = name;
+		(*info)[i].acct_desc = gecos;
 		(*info)[i].rid = rid;
 		i++;
 	}
@@ -558,11 +561,12 @@ static NTSTATUS name_to_sid(struct winbindd_domain *domain,
 			    const char *domain_name,
 			    const char *name,
 			    uint32_t flags,
+			    const char **pdom_name,
 			    struct dom_sid *sid,
 			    enum lsa_SidType *type)
 {
 	return msrpc_methods.name_to_sid(domain, mem_ctx, domain_name, name,
-					 flags, sid, type);
+					 flags, pdom_name, sid, type);
 }
 
 /* convert a domain SID to a user or group name - use rpc methods */
@@ -718,7 +722,7 @@ static NTSTATUS lookup_usergroups_memberof(struct winbindd_domain *domain,
 	const char *attrs[] = {"memberOf", NULL};
 	uint32_t num_groups = 0;
 	struct dom_sid *group_sids = NULL;
-	int i;
+	size_t i;
 	char **strings = NULL;
 	size_t num_strings = 0, num_sids = 0;
 
@@ -835,6 +839,7 @@ static NTSTATUS lookup_usergroups(struct winbindd_domain *domain,
 	uint32_t primary_group_rid;
 	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
 	uint32_t num_groups = 0;
+	struct dom_sid_buf buf;
 
 	DEBUG(3,("ads: lookup_usergroups\n"));
 	*p_num_groups = 0;
@@ -867,7 +872,9 @@ static NTSTATUS lookup_usergroups(struct winbindd_domain *domain,
 	if (!ADS_ERR_OK(rc)) {
 		status = ads_ntstatus(rc);
 		DEBUG(1, ("lookup_usergroups(sid=%s) ads_search tokenGroups: "
-			  "%s\n", sid_string_dbg(sid), ads_errstr(rc)));
+			  "%s\n",
+			  dom_sid_str_buf(sid, &buf),
+			  ads_errstr(rc)));
 		goto done;
 	}
 
@@ -876,13 +883,14 @@ static NTSTATUS lookup_usergroups(struct winbindd_domain *domain,
 		status = NT_STATUS_UNSUCCESSFUL;
 		DEBUG(1,("lookup_usergroups(sid=%s) ads_search tokenGroups: "
 			 "invalid number of results (count=%d)\n", 
-			 sid_string_dbg(sid), count));
+			 dom_sid_str_buf(sid, &buf),
+			 count));
 		goto done;
 	}
 
 	if (!msg) {
 		DEBUG(1,("lookup_usergroups(sid=%s) ads_search tokenGroups: NULL msg\n", 
-			 sid_string_dbg(sid)));
+			 dom_sid_str_buf(sid, &buf)));
 		status = NT_STATUS_UNSUCCESSFUL;
 		goto done;
 	}
@@ -895,7 +903,8 @@ static NTSTATUS lookup_usergroups(struct winbindd_domain *domain,
 
 	if (!ads_pull_uint32(ads, msg, "primaryGroupID", &primary_group_rid)) {
 		DEBUG(1,("%s: No primary group for sid=%s !?\n", 
-			 domain->name, sid_string_dbg(sid)));
+			 domain->name,
+			 dom_sid_str_buf(sid, &buf)));
 		goto done;
 	}
 
@@ -961,7 +970,7 @@ static NTSTATUS lookup_usergroups(struct winbindd_domain *domain,
 	status = (*user_sids != NULL) ? NT_STATUS_OK : NT_STATUS_NO_MEMORY;
 
 	DEBUG(3,("ads lookup_usergroups (tokenGroups) succeeded for sid=%s\n",
-		 sid_string_dbg(sid)));
+		 dom_sid_str_buf(sid, &buf)));
 done:
 	TALLOC_FREE(user_dn);
 	ads_msgfree(ads, msg);
@@ -1075,7 +1084,7 @@ static NTSTATUS lookup_groupmem(struct winbindd_domain *domain,
 	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
 	char *sidbinstr;
 	char **members = NULL;
-	int i;
+	size_t i;
 	size_t num_members = 0;
 	ads_control args;
 	struct dom_sid *sid_mem_nocache = NULL;
@@ -1085,9 +1094,10 @@ static NTSTATUS lookup_groupmem(struct winbindd_domain *domain,
 	uint32_t num_nocache = 0;
 	TALLOC_CTX *tmp_ctx = NULL;
 	uint32_t rid;
+	struct dom_sid_buf buf;
 
 	DEBUG(10,("ads: lookup_groupmem %s sid=%s\n", domain->name,
-		  sid_string_dbg(group_sid)));
+		  dom_sid_str_buf(group_sid, &buf)));
 
 	*num_names = 0;
 
@@ -1213,7 +1223,8 @@ static NTSTATUS lookup_groupmem(struct winbindd_domain *domain,
 		if (lookup_cached_sid(mem_ctx, &sid, &domain_name, &name,
 		    &name_type)) {
 			DEBUG(10,("ads: lookup_groupmem: got sid %s from "
-				  "cache\n", sid_string_dbg(&sid)));
+				  "cache\n",
+				  dom_sid_str_buf(&sid, &buf)));
 			sid_copy(&(*sid_mem)[*num_names], &sid);
 			(*names)[*num_names] = fill_domain_username_talloc(
 							*names,
@@ -1226,7 +1237,8 @@ static NTSTATUS lookup_groupmem(struct winbindd_domain *domain,
 		}
 		else {
 			DEBUG(10, ("ads: lookup_groupmem: sid %s not found in "
-				   "cache\n", sid_string_dbg(&sid)));
+				   "cache\n",
+				   dom_sid_str_buf(&sid, &buf)));
 			sid_copy(&(sid_mem_nocache)[num_nocache], &sid);
 			num_nocache++;
 		}
@@ -1302,7 +1314,7 @@ static NTSTATUS lookup_groupmem(struct winbindd_domain *domain,
 
 	status = NT_STATUS_OK;
 	DEBUG(3,("ads lookup_groupmem for sid=%s succeeded\n",
-		 sid_string_dbg(group_sid)));
+		 dom_sid_str_buf(group_sid, &buf)));
 
 done:
 
@@ -1382,7 +1394,7 @@ static NTSTATUS trusted_domains(struct winbindd_domain *domain,
 {
 	NTSTATUS 		result = NT_STATUS_UNSUCCESSFUL;
 	WERROR werr;
-	int			i;
+	uint32_t		i;
 	uint32_t		flags;
 	struct rpc_pipe_client *cli;
 	int ret_count;
@@ -1448,7 +1460,7 @@ static NTSTATUS trusted_domains(struct winbindd_domain *domain,
 		 */
 
 		if ((trust->trust_attributes
-		     == LSA_TRUST_ATTRIBUTE_QUARANTINED_DOMAIN) &&
+		     & LSA_TRUST_ATTRIBUTE_QUARANTINED_DOMAIN) &&
 		    !domain->primary )
 		{
 			DEBUG(10,("trusted_domains: Skipping external trusted "

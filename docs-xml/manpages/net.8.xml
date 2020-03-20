@@ -26,6 +26,7 @@
 		<arg choice="opt">-w|--workgroup workgroup</arg>
 		<arg choice="opt">-W|--myworkgroup myworkgroup</arg>
 		<arg choice="opt">-U|--user user</arg>
+		<arg choice="opt">-A|--authentication-file authfile</arg>
 		<arg choice="opt">-I|--ipaddress ip-address</arg>
 		<arg choice="opt">-p|--port port</arg>
 		<arg choice="opt">-n myname</arg>
@@ -375,6 +376,40 @@
 		<listitem><para>Do not perform DNS updates as part of
 		"net ads join".
 		</para></listitem>
+		</varlistentry>
+
+		<varlistentry>
+		<term>--keep-account</term>
+		<listitem><para>Prevent the machine account removal as
+		part of "net ads leave".
+		</para></listitem>
+		</varlistentry>
+
+		<varlistentry>
+		<term>--json</term>
+		<listitem><para>Report results in JSON format for
+		"net ads info" and "net ads lookup".
+		</para></listitem>
+		</varlistentry>
+
+		<!-- Options for net vfs stream2abouble -->
+
+		<varlistentry>
+		<term>--recursive</term>
+		<listitem><para>Traverse a directory
+		hierarchy.</para></listitem>
+		</varlistentry>
+
+		<varlistentry>
+		<term>--continue</term>
+		<listitem><para>Continue traversing a directory hierarchy in
+		case conversion of one file fails.</para></listitem>
+		</varlistentry>
+
+		<varlistentry>
+		<term>--follow-symlinks</term>
+		<listitem><para>Follow symlinks encountered while traversing a
+		directory.</para></listitem>
 		</varlistentry>
 
 		&stdarg.encrypt;
@@ -813,6 +848,30 @@ DOMAIN</replaceable>. Defaults to local domain.</para>
 
 <para>Give IP of master browser for specified <replaceable>DOMAIN</replaceable>
 or workgroup. Defaults to local domain.</para>
+
+</refsect3>
+
+<refsect3>
+<title>LOOKUP NAME [<replaceable>NAME</replaceable>]</title>
+
+<para>Lookup username's sid and type for specified <replaceable>NAME</replaceable>
+</para>
+
+</refsect3>
+
+<refsect3>
+<title>LOOKUP SID [<replaceable>SID</replaceable>]</title>
+
+<para>Give sid's name and type for specified <replaceable>SID</replaceable>
+</para>
+
+</refsect3>
+
+<refsect3>
+<title>LOOKUP DSGETDCNAME [<replaceable>NAME</replaceable>] [<replaceable>FLAGS</replaceable>] [<replaceable>SITENAME</replaceable>]</title>
+
+<para>Give Domain Controller information for specified domain <replaceable>NAME</replaceable>
+</para>
 
 </refsect3>
 
@@ -1276,7 +1335,68 @@ against an NT4 Domain Controller.
 </refsect2>
 
 <refsect2>
-<title>ADS LEAVE</title>
+
+<title>ADS GPO</title>
+<refsect3>
+<title>ADS GPO APPLY &lt;USERNAME|MACHINENAME&gt; </title>
+<para>Apply GPOs for a username or machine name. Either username or machine name should be provided to the command, not both. </para>
+</refsect3>
+
+<refsect3>
+<title>ADS GPO GETGPO [<replaceable>GPO</replaceable>]</title>
+<para>List specified GPO.</para>
+</refsect3>
+
+<refsect3>
+<title>ADS GPO LINKADD [<replaceable>LINKDN</replaceable>] [<replaceable>GPODN</replaceable>]</title>
+<para>Link a container to a GPO. <replaceable>LINKDN</replaceable> Container to link to a GPO. <replaceable>GPODN</replaceable> GPO to link container to. DNs must be provided properly escaped. See RFC 4514 for details.</para>
+</refsect3>
+
+<refsect3>
+<title>ADS GPO LINKGET [<replaceable>CONTAINER</replaceable>]</title>
+<para>Lists gPLink of a containter.</para>
+</refsect3>
+
+<refsect3>
+<title>ADS GPO LIST &lt;USERNAME|MACHINENAME&gt; </title>
+<para>Lists all GPOs for a username or machine name. Either username or machine name should be provided to the command, not both. </para>
+</refsect3>
+
+<refsect3>
+<title>ADS GPO LISTALL</title>
+<para>Lists all GPOs on a DC.</para>
+</refsect3>
+
+<refsect3>
+<title>ADS GPO REFRESH [<replaceable>USERNAME</replaceable>] [<replaceable>MACHINENAME</replaceable>]</title>
+<para>Lists all GPOs assigned to an account and download them. <replaceable>USERNAME</replaceable> User to refresh GPOs for. <replaceable>MACHINENAME</replaceable> Machine to refresh GPOs for.</para>
+</refsect3>
+
+</refsect2>
+
+<refsect2>
+
+<title>ADS DNS</title>
+
+<refsect3>
+<title>ADS DNS REGISTER [HOSTNAME [IP [IP.....]]]</title>
+<para>Add host dns entry to Active Directory.</para>
+</refsect3>
+
+<refsect3>
+<title>ADS DNS UNREGISTER &lt;HOSTNAME&gt;</title>
+<para>Remove host dns entry from Active Directory.</para>
+</refsect3>
+
+<refsect3>
+<title>ADS DNS GETHOSTBYNAME &lt;NAMESERVER|HOSTNAME&gt;</title>
+<para>Look up the hostname from Active Directory. You can either provide nameserver ie IPv4|IPv6 address or the hostname. Only one should be provided at a time.</para>
+</refsect3>
+
+</refsect2>
+
+<refsect2>
+<title>ADS LEAVE [--keep-account]</title>
 
 <para>Make the remote host leave the domain it is part of. </para>
 
@@ -2579,7 +2699,7 @@ string.</member>
    <varlistentry><term>--reg-version={1,2,3}</term>
       <listitem><para>
 	Specify the format of the registry database. If not given it defaults to
-	the value of the binary or, if an registry.tdb is explizitly stated at
+	the value of the binary or, if an registry.tdb is explicitly stated at
 	the commandline, to the value found in the INFO/version record.
       </para></listitem>
     </varlistentry>
@@ -2848,6 +2968,72 @@ Dump the locking table of a certain global lock.
 		</itemizedlist>
 
 	</refsect3>
+</refsect2>
+
+<refsect2>
+  <title>vfs</title>
+  <para>Access shared filesystem through the VFS.</para>
+
+  <refsect3>
+    <title>vfs stream2abouble [--recursive] [--verbose] [--continue] [--follow-symlinks] <replaceable>share</replaceable> <replaceable>path</replaceable></title>
+
+    <para>Convert file streams to AppleDouble files.</para>
+    <itemizedlist>
+      <listitem>
+	<para><replaceable>share</replaceable>
+	A Samba share.</para>
+      </listitem>
+    </itemizedlist>
+    <itemizedlist>
+      <listitem>
+	<para><replaceable>path</replaceable> A relative path of something in
+	the Samba share. "." can be used for the root directory of the
+	share.</para>
+      </listitem>
+    </itemizedlist>
+
+    <para>Options:</para>
+    <variablelist>
+      <varlistentry>
+	<term>--recursive</term>
+	<listitem><para>Traverse a directory hierarchy.</para></listitem>
+      </varlistentry>
+      <varlistentry>
+	<term>--verbose</term>
+	<listitem><para>Verbose output.</para></listitem>
+      </varlistentry>
+      <varlistentry>
+	<term>--continue</term>
+	<listitem><para>Continue traversing a directory hierarchy if a single
+	conversion fails.</para></listitem>
+      </varlistentry>
+      <varlistentry>
+	<term>--follow-symlinks</term>
+	<listitem><para>Follow symlinks encountered while traversing a
+	directory.</para></listitem>
+      </varlistentry>
+    </variablelist>
+  </refsect3>
+
+  <refsect3>
+    <title>vfs getntacl <replaceable>share</replaceable> <replaceable>path</replaceable></title>
+
+    <para>Display the security descriptor of a file or directory.</para>
+    <itemizedlist>
+      <listitem>
+	<para><replaceable>share</replaceable>
+	A Samba share.</para>
+      </listitem>
+    </itemizedlist>
+    <itemizedlist>
+      <listitem>
+	<para><replaceable>path</replaceable> A relative path of something in
+	the Samba share. "." can be used for the root directory of the
+	share.</para>
+      </listitem>
+    </itemizedlist>
+  </refsect3>
+
 </refsect2>
 
 <refsect2>

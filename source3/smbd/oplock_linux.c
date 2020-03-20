@@ -23,7 +23,7 @@
 #include "smbd/smbd.h"
 #include "smbd/globals.h"
 
-#if HAVE_KERNEL_OPLOCKS_LINUX
+#ifdef HAVE_KERNEL_OPLOCKS_LINUX
 
 #ifndef F_SETLEASE
 #define F_SETLEASE	1024
@@ -125,12 +125,6 @@ static void linux_oplock_signal_handler(struct tevent_context *ev_ctx,
 	int fd = info->si_fd;
 	files_struct *fsp;
 
-	/*
-	 * This function doesn't expect any specific impersonation, as it only
-	 * sends messages to other smbd processes. And messaging_send_iov_from()
-	 * already handles EACCES.
-	 */
-
 	fsp = file_find_fd(sconn, fd);
 	if (fsp == NULL) {
 		DEBUG(0,("linux_oplock_signal_handler: failed to find fsp for file fd=%d (file was closed ?)\n", fd ));
@@ -146,19 +140,23 @@ static void linux_oplock_signal_handler(struct tevent_context *ev_ctx,
 static bool linux_set_kernel_oplock(struct kernel_oplocks *ctx,
 				    files_struct *fsp, int oplock_type)
 {
+	struct file_id_buf idbuf;
+
 	if ( SMB_VFS_LINUX_SETLEASE(fsp, F_WRLCK) == -1) {
-		DEBUG(3,("linux_set_kernel_oplock: Refused oplock on file %s, "
-			 "fd = %d, file_id = %s. (%s)\n",
-			 fsp_str_dbg(fsp), fsp->fh->fd,
-			 file_id_string_tos(&fsp->file_id),
-			 strerror(errno)));
+		DBG_NOTICE("Refused oplock on file %s, "
+			   "fd = %d, file_id = %s. (%s)\n",
+			   fsp_str_dbg(fsp),
+			   fsp->fh->fd,
+			   file_id_str_buf(fsp->file_id, &idbuf),
+			   strerror(errno));
 		return False;
 	}
 	
-	DEBUG(3,("linux_set_kernel_oplock: got kernel oplock on file %s, "
-		 "file_id = %s gen_id = %lu\n",
-		 fsp_str_dbg(fsp), file_id_string_tos(&fsp->file_id),
-		 fsp->fh->gen_id));
+	DBG_NOTICE("got kernel oplock on file %s, "
+		   "file_id = %s gen_id = %"PRIu64"\n",
+		   fsp_str_dbg(fsp),
+		   file_id_str_buf(fsp->file_id, &idbuf),
+		   fsp->fh->gen_id);
 
 	return True;
 }
@@ -170,6 +168,8 @@ static bool linux_set_kernel_oplock(struct kernel_oplocks *ctx,
 static void linux_release_kernel_oplock(struct kernel_oplocks *ctx,
 					files_struct *fsp, int oplock_type)
 {
+	struct file_id_buf idbuf;
+
 	if (DEBUGLVL(10)) {
 		/*
 		 * Check and print out the current kernel
@@ -177,10 +177,12 @@ static void linux_release_kernel_oplock(struct kernel_oplocks *ctx,
 		 */
 		int state = fcntl(fsp->fh->fd, F_GETLEASE, 0);
 		dbgtext("linux_release_kernel_oplock: file %s, file_id = %s "
-			"gen_id = %lu has kernel oplock state "
-			"of %x.\n", fsp_str_dbg(fsp),
-		        file_id_string_tos(&fsp->file_id),
-			fsp->fh->gen_id, state );
+			"gen_id = %"PRIu64" has kernel oplock state "
+			"of %x.\n",
+			fsp_str_dbg(fsp),
+		        file_id_str_buf(fsp->file_id, &idbuf),
+			fsp->fh->gen_id,
+			state);
 	}
 
 	/*
@@ -190,10 +192,12 @@ static void linux_release_kernel_oplock(struct kernel_oplocks *ctx,
 		if (DEBUGLVL(0)) {
 			dbgtext("linux_release_kernel_oplock: Error when "
 				"removing kernel oplock on file " );
-			dbgtext("%s, file_id = %s, gen_id = %lu. "
-				"Error was %s\n", fsp_str_dbg(fsp),
-				file_id_string_tos(&fsp->file_id),
-				fsp->fh->gen_id, strerror(errno) );
+			dbgtext("%s, file_id = %s, gen_id = %"PRIu64". "
+				"Error was %s\n",
+				fsp_str_dbg(fsp),
+				file_id_str_buf(fsp->file_id, &idbuf),
+				fsp->fh->gen_id,
+				strerror(errno));
 		}
 	}
 }
@@ -220,8 +224,6 @@ static bool linux_oplocks_available(void)
 static const struct kernel_oplocks_ops linux_koplocks = {
 	.set_oplock			= linux_set_kernel_oplock,
 	.release_oplock			= linux_release_kernel_oplock,
-	.contend_level2_oplocks_begin	= NULL,
-	.contend_level2_oplocks_end	= NULL,
 };
 
 struct kernel_oplocks *linux_init_kernel_oplocks(struct smbd_server_connection *sconn)
@@ -243,13 +245,7 @@ struct kernel_oplocks *linux_init_kernel_oplocks(struct smbd_server_connection *
 	ctx->ops = &linux_koplocks;
 	ctx->private_data = sconn;
 
-	/*
-	 * linux_oplock_signal_handler() only
-	 * sends messages to other smbd processes
-	 * and doesn't require any impersonation.
-	 * So we can just use the raw tevent_context.
-	 */
-	se = tevent_add_signal(sconn->raw_ev_ctx,
+	se = tevent_add_signal(sconn->ev_ctx,
 			       ctx,
 			       RT_SIGNAL_LEASE, SA_SIGINFO,
 			       linux_oplock_signal_handler,

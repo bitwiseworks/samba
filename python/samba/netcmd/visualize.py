@@ -39,6 +39,16 @@ import re
 from samba.kcc import KCC, ldif_import_export
 from samba.kcc.kcc_utils import KCCError
 from samba.compat import text_type
+from samba.uptodateness import (
+    get_partition_maps,
+    get_partition,
+    get_own_cursor,
+    get_utdv,
+    get_utdv_edges,
+    get_utdv_distances,
+    get_utdv_max_distance,
+    get_kcc_and_dsas,
+)
 
 COMMON_OPTIONS = [
     Option("-H", "--URL", help="LDB URL for database or target server",
@@ -90,19 +100,6 @@ class GraphCommand(Command):
         creds = credopts.get_credentials(lp, fallback_machine=True)
         samdb = SamDB(url=H, credentials=creds, lp=lp)
         return samdb
-
-    def get_kcc_and_dsas(self, H, lp, creds):
-        """Get a readonly KCC object and the list of DSAs it knows about."""
-        unix_now = int(time.time())
-        kcc = KCC(unix_now, readonly=True)
-        kcc.load_samdb(H, lp, creds)
-
-        dsa_list = kcc.list_dsas()
-        dsas = set(dsa_list)
-        if len(dsas) != len(dsa_list):
-            print("There seem to be duplicate dsas", file=sys.stderr)
-
-        return kcc, dsas
 
     def write(self, s, fn=None, suffix='.dot'):
         """Decide whether we're dealing with a filename, a tempfile, or
@@ -207,36 +204,6 @@ def colour_hash(x):
     return '#%06x' % c
 
 
-def get_partition_maps(samdb):
-    """Generate dictionaries mapping short partition names to the
-    appropriate DNs."""
-    base_dn = samdb.domain_dn()
-    short_to_long = {
-        "DOMAIN": base_dn,
-        "CONFIGURATION": str(samdb.get_config_basedn()),
-        "SCHEMA": "CN=Schema,%s" % samdb.get_config_basedn(),
-        "DNSDOMAIN": "DC=DomainDnsZones,%s" % base_dn,
-        "DNSFOREST": "DC=ForestDnsZones,%s" % base_dn
-    }
-
-    long_to_short = {}
-    for s, l in short_to_long.items():
-        long_to_short[l] = s
-
-    return short_to_long, long_to_short
-
-
-def get_partition(samdb, part):
-    # Allow people to say "--partition=DOMAIN" rather than
-    # "--partition=DC=blah,DC=..."
-    if part is not None:
-        short_partitions, long_partitions = get_partition_maps(samdb)
-        part = short_partitions.get(part.upper(), part)
-        if part not in long_partitions:
-            raise CommandError("unknown partition %s" % part)
-    return part
-
-
 class cmd_reps(GraphCommand):
     "repsFrom/repsTo from every DSA"
 
@@ -254,7 +221,7 @@ class cmd_reps(GraphCommand):
         # replication graph.
         lp = sambaopts.get_loadparm()
         creds = credopts.get_credentials(lp, fallback_machine=True)
-        local_kcc, dsas = self.get_kcc_and_dsas(H, lp, creds)
+        local_kcc, dsas = get_kcc_and_dsas(H, lp, creds)
         unix_now = local_kcc.unix_now
 
         partition = get_partition(local_kcc.samdb, partition)
@@ -275,7 +242,7 @@ class cmd_reps(GraphCommand):
                 res = local_kcc.samdb.search(dsa_dn,
                                              scope=SCOPE_BASE,
                                              attrs=["dNSHostName"])
-                dns_name = res[0]["dNSHostName"][0]
+                dns_name = str(res[0]["dNSHostName"][0])
                 print("Attempting to contact ldap://%s (%s)" %
                       (dns_name, dsa_dn),
                       file=sys.stderr)
@@ -320,7 +287,7 @@ class cmd_reps(GraphCommand):
                     if partition is None or part == partition:
                         nc_reps[part]['needed'].append((dsa_dn, rep))
 
-        all_edges = {'needed':  {'to': [], 'from': []},
+        all_edges = {'needed': {'to': [], 'from': []},
                      'current': {'to': [], 'from': []}}
 
         short_partitions, long_partitions = get_partition_maps(local_kcc.samdb)
@@ -463,7 +430,7 @@ class cmd_ntdsconn(GraphCommand):
             creds = None
             H = self.import_ldif_db(importldif, lp)
 
-        local_kcc, dsas = self.get_kcc_and_dsas(H, lp, creds)
+        local_kcc, dsas = get_kcc_and_dsas(H, lp, creds)
         local_dsa_dn = local_kcc.my_dsa_dnstr.split(',', 1)[1]
         vertices = set()
         attested_edges = []
@@ -501,14 +468,14 @@ class cmd_ntdsconn(GraphCommand):
                                expression="(objectClass=nTDSConnection)",
                                attrs=['fromServer'],
                                # XXX can't be critical for ldif test
-                               #controls=["search_options:1:2"],
+                               # controls=["search_options:1:2"],
                                controls=["search_options:0:2"],
-            )
+                               )
 
             for msg in res:
                 msgdn = str(msg.dn)
                 dest_dn = msgdn[msgdn.index(',') + 1:]
-                attested_edges.append((msg['fromServer'][0],
+                attested_edges.append((str(msg['fromServer'][0]),
                                        dest_dn, ntds_dn))
 
         if importldif and H == self._tmp_fn_to_delete:
@@ -684,36 +651,6 @@ class cmd_uptodateness(GraphCommand):
                help="display this many digits of out-of-date-ness"),
     ]
 
-    def get_utdv(self, samdb, dn):
-        """This finds the uptodateness vector in the database."""
-        cursors = []
-        config_dn = samdb.get_config_basedn()
-        for c in dsdb._dsdb_load_udv_v2(samdb, dn):
-            inv_id = str(c.source_dsa_invocation_id)
-            res = samdb.search(base=config_dn,
-                               expression=("(&(invocationId=%s)"
-                                           "(objectClass=nTDSDSA))" % inv_id),
-                               attrs=["distinguishedName", "invocationId"])
-            settings_dn = res[0]["distinguishedName"][0]
-            prefix, dsa_dn = settings_dn.split(',', 1)
-            if prefix != 'CN=NTDS Settings':
-                raise CommandError("Expected NTDS Settings DN, got %s" %
-                                   settings_dn)
-
-            cursors.append((dsa_dn,
-                            inv_id,
-                            int(c.highest_usn),
-                            nttime2unix(c.last_sync_success)))
-        return cursors
-
-    def get_own_cursor(self, samdb):
-            res = samdb.search(base="",
-                               scope=SCOPE_BASE,
-                               attrs=["highestCommittedUSN"])
-            usn = int(res[0]["highestCommittedUSN"][0])
-            now = int(time.time())
-            return (usn, now)
-
     def run(self, H=None, output=None, shorten_names=False,
             key=True, talk_to_remote=False,
             sambaopts=None, credopts=None, versionopts=None,
@@ -729,7 +666,7 @@ class cmd_uptodateness(GraphCommand):
         # replication graph.
         lp = sambaopts.get_loadparm()
         creds = credopts.get_credentials(lp, fallback_machine=True)
-        local_kcc, dsas = self.get_kcc_and_dsas(H, lp, creds)
+        local_kcc, dsas = get_kcc_and_dsas(H, lp, creds)
         self.samdb = local_kcc.samdb
         partition = get_partition(self.samdb, partition)
 
@@ -742,52 +679,11 @@ class cmd_uptodateness(GraphCommand):
             if partition not in (part_dn, None):
                 continue  # we aren't doing this partition
 
-            cursors = self.get_utdv(self.samdb, part_dn)
+            utdv_edges = get_utdv_edges(local_kcc, dsas, part_dn, lp, creds)
 
-            # we talk to each remote and make a matrix of the vectors
-            # -- for each partition
-            # normalise by oldest
-            utdv_edges = {}
-            for dsa_dn in dsas:
-                res = local_kcc.samdb.search(dsa_dn,
-                                             scope=SCOPE_BASE,
-                                             attrs=["dNSHostName"])
-                ldap_url = "ldap://%s" % res[0]["dNSHostName"][0]
-                try:
-                    samdb = self.get_db(ldap_url, sambaopts, credopts)
-                    cursors = self.get_utdv(samdb, part_dn)
-                    own_usn, own_time = self.get_own_cursor(samdb)
-                    remotes = {dsa_dn: own_usn}
-                    for dn, guid, usn, t in cursors:
-                        remotes[dn] = usn
-                except LdbError as e:
-                    print("Could not contact %s (%s)" % (ldap_url, e),
-                          file=sys.stderr)
-                    continue
-                utdv_edges[dsa_dn] = remotes
+            distances = get_utdv_distances(utdv_edges, dsas)
 
-            distances = {}
-            max_distance = 0
-            for dn1 in dsas:
-                try:
-                    peak = utdv_edges[dn1][dn1]
-                except KeyError as e:
-                    peak = 0
-                d = {}
-                distances[dn1] = d
-                for dn2 in dsas:
-                    if dn2 in utdv_edges:
-                        if dn1 in utdv_edges[dn2]:
-                            dist = peak - utdv_edges[dn2][dn1]
-                            d[dn2] = dist
-                            if dist > max_distance:
-                                max_distance = dist
-                        else:
-                            print("Missing dn %s from UTD vector" % dn1,
-                                  file=sys.stderr)
-                    else:
-                        print("missing dn %s from UTD vector list" % dn2,
-                              file=sys.stderr)
+            max_distance = get_utdv_max_distance(distances)
 
             digits = min(max_digits, len(str(max_distance)))
             if digits < 1:
@@ -809,7 +705,7 @@ class cmd_uptodateness(GraphCommand):
 
 
 class cmd_visualize(SuperCommand):
-    """Produces graphical representations of Samba network state"""
+    """Produces graphical representations of Samba network state."""
     subcommands = {}
 
     for k, v in globals().items():

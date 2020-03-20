@@ -184,7 +184,7 @@ void ctdb_client_wait(struct tevent_context *ev, bool *done);
  * @param[in] ev Tevent context
  * @param[in] done Boolean flag to indicate when to stop waiting
  * @param[in] timeout How long to wait
- * @return 0 on succes, ETIMEDOUT on timeout, and errno on failure
+ * @return 0 on success, ETIMEDOUT on timeout, and errno on failure
  */
 int ctdb_client_wait_timeout(struct tevent_context *ev, bool *done,
 			     struct timeval timeout);
@@ -691,7 +691,7 @@ int ctdb_tunnel_destroy(struct tevent_context *ev,
 struct tevent_req *ctdb_tunnel_request_send(TALLOC_CTX *mem_ctx,
 					    struct tevent_context *ev,
 					    struct ctdb_tunnel_context *tctx,
-					    int destnode,
+					    uint32_t destnode,
 					    struct timeval timeout,
 					    uint8_t *buf, size_t buflen,
 					    bool wait_for_reply);
@@ -724,7 +724,7 @@ bool ctdb_tunnel_request_recv(struct tevent_req *req, int *perr,
  * @return 0 on success, errno on failure
  */
 int ctdb_tunnel_request(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
-			struct ctdb_tunnel_context *tctx, int destnode,
+			struct ctdb_tunnel_context *tctx, uint32_t destnode,
 			struct timeval timeout, uint8_t *buf, size_t buflen,
 			bool wait_for_reply);
 
@@ -744,7 +744,7 @@ int ctdb_tunnel_request(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 struct tevent_req *ctdb_tunnel_reply_send(TALLOC_CTX *mem_ctx,
 					  struct tevent_context *ev,
 					  struct ctdb_tunnel_context *tctx,
-					  int destnode, uint32_t reqid,
+					  uint32_t destnode, uint32_t reqid,
 					  struct timeval timeout,
 					  uint8_t *buf, size_t buflen);
 
@@ -771,7 +771,7 @@ bool ctdb_tunnel_reply_recv(struct tevent_req *req, int *perr);
  * @return 0 on success, errno on failure
  */
 int ctdb_tunnel_reply(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
-		      struct ctdb_tunnel_context *tctx, int destnode,
+		      struct ctdb_tunnel_context *tctx, uint32_t destnode,
 		      uint32_t reqid, struct timeval timeout,
 		      uint8_t *buf, size_t buflen);
 

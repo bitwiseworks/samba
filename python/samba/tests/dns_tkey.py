@@ -17,16 +17,9 @@
 #
 
 import sys
-import struct
-import random
-import socket
 import optparse
-import uuid
-import time
-import samba.ndr as ndr
 import samba.getopt as options
-from samba import credentials
-from samba.dcerpc import dns, dnsp
+from samba.dcerpc import dns
 from samba.tests.subunitrun import SubunitOptions, TestProgram
 from samba.tests.dns_base import DNSTKeyTest
 
@@ -210,5 +203,6 @@ class TestDNSUpdates(DNSTKeyTest):
         # check it's gone
         rcode = self.search_record(self.newrecname)
         self.assert_rcode_equals(rcode, dns.DNS_RCODE_NXDOMAIN)
+
 
 TestProgram(module=__name__, opts=subunitopts)

@@ -36,18 +36,13 @@ static int SDBFlags_to_kflags(const struct SDBFlags *s,
 	if (s->initial) {
 		*k |= KRB5_KDB_DISALLOW_TGT_BASED;
 	}
-	/*
-	 * Do not set any disallow rules for forwardable, proxiable,
-	 * renewable, postdate and server.
-	 *
-	 * The KDC will take care setting the flags based on the incoming
-	 * ticket.
-	 */
-	if (s->forwardable) {
-		;
+	/* The forwardable and proxiable flags are set according to client and
+	 * server attributes. */
+	if (!s->forwardable) {
+		*k |= KRB5_KDB_DISALLOW_FORWARDABLE;
 	}
-	if (s->proxiable) {
-		;
+	if (!s->proxiable) {
+		*k |= KRB5_KDB_DISALLOW_PROXIABLE;
 	}
 	if (s->renewable) {
 		;
@@ -327,8 +322,10 @@ static int samba_kdc_kdb_entry_destructor(struct samba_kdc_entry *p)
 		entry_ex->e_data = NULL;
 	}
 
-	ret = krb5_init_context(&context);
+	ret = smb_krb5_init_context_common(&context);
 	if (ret) {
+		DBG_ERR("kerberos init context failed (%s)\n",
+			error_message(ret));
 		return ret;
 	}
 

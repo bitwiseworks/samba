@@ -1240,6 +1240,69 @@ fail:
 	return ret;
 }
 
+size_t ctdb_db_vacuum_len(struct ctdb_db_vacuum *in)
+{
+	return ctdb_uint32_len(&in->db_id) +
+		ctdb_bool_len(&in->full_vacuum_run);
+}
+
+void ctdb_db_vacuum_push(struct ctdb_db_vacuum *in,
+			 uint8_t *buf,
+			 size_t *npush)
+{
+	size_t offset = 0, np;
+
+	ctdb_uint32_push(&in->db_id, buf+offset, &np);
+	offset += np;
+
+	ctdb_bool_push(&in->full_vacuum_run, buf+offset, &np);
+	offset += np;
+
+	*npush = offset;
+}
+
+int ctdb_db_vacuum_pull(uint8_t *buf,
+			size_t buflen,
+			TALLOC_CTX *mem_ctx,
+			struct ctdb_db_vacuum **out,
+			size_t *npull)
+{
+	struct ctdb_db_vacuum *val;
+	size_t offset = 0, np;
+	int ret;
+
+	val = talloc(mem_ctx, struct ctdb_db_vacuum);
+	if (val == NULL) {
+		return ENOMEM;
+	}
+
+	ret = ctdb_uint32_pull(buf+offset,
+			       buflen-offset,
+			       &val->db_id,
+			       &np);
+	if (ret != 0) {
+		goto fail;;
+	}
+	offset += np;
+
+	ret = ctdb_bool_pull(buf+offset,
+			     buflen-offset,
+			     &val->full_vacuum_run,
+			     &np);
+	if (ret != 0) {
+		goto fail;
+	}
+	offset += np;
+
+	*out = val;
+	*npull = offset;
+	return 0;
+
+fail:
+	talloc_free(val);
+	return ret;
+}
+
 size_t ctdb_ltdb_header_len(struct ctdb_ltdb_header *in)
 {
 	return ctdb_uint64_len(&in->rsn) +
@@ -1640,7 +1703,8 @@ int ctdb_rec_buffer_traverse(struct ctdb_rec_buffer *recbuf,
 	TDB_DATA key, data;
 	uint32_t reqid;
 	size_t offset, reclen;
-	int ret = 0, i;
+	unsigned int i;
+	int ret = 0;
 
 	offset = 0;
 	for (i=0; i<recbuf->count; i++) {
@@ -1679,19 +1743,19 @@ int ctdb_rec_buffer_write(struct ctdb_rec_buffer *recbuf, int fd)
 	ssize_t n;
 
 	n = write(fd, &recbuf->db_id, sizeof(uint32_t));
-	if (n == -1 || n != sizeof(uint32_t)) {
+	if (n == -1 || (size_t)n != sizeof(uint32_t)) {
 		return (errno != 0 ? errno : EIO);
 	}
 	n = write(fd, &recbuf->count, sizeof(uint32_t));
-	if (n == -1 || n != sizeof(uint32_t)) {
+	if (n == -1 || (size_t)n != sizeof(uint32_t)) {
 		return (errno != 0 ? errno : EIO);
 	}
 	n = write(fd, &recbuf->buflen, sizeof(size_t));
-	if (n == -1 || n != sizeof(size_t)) {
+	if (n == -1 || (size_t)n != sizeof(size_t)) {
 		return (errno != 0 ? errno : EIO);
 	}
 	n = write(fd, recbuf->buf, recbuf->buflen);
-	if (n == -1 || n != recbuf->buflen) {
+	if (n == -1 || (size_t)n != recbuf->buflen) {
 		return (errno != 0 ? errno : EIO);
 	}
 
@@ -1710,15 +1774,15 @@ int ctdb_rec_buffer_read(int fd, TALLOC_CTX *mem_ctx,
 	}
 
 	n = read(fd, &recbuf->db_id, sizeof(uint32_t));
-	if (n == -1 || n != sizeof(uint32_t)) {
+	if (n == -1 || (size_t)n != sizeof(uint32_t)) {
 		return (errno != 0 ? errno : EIO);
 	}
 	n = read(fd, &recbuf->count, sizeof(uint32_t));
-	if (n == -1 || n != sizeof(uint32_t)) {
+	if (n == -1 || (size_t)n != sizeof(uint32_t)) {
 		return (errno != 0 ? errno : EIO);
 	}
 	n = read(fd, &recbuf->buflen, sizeof(size_t));
-	if (n == -1 || n != sizeof(size_t)) {
+	if (n == -1 || (size_t)n != sizeof(size_t)) {
 		return (errno != 0 ? errno : EIO);
 	}
 
@@ -1728,7 +1792,7 @@ int ctdb_rec_buffer_read(int fd, TALLOC_CTX *mem_ctx,
 	}
 
 	n = read(fd, recbuf->buf, recbuf->buflen);
-	if (n == -1 || n != recbuf->buflen) {
+	if (n == -1 || (size_t)n != recbuf->buflen) {
 		return (errno != 0 ? errno : EIO);
 	}
 
@@ -5208,5 +5272,5 @@ done:
 
 fail:
 	talloc_free(val);
-	return ENOMEM;
+	return ret;
 }

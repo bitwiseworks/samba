@@ -86,7 +86,7 @@ static struct extended_dn_context *extended_dn_context_init(struct ldb_module *m
 		return NULL;
 	}
 
-	ac->schema = dsdb_get_schema(ldb_module_get_ctx(module), ac);
+	ac->schema = dsdb_get_schema(ldb, ac);
 	ac->module = module;
 	ac->ldb = ldb;
 	ac->req = req;
@@ -722,6 +722,7 @@ static int extended_dn_modify(struct ldb_module *module, struct ldb_request *req
 	unsigned int i, j;
 	struct extended_dn_context *ac;
 	struct ldb_control *fix_links_control = NULL;
+	struct ldb_control *fix_link_sid_ctrl = NULL;
 	int ret;
 
 	if (ldb_dn_is_special(req->op.mod.message->dn)) {
@@ -743,6 +744,12 @@ static int extended_dn_modify(struct ldb_module *module, struct ldb_request *req
 	fix_links_control = ldb_request_get_control(req,
 					DSDB_CONTROL_DBCHECK_FIX_DUPLICATE_LINKS);
 	if (fix_links_control != NULL) {
+		return ldb_next_request(module, req);
+	}
+
+	fix_link_sid_ctrl = ldb_request_get_control(ac->req,
+					DSDB_CONTROL_DBCHECK_FIX_LINK_DN_SID);
+	if (fix_link_sid_ctrl != NULL) {
 		return ldb_next_request(module, req);
 	}
 

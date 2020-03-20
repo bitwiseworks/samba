@@ -676,7 +676,7 @@ NTSTATUS dcesrv_lsa_LookupSids3(struct dcesrv_call_state *dce_call,
 {
 	enum dcerpc_transport_t transport =
 		dcerpc_binding_get_transport(dce_call->conn->endpoint->ep_description);
-	const struct dcesrv_auth *auth = &dce_call->conn->auth_state;
+	enum dcerpc_AuthType auth_type = DCERPC_AUTH_TYPE_NONE;
 	struct dcesrv_lsa_LookupSids_base_state *state = NULL;
 	NTSTATUS status;
 
@@ -687,9 +687,12 @@ NTSTATUS dcesrv_lsa_LookupSids3(struct dcesrv_call_state *dce_call,
 	/*
 	 * We don't have policy handles on this call. So this must be restricted
 	 * to crypto connections only.
+	 *
+	 * NB. gensec requires schannel connections to
+	 * have at least DCERPC_AUTH_LEVEL_INTEGRITY.
 	 */
-	if (auth->auth_type != DCERPC_AUTH_TYPE_SCHANNEL ||
-	    auth->auth_level < DCERPC_AUTH_LEVEL_INTEGRITY) {
+	dcesrv_call_auth_info(dce_call, &auth_type, NULL);
+	if (auth_type != DCERPC_AUTH_TYPE_SCHANNEL) {
 		DCESRV_FAULT(DCERPC_FAULT_ACCESS_DENIED);
 	}
 
@@ -1295,7 +1298,7 @@ NTSTATUS dcesrv_lsa_LookupNames4(struct dcesrv_call_state *dce_call, TALLOC_CTX 
 {
 	enum dcerpc_transport_t transport =
 		dcerpc_binding_get_transport(dce_call->conn->endpoint->ep_description);
-	const struct dcesrv_auth *auth = &dce_call->conn->auth_state;
+	enum dcerpc_AuthType auth_type = DCERPC_AUTH_TYPE_NONE;
 	struct dcesrv_lsa_LookupNames_base_state *state = NULL;
 	NTSTATUS status;
 
@@ -1307,8 +1310,8 @@ NTSTATUS dcesrv_lsa_LookupNames4(struct dcesrv_call_state *dce_call, TALLOC_CTX 
 	 * We don't have policy handles on this call. So this must be restricted
 	 * to crypto connections only.
 	 */
-	if (auth->auth_type != DCERPC_AUTH_TYPE_SCHANNEL ||
-	    auth->auth_level < DCERPC_AUTH_LEVEL_INTEGRITY) {
+	dcesrv_call_auth_info(dce_call, &auth_type, NULL);
+	if (auth_type != DCERPC_AUTH_TYPE_SCHANNEL) {
 		DCESRV_FAULT(DCERPC_FAULT_ACCESS_DENIED);
 	}
 
@@ -1595,7 +1598,7 @@ static NTSTATUS dcesrv_lsa_lookup_name_builtin(
 			return NT_STATUS_NONE_MAPPED;
 		}
 		/*
-		 * We know we're authoritive
+		 * We know we're authoritative
 		 */
 		status = NT_STATUS_OK;
 	}
@@ -1636,7 +1639,7 @@ static NTSTATUS dcesrv_lsa_lookup_sid_builtin(
 				       &item->type);
 	if (NT_STATUS_EQUAL(status, NT_STATUS_NONE_MAPPED)) {
 		/*
-		 * We know we're authoritive
+		 * We know we're authoritative
 		 */
 		status = NT_STATUS_OK;
 	}
@@ -1802,7 +1805,7 @@ static NTSTATUS dcesrv_lsa_lookup_name_account(
 			return NT_STATUS_NONE_MAPPED;
 		}
 		/*
-		 * We know we're authoritive
+		 * We know we're authoritative
 		 */
 		status = NT_STATUS_OK;
 	}
@@ -1846,7 +1849,7 @@ static NTSTATUS dcesrv_lsa_lookup_sid_account(
 				       &item->type);
 	if (NT_STATUS_EQUAL(status, NT_STATUS_NONE_MAPPED)) {
 		/*
-		 * We know we're authoritive
+		 * We know we're authoritative
 		 */
 		status = NT_STATUS_OK;
 	}
@@ -1875,6 +1878,8 @@ static NTSTATUS dcesrv_lsa_lookup_name_winbind(
 	NTSTATUS status;
 	const char *check_domain_name = NULL;
 	bool expect_domain = false;
+	struct imessaging_context *imsg_ctx =
+		dcesrv_imessaging_context(state->dce_call->conn);
 
 	if (item->name == NULL) {
 		/*
@@ -1991,9 +1996,9 @@ static NTSTATUS dcesrv_lsa_lookup_name_winbind(
 	}
 
 	state->wb.irpc_handle = irpc_binding_handle_by_name(state,
-					state->dce_call->msg_ctx,
-					"winbind_server",
-					&ndr_table_lsarpc);
+							    imsg_ctx,
+							    "winbind_server",
+							    &ndr_table_lsarpc);
 	if (state->wb.irpc_handle == NULL) {
 		DEBUG(0,("Failed to get binding_handle for winbind_server task\n"));
 		state->dce_call->fault_code = DCERPC_FAULT_CANT_PERFORM;
@@ -2018,6 +2023,8 @@ static NTSTATUS dcesrv_lsa_lookup_sid_winbind(
 	struct dom_sid domain_sid = {0,};
 	NTSTATUS status;
 	bool match;
+	struct imessaging_context *imsg_ctx =
+		dcesrv_imessaging_context(state->dce_call->conn);
 
 	/*
 	 * Verify the sid is not INVALID.
@@ -2108,9 +2115,9 @@ static NTSTATUS dcesrv_lsa_lookup_sid_winbind(
 	}
 
 	state->wb.irpc_handle = irpc_binding_handle_by_name(state,
-					state->dce_call->msg_ctx,
-					"winbind_server",
-					&ndr_table_lsarpc);
+							    imsg_ctx,
+							    "winbind_server",
+							    &ndr_table_lsarpc);
 	if (state->wb.irpc_handle == NULL) {
 		DEBUG(0,("Failed to get binding_handle for winbind_server task\n"));
 		state->dce_call->fault_code = DCERPC_FAULT_CANT_PERFORM;

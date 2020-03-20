@@ -30,7 +30,6 @@
 #include "../librpc/gen_ndr/ndr_netlogon_c.h"
 #include "../librpc/gen_ndr/schannel.h"
 #include "rpc_client/cli_netlogon.h"
-#include "rpc_client/init_netlogon.h"
 #include "rpc_client/util_netlogon.h"
 #include "../libcli/security/security.h"
 #include "lib/param/param.h"
@@ -38,6 +37,7 @@
 #include "dbwrap/dbwrap.h"
 #include "dbwrap/dbwrap_open.h"
 #include "util_tdb.h"
+#include "lib/crypto/gnutls_helpers.h"
 
 
 NTSTATUS rpccli_pre_open_netlogon_creds(void)
@@ -458,6 +458,7 @@ NTSTATUS rpccli_netlogon_password_logon(
 	const char *username,
 	const char *password,
 	const char *workstation,
+	const uint64_t logon_id,
 	enum netr_LogonInfoClass logon_type,
 	uint8_t *authoritative,
 	uint32_t *flags,
@@ -470,6 +471,13 @@ NTSTATUS rpccli_netlogon_password_logon(
 	uint16_t validation_level = 0;
 	union netr_Validation *validation = NULL;
 	char *workstation_slash = NULL;
+
+	unsigned char local_nt_response[24];
+	unsigned char local_lm_response[24];
+	struct samr_Password lmpassword = {.hash = {0}};
+	struct samr_Password ntpassword = {.hash = {0}};
+	struct netr_ChallengeResponse lm = {0};
+	struct netr_ChallengeResponse nt = {0};
 
 	logon = talloc_zero(frame, union netr_LogonLevel);
 	if (logon == NULL) {
@@ -495,8 +503,6 @@ NTSTATUS rpccli_netlogon_password_logon(
 
 		struct netr_PasswordInfo *password_info;
 
-		struct samr_Password lmpassword;
-		struct samr_Password ntpassword;
 
 		password_info = talloc_zero(frame, struct netr_PasswordInfo);
 		if (password_info == NULL) {
@@ -508,8 +514,7 @@ NTSTATUS rpccli_netlogon_password_logon(
 
 		password_info->identity_info.domain_name.string		= domain;
 		password_info->identity_info.parameter_control		= logon_parameters;
-		password_info->identity_info.logon_id_low		= 0xdead;
-		password_info->identity_info.logon_id_high		= 0xbeef;
+		password_info->identity_info.logon_id			= logon_id;
 		password_info->identity_info.account_name.string	= username;
 		password_info->identity_info.workstation.string		= workstation_slash;
 
@@ -524,10 +529,7 @@ NTSTATUS rpccli_netlogon_password_logon(
 	case NetlogonNetworkTransitiveInformation: {
 		struct netr_NetworkInfo *network_info;
 		uint8_t chal[8];
-		unsigned char local_lm_response[24];
-		unsigned char local_nt_response[24];
-		struct netr_ChallengeResponse lm;
-		struct netr_ChallengeResponse nt;
+		int rc;
 
 		ZERO_STRUCT(lm);
 		ZERO_STRUCT(nt);
@@ -541,7 +543,11 @@ NTSTATUS rpccli_netlogon_password_logon(
 		generate_random_buffer(chal, 8);
 
 		SMBencrypt(password, chal, local_lm_response);
-		SMBNTencrypt(password, chal, local_nt_response);
+		rc = SMBNTencrypt(password, chal, local_nt_response);
+		if (rc != 0) {
+			TALLOC_FREE(frame);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+		}
 
 		lm.length = 24;
 		lm.data = local_lm_response;
@@ -551,8 +557,7 @@ NTSTATUS rpccli_netlogon_password_logon(
 
 		network_info->identity_info.domain_name.string		= domain;
 		network_info->identity_info.parameter_control		= logon_parameters;
-		network_info->identity_info.logon_id_low		= 0xdead;
-		network_info->identity_info.logon_id_high		= 0xbeef;
+		network_info->identity_info.logon_id			= logon_id;
 		network_info->identity_info.account_name.string		= username;
 		network_info->identity_info.workstation.string		= workstation_slash;
 
@@ -607,6 +612,7 @@ NTSTATUS rpccli_netlogon_network_logon(
 	const char *username,
 	const char *domain,
 	const char *workstation,
+	const uint64_t logon_id,
 	const uint8_t chal[8],
 	DATA_BLOB lm_response,
 	DATA_BLOB nt_response,
@@ -670,8 +676,7 @@ NTSTATUS rpccli_netlogon_network_logon(
 
 	network_info->identity_info.domain_name.string		= domain;
 	network_info->identity_info.parameter_control		= logon_parameters;
-	network_info->identity_info.logon_id_low		= 0xdead;
-	network_info->identity_info.logon_id_high		= 0xbeef;
+	network_info->identity_info.logon_id			= logon_id;
 	network_info->identity_info.account_name.string		= username;
 	network_info->identity_info.workstation.string		= workstation_name_slash;
 
@@ -710,6 +715,7 @@ NTSTATUS rpccli_netlogon_interactive_logon(
 	const char *username,
 	const char *domain,
 	const char *workstation,
+	const uint64_t logon_id,
 	DATA_BLOB lm_hash,
 	DATA_BLOB nt_hash,
 	enum netr_LogonInfoClass logon_type,
@@ -771,8 +777,7 @@ NTSTATUS rpccli_netlogon_interactive_logon(
 
 	password_info->identity_info.domain_name.string		= domain;
 	password_info->identity_info.parameter_control		= logon_parameters;
-	password_info->identity_info.logon_id_low		= 0xdead;
-	password_info->identity_info.logon_id_high		= 0xbeef;
+	password_info->identity_info.logon_id			= logon_id;
 	password_info->identity_info.account_name.string	= username;
 	password_info->identity_info.workstation.string		= workstation_name_slash;
 

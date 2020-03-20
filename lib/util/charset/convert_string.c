@@ -293,31 +293,31 @@ bool convert_string_handle(struct smb_iconv_handle *ic,
 		switch(errno) {
 			case EINVAL:
 				reason="Incomplete multibyte sequence";
-				DEBUG(3,("convert_string_internal: Conversion error: %s(%s)\n",
-					 reason, (const char *)src));
+				DBG_NOTICE("Conversion error: %s\n",
+					 reason);
 				break;
 			case E2BIG:
 			{
 				reason="No more room";
 				if (from == CH_UNIX) {
-					DEBUG(3,("E2BIG: convert_string(%s,%s): srclen=%u destlen=%u - '%s'\n",
-						 charset_name(ic, from), charset_name(ic, to),
-						 (unsigned int)srclen, (unsigned int)destlen, (const char *)src));
+					DBG_NOTICE("E2BIG: convert_string(%s,%s): srclen=%u destlen=%u error: %s\n",
+						   charset_name(ic, from), charset_name(ic, to),
+						   (unsigned int)srclen, (unsigned int)destlen, reason);
 				} else {
-					DEBUG(3,("E2BIG: convert_string(%s,%s): srclen=%u destlen=%u\n",
-						 charset_name(ic, from), charset_name(ic, to),
-						 (unsigned int)srclen, (unsigned int)destlen));
+					DBG_NOTICE("E2BIG: convert_string(%s,%s): srclen=%u destlen=%u error: %s\n",
+						   charset_name(ic, from), charset_name(ic, to),
+						   (unsigned int)srclen, (unsigned int)destlen, reason);
 				}
 				break;
 			}
 			case EILSEQ:
 				reason="Illegal multibyte sequence";
-				DEBUG(3,("convert_string_internal: Conversion error: %s(%s)\n",
-					 reason, (const char *)src));
+				DBG_NOTICE("convert_string_internal: Conversion error: %s\n",
+					   reason);
 				break;
 			default:
-				DEBUG(0,("convert_string_internal: Conversion error: %s(%s)\n",
-					 reason, (const char *)src));
+				DBG_ERR("convert_string_internal: Conversion error: %s\n",
+					reason);
 				break;
 		}
 		/* smb_panic(reason); */
@@ -349,14 +349,17 @@ bool convert_string_talloc_handle(TALLOC_CTX *ctx, struct smb_iconv_handle *ic,
 				  size_t *converted_size)
 
 {
-	size_t i_len, o_len, destlen = (srclen * 3) / 2;
+	size_t i_len, o_len, destlen;
 	size_t retval;
-	const char *inbuf = (const char *)src;
+	const char *inbuf = NULL;
 	char *outbuf = NULL, *ob = NULL;
 	smb_iconv_t descriptor;
 	void **dest = (void **)dst;
 
 	*dest = NULL;
+	if (converted_size != NULL) {
+		*converted_size = 0;
+	}
 
 	if (src == NULL || srclen == (size_t)-1) {
 		errno = EINVAL;
@@ -394,18 +397,14 @@ bool convert_string_talloc_handle(TALLOC_CTX *ctx, struct smb_iconv_handle *ic,
 		return false;
 	}
 
-  convert:
-
-	/* +2 is for ucs2 null termination. */
-	if ((destlen*2)+2 < destlen) {
-		/* wrapped ! abort. */
-		DEBUG(0, ("convert_string_talloc: destlen wrapped !\n"));
-		TALLOC_FREE(outbuf);
+	if (srclen >= (SIZE_MAX - 2) / 3) {
+		DBG_ERR("convert_string_talloc: "
+			"srclen is %zu, destlen would wrap!\n",
+			srclen);
 		errno = EOPNOTSUPP;
 		return false;
-	} else {
-		destlen = destlen * 2;
 	}
+	destlen = srclen * 3;
 
 	/* +2 is for ucs2 null termination. */
 	ob = talloc_realloc(ctx, ob, char, destlen + 2);
@@ -418,6 +417,7 @@ bool convert_string_talloc_handle(TALLOC_CTX *ctx, struct smb_iconv_handle *ic,
 	outbuf = ob;
 	i_len = srclen;
 	o_len = destlen;
+	inbuf = (const char *)src;
 
 	retval = smb_iconv(descriptor,
 			   &inbuf, &i_len,
@@ -427,16 +427,22 @@ bool convert_string_talloc_handle(TALLOC_CTX *ctx, struct smb_iconv_handle *ic,
 		switch(errno) {
 			case EINVAL:
 				reason="Incomplete multibyte sequence";
-				DEBUG(3,("convert_string_talloc: Conversion error: %s(%s)\n",reason,inbuf));
+				DBG_NOTICE("Conversion error: %s\n",
+					   reason);
 				break;
 			case E2BIG:
-				goto convert;
+				reason = "output buffer is too small";
+				DBG_NOTICE("Conversion error: %s\n",
+					   reason);
+				break;
 			case EILSEQ:
 				reason="Illegal multibyte sequence";
-				DEBUG(3,("convert_string_talloc: Conversion error: %s(%s)\n",reason,inbuf));
+				DBG_NOTICE("Conversion error: %s\n",
+					   reason);
 				break;
 			default:
-				DEBUG(0,("Conversion error: %s(%s)\n",reason,inbuf));
+				DBG_ERR("Conversion error: %s\n",
+					reason);
 				break;
 		}
 		/* smb_panic(reason); */

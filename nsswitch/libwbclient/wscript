@@ -1,9 +1,9 @@
 #!/usr/bin/env python
 
-import Options, Logs
+from waflib import Options, Logs
 
 # Remember to also update wbclient.h
-VERSION="0.14"
+VERSION="0.15"
 
 # It may be useful at some point to allow Samba to build against a
 # system libwbclient, such as the one provided by Likewise.  To to
@@ -37,7 +37,7 @@ def build(bld):
                              wbc_pwd.c
                              wbc_sid.c
                              wbc_util.c''',
-                      deps='winbind-client',
+                      deps='winbind-client samba-util',
                       pc_files='wbclient.pc',
                       public_headers='wbclient.h',
                       abi_directory='ABI',

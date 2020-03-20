@@ -88,7 +88,7 @@ def shorten_vertex_names(vertices, suffix=',...', aggressive=False):
         try:
             while True:
                 c = set(x[i] for x in vlist)
-                if len(c) > 1 or c == {'*'}:
+                if len(c) > 1 or '*' in c:
                     break
                 i -= 1
         except IndexError:
@@ -121,7 +121,7 @@ def shorten_vertex_names(vertices, suffix=',...', aggressive=False):
                 break
         else:
             vmap = dict((k, v.replace(',CN=Servers,', ',**,', 1))
-                       for k, v in vmap.items())
+                        for k, v in vmap.items())
             replacements.append(('**', 'CN=Servers'))
 
         for v in vmap.values():
@@ -129,14 +129,10 @@ def shorten_vertex_names(vertices, suffix=',...', aggressive=False):
                 break
         else:
             vmap = dict((k, v.replace('CN=NTDS Settings,', '*,', 1))
-                       for k, v in vmap.items())
+                        for k, v in vmap.items())
             replacements.append(('*', 'CN=NTDS Settings'))
 
     return vmap, replacements
-
-
-
-
 
 
 def compile_graph_key(key_items, nodes_above=[], elisions=None,
@@ -229,7 +225,7 @@ def compile_graph_key(key_items, nodes_above=[], elisions=None,
             elision_str,
             ';\n'.join(above_lines),
             ' -> '.join(order_lines),
-         ))
+            ))
 
     return s
 
@@ -395,7 +391,7 @@ COLOUR_SETS = {
     'xterm-256color': {
         'alternate rows': (colour.xterm_256_colour(39),
                            colour.xterm_256_colour(45)),
-        #'alternate rows': (colour.xterm_256_colour(246),
+        # 'alternate rows': (colour.xterm_256_colour(246),
         #                   colour.xterm_256_colour(247)),
         'disconnected': colour.xterm_256_colour(124, bg=True),
         'connected': colour.xterm_256_colour(112),
@@ -405,14 +401,14 @@ COLOUR_SETS = {
                              colour.xterm_256_colour(220),
                              colour.xterm_256_colour(214),
                              colour.xterm_256_colour(208),
-        ),
+                             ),
         'header': colour.UNDERLINE,
         'reset': colour.C_NORMAL,
     },
     'xterm-256color-heatmap': {
         'alternate rows': (colour.xterm_256_colour(171),
                            colour.xterm_256_colour(207)),
-        #'alternate rows': (colour.xterm_256_colour(246),
+        # 'alternate rows': (colour.xterm_256_colour(246),
         #                    colour.xterm_256_colour(247)),
         'disconnected': colour.xterm_256_colour(124, bg=True),
         'connected': colour.xterm_256_colour(112, bg=True),
@@ -422,7 +418,7 @@ COLOUR_SETS = {
                              colour.xterm_256_colour(220, bg=True),
                              colour.xterm_256_colour(214, bg=True),
                              colour.xterm_256_colour(208, bg=True),
-        ),
+                             ),
         'header': colour.UNDERLINE,
         'reset': colour.C_NORMAL,
     },
@@ -441,9 +437,9 @@ CHARSETS = {
         'vertical': '│',
         'horizontal': '─',
         'corner': '╭',
-        #'diagonal': '╲',
+        # 'diagonal': '╲',
         'diagonal': '·',
-        #'missing': '🕱',
+        # 'missing': '🕱',
         'missing': '-',
         'right_arrow': '←',
     },
@@ -573,7 +569,6 @@ def distance_matrix(vertices, edges,
         vertices = [vmap[x] for x in vertices]
         edges = [(vmap[a], vmap[b]) for a, b in edges]
 
-
     vlen = max(6, max(len(v) for v in vertices))
 
     # first, the key for the columns
@@ -605,7 +600,7 @@ def distance_matrix(vertices, edges,
                                       horizontal * j,
                                       v,
                                       c_reset
-        ))
+                                      ))
         verticals += c + vertical
 
     connections = find_transitive_distance(vertices, edges)
@@ -674,6 +669,7 @@ def transpose_dict_matrix(m):
         for k2, dist in row.items():
             m2.setdefault(k2, {})[k1] = dist
     return m2
+
 
 def full_matrix(rows,
                 utf8=False,
@@ -768,7 +764,7 @@ def full_matrix(rows,
                                       horizontal * j,
                                       v,
                                       c_reset
-        ))
+                                      ))
         verticals += '%s%s' % (c, vertical)
 
     end_cell = '%s%s' % (' ' * use_padding, c_reset)

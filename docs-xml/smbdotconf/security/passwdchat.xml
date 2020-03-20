@@ -1,6 +1,7 @@
 <samba:parameter name="passwd chat"
                  context="G"
 		 type="string"
+                 substitution="1"
                  xmlns:samba="http://www.samba.org/samba/DTD/samba-doc">
 <description>
     <para>This string controls the <emphasis>&quot;chat&quot;</emphasis> 
@@ -28,7 +29,7 @@
 
     <para>The string can contain the macro <parameter
     moreinfo="none">%n</parameter> which is substituted 
-    for the new password.  The old passsword (<parameter 
+    for the new password.  The old password (<parameter 
     moreinfo="none">%o</parameter>) is only available when
     <smbconfoption name="encrypt passwords"/> has been disabled.
     The chat sequence can also contain the standard macros 

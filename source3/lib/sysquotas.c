@@ -227,6 +227,9 @@ static struct {
 	int (*get_quota)(const char *path, const char *bdev, enum SMB_QUOTA_TYPE qtype, unid_t id, SMB_DISK_QUOTA *dp);
 	int (*set_quota)(const char *path, const char *bdev, enum SMB_QUOTA_TYPE qtype, unid_t id, SMB_DISK_QUOTA *dp);
 } sys_quota_backends[] = {
+#ifdef HAVE_JFS_QUOTA_H
+	{"jfs2", sys_get_jfs2_quota, 	sys_set_jfs2_quota},
+#endif
 #if defined HAVE_XFS_QUOTAS
 	{"xfs", sys_get_xfs_quota, 	sys_set_xfs_quota},
 	{"gfs", sys_get_xfs_quota, 	sys_set_xfs_quota},
@@ -241,15 +244,18 @@ static struct {
 
 static int command_get_quota(const char *path, enum SMB_QUOTA_TYPE qtype, unid_t id, SMB_DISK_QUOTA *dp)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	const char *get_quota_command;
 	char **lines = NULL;
 
-	get_quota_command = lp_get_quota_command(talloc_tos());
+	get_quota_command = lp_get_quota_command(talloc_tos(), lp_sub);
 	if (get_quota_command && *get_quota_command) {
 		const char *p;
 		char *p2;
-		char *syscmd = NULL;
 		int _id = -1;
+		int error = 0;
+		char **argl = NULL;
 
 		switch(qtype) {
 			case SMB_USER_QUOTA_TYPE:
@@ -265,15 +271,40 @@ static int command_get_quota(const char *path, enum SMB_QUOTA_TYPE qtype, unid_t
 				return -1;
 		}
 
-		if (asprintf(&syscmd, "%s %s %d %d",
-			get_quota_command, path, qtype, _id) < 0) {
+		argl = talloc_zero_array(talloc_tos(), char *, 5);
+		if (argl == NULL) {
 			return -1;
 		}
+		argl[0] = talloc_strdup(argl, get_quota_command);
+		if (argl[0] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[1] = talloc_strdup(argl, path);
+		if (argl[1] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[2] = talloc_asprintf(argl, "%d", qtype);
+		if (argl[2] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[3] = talloc_asprintf(argl, "%d", _id);
+		if (argl[3] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[4] = NULL;
 
-		DEBUG (3, ("get_quota: Running command %s\n", syscmd));
+		DBG_NOTICE("Running command %s %s %d %d\n",
+			get_quota_command,
+			path,
+			qtype,
+			_id);
 
-		lines = file_lines_pload(talloc_tos(), syscmd, NULL);
-		SAFE_FREE(syscmd);
+		lines = file_lines_ploadv(talloc_tos(), argl, NULL);
+		TALLOC_FREE(argl);
 
 		if (lines) {
 			char *line = lines[0];
@@ -282,7 +313,15 @@ static int command_get_quota(const char *path, enum SMB_QUOTA_TYPE qtype, unid_t
 
 			/* we need to deal with long long unsigned here, if supported */
 
-			dp->qflags = strtoul(line, &p2, 10);
+			dp->qflags = smb_strtoul(line,
+						 &p2,
+						 10,
+						 &error,
+						 SMB_STR_STANDARD);
+			if (error != 0) {
+				goto invalid_param;
+			}
+
 			p = p2;
 			while (p && *p && isspace(*p)) {
 				p++;
@@ -386,13 +425,15 @@ invalid_param:
 
 static int command_set_quota(const char *path, enum SMB_QUOTA_TYPE qtype, unid_t id, SMB_DISK_QUOTA *dp)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	const char *set_quota_command;
 
-	set_quota_command = lp_set_quota_command(talloc_tos());
+	set_quota_command = lp_set_quota_command(talloc_tos(), lp_sub);
 	if (set_quota_command && *set_quota_command) {
 		char **lines = NULL;
-		char *syscmd = NULL;
 		int _id = -1;
+		char **argl = NULL;
 
 		switch(qtype) {
 			case SMB_USER_QUOTA_TYPE:
@@ -407,21 +448,84 @@ static int command_set_quota(const char *path, enum SMB_QUOTA_TYPE qtype, unid_t
 				return -1;
 		}
 
-		if (asprintf(&syscmd,
+		argl = talloc_zero_array(talloc_tos(), char *, 11);
+		if (argl == NULL) {
+			return -1;
+		}
+		argl[0] = talloc_strdup(argl, set_quota_command);
+		if (argl[0] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[1] = talloc_strdup(argl, path);
+		if (argl[1] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[2] = talloc_asprintf(argl, "%d", qtype);
+		if (argl[2] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[3] = talloc_asprintf(argl, "%d", _id);
+		if (argl[3] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[4] = talloc_asprintf(argl, "%u", dp->qflags);
+		if (argl[4] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[5] = talloc_asprintf(argl, "%llu",
+				(long long unsigned)dp->softlimit);
+		if (argl[5] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[6] = talloc_asprintf(argl, "%llu",
+				(long long unsigned)dp->hardlimit);
+		if (argl[6] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[7] = talloc_asprintf(argl, "%llu",
+				(long long unsigned)dp->isoftlimit);
+		if (argl[7] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[8] = talloc_asprintf(argl, "%llu",
+				(long long unsigned)dp->ihardlimit);
+		if (argl[8] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[9] = talloc_asprintf(argl, "%llu",
+				(long long unsigned)dp->bsize);
+		if (argl[9] == NULL) {
+			TALLOC_FREE(argl);
+			return -1;
+		}
+		argl[10] = NULL;
+
+		DBG_NOTICE("Running command "
 			"%s %s %d %d "
 			"%u %llu %llu "
 			"%llu %llu %llu ",
-			set_quota_command, path, qtype, _id, dp->qflags,
-			(long long unsigned)dp->softlimit,(long long unsigned)dp->hardlimit,
-			(long long unsigned)dp->isoftlimit,(long long unsigned)dp->ihardlimit,
-			(long long unsigned)dp->bsize) < 0) {
-			return -1;
-		}
+			set_quota_command,
+			path,
+			qtype,
+			_id,
+			dp->qflags,
+			(long long unsigned)dp->softlimit,
+			(long long unsigned)dp->hardlimit,
+			(long long unsigned)dp->isoftlimit,
+			(long long unsigned)dp->ihardlimit,
+			(long long unsigned)dp->bsize);
 
-		DBG_NOTICE("set_quota: Running command %s\n", syscmd);
-
-		lines = file_lines_pload(talloc_tos(), syscmd, NULL);
-		SAFE_FREE(syscmd);
+		lines = file_lines_ploadv(talloc_tos(), argl, NULL);
+		TALLOC_FREE(argl);
 		if (lines) {
 			char *line = lines[0];
 

@@ -242,7 +242,7 @@ static NTSTATUS gensec_gssapi_start(struct gensec_security *gensec_security)
 	}
 
 	/* don't do DNS lookups of any kind, it might/will fail for a netbios name */
-	ret = gsskrb5_set_dns_canonicalize(gensec_setting_bool(gensec_security->settings, "krb5", "set_dns_canonicalize", false));
+	ret = gsskrb5_set_dns_canonicalize(false);
 	if (ret) {
 		DEBUG(1,("gensec_gssapi_start: gsskrb5_set_dns_canonicalize failed\n"));
 		talloc_free(gensec_gssapi_state);
@@ -428,7 +428,7 @@ static NTSTATUS gensec_gssapi_update_internal(struct gensec_security *gensec_sec
 {
 	struct gensec_gssapi_state *gensec_gssapi_state
 		= talloc_get_type(gensec_security->private_data, struct gensec_gssapi_state);
-	NTSTATUS nt_status = NT_STATUS_LOGON_FAILURE;
+	NTSTATUS nt_status;
 	OM_uint32 maj_stat, min_stat;
 	OM_uint32 min_stat2;
 	gss_buffer_desc input_token = { 0, NULL };
@@ -437,8 +437,6 @@ static NTSTATUS gensec_gssapi_update_internal(struct gensec_security *gensec_sec
 	const char *target_principal = gensec_get_target_principal(gensec_security);
 	const char *hostname = gensec_get_target_hostname(gensec_security);
 	const char *service = gensec_get_target_service(gensec_security);
-	const char *client_realm = cli_credentials_get_realm(cli_creds);
-	const char *server_realm = NULL;
 	gss_OID gss_oid_p = NULL;
 	OM_uint32 time_req = 0;
 	OM_uint32 time_rec = 0;
@@ -457,6 +455,7 @@ static NTSTATUS gensec_gssapi_update_internal(struct gensec_security *gensec_sec
 		switch (gensec_security->gensec_role) {
 		case GENSEC_CLIENT:
 		{
+			const char *client_realm = NULL;
 #ifdef SAMBA4_USES_HEIMDAL
 			struct gsskrb5_send_to_kdc send_to_kdc;
 			krb5_error_code ret;
@@ -532,6 +531,7 @@ static NTSTATUS gensec_gssapi_update_internal(struct gensec_security *gensec_sec
 			 * transitive forest trusts, would have to do the
 			 * fallback ourself.
 			 */
+			client_realm = cli_credentials_get_realm(cli_creds);
 #ifndef SAMBA4_USES_HEIMDAL
 			if (gensec_gssapi_state->server_name == NULL) {
 				nt_status = gensec_gssapi_setup_server_principal(gensec_gssapi_state,
@@ -575,6 +575,8 @@ static NTSTATUS gensec_gssapi_update_internal(struct gensec_security *gensec_sec
 			}
 #endif /* !SAMBA4_USES_HEIMDAL */
 			if (gensec_gssapi_state->server_name == NULL) {
+				const char *server_realm = NULL;
+
 				server_realm = smb_krb5_get_realm_from_hostname(gensec_gssapi_state,
 										hostname,
 										client_realm);
@@ -703,11 +705,7 @@ init_sec_context_done:
 			OM_uint32 lifetime = 0;
 			gss_cred_usage_t usage;
 			const char *role = NULL;
-			DEBUG(0, ("GSS %s Update(krb5)(%d) Update failed, credentials expired during GSSAPI handshake!\n",
-				  role,
-				  gensec_gssapi_state->gss_exchange_count));
 
-			
 			switch (gensec_security->gensec_role) {
 			case GENSEC_CLIENT:
 				creds = gensec_gssapi_state->client_cred->creds;
@@ -718,6 +716,11 @@ init_sec_context_done:
 				role = "server";
 				break;
 			}
+
+			DBG_ERR("GSS %s Update(krb5)(%d) failed, credentials "
+				"expired during GSSAPI handshake!\n",
+				role,
+				gensec_gssapi_state->gss_exchange_count);
 
 			maj_stat = gss_inquire_cred(&min_stat, 
 						    creds,

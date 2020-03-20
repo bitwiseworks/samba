@@ -25,7 +25,7 @@
 #include "messages.h"
 
 struct db_context *db_open_watched(TALLOC_CTX *mem_ctx,
-				   struct db_context *backend,
+				   struct db_context **backend,
 				   struct messaging_context *msg);
 struct tevent_req *dbwrap_watched_watch_send(TALLOC_CTX *mem_ctx,
 					     struct tevent_context *ev,
@@ -34,5 +34,13 @@ struct tevent_req *dbwrap_watched_watch_send(TALLOC_CTX *mem_ctx,
 NTSTATUS dbwrap_watched_watch_recv(struct tevent_req *req,
 				   bool *blockerdead,
 				   struct server_id *blocker);
+
+/*
+ * Wake up watchers without having modified the record value. One
+ * usecase at the time of this commit is: We have lease break waiters
+ * waiting on a locking.tdb record. They should be woken up when a
+ * lease is broken, which does not modify the locking.tdb record.
+ */
+void dbwrap_watched_wakeup(struct db_record *rec);
 
 #endif /* __DBWRAP_WATCH_H__ */

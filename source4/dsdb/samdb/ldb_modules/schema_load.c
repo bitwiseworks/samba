@@ -117,6 +117,7 @@ static int schema_metadata_get_uint64(struct schema_load_private_data *data,
 	char *value_str;
 	TALLOC_CTX *tmp_ctx;
 	int tdb_seqnum;
+	int error = 0;
 
 	if (!data) {
 		*value = default_value;
@@ -169,7 +170,16 @@ static int schema_metadata_get_uint64(struct schema_load_private_data *data,
 	 * next time
 	 */
 	data->tdb_seqnum = tdb_seqnum;
-	data->schema_seq_num_cache = strtoull(value_str, NULL, 10);
+	data->schema_seq_num_cache = smb_strtoull(value_str,
+						  NULL,
+						  10,
+						  &error,
+						  SMB_STR_STANDARD);
+	if (error != 0) {
+		talloc_free(tmp_ctx);
+		return ldb_module_error(data->module, LDB_ERR_OPERATIONS_ERROR,
+					"Failed to convert value");
+	}
 
 	*value = data->schema_seq_num_cache;
 
@@ -386,7 +396,6 @@ static int schema_load(struct ldb_context *ldb,
 		       bool *need_write)
 {
 	struct dsdb_schema *schema;
-	void *readOnlySchema;
 	int ret, metadata_ret;
 	TALLOC_CTX *frame = talloc_stackframe();
 	
@@ -413,33 +422,7 @@ static int schema_load(struct ldb_context *ldb,
 		return LDB_SUCCESS;
 	}
 
-	readOnlySchema = ldb_get_opaque(ldb, "readOnlySchema");
-
-	/* If we have the readOnlySchema opaque, then don't check for
-	 * runtime schema updates, as they are not permitted (we would
-	 * have to update the backend server schema too */
-	if (readOnlySchema != NULL) {
-		struct dsdb_schema *new_schema;
-		ret = dsdb_schema_from_db(module, frame, 0, &new_schema);
-		if (ret != LDB_SUCCESS) {
-			ldb_debug_set(ldb, LDB_DEBUG_FATAL,
-				      "schema_load_init: dsdb_schema_from_db() failed: %d:%s: %s",
-				      ret, ldb_strerror(ret), ldb_errstring(ldb));
-			TALLOC_FREE(frame);
-			return ret;
-		}
-
-		/* "dsdb_set_schema()" steals schema into the ldb_context */
-		ret = dsdb_set_schema(ldb, new_schema, SCHEMA_MEMORY_ONLY);
-		if (ret != LDB_SUCCESS) {
-			ldb_debug_set(ldb, LDB_DEBUG_FATAL,
-				      "schema_load_init: dsdb_set_schema() failed: %d:%s: %s",
-				      ret, ldb_strerror(ret), ldb_errstring(ldb));
-			TALLOC_FREE(frame);
-			return ret;
-		}
-
-	} else if (metadata_ret == LDB_SUCCESS) {
+	if (metadata_ret == LDB_SUCCESS) {
 		ret = dsdb_set_schema_refresh_function(ldb, dsdb_schema_refresh, module);
 
 		if (ret != LDB_SUCCESS) {
@@ -579,26 +562,35 @@ static int schema_load_extended(struct ldb_module *module, struct ldb_request *r
 	struct dsdb_schema *schema;
 	int ret;
 
-	if (strcmp(req->op.extended.oid, DSDB_EXTENDED_SCHEMA_UPDATE_NOW_OID) != 0) {
+	if (strcmp(req->op.extended.oid, DSDB_EXTENDED_SCHEMA_LOAD) == 0) {
+
+		ret = dsdb_schema_from_db(module, req, 0, &schema);
+		if (ret == LDB_SUCCESS) {
+			return ldb_module_done(req, NULL, NULL, LDB_SUCCESS);
+		}
+		return ret;
+
+	} else if (strcmp(req->op.extended.oid, DSDB_EXTENDED_SCHEMA_UPDATE_NOW_OID) == 0) {
+		/* Force a refresh */
+		schema = dsdb_get_schema(ldb, NULL);
+
+		ret = dsdb_schema_set_indices_and_attributes(ldb,
+							     schema,
+							     SCHEMA_WRITE);
+
+		if (ret != LDB_SUCCESS) {
+			ldb_asprintf_errstring(ldb, "Failed to write new "
+					       "@INDEXLIST and @ATTRIBUTES "
+					       "records for updated schema: %s",
+					       ldb_errstring(ldb));
+			return ret;
+		}
+
+		return ldb_next_request(module, req);
+	} else {
+		/* Pass to next module, the partition one should finish the chain */
 		return ldb_next_request(module, req);
 	}
-	/* Force a refresh */
-	schema = dsdb_get_schema(ldb, NULL);
-
-	ret = dsdb_schema_set_indices_and_attributes(ldb,
-						     schema,
-						     SCHEMA_WRITE);
-
-	if (ret != LDB_SUCCESS) {
-		ldb_asprintf_errstring(ldb, "Failed to write new "
-				       "@INDEXLIST and @ATTRIBUTES "
-				       "records for updated schema: %s",
-				       ldb_errstring(ldb));
-		return ret;
-	}
-	
-	/* Pass to next module, the partition one should finish the chain */
-	return ldb_next_request(module, req);
 }
 
 static int schema_read_lock(struct ldb_module *module)

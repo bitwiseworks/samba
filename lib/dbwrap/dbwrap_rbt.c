@@ -213,7 +213,9 @@ static NTSTATUS db_rbt_storev(struct db_record *rec,
 	TALLOC_FREE(rec_priv->node);
 	rec_priv->node = node;
 
-	memcpy(this_val.dptr, data.dptr, node->valuesize);
+	if (node->valuesize > 0) {
+		memcpy(this_val.dptr, data.dptr, node->valuesize);
+	}
 
 	parent = NULL;
 	p = &db_ctx->tree.rb_node;
@@ -373,6 +375,7 @@ static struct db_record *db_rbt_fetch_locked(struct db_context *db_ctx,
 
 	rec_priv->node = res.node;
 	result->value  = res.val;
+	result->value_valid = true;
 
 	if (found) {
 		result->key = res.key;
@@ -445,6 +448,7 @@ static int db_rbt_traverse_internal(struct db_context *db,
 		rec.storev = db_rbt_storev;
 		rec.delete_rec = db_rbt_delete;
 		db_rbt_parse_node(rec_priv.node, &rec.key, &rec.value);
+		rec.value_valid = true;
 
 		if (rw) {
 			ctx->traverse_nextp = &next;

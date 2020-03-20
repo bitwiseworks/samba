@@ -278,9 +278,14 @@ static bool test_auth(TALLOC_CTX *mem_ctx, struct samu *pdb_entry)
 	NTSTATUS status;
 	bool ok;
 	uint8_t authoritative = 0;
+	int rc;
 
-	SMBOWFencrypt(pdb_get_nt_passwd(pdb_entry), challenge_8,
-		      local_nt_response);
+	rc = SMBOWFencrypt(pdb_get_nt_passwd(pdb_entry), challenge_8,
+			   local_nt_response);
+	if (rc != 0) {
+		return False;
+	}
+
 	SMBsesskeygen_ntv1(pdb_get_nt_passwd(pdb_entry), local_nt_session_key);
 
 	if (tsocket_address_inet_from_strings(NULL, "ip", NULL, 0, &remote_address) != 0) {
@@ -358,9 +363,11 @@ static bool test_auth(TALLOC_CTX *mem_ctx, struct samu *pdb_entry)
 	}
 
 	if (!dom_sid_equal(info3_sam->base.domain_sid, info3_auth->base.domain_sid)) {
+		struct dom_sid_buf buf1, buf2;
 		DEBUG(0, ("domain_sid in SAM info3 %s does not match domain_sid in AUTH info3 %s\n", 
-			  dom_sid_string(NULL, info3_sam->base.domain_sid),
-			  dom_sid_string(NULL, info3_auth->base.domain_sid)));
+			  dom_sid_str_buf(info3_sam->base.domain_sid, &buf1),
+			  dom_sid_str_buf(info3_auth->base.domain_sid,
+					  &buf2)));
 		return False;
 	}
 	
@@ -429,9 +436,12 @@ static bool test_auth(TALLOC_CTX *mem_ctx, struct samu *pdb_entry)
 		}
 
 		if (!dom_sid_equal(info3_sam->base.domain_sid, info6_wbc->base.domain_sid)) {
+			struct dom_sid_buf buf1, buf2;
 			DEBUG(0, ("domain_sid in SAM info3 %s does not match domain_sid in AUTH info3 %s\n",
-				  dom_sid_string(NULL, info3_sam->base.domain_sid),
-				  dom_sid_string(NULL, info6_wbc->base.domain_sid)));
+				  dom_sid_str_buf(info3_sam->base.domain_sid,
+						  &buf1),
+				  dom_sid_str_buf(info6_wbc->base.domain_sid,
+						  &buf2)));
 			return false;
 		}
 	}

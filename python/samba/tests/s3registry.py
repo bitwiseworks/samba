@@ -18,12 +18,11 @@
 """Tests for samba.samba3."""
 
 from samba.samba3 import Registry
-from samba.tests import TestCase, TestCaseInTempDir
-from samba.dcerpc.security import dom_sid
+from samba.tests import TestCase
 import os
 
 
-for p in [ "../../../../../testdata/samba3", "../../../../testdata/samba3" ]:
+for p in ["../../../../../testdata/samba3", "../../../../testdata/samba3"]:
     DATADIR = os.path.join(os.path.dirname(__file__), p)
     if os.path.exists(DATADIR):
         break
@@ -51,4 +50,4 @@ class RegistryTestCase(TestCase):
     def test_values(self):
         self.assertEquals({b'DisplayName': (1, b'E\x00v\x00e\x00n\x00t\x00 \x00L\x00o\x00g\x00\x00\x00'),
                            b'ErrorControl': (4, b'\x01\x00\x00\x00')},
-                           self.registry.values(b"HKLM/SYSTEM/CURRENTCONTROLSET/SERVICES/EVENTLOG"))
+                          self.registry.values(b"HKLM/SYSTEM/CURRENTCONTROLSET/SERVICES/EVENTLOG"))

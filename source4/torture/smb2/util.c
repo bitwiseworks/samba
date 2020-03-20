@@ -102,6 +102,13 @@ static NTSTATUS smb2_create_complex(struct torture_context *tctx,
 	}
 
 	status = smb2_create(tree, tmp_ctx, &io);
+	if (NT_STATUS_EQUAL(status, NT_STATUS_EAS_NOT_SUPPORTED)) {
+		torture_comment(
+			tctx, "EAs not supported, creating: %s\n", fname);
+		io.in.eas.num_eas = 0;
+		status = smb2_create(tree, tmp_ctx, &io);
+	}
+
 	talloc_free(tmp_ctx);
 	NT_STATUS_NOT_OK_RETURN(status);
 
@@ -528,6 +535,36 @@ NTSTATUS torture_smb2_testfile(struct smb2_tree *tree, const char *fname,
 }
 
 /*
+  create and return a handle to a test file
+  with a specific access mask
+*/
+NTSTATUS torture_smb2_open(struct smb2_tree *tree,
+			   const char *fname,
+			   uint32_t desired_access,
+			   struct smb2_handle *handle)
+{
+	struct smb2_create io;
+	NTSTATUS status;
+
+	io = (struct smb2_create) {
+		.in.fname = fname,
+		.in.desired_access = desired_access,
+		.in.file_attributes = FILE_ATTRIBUTE_NORMAL,
+		.in.create_disposition = NTCREATEX_DISP_OPEN,
+		.in.share_access = NTCREATEX_SHARE_ACCESS_MASK,
+	};
+
+	status = smb2_create(tree, tree, &io);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
+	*handle = io.out.file.handle;
+
+	return NT_STATUS_OK;
+}
+
+/*
   create and return a handle to a test directory
   with specific desired access
 */
@@ -563,6 +600,40 @@ NTSTATUS torture_smb2_testdir(struct smb2_tree *tree, const char *fname,
 {
 	return torture_smb2_testdir_access(tree, fname, handle,
 					   SEC_RIGHTS_DIR_ALL);
+}
+
+/*
+  create a simple file using the SMB2 protocol
+*/
+NTSTATUS smb2_create_simple_file(struct torture_context *tctx,
+				 struct smb2_tree *tree, const char *fname,
+				 struct smb2_handle *handle)
+{
+	char buf[7] = "abc";
+	NTSTATUS status;
+
+	smb2_util_unlink(tree, fname);
+	status = torture_smb2_testfile_access(tree,
+					      fname, handle,
+					      SEC_FLAG_MAXIMUM_ALLOWED);
+	NT_STATUS_NOT_OK_RETURN(status);
+
+	status = smb2_util_write(tree, *handle, buf, 0, sizeof(buf));
+	NT_STATUS_NOT_OK_RETURN(status);
+
+	return NT_STATUS_OK;
+}
+
+/*
+  create a simple file using SMB2.
+*/
+NTSTATUS torture_setup_simple_file(struct torture_context *tctx,
+				   struct smb2_tree *tree, const char *fname)
+{
+	struct smb2_handle handle;
+	NTSTATUS status = smb2_create_simple_file(tctx, tree, fname, &handle);
+	NT_STATUS_NOT_OK_RETURN(status);
+	return smb2_util_close(tree, handle);
 }
 
 /*

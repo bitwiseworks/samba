@@ -361,8 +361,7 @@ static void send_bad_password_netlogon(TALLOC_CTX *mem_ctx,
 
 	identity_info->domain_name.string = user_info->mapped.domain_name;
 	identity_info->parameter_control = user_info->logon_parameters; /* TODO */
-	identity_info->logon_id_low = 0;
-	identity_info->logon_id_high = 0;
+	identity_info->logon_id = user_info->logon_id;
 	identity_info->account_name.string = user_info->mapped.account_name;
 	identity_info->workstation.string
 		= talloc_asprintf(identity_info, "krb5-bad-pw on RODC from %s",
@@ -397,6 +396,7 @@ static krb5_error_code hdb_samba4_auth_status(krb5_context context, HDB *db,
 									struct samba_kdc_db_context);
 
 	struct ldb_dn *domain_dn = ldb_get_default_basedn(kdc_db_ctx->samdb);
+	uint64_t logon_id = generate_random_u64();
 
 	/*
 	 * Forcing this via the NTLM auth structure is not ideal, but
@@ -412,7 +412,8 @@ static krb5_error_code hdb_samba4_auth_status(krb5_context context, HDB *db,
 		},
 		.service_description = "Kerberos KDC",
 		.auth_description = "ENC-TS Pre-authentication",
-		.password_type = auth_type
+		.password_type = auth_type,
+		.logon_id = logon_id
 	};
 
 	size_t sa_socklen = 0;
@@ -500,7 +501,6 @@ static krb5_error_code hdb_samba4_auth_status(krb5_context context, HDB *db,
 					 status,
 					 domain_name,
 					 account_name,
-					 NULL,
 					 sid);
 		TALLOC_FREE(frame);
 		break;
@@ -525,7 +525,7 @@ static krb5_error_code hdb_samba4_auth_status(krb5_context context, HDB *db,
 					 &ui,
 					 NT_STATUS_NO_SUCH_USER,
 					 NULL, NULL,
-					 NULL, NULL);
+					 NULL);
 		TALLOC_FREE(frame);
 		break;
 	}

@@ -31,25 +31,15 @@ bool file_id_equal(const struct file_id *id1, const struct file_id *id2)
 	    id1->extid == id2->extid;
 }
 
-/*
-  a static-like (on talloc_tos()) string for a file_id structure
- */
-const char *file_id_string_tos(const struct file_id *id)
+char *file_id_str_buf(struct file_id fid, struct file_id_buf *dst)
 {
-	return file_id_string(talloc_tos(), id);
-}
-
-/*
-  an allocated string for a file_id structure
- */
-const char *file_id_string(TALLOC_CTX *mem_ctx, const struct file_id *id)
-{
-	char *result = talloc_asprintf(mem_ctx, "%llx:%llx:%llx",
-				       (unsigned long long)id->devid,
-				       (unsigned long long)id->inode,
-				       (unsigned long long)id->extid);
-	SMB_ASSERT(result != NULL);
-	return result;
+	snprintf(dst->buf,
+		 sizeof(dst->buf),
+		 "%"PRIu64":%"PRIu64":%"PRIu64,
+		 fid.devid,
+		 fid.inode,
+		 fid.extid);
+	return dst->buf;
 }
 
 /*
@@ -89,4 +79,40 @@ void pull_file_id_24(const char *buf, struct file_id *id)
 	id->inode |= ((uint64_t)IVAL(buf,12))<<32;
 	id->extid  = IVAL(buf,  16);
 	id->extid |= ((uint64_t)IVAL(buf,20))<<32;
+}
+
+uint64_t make_file_id_from_itime(SMB_STRUCT_STAT *st)
+{
+	struct timespec itime = st->st_ex_itime;
+	ino_t ino = st->st_ex_ino;
+	uint64_t file_id_low;
+	uint64_t file_id;
+
+	if (st->st_ex_iflags & ST_EX_IFLAG_CALCULATED_ITIME) {
+		return ino;
+	}
+
+	round_timespec_to_nttime(&itime);
+
+	file_id_low = itime.tv_nsec;
+	if (file_id_low == 0) {
+		/*
+		 * This could be by coincidence, but more likely the filesystem
+		 * is only giving us seconds granularity. We need more fine
+		 * grained granularity for the File-ID, so combine with the
+		 * inode number.
+		 */
+		file_id_low = ino & ((1 << 30) - 1);
+	}
+
+	/*
+	 * Set the high bit so ideally File-IDs based on inode numbers and
+	 * File-IDs based on Birth Time use disjoint ranges, given inodes never
+	 * have the high bit set.
+	 */
+	file_id = ((uint64_t)1) << 63;
+	file_id |= (uint64_t)itime.tv_sec << 30;
+	file_id |= file_id_low;
+
+	return file_id;
 }

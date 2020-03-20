@@ -19,6 +19,7 @@
 
 #include "includes.h"
 #include "winbindd.h"
+#include "libcli/security/dom_sid.h"
 
 struct winbindd_getgrnam_state {
 	struct tevent_context *ev;
@@ -54,7 +55,10 @@ struct tevent_req *winbindd_getgrnam_send(TALLOC_CTX *mem_ctx,
 	/* Ensure null termination */
 	request->data.groupname[sizeof(request->data.groupname)-1]='\0';
 
-	DEBUG(3, ("getgrnam %s\n", request->data.groupname));
+	DBG_NOTICE("[%s (%u)] getgrnam %s\n",
+		   cli->client_name,
+		   (unsigned int)cli->pid,
+		   request->data.groupname);
 
 	nt_status = normalize_name_unmap(state, request->data.groupname, &tmp);
 	/* If we didn't map anything in the above call, just reset the
@@ -165,8 +169,10 @@ NTSTATUS winbindd_getgrnam_recv(struct tevent_req *req,
 	char *buf;
 
 	if (tevent_req_is_nterror(req, &status)) {
+		struct dom_sid_buf sidbuf;
 		DEBUG(5, ("Could not convert sid %s: %s\n",
-			  sid_string_dbg(&state->sid), nt_errstr(status)));
+			  dom_sid_str_buf(&state->sid, &sidbuf),
+			  nt_errstr(status)));
 		return status;
 	}
 

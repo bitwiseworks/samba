@@ -209,11 +209,12 @@ bool winbindd_list_trusted_domains(struct winbindd_cli_state *state)
 	size_t num_domains = 0;
 	int extra_data_len = 0;
 	char *extra_data = NULL;
-	int i = 0;
+	size_t i = 0;
 	bool ret = false;
 
-	DEBUG(3, ("[%5lu]: list trusted domains\n",
-		  (unsigned long)state->pid));
+	DBG_NOTICE("[%s (%u)]: list trusted domains\n",
+		   state->client_name,
+		   (unsigned int)state->pid);
 
 	if( !wcache_tdc_fetch_list( &dom_list, &num_domains )) {
 		goto done;
@@ -229,6 +230,7 @@ bool winbindd_list_trusted_domains(struct winbindd_cli_state *state)
 		bool is_online = true;		
 		struct winbindd_tdc_domain *d = NULL;
 		char *trust_type = NULL;
+		struct dom_sid_buf buf;
 
 		d = &dom_list[i];
 		domain = find_domain_from_name_noinit(d->domain_name);
@@ -246,7 +248,7 @@ bool winbindd_list_trusted_domains(struct winbindd_cli_state *state)
 			"%s\\%s\\%s\\%s\\%s\\%s\\%s\\%s\n",
 			d->domain_name,
 			d->dns_name ? d->dns_name : "",
-			sid_string_talloc(state->mem_ctx, &d->sid),
+			dom_sid_str_buf(&d->sid, &buf),
 			trust_type,
 			trust_is_transitive(d) ? "Yes" : "No",
 			trust_is_inbound(d) ? "Yes" : "No",
@@ -277,15 +279,16 @@ done:
 enum winbindd_result winbindd_dual_list_trusted_domains(struct winbindd_domain *domain,
 							struct winbindd_cli_state *state)
 {
-	int i;
+	uint32_t i;
 	int extra_data_len = 0;
 	char *extra_data;
 	NTSTATUS result;
 	bool have_own_domain = False;
 	struct netr_DomainTrustList trusts;
 
-	DEBUG(3, ("[%5lu]: list trusted domains\n",
-		  (unsigned long)state->pid));
+	DBG_NOTICE("[%s %u]: list trusted domains\n",
+		   state->client_name,
+		   (unsigned int)state->pid);
 
 	result = wb_cache_trusted_domains(domain, state->mem_ctx, &trusts);
 
@@ -298,6 +301,7 @@ enum winbindd_result winbindd_dual_list_trusted_domains(struct winbindd_domain *
 	extra_data = talloc_strdup(state->mem_ctx, "");
 
 	for (i=0; i<trusts.count; i++) {
+		struct dom_sid_buf buf;
 
 		if (trusts.array[i].sid == NULL) {
 			continue;
@@ -309,7 +313,7 @@ enum winbindd_result winbindd_dual_list_trusted_domains(struct winbindd_domain *
 		extra_data = talloc_asprintf_append_buffer(
 		    extra_data, "%s\\%s\\%s\\%u\\%u\\%u\n",
 		    trusts.array[i].netbios_name, trusts.array[i].dns_name,
-		    sid_string_talloc(state->mem_ctx, trusts.array[i].sid),
+		    dom_sid_str_buf(trusts.array[i].sid, &buf),
 		    trusts.array[i].trust_flags,
 		    (uint32_t)trusts.array[i].trust_type,
 		    trusts.array[i].trust_attributes);
@@ -325,12 +329,13 @@ enum winbindd_result winbindd_dual_list_trusted_domains(struct winbindd_domain *
 	}
 
 	if (state->request->data.list_all_domains && !have_own_domain) {
+		struct dom_sid_buf buf;
 		extra_data = talloc_asprintf_append_buffer(
 			extra_data, "%s\\%s\\%s\n", domain->name,
 			domain->alt_name != NULL ?
 				domain->alt_name :
 				domain->name,
-			sid_string_talloc(state->mem_ctx, &domain->sid));
+			dom_sid_str_buf(&domain->sid, &buf));
 	}
 
 	extra_data_len = strlen(extra_data);
@@ -353,8 +358,10 @@ bool winbindd_dc_info(struct winbindd_cli_state *cli)
 
 	cli->request->domain_name[sizeof(cli->request->domain_name)-1] = '\0';
 
-	DEBUG(3, ("[%5lu]: domain_info [%s]\n", (unsigned long)cli->pid,
-		  cli->request->domain_name));
+	DBG_NOTICE("[%s (%u)]: domain_info [%s]\n",
+		   cli->client_name,
+		   (unsigned int)cli->pid,
+		   cli->request->domain_name);
 
 	if (cli->request->domain_name[0] != '\0') {
 		domain = find_trust_from_name_noinit(
@@ -395,7 +402,9 @@ bool winbindd_dc_info(struct winbindd_cli_state *cli)
 
 bool winbindd_ping(struct winbindd_cli_state *state)
 {
-	DEBUG(3, ("[%5lu]: ping\n", (unsigned long)state->pid));
+	DBG_NOTICE("[%s (%u)]: ping\n",
+		   state->client_name,
+		   (unsigned int)state->pid);
 	return true;
 }
 
@@ -404,7 +413,9 @@ bool winbindd_ping(struct winbindd_cli_state *state)
 bool winbindd_info(struct winbindd_cli_state *state)
 {
 
-	DEBUG(3, ("[%5lu]: request misc info\n", (unsigned long)state->pid));
+	DBG_NOTICE("[%s (%u)]: request misc info\n",
+		   state->client_name,
+		   (unsigned int)state->pid);
 
 	state->response->data.info.winbind_separator = *lp_winbind_separator();
 	fstrcpy(state->response->data.info.samba_version, samba_version_string());
@@ -415,8 +426,10 @@ bool winbindd_info(struct winbindd_cli_state *state)
 
 bool winbindd_interface_version(struct winbindd_cli_state *state)
 {
-	DEBUG(3, ("[%5lu]: request interface version (version = %d)\n",
-		  (unsigned long)state->pid, WINBIND_INTERFACE_VERSION));
+	DBG_NOTICE("[%s (%u)]: request interface version (version = %d)\n",
+		   state->client_name,
+		   (unsigned int)state->pid,
+		   WINBIND_INTERFACE_VERSION);
 
 	state->response->data.interface_version = WINBIND_INTERFACE_VERSION;
 	return true;
@@ -426,7 +439,9 @@ bool winbindd_interface_version(struct winbindd_cli_state *state)
 
 bool winbindd_domain_name(struct winbindd_cli_state *state)
 {
-	DEBUG(3, ("[%5lu]: request domain name\n", (unsigned long)state->pid));
+	DBG_NOTICE("[%s (%u)]: request domain name\n",
+		   state->client_name,
+		   (unsigned int)state->pid);
 
 	fstrcpy(state->response->data.domain_name, lp_workgroup());
 	return true;
@@ -436,8 +451,9 @@ bool winbindd_domain_name(struct winbindd_cli_state *state)
 
 bool winbindd_netbios_name(struct winbindd_cli_state *state)
 {
-	DEBUG(3, ("[%5lu]: request netbios name\n",
-		  (unsigned long)state->pid));
+	DBG_NOTICE("[%s (%u)]: request netbios name\n",
+		   state->client_name,
+		   (unsigned int)state->pid);
 
 	fstrcpy(state->response->data.netbios_name, lp_netbios_name());
 	return true;
@@ -448,8 +464,10 @@ bool winbindd_netbios_name(struct winbindd_cli_state *state)
 bool winbindd_priv_pipe_dir(struct winbindd_cli_state *state)
 {
 	char *priv_dir;
-	DEBUG(3, ("[%5lu]: request location of privileged pipe\n",
-		  (unsigned long)state->pid));
+
+	DBG_NOTICE("[%s (%u)]: request location of privileged pipe\n",
+		   state->client_name,
+		   (unsigned int)state->pid);
 
 	priv_dir = get_winbind_priv_pipe_dir();
 	state->response->extra_data.data = talloc_move(state->mem_ctx,
@@ -459,6 +477,10 @@ bool winbindd_priv_pipe_dir(struct winbindd_cli_state *state)
 	state->response->length +=
 		strlen((char *)state->response->extra_data.data) + 1;
 
+	DBG_NOTICE("[%s (%u)]: response location of privileged pipe: %s\n",
+		   state->client_name,
+		   (unsigned int)state->pid,
+		   priv_dir);
+
 	return true;
 }
-

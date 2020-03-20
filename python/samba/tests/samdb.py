@@ -19,7 +19,6 @@
 
 import logging
 import os
-import uuid
 import shutil
 
 from samba.auth import system_session
@@ -43,7 +42,6 @@ class SamDBTestCase(TestCaseInTempDir):
         realm = "dsdb.samba.example.com"
         host_name = "test"
         server_role = "active directory domain controller"
-        dns_backend = "SAMBA_INTERNAL"
         self.result = provision(logger,
                                 self.session, targetdir=self.tempdir,
                                 realm=realm, domain=domain,

@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 import optparse
 import sys
@@ -59,6 +59,7 @@ random.seed(1)
 
 class PerfTestException(Exception):
     pass
+
 
 class UserTests(samba.tests.TestCase):
 

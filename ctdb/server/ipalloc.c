@@ -67,7 +67,7 @@ static void *add_ip_callback(void *parm, void *data)
 	if (prev_ip == NULL) {
 		return parm;
 	}
-	if (this_ip->pnn == -1) {
+	if (this_ip->pnn == CTDB_UNKNOWN_PNN) {
 		this_ip->pnn = prev_ip->pnn;
 	}
 
@@ -92,7 +92,7 @@ static int getips_count_callback(void *param, void *data)
 static struct public_ip_list *
 create_merged_ip_list(struct ipalloc_state *ipalloc_state)
 {
-	int i, j;
+	unsigned int i, j;
 	struct public_ip_list *ip_list;
 	struct ctdb_public_ip_list *public_ips;
 	struct trbt_tree *ip_tree;
@@ -125,7 +125,7 @@ create_merged_ip_list(struct ipalloc_state *ipalloc_state)
 			if (public_ips->ip[j].pnn == i) {
 				tmp_ip->pnn = public_ips->ip[j].pnn;
 			} else {
-				tmp_ip->pnn = -1;
+				tmp_ip->pnn = CTDB_UNKNOWN_PNN;
 			}
 			tmp_ip->addr = public_ips->ip[j].addr;
 			tmp_ip->next = NULL;
@@ -147,7 +147,7 @@ create_merged_ip_list(struct ipalloc_state *ipalloc_state)
 static bool populate_bitmap(struct ipalloc_state *ipalloc_state)
 {
 	struct public_ip_list *ip = NULL;
-	int i, j;
+	unsigned int i, j;
 
 	for (ip = ipalloc_state->all_ips; ip != NULL; ip = ip->next) {
 
@@ -210,14 +210,14 @@ void ipalloc_set_public_ips(struct ipalloc_state *ipalloc_state,
  * right now... */
 bool ipalloc_can_host_ips(struct ipalloc_state *ipalloc_state)
 {
-	int i;
+	unsigned int i;
 	bool have_ips = false;
 
 	for (i=0; i < ipalloc_state->num; i++) {
 		struct ctdb_public_ip_list *ips =
 			ipalloc_state->known_public_ips;
 		if (ips[i].num != 0) {
-			int j;
+			unsigned int j;
 			have_ips = true;
 			/* Succeed if an address is hosted on node i */
 			for (j=0; j < ips[i].num; j++) {
@@ -272,7 +272,7 @@ struct public_ip_list *ipalloc(struct ipalloc_state *ipalloc_state)
 	}
 
 	/* at this point ->pnn is the node which will own each IP
-	   or -1 if there is no node that can cover this ip
+	   or CTDB_UNKNOWN_PNN if there is no node that can cover this ip
 	*/
 
 	return (ret ? ipalloc_state->all_ips : NULL);

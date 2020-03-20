@@ -19,6 +19,7 @@ import os
 import ldb
 from samba.tests.samba_tool.base import SambaToolCmdTest
 
+
 class SchemaCmdTestCase(SambaToolCmdTest):
     """Tests for samba-tool dsacl subcommands"""
     samdb = None
@@ -26,7 +27,7 @@ class SchemaCmdTestCase(SambaToolCmdTest):
     def setUp(self):
         super(SchemaCmdTestCase, self).setUp()
         self.samdb = self.getSamDB("-H", "ldap://%s" % os.environ["DC_SERVER"],
-            "-U%s%%%s" % (os.environ["DC_USERNAME"], os.environ["DC_PASSWORD"]))
+                                   "-U%s%%%s" % (os.environ["DC_USERNAME"], os.environ["DC_PASSWORD"]))
 
     def tearDown(self):
         super(SchemaCmdTestCase, self).tearDown()
@@ -34,80 +35,78 @@ class SchemaCmdTestCase(SambaToolCmdTest):
     def test_display_attribute(self):
         """Tests that we can display schema attributes"""
         (result, out, err) = self.runsublevelcmd("schema", ("attribute",
-                              "show"), "uid",
-                              "-H", "ldap://%s" % os.environ["DC_SERVER"],
-                              "-U%s%%%s" % (os.environ["DC_USERNAME"],
-                                            os.environ["DC_PASSWORD"]))
+                                                            "show"), "uid",
+                                                 "-H", "ldap://%s" % os.environ["DC_SERVER"],
+                                                 "-U%s%%%s" % (os.environ["DC_USERNAME"],
+                                                               os.environ["DC_PASSWORD"]))
 
         self.assertCmdSuccess(result, out, err)
-        self.assertEquals(err,"","Shouldn't be any error messages")
-        self.assertIn("dn: CN=uid,CN=Schema,CN=Configuration,DC=samba,DC=example,DC=com", out)
+        self.assertEquals(err, "", "Shouldn't be any error messages")
+        self.assertIn("dn: CN=uid,CN=Schema,CN=Configuration,", out)
 
     def test_modify_attribute_searchflags(self):
         """Tests that we can modify searchFlags of an attribute"""
         (result, out, err) = self.runsublevelcmd("schema", ("attribute",
-                              "modify"), "uid", "--searchflags=9",
-                              "-H", "ldap://%s" % os.environ["DC_SERVER"],
-                              "-U%s%%%s" % (os.environ["DC_USERNAME"],
-                                            os.environ["DC_PASSWORD"]))
+                                                            "modify"), "uid", "--searchflags=9",
+                                                 "-H", "ldap://%s" % os.environ["DC_SERVER"],
+                                                 "-U%s%%%s" % (os.environ["DC_USERNAME"],
+                                                               os.environ["DC_PASSWORD"]))
 
         self.assertCmdFail(result, 'Unknown flag 9, please see --help')
 
         (result, out, err) = self.runsublevelcmd("schema", ("attribute",
-                              "modify"), "uid", "--searchflags=fATTINDEX",
-                              "-H", "ldap://%s" % os.environ["DC_SERVER"],
-                              "-U%s%%%s" % (os.environ["DC_USERNAME"],
-                                            os.environ["DC_PASSWORD"]))
+                                                            "modify"), "uid", "--searchflags=fATTINDEX",
+                                                 "-H", "ldap://%s" % os.environ["DC_SERVER"],
+                                                 "-U%s%%%s" % (os.environ["DC_USERNAME"],
+                                                               os.environ["DC_PASSWORD"]))
 
         self.assertCmdSuccess(result, out, err)
-        self.assertEquals(err,"","Shouldn't be any error messages")
-        self.assertIn("modified cn=uid,CN=Schema,CN=Configuration,DC=samba,DC=example,DC=com", out)
+        self.assertEquals(err, "", "Shouldn't be any error messages")
+        self.assertIn("modified cn=uid,CN=Schema,CN=Configuration,", out)
 
         (result, out, err) = self.runsublevelcmd("schema", ("attribute",
-                              "modify"), "uid",
-                              "--searchflags=fATTINDEX,fSUBTREEATTINDEX",
-                              "-H", "ldap://%s" % os.environ["DC_SERVER"],
-                              "-U%s%%%s" % (os.environ["DC_USERNAME"],
-                                            os.environ["DC_PASSWORD"]))
+                                                            "modify"), "uid",
+                                                 "--searchflags=fATTINDEX,fSUBTREEATTINDEX",
+                                                 "-H", "ldap://%s" % os.environ["DC_SERVER"],
+                                                 "-U%s%%%s" % (os.environ["DC_USERNAME"],
+                                                               os.environ["DC_PASSWORD"]))
 
         self.assertCmdSuccess(result, out, err)
-        self.assertEquals(err,"","Shouldn't be any error messages")
-        self.assertIn("modified cn=uid,CN=Schema,CN=Configuration,DC=samba,DC=example,DC=com", out)
+        self.assertEquals(err, "", "Shouldn't be any error messages")
+        self.assertIn("modified cn=uid,CN=Schema,CN=Configuration,", out)
 
         (result, out, err) = self.runsublevelcmd("schema", ("attribute",
-                              "modify"), "uid",
-                              "--searchflags=fAtTiNdEx,fPRESERVEONDELETE",
-                              "-H", "ldap://%s" % os.environ["DC_SERVER"],
-                              "-U%s%%%s" % (os.environ["DC_USERNAME"],
-                                            os.environ["DC_PASSWORD"]))
+                                                            "modify"), "uid",
+                                                 "--searchflags=fAtTiNdEx,fPRESERVEONDELETE",
+                                                 "-H", "ldap://%s" % os.environ["DC_SERVER"],
+                                                 "-U%s%%%s" % (os.environ["DC_USERNAME"],
+                                                               os.environ["DC_PASSWORD"]))
 
         self.assertCmdSuccess(result, out, err)
-        self.assertEquals(err,"","Shouldn't be any error messages")
-        self.assertIn("modified cn=uid,CN=Schema,CN=Configuration,DC=samba,DC=example,DC=com", out)
+        self.assertEquals(err, "", "Shouldn't be any error messages")
+        self.assertIn("modified cn=uid,CN=Schema,CN=Configuration,", out)
 
     def test_show_oc_attribute(self):
         """Tests that we can modify searchFlags of an attribute"""
         (result, out, err) = self.runsublevelcmd("schema", ("attribute",
-                              "show_oc"), "cn",
-                              "-H", "ldap://%s" % os.environ["DC_SERVER"],
-                              "-U%s%%%s" % (os.environ["DC_USERNAME"],
-                                            os.environ["DC_PASSWORD"]))
+                                                            "show_oc"), "cn",
+                                                 "-H", "ldap://%s" % os.environ["DC_SERVER"],
+                                                 "-U%s%%%s" % (os.environ["DC_USERNAME"],
+                                                               os.environ["DC_PASSWORD"]))
 
         self.assertCmdSuccess(result, out, err)
-        self.assertEquals(err,"","Shouldn't be any error messages")
+        self.assertEquals(err, "", "Shouldn't be any error messages")
         self.assertIn("--- MAY contain ---", out)
         self.assertIn("--- MUST contain ---", out)
 
     def test_display_objectclass(self):
         """Tests that we can display schema objectclasses"""
         (result, out, err) = self.runsublevelcmd("schema", ("objectclass",
-                              "show"), "person",
-                              "-H", "ldap://%s" % os.environ["DC_SERVER"],
-                              "-U%s%%%s" % (os.environ["DC_USERNAME"],
-                                            os.environ["DC_PASSWORD"]))
+                                                            "show"), "person",
+                                                 "-H", "ldap://%s" % os.environ["DC_SERVER"],
+                                                 "-U%s%%%s" % (os.environ["DC_USERNAME"],
+                                                               os.environ["DC_PASSWORD"]))
 
         self.assertCmdSuccess(result, out, err)
-        self.assertEquals(err,"","Shouldn't be any error messages")
-        self.assertIn("dn: CN=Person,CN=Schema,CN=Configuration,DC=samba,DC=example,DC=com", out)
-
-
+        self.assertEquals(err, "", "Shouldn't be any error messages")
+        self.assertIn("dn: CN=Person,CN=Schema,CN=Configuration,", out)

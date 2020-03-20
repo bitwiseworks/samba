@@ -16,7 +16,8 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-import ldb, sys
+import ldb
+import sys
 import samba.getopt as options
 from samba.auth import system_session
 from samba.samdb import SamDB
@@ -24,7 +25,7 @@ from samba.netcmd import (
     Command,
     CommandError,
     Option
-    )
+)
 from samba.dbchecker import dbcheck
 
 
@@ -40,7 +41,6 @@ class cmd_dbcheck(Command):
 
     def process_yes(option, opt, value, parser):
         assert value is None
-        done = 0
         rargs = parser.rargs
         if rargs:
             arg = rargs[0]
@@ -57,7 +57,7 @@ class cmd_dbcheck(Command):
 
     takes_options = [
         Option("--scope", dest="scope", default="SUB",
-            help="Pass search scope that builds DN list. Options: SUB, ONE, BASE"),
+               help="Pass search scope that builds DN list. Options: SUB, ONE, BASE"),
         Option("--fix", dest="fix", default=False, action='store_true',
                help='Fix any errors found'),
         Option("--yes", action='callback', callback=process_yes,
@@ -65,22 +65,33 @@ class cmd_dbcheck(Command):
         Option("--cross-ncs", dest="cross_ncs", default=False, action='store_true',
                help="cross naming context boundaries"),
         Option("-v", "--verbose", dest="verbose", action="store_true", default=False,
-            help="Print more details of checking"),
+               help="Print more details of checking"),
         Option("-q", "--quiet", action="store_true", default=False,
-            help="don't print details of checking"),
+               help="don't print details of checking"),
         Option("--attrs", dest="attrs", default=None, help="list of attributes to check (space separated)"),
         Option("--reindex", dest="reindex", default=False, action="store_true", help="force database re-index"),
         Option("--force-modules", dest="force_modules", default=False, action="store_true", help="force loading of Samba modules and ignore the @MODULES record (for very old databases)"),
         Option("--reset-well-known-acls", dest="reset_well_known_acls", default=False, action="store_true", help="reset ACLs on objects with well known default ACL values to the default"),
+        Option("--quick-membership-checks", dest="quick_membership_checks",
+               help=("Skips missing/orphaned memberOf backlinks checks, "
+                     "but speeds up dbcheck dramatically for domains with "
+                     "large groups"),
+               default=False, action="store_true"),
         Option("-H", "--URL", help="LDB URL for database or target server (defaults to local SAM database)",
                type=str, metavar="URL", dest="H"),
-        ]
+        Option("--selftest-check-expired-tombstones",
+               dest="selftest_check_expired_tombstones", default=False, action="store_true",
+               help=Option.SUPPRESS_HELP), # This is only used by tests
+    ]
 
     def run(self, DN=None, H=None, verbose=False, fix=False, yes=False,
             cross_ncs=False, quiet=False,
             scope="SUB", credopts=None, sambaopts=None, versionopts=None,
             attrs=None, reindex=False, force_modules=False,
-            reset_well_known_acls=False, yes_rules=[]):
+            quick_membership_checks=False,
+            reset_well_known_acls=False,
+            selftest_check_expired_tombstones=False,
+            yes_rules=[]):
 
         lp = sambaopts.get_loadparm()
 
@@ -101,16 +112,15 @@ class cmd_dbcheck(Command):
             except:
                 raise CommandError("Failed to connect to DB at %s.  If this is a really old sam.ldb (before alpha9), then try again with --force-modules" % H)
 
-
         if H is None or not over_ldap:
             samdb_schema = samdb
         else:
             samdb_schema = SamDB(session_info=system_session(), url=None,
                                  credentials=creds, lp=lp)
 
-        scope_map = { "SUB": ldb.SCOPE_SUBTREE, "BASE": ldb.SCOPE_BASE, "ONE":ldb.SCOPE_ONELEVEL }
+        scope_map = {"SUB": ldb.SCOPE_SUBTREE, "BASE": ldb.SCOPE_BASE, "ONE": ldb.SCOPE_ONELEVEL}
         scope = scope.upper()
-        if not scope in scope_map:
+        if scope not in scope_map:
             raise CommandError("Unknown scope %s" % scope)
         search_scope = scope_map[scope]
 
@@ -131,8 +141,11 @@ class cmd_dbcheck(Command):
             started_transaction = True
         try:
             chk = dbcheck(samdb, samdb_schema=samdb_schema, verbose=verbose,
-                          fix=fix, yes=yes, quiet=quiet, in_transaction=started_transaction,
-                          reset_well_known_acls=reset_well_known_acls)
+                          fix=fix, yes=yes, quiet=quiet,
+                          in_transaction=started_transaction,
+                          quick_membership_checks=quick_membership_checks,
+                          reset_well_known_acls=reset_well_known_acls,
+                          check_expired_tombstones=selftest_check_expired_tombstones)
 
             for option in yes_rules:
                 if hasattr(chk, option):
@@ -154,7 +167,7 @@ class cmd_dbcheck(Command):
 
             else:
                 error_count = chk.check_database(DN=DN, scope=search_scope,
-                        controls=controls, attrs=attrs)
+                                                 controls=controls, attrs=attrs)
         except:
             if started_transaction:
                 samdb.transaction_cancel()

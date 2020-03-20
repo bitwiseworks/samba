@@ -37,10 +37,13 @@ enum ctdb_event ctdb_event_from_string(const char *event_str);
  */
 int ctdb_sock_addr_to_buf(char *buf, socklen_t buflen,
 			  ctdb_sock_addr *addr, bool with_port);
-const char *ctdb_sock_addr_to_string(TALLOC_CTX *mem_ctx,
+char *ctdb_sock_addr_to_string(TALLOC_CTX *mem_ctx,
 				     ctdb_sock_addr *addr, bool with_port);
 int ctdb_sock_addr_from_string(const char *str,
 			       ctdb_sock_addr *addr, bool with_port);
+int ctdb_sock_addr_mask_from_string(const char *str,
+				    ctdb_sock_addr *addr,
+				    unsigned int *mask);
 unsigned int ctdb_sock_addr_port(ctdb_sock_addr *addr);
 void ctdb_sock_addr_set_port(ctdb_sock_addr *addr, unsigned int port);
 int ctdb_sock_addr_cmp_ip(const ctdb_sock_addr *addr1,
@@ -54,16 +57,16 @@ bool ctdb_sock_addr_same(const ctdb_sock_addr *addr1,
 
 int ctdb_connection_to_buf(char *buf, size_t buflen,
 			   struct ctdb_connection * conn, bool client_first);
-const char *ctdb_connection_to_string(TALLOC_CTX *mem_ctx,
-				      struct ctdb_connection * conn,
-				      bool client_first);
+char *ctdb_connection_to_string(TALLOC_CTX *mem_ctx,
+				struct ctdb_connection * conn,
+				bool client_first);
 int ctdb_connection_from_string(const char *str, bool client_first,
 				struct ctdb_connection *conn);
 
 int ctdb_connection_list_add(struct ctdb_connection_list *conn_list,
 			     struct ctdb_connection *conn);
 int ctdb_connection_list_sort(struct ctdb_connection_list *conn_list);
-const char *ctdb_connection_list_to_string(
+char *ctdb_connection_list_to_string(
 	TALLOC_CTX *mem_ctx,
 	struct ctdb_connection_list *conn_list, bool client_first);
 int ctdb_connection_list_read(TALLOC_CTX *mem_ctx,

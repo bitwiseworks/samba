@@ -36,6 +36,9 @@
 #define pipe(A) os2_pipe(A)
 #endif
 
+static unsigned connections_active = 0;
+static unsigned smbd_max_processes = 0;
+
 struct standard_child_state {
 	const char *name;
 	pid_t pid;
@@ -72,7 +75,7 @@ static void sigterm_signal_handler(struct tevent_context *ev,
 				int signum, int count, void *siginfo,
 				void *private_data)
 {
-#if HAVE_GETPGRP
+#ifdef HAVE_GETPGRP
 	if (getpgrp() == getpid()) {
 		/*
 		 * We're the process group leader, send
@@ -147,8 +150,7 @@ static void standard_child_pipe_handler(struct tevent_context *ev,
 		if (errno == 0) {
 			errno = ECHILD;
 		}
-		TALLOC_FREE(state);
-		return;
+		goto done;
 	}
 	if (WIFEXITED(status)) {
 		status = WEXITSTATUS(status);
@@ -161,7 +163,17 @@ static void standard_child_pipe_handler(struct tevent_context *ev,
 		DBG_ERR("Child %d (%s) terminated with signal %d\n",
 			(int)state->pid, state->name, status);
 	}
+done:
 	TALLOC_FREE(state);
+	if (smbd_max_processes > 0) {
+		if (connections_active < 1) {
+			DBG_ERR("Number of active connections "
+				"less than 1 (%d)\n",
+				connections_active);
+			connections_active = 1;
+		}
+		connections_active--;
+	}
 	return;
 }
 
@@ -286,6 +298,21 @@ static void standard_accept_connection(
 		return;
 	}
 
+	if (smbd_max_processes > 0) {
+		if (connections_active >= smbd_max_processes) {
+			DBG_ERR("(%d) connections already active, "
+				"maximum is (%d). Dropping request\n",
+				connections_active,
+				smbd_max_processes);
+			/*
+			 * Drop the connection as we're overloaded at the moment
+			 */
+			talloc_free(sock2);
+			return;
+		}
+		connections_active++;
+	}
+
 	state = setup_standard_child_pipe(ev, NULL);
 	if (state == NULL) {
 		return;
@@ -397,7 +424,7 @@ static void standard_accept_connection(
 static void standard_new_task(struct tevent_context *ev,
 			      struct loadparm_context *lp_ctx,
 			      const char *service_name,
-			      void (*new_task)(struct tevent_context *, struct loadparm_context *lp_ctx, struct server_id , void *, void *),
+			      struct task_server *(*new_task)(struct tevent_context *, struct loadparm_context *lp_ctx, struct server_id , void *, void *),
 			      void *private_data,
 			      const struct service_details *service_details,
 			      int from_parent_fd)
@@ -408,6 +435,7 @@ static void standard_new_task(struct tevent_context *ev,
 	struct tevent_fd *fde = NULL;
 	struct tevent_signal *se = NULL;
 	struct process_context *proc_ctx = NULL;
+	struct task_server* task = NULL;
 
 	state = setup_standard_child_pipe(ev, service_name);
 	if (state == NULL) {
@@ -489,8 +517,20 @@ static void standard_new_task(struct tevent_context *ev,
 		service_details->inhibit_fork_on_accept;
 	proc_ctx->forked_on_accept = false;
 
+	smbd_max_processes = lpcfg_max_smbd_processes(lp_ctx);
+
 	/* setup this new task.  Cluster ID is PID based for this process model */
-	new_task(ev, lp_ctx, cluster_id(pid, 0), private_data, proc_ctx);
+	task = new_task(ev, lp_ctx, cluster_id(pid, 0), private_data, proc_ctx);
+	/*
+	 * Currently we don't support the post_fork functionality in the
+	 * standard model, i.e. it is only called here not after a new process
+	 * is forked in standard_accept_connection.
+	 */
+	if (task != NULL && service_details->post_fork != NULL) {
+		struct process_details pd = initial_process_details;
+		service_details->post_fork(task, &pd);
+	}
+
 
 	/* we can't return to the top level here, as that event context is gone,
 	   so we now process events in the new event context until there are no
@@ -503,14 +543,27 @@ static void standard_new_task(struct tevent_context *ev,
 
 
 /* called when a task goes down */
-static void standard_terminate(struct tevent_context *ev,
-			       struct loadparm_context *lp_ctx,
-			       const char *reason,
-			       void *process_context)
+static void standard_terminate_task(struct tevent_context *ev,
+				    struct loadparm_context *lp_ctx,
+				    const char *reason,
+				    bool fatal,
+				    void *process_context)
+{
+	if (fatal == true) {
+		exit(127);
+	}
+	exit(0);
+}
+
+/* called when a connection terminates*/
+static void standard_terminate_connection(struct tevent_context *ev,
+					  struct loadparm_context *lp_ctx,
+					  const char *reason,
+					  void *process_context)
 {
 	struct process_context *proc_ctx = NULL;
 
-	DBG_DEBUG("process terminating reason[%s]\n", reason);
+	DBG_DEBUG("connection terminating reason[%s]\n", reason);
 	if (process_context == NULL) {
 		smb_panic("Panicking process_context is NULL");
 	}
@@ -539,7 +592,6 @@ static void standard_terminate(struct tevent_context *ev,
 	/* terminate this process */
 	exit(0);
 }
-
 /* called to set a title of a task or connection */
 static void standard_set_title(struct tevent_context *ev, const char *title) 
 {
@@ -554,9 +606,10 @@ static const struct model_ops standard_ops = {
 	.name			= "standard",
 	.model_init		= standard_model_init,
 	.accept_connection	= standard_accept_connection,
-	.new_task               = standard_new_task,
-	.terminate              = standard_terminate,
-	.set_title              = standard_set_title,
+	.new_task		= standard_new_task,
+	.terminate_task		= standard_terminate_task,
+	.terminate_connection	= standard_terminate_connection,
+	.set_title		= standard_set_title,
 };
 
 /*

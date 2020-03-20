@@ -34,38 +34,9 @@
 
 char *sid_to_fstring(fstring sidstr_out, const struct dom_sid *sid)
 {
-	dom_sid_string_buf(sid, sidstr_out, sizeof(fstring));
+	struct dom_sid_buf buf;
+	fstrcpy(sidstr_out, dom_sid_str_buf(sid, &buf));
 	return sidstr_out;
-}
-
-/*****************************************************************
- Essentially a renamed dom_sid_string from
- ../libcli/security/dom_sid.c with a panic if it didn't work.
-*****************************************************************/
-
-char *sid_string_talloc(TALLOC_CTX *mem_ctx, const struct dom_sid *sid)
-{
-	char *result = dom_sid_string(mem_ctx, sid);
-	SMB_ASSERT(result != NULL);
-	return result;
-}
-
-/*****************************************************************
- Useful function for debug lines.
-*****************************************************************/
-
-char *sid_string_dbg(const struct dom_sid *sid)
-{
-	return sid_string_talloc(talloc_tos(), sid);
-}
-
-/*****************************************************************
- Use with care!
-*****************************************************************/
-
-char *sid_string_tos(const struct dom_sid *sid)
-{
-	return sid_string_talloc(talloc_tos(), sid);
 }
 
 /*****************************************************************
@@ -74,7 +45,7 @@ char *sid_string_tos(const struct dom_sid *sid)
 
 bool sid_linearize(uint8_t *outbuf, size_t len, const struct dom_sid *sid)
 {
-	size_t i;
+	int8_t i;
 
 	if (len < ndr_size_dom_sid(sid, 0))
 		return False;
@@ -131,7 +102,7 @@ NTSTATUS sid_array_from_info3(TALLOC_CTX *mem_ctx,
 	struct dom_sid sid;
 	struct dom_sid *sid_array = NULL;
 	uint32_t num_sids = 0;
-	int i;
+	uint32_t i;
 
 	if (include_user_group_rid) {
 		if (!sid_compose(&sid, info3->base.domain_sid, info3->base.rid)) {
@@ -193,8 +164,9 @@ NTSTATUS sid_array_from_info3(TALLOC_CTX *mem_ctx,
 		status = add_sid_to_array(mem_ctx, info3->sids[i].sid,
 				      &sid_array, &num_sids);
 		if (!NT_STATUS_IS_OK(status)) {
+			struct dom_sid_buf buf;
 			DEBUG(3, ("could not add SID to array: %s\n",
-				  sid_string_dbg(info3->sids[i].sid)));
+				  dom_sid_str_buf(info3->sids[i].sid, &buf)));
 			return status;
 		}
 	}

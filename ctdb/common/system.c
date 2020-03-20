@@ -33,11 +33,11 @@
 #include "common/logging.h"
 #include "common/system.h"
 
-#if HAVE_SCHED_H
+#ifdef HAVE_SCHED_H
 #include <sched.h>
 #endif
 
-#if HAVE_PROCINFO_H
+#ifdef HAVE_PROCINFO_H
 #include <procinfo.h>
 #endif
 
@@ -49,7 +49,7 @@
 bool set_scheduler(void)
 {
 #ifdef _AIX_
-#if HAVE_THREAD_SETSCHED
+#ifdef HAVE_THREAD_SETSCHED
 	struct thrdentry64 te;
 	tid64_t ti;
 
@@ -68,7 +68,7 @@ bool set_scheduler(void)
 	}
 #endif
 #else /* no AIX */
-#if HAVE_SCHED_SETSCHEDULER
+#ifdef HAVE_SCHED_SETSCHEDULER
 	struct sched_param p;
 
 	p.sched_priority = 1;
@@ -92,7 +92,7 @@ bool set_scheduler(void)
 void reset_scheduler(void)
 {
 #ifdef _AIX_
-#if HAVE_THREAD_SETSCHED
+#ifdef HAVE_THREAD_SETSCHED
 	struct thrdentry64 te;
 	tid64_t ti;
 
@@ -105,7 +105,7 @@ void reset_scheduler(void)
 	}
 #endif
 #else /* no AIX */
-#if HAVE_SCHED_SETSCHEDULER
+#ifdef HAVE_SCHED_SETSCHEDULER
 	struct sched_param p;
 
 	p.sched_priority = 0;
@@ -141,20 +141,6 @@ void lockdown_memory(bool valgrinding)
 				     strerror(errno)));
 	}
 #endif
-}
-
-void mkdir_p_or_die(const char *dir, int mode)
-{
-	int ret;
-
-	ret = mkdir_p(dir, mode);
-	if (ret != 0) {
-		DEBUG(DEBUG_ALERT,
-		      ("ctdb exiting with error: "
-		       "failed to create directory \"%s\" (%s)\n",
-		       dir, strerror(errno)));
-		exit(1);
-	}
 }
 
 void ctdb_wait_for_process_to_exit(pid_t pid)

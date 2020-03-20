@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Originally based on ./sam.py
 import sys
@@ -16,7 +16,6 @@ import samba.getopt as options
 from samba.auth import system_session
 import ldb
 from samba.samdb import SamDB
-from samba.dcerpc import misc
 
 from samba.dcerpc import drsuapi, misc, drsblobs
 from samba.drs_utils import drs_DsBind
@@ -25,6 +24,7 @@ from samba.ndr import ndr_unpack, ndr_pack
 import drs_base
 
 import time
+
 
 class LATestException(Exception):
     pass
@@ -65,8 +65,8 @@ class LATests(drs_base.DrsBaseTestCase):
     def add_object(self, cn, objectclass):
         dn = "CN=%s,%s" % (cn, self.ou)
         self.samdb.add({'cn': cn,
-                      'objectclass': objectclass,
-                      'dn': dn})
+                        'objectclass': objectclass,
+                        'dn': dn})
 
         return dn
 
@@ -111,13 +111,12 @@ class LATests(drs_base.DrsBaseTestCase):
 
         return links
 
-
     def assert_forward_links(self, obj, expected, attr='member'):
         results = self.attr_search(obj, expected, attr)
         self.assertEqual(len(results), len(expected))
 
         for k, v in results:
-            self.assertTrue(k in expected) 
+            self.assertTrue(k in expected)
             self.assertEqual(expected[k], v, "%s active flag should be %d, not %d" %
                              (k, expected[k], v))
 
@@ -143,7 +142,6 @@ class LATests(drs_base.DrsBaseTestCase):
                                 controls=['show_deleted:1'])
         new_dn = res[0].dn
         self.assert_forward_links(new_dn, {})
-
 
     def test_la_links_delete_link(self):
         u1, u2 = self.add_objects(2, 'user', 'u_del_link')

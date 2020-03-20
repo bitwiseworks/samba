@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # Unix SMB/CIFS implementation.
 # A script to compare differences of security descriotors between
@@ -26,6 +26,7 @@
 # You should have received a copy of the GNU General Public License
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
+from __future__ import print_function
 
 import optparse
 import sys
@@ -60,6 +61,10 @@ creds = credopts.get_credentials(lp)
 
 opts = parser.parse_args()[0]
 
+if not opts.host or not opts.localdomain or not opts.remote_domain:
+    parser.print_usage()
+    sys.exit(1)
+
 class DescrGetter:
 
     def __init__(self, localdomain, remotedomain):
@@ -90,19 +95,19 @@ class DescrGetter:
         for line in ldif_entry:
             length = 79
             if len(line) <= length + 1:
-                print line
+                print(line)
             else:
                 for i in range(len(line) / length + 1):
                     if i == 0:
                         l = line[i * length:((i + 1) * length)]
                     else:
                         l = " " + line[(i * length):((i + 1) * length)]
-                    print l
-        print "\n"
+                    print(l)
+        print("\n")
 
     def write_as_sddl(self, dn, descr):
-        print dn
-        print descr + "\n"
+        print(dn)
+        print(descr + "\n")
 
     def read_descr_by_base(self, search_base):
         res = self.samdb.search(base=search_base + self.local_domain, expression="(objectClass=*)", scope=SCOPE_SUBTREE, attrs=["nTSecurityDescriptor"])

@@ -37,7 +37,8 @@
 
 NTSTATUS smb_register_auth(int version, const char *name, auth_init_function init);
 bool load_auth_module(struct auth_context *auth_context,
-		      const char *module, auth_methods **ret) ;
+		      const char *module,
+		      struct auth_methods **ret) ;
 NTSTATUS make_auth3_context_for_ntlm(TALLOC_CTX *mem_ctx,
 				     struct auth_context **auth_context);
 NTSTATUS make_auth3_context_for_netlogon(TALLOC_CTX *mem_ctx,
@@ -126,12 +127,17 @@ NTSTATUS auth3_get_challenge(struct auth4_context *auth4_context,
 NTSTATUS auth3_set_challenge(struct auth4_context *auth4_context, const uint8_t *chal,
 			     const char *challenge_set_by);
 
-NTSTATUS auth3_check_password(struct auth4_context *auth4_context,
-			      TALLOC_CTX *mem_ctx,
-			      const struct auth_usersupplied_info *user_info,
-			      uint8_t *pauthoritative,
-			      void **server_returned_info,
-			      DATA_BLOB *session_key, DATA_BLOB *lm_session_key);
+struct tevent_req *auth3_check_password_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct auth4_context *auth4_context,
+	const struct auth_usersupplied_info *user_info);
+NTSTATUS auth3_check_password_recv(struct tevent_req *req,
+				   TALLOC_CTX *mem_ctx,
+				   uint8_t *pauthoritative,
+				   void **server_returned_info,
+				   DATA_BLOB *nt_session_key,
+				   DATA_BLOB *lm_session_key);
 
 /* The following definitions come from auth/auth_sam.c  */
 
@@ -270,9 +276,8 @@ NTSTATUS make_session_info_from_username(TALLOC_CTX *mem_ctx,
 					 const char *username,
 					 bool is_guest,
 					 struct auth_session_info **session_info);
-struct auth_session_info *copy_session_info(TALLOC_CTX *mem_ctx,
-					     const struct auth_session_info *src);
 bool init_guest_session_info(TALLOC_CTX *mem_ctx);
+bool reinit_guest_session_info(TALLOC_CTX *mem_ctx);
 NTSTATUS init_system_session_info(TALLOC_CTX *mem_ctx);
 bool session_info_set_session_key(struct auth_session_info *info,
 				 DATA_BLOB session_key);
@@ -385,14 +390,15 @@ NTSTATUS pass_check(const struct passwd *pass,
 
 bool nt_token_check_sid ( const struct dom_sid *sid, const struct security_token *token );
 bool nt_token_check_domain_rid( struct security_token *token, uint32_t rid );
-struct security_token *get_root_nt_token( void );
+NTSTATUS get_root_nt_token( struct security_token **token );
 NTSTATUS add_aliases(const struct dom_sid *domain_sid,
 		     struct security_token *token);
-struct security_token *create_local_nt_token(TALLOC_CTX *mem_ctx,
+NTSTATUS create_local_nt_token(TALLOC_CTX *mem_ctx,
 					    const struct dom_sid *user_sid,
 					    bool is_guest,
 					    int num_groupsids,
-					    const struct dom_sid *groupsids);
+					    const struct dom_sid *groupsids,
+					    struct security_token **token);
 NTSTATUS finalize_local_nt_token(struct security_token *result,
 				 uint32_t session_info_flags);
 NTSTATUS get_user_sid_info3_and_extra(const struct netr_SamInfo3 *info3,

@@ -17,7 +17,9 @@
 
 """Tests for samba.xattr_native and samba.xattr_tdb."""
 
-import samba.xattr_native, samba.xattr_tdb, samba.posix_eadb
+import samba.xattr_native
+import samba.xattr_tdb
+import samba.posix_eadb
 from samba.xattr import copytree_with_xattrs
 from samba.dcerpc import xattr
 from samba.ndr import ndr_pack
@@ -25,17 +27,18 @@ from samba.tests import (
     SkipTest,
     TestCase,
     TestCaseInTempDir,
-    )
+)
 import random
 import shutil
 import os
+
 
 class XattrTests(TestCase):
 
     def _tmpfilename(self):
         random.seed()
         path = os.environ['SELFTEST_PREFIX']
-        return os.path.join(path, "pytests"+str(int(100000*random.random())))
+        return os.path.join(path, "pytests" +str(int(100000 * random.random())))
 
     def _eadbpath(self):
         return os.path.join(os.environ['SELFTEST_PREFIX'], "eadb.tdb")
@@ -49,7 +52,7 @@ class XattrTests(TestCase):
         open(tempf, 'w').write("empty")
         try:
             samba.xattr_native.wrap_setxattr(tempf, "user.unittests",
-                ndr_pack(ntacl))
+                                             ndr_pack(ntacl))
         except IOError:
             raise SkipTest("the filesystem where the tests are runned do not support XATTR")
         os.unlink(tempf)
@@ -76,7 +79,7 @@ class XattrTests(TestCase):
         open(tempf, 'w').write("empty")
         try:
             samba.xattr_tdb.wrap_setxattr(eadb_path,
-                tempf, "user.unittests", ndr_pack(ntacl))
+                                          tempf, "user.unittests", ndr_pack(ntacl))
         finally:
             os.unlink(tempf)
         os.unlink(eadb_path)
@@ -88,8 +91,8 @@ class XattrTests(TestCase):
         open(tempf, 'w').write("empty")
         try:
             self.assertRaises(IOError, samba.xattr_tdb.wrap_setxattr,
-                    os.path.join("nonexistent", "eadb.tdb"), tempf,
-                    "user.unittests", ndr_pack(ntacl))
+                              os.path.join("nonexistent", "eadb.tdb"), tempf,
+                              "user.unittests", ndr_pack(ntacl))
         finally:
             os.unlink(tempf)
 
@@ -100,9 +103,9 @@ class XattrTests(TestCase):
         open(tempf, 'w').write("empty")
         try:
             samba.xattr_tdb.wrap_setxattr(eadb_path, tempf, "user.unittests",
-                reftxt)
+                                          reftxt)
             text = samba.xattr_tdb.wrap_getxattr(eadb_path, tempf,
-                "user.unittests")
+                                                 "user.unittests")
             self.assertEquals(text, reftxt)
         finally:
             os.unlink(tempf)
@@ -116,7 +119,7 @@ class XattrTests(TestCase):
         open(tempf, 'w').write("empty")
         try:
             samba.posix_eadb.wrap_setxattr(eadb_path,
-                tempf, "user.unittests", ndr_pack(ntacl))
+                                           tempf, "user.unittests", ndr_pack(ntacl))
         finally:
             os.unlink(tempf)
         os.unlink(eadb_path)
@@ -128,9 +131,9 @@ class XattrTests(TestCase):
         open(tempf, 'w').write("empty")
         try:
             samba.posix_eadb.wrap_setxattr(eadb_path, tempf, "user.unittests",
-                reftxt)
+                                           reftxt)
             text = samba.posix_eadb.wrap_getxattr(eadb_path, tempf,
-                "user.unittests")
+                                                  "user.unittests")
             self.assertEquals(text, reftxt)
         finally:
             os.unlink(tempf)

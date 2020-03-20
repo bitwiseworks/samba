@@ -1,7 +1,5 @@
 #!/usr/bin/env python
 
-import Options, Logs
-
 def build(bld):
     bld.SAMBA3_LIBRARY('smbclient',
                        source='''
@@ -18,6 +16,7 @@ def build(bld):
                               libsmb_xattr.c
                               libsmb_setget.c''',
                        public_deps='''
+                                   pthread
                                    talloc
                                    smbconf
                                    libsmb
@@ -27,5 +26,5 @@ def build(bld):
                        public_headers='../include/libsmbclient.h',
                        abi_directory='ABI',
                        abi_match='smbc_*',
-                       vnum='0.4.0',
+                       vnum='0.6.0',
                        pc_files='smbclient.pc')

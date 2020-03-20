@@ -21,7 +21,7 @@ bld.SAMBA_BINARY('test_audit_util',
                  audit_logging
                  DSDB_MODULE_HELPERS
                  ''',
-                 install=False)
+                 for_selftest=True)
 
 bld.SAMBA_BINARY('test_audit_log',
                  source='tests/test_audit_log.c',
@@ -35,7 +35,26 @@ bld.SAMBA_BINARY('test_audit_log',
                  DSDB_MODULE_HELPERS
                  DSDB_MODULE_HELPERS_AUDIT
                  ''',
-                 install=False)
+                 for_selftest=True)
+
+bld.SAMBA_BINARY('test_audit_log_errors',
+                 source='tests/test_audit_log_errors.c',
+                 deps='''
+                 talloc
+                 samba-util
+                 samdb-common
+                 samdb
+                 cmocka
+                 audit_logging
+                 DSDB_MODULE_HELPERS
+                 DSDB_MODULE_HELPERS_AUDIT
+                 ''',
+                 ldflags='''
+                     -Wl,--wrap,json_new_object
+                     -Wl,--wrap,json_add_version
+                     -Wl,--wrap,json_add_timestamp
+                 ''',
+                 for_selftest=True)
 
 bld.SAMBA_BINARY('test_group_audit',
                  source='tests/test_group_audit.c',
@@ -49,7 +68,26 @@ bld.SAMBA_BINARY('test_group_audit',
                  DSDB_MODULE_HELPERS
                  DSDB_MODULE_HELPERS_AUDIT
                  ''',
-                 install=False)
+                 for_selftest=True)
+
+bld.SAMBA_BINARY('test_group_audit_errors',
+                 source='tests/test_group_audit_errors.c',
+                 deps='''
+                 talloc
+                 samba-util
+                 samdb-common
+                 samdb
+                 cmocka
+                 audit_logging
+                 DSDB_MODULE_HELPERS
+                 DSDB_MODULE_HELPERS_AUDIT
+                 ''',
+                 ldflags='''
+                     -Wl,--wrap,json_new_object
+                     -Wl,--wrap,json_add_version
+                     -Wl,--wrap,json_add_timestamp
+                 ''',
+                 for_selftest=True)
 
 bld.SAMBA_MODULE('ldb_samba_dsdb',
 	source='samba_dsdb.c',
@@ -141,16 +179,6 @@ bld.SAMBA_MODULE('ldb_samba3sid',
 	)
 
 
-bld.SAMBA_MODULE('ldb_simple_ldap_map',
-	source='simple_ldap_map.c',
-	subsystem='ldb',
-	init_function='ldb_simple_ldap_map_module_init',
-	module_init_name='ldb_init_module',
-	internal_module=False,
-	deps='talloc ldb ndr ldbsamba samdb-common'
-	)
-
-
 bld.SAMBA_MODULE('ldb_rootdse',
 	source='rootdse.c',
 	subsystem='ldb',
@@ -167,18 +195,9 @@ bld.SAMBA_MODULE('ldb_password_hash',
 	init_function='ldb_password_hash_module_init',
 	module_init_name='ldb_init_module',
 	internal_module=False,
-	deps='talloc samdb LIBCLI_AUTH NDR_DRSBLOBS authkrb5 krb5 gpgme DSDB_MODULE_HELPERS'
+	deps='talloc samdb LIBCLI_AUTH NDR_DRSBLOBS authkrb5 krb5 gpgme DSDB_MODULE_HELPERS crypt'
 	)
 
-
-bld.SAMBA_MODULE('ldb_local_password',
-	source='local_password.c',
-	subsystem='ldb',
-	init_function='ldb_local_password_module_init',
-	module_init_name='ldb_init_module',
-	internal_module=False,
-	deps='talloc ndr samdb'
-	)
 
 bld.SAMBA_MODULE('ldb_extended_dn_in',
 	source='extended_dn_in.c',
@@ -398,15 +417,6 @@ bld.SAMBA_MODULE('ldb_aclread',
 	deps='talloc samba-security samdb DSDB_MODULE_HELPERS',
 	)
 
-bld.SAMBA_MODULE('ldb_simple_dn',
-	source='simple_dn.c',
-	subsystem='ldb',
-	init_function='ldb_simple_dn_module_init',
-	module_init_name='ldb_init_module',
-	internal_module=False,
-	deps='talloc DSDB_MODULE_HELPERS'
-	)
-
 bld.SAMBA_MODULE('ldb_dirsync',
 	source='dirsync.c',
 	subsystem='ldb',
@@ -446,6 +456,15 @@ bld.SAMBA_MODULE('tombstone_reanimate',
 bld.SAMBA_MODULE('ldb_vlv',
 	'vlv_pagination.c',
 	init_function='ldb_vlv_init',
+	module_init_name='ldb_init_module',
+	internal_module=False,
+	deps='samdb-common',
+	subsystem='ldb'
+	)
+
+bld.SAMBA_MODULE('ldb_paged_results',
+	'paged_results.c',
+	init_function='ldb_dsdb_paged_results_init',
 	module_init_name='ldb_init_module',
 	internal_module=False,
 	deps='samdb-common',
@@ -508,3 +527,13 @@ bld.SAMBA_MODULE('ldb_group_audit_log',
             samdb
         '''
 	)
+
+
+bld.SAMBA_MODULE('count_attrs',
+	'count_attrs.c',
+	init_function='ldb_count_attrs_init',
+	module_init_name='ldb_init_module',
+	internal_module=False,
+	deps='samdb-common DSDB_MODULE_HELPERS',
+	subsystem='ldb'
+)

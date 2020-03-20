@@ -98,7 +98,9 @@ bool ads_parse_gp_ext(TALLOC_CTX *mem_ctx,
 		for (k = 0; ext_strings[k] != NULL; k++) {
 			/* no op */
 		}
-
+		if (k == 0) {
+			goto parse_error;
+		}
 		q = ext_strings[0];
 
 		if (q[0] == '{') {
@@ -474,7 +476,7 @@ ADS_STATUS ads_get_gpo(ADS_STRUCT *ads,
 		       const char *guid_name,
 		       struct GROUP_POLICY_OBJECT *gpo)
 {
-	ADS_STATUS status;
+	ADS_STATUS status = ADS_ERROR(LDAP_NO_SUCH_OBJECT);
 	LDAPMessage *res = NULL;
 	char *dn;
 	const char *filter;
@@ -688,10 +690,13 @@ ADS_STATUS ads_get_sid_token(ADS_STRUCT *ads,
 		}
 	}
 
-	new_token = create_local_nt_token(mem_ctx, &object_sid, false,
-					  num_token_sids, token_sids);
-	ADS_ERROR_HAVE_NO_MEMORY(new_token);
-
+	status = ADS_ERROR_NT(create_local_nt_token(mem_ctx, 
+					  &object_sid, false,
+					  num_token_sids, token_sids, &new_token));
+	if (!ADS_ERR_OK(status)) {
+		return status;
+	}
+	
 	*token = new_token;
 
 	security_token_debug(DBGC_CLASS, 5, *token);

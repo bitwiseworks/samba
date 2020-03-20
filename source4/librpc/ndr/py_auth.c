@@ -38,6 +38,7 @@ static void PyType_AddGetSet(PyTypeObject *type, PyGetSetDef *getset)
 		descr = PyDescr_NewGetSet(type, &getset[i]);
 		PyDict_SetItemString(dict, getset[i].name, 
 				     descr);
+		Py_CLEAR(descr);
 	}
 }
 
@@ -58,8 +59,12 @@ static int py_auth_session_set_credentials(PyObject *self, PyObject *value, void
 }
 
 static PyGetSetDef py_auth_session_extra_getset[] = {
-	{ discard_const_p(char, "credentials"), (getter)py_auth_session_get_credentials, (setter)py_auth_session_set_credentials, NULL },
-	{ NULL }
+	{
+		.name = discard_const_p(char, "credentials"),
+		.get  = (getter)py_auth_session_get_credentials,
+		.set  = (setter)py_auth_session_set_credentials,
+	},
+	{ .name = NULL },
 };
 
 static void py_auth_session_info_patch(PyTypeObject *type)

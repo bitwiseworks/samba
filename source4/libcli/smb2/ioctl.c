@@ -31,6 +31,9 @@ struct smb2_request *smb2_ioctl_send(struct smb2_tree *tree, struct smb2_ioctl *
 {
 	NTSTATUS status;
 	struct smb2_request *req;
+	uint64_t max_payload_in;
+	uint64_t max_payload_out;
+	size_t max_payload;
 
 	req = smb2_request_init_tree(tree, SMB2_OP_IOCTL, 0x38, true,
 				     io->in.in.length+io->in.out.length);
@@ -46,7 +49,7 @@ struct smb2_request *smb2_ioctl_send(struct smb2_tree *tree, struct smb2_ioctl *
 		return NULL;
 	}
 
-	SIVAL(req->out.body, 0x20, io->in.unknown2);
+	SIVAL(req->out.body, 0x20, io->in.max_input_response);
 
 	status = smb2_push_o32s32_blob(&req->out, 0x24, io->in.in);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -54,8 +57,16 @@ struct smb2_request *smb2_ioctl_send(struct smb2_tree *tree, struct smb2_ioctl *
 		return NULL;
 	}
 
-	SIVAL(req->out.body, 0x2C, io->in.max_response_size);
+	SIVAL(req->out.body, 0x2C, io->in.max_output_response);
 	SBVAL(req->out.body, 0x30, io->in.flags);
+
+	max_payload_in = io->in.out.length + io->in.in.length;
+	max_payload_in = MIN(max_payload_in, UINT32_MAX);
+	max_payload_out = io->in.max_input_response + io->in.max_output_response;
+	max_payload_out = MIN(max_payload_out, UINT32_MAX);
+
+	max_payload = MAX(max_payload_in, max_payload_out);
+	req->credit_charge = (MAX(max_payload, 1) - 1)/ 65536 + 1;
 
 	smb2_transport_send(req);
 
@@ -108,7 +119,7 @@ NTSTATUS smb2_ioctl_recv(struct smb2_request *req,
 
 	SMB2_CHECK_PACKET_RECV(req, 0x30, true);
 
-	io->out._pad       = SVAL(req->in.body, 0x02);
+	io->out.reserved   = SVAL(req->in.body, 0x02);
 	io->out.function   = IVAL(req->in.body, 0x04);
 	smb2_pull_handle(req->in.body+0x08, &io->out.file.handle);
 
@@ -124,8 +135,8 @@ NTSTATUS smb2_ioctl_recv(struct smb2_request *req,
 		return status;
 	}
 
-	io->out.unknown2 = IVAL(req->in.body, 0x28);
-	io->out.unknown3 = IVAL(req->in.body, 0x2C);
+	io->out.flags     = IVAL(req->in.body, 0x28);
+	io->out.reserved2 = IVAL(req->in.body, 0x2C);
 
 	return smb2_request_destroy(req);
 }

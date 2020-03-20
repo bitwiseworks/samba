@@ -23,7 +23,7 @@
 #include "includes.h"
 #include "system/filesys.h"
 #include "krb5_samba.h"
-#include "lib/crypto/crypto.h"
+#include "lib/crypto/md4.h"
 #include "../libds/common/flags.h"
 
 #ifdef HAVE_COM_ERR_H
@@ -701,6 +701,11 @@ krb5_error_code smb_krb5_parse_name(krb5_context context,
 	}
 
 	ret = krb5_parse_name(context, utf8_name, principal);
+	if (ret == KRB5_PARSE_MALFORMED) {
+		ret = krb5_parse_name_flags(context, utf8_name,
+					    KRB5_PRINCIPAL_PARSE_ENTERPRISE,
+					    principal);
+	}
 	TALLOC_FREE(frame);
 	return ret;
 }
@@ -932,9 +937,10 @@ krb5_error_code smb_krb5_renew_ticket(const char *ccache_string,
 	ZERO_STRUCT(creds);
 	ZERO_STRUCT(creds_in);
 
-	initialize_krb5_error_table();
-	ret = krb5_init_context(&context);
+	ret = smb_krb5_init_context_common(&context);
 	if (ret) {
+		DBG_ERR("kerberos init context failed (%s)\n",
+			error_message(ret));
 		goto done;
 	}
 
@@ -1465,7 +1471,7 @@ krb5_error_code smb_krb5_kt_get_name(TALLOC_CTX *mem_ctx,
  *
  * @param[in]  princ         The principal as a krb5_principal to search for.
  *
- * @param[in]  flush         Weather to flush the complete keytab.
+ * @param[in]  flush         Whether to flush the complete keytab.
  *
  * @param[in]  keep_old_entries Keep the entry with the previous kvno.
  *
@@ -1658,7 +1664,7 @@ out:
  *                            this is only set to false for encryption types
  *                            which do not support salting like RC4.
  *
- * @param[in]  keep_old_entries Wether to keep or delte old keytab entries.
+ * @param[in]  keep_old_entries Whether to keep or delete old keytab entries.
  *
  * @retval 0 on Success
  *
@@ -1956,7 +1962,7 @@ krb5_error_code smb_krb5_keyblock_init_contents(krb5_context context,
 /**
  * @brief Simulate a kinit by putting the tgt in the given credential cache.
  *
- * This function uses a keyblock rather than needingthe original password.
+ * This function uses a keyblock rather than needing the original password.
  *
  * @param[in]  ctx      The library context
  *
@@ -1996,21 +2002,21 @@ krb5_error_code smb_krb5_kinit_keyblock_ccache(krb5_context ctx,
 					    krb_options);
 #elif defined(HAVE_KRB5_GET_INIT_CREDS_KEYTAB)
 {
-#define SMB_CREDS_KEYTAB "MEMORY:tmp_smb_creds_XXXXXX"
-	char tmp_name[sizeof(SMB_CREDS_KEYTAB)];
+#define SMB_CREDS_KEYTAB "MEMORY:tmp_kinit_keyblock_ccache"
+	char tmp_name[64] = {0};
 	krb5_keytab_entry entry;
 	krb5_keytab keytab;
-	mode_t mask;
+	int rc;
 
 	memset(&entry, 0, sizeof(entry));
 	entry.principal = principal;
 	*(KRB5_KT_KEY(&entry)) = *keyblock;
 
-	memcpy(tmp_name, SMB_CREDS_KEYTAB, sizeof(SMB_CREDS_KEYTAB));
-	mask = umask(S_IRWXO | S_IRWXG);
-	mktemp(tmp_name);
-	umask(mask);
-	if (tmp_name[0] == 0) {
+	rc = snprintf(tmp_name, sizeof(tmp_name),
+		      "%s-%p",
+		      SMB_CREDS_KEYTAB,
+		      &my_creds);
+	if (rc < 0) {
 		return KRB5_KT_BADNAME;
 	}
 	code = krb5_kt_resolve(ctx, tmp_name, &keytab);
@@ -2110,14 +2116,12 @@ krb5_error_code smb_krb5_kinit_password_ccache(krb5_context ctx,
 		return code;
 	}
 
-#ifndef SAMBA4_USES_HEIMDAL /* MIT */
 	/*
 	 * We need to store the principal as returned from the KDC to the
 	 * credentials cache. If we don't do that the KRB5 library is not
 	 * able to find the tickets it is looking for
 	 */
 	principal = my_creds.client;
-#endif
 	code = krb5_cc_initialize(ctx, cc, principal);
 	if (code) {
 		goto done;
@@ -2780,24 +2784,25 @@ krb5_error_code smb_krb5_make_pac_checksum(TALLOC_CTX *mem_ctx,
 /**
  * @brief Get realm of a principal
  *
+ * @param[in] mem_ctx   The talloc ctx to put the result on
+ *
  * @param[in] context   The library context
  *
  * @param[in] principal The principal to get the realm from.
  *
- * @return An allocated string with the realm or NULL if an error occurred.
- *
- * The caller must free the realm string with free() if not needed anymore.
+ * @return A talloced string with the realm or NULL if an error occurred.
  */
-char *smb_krb5_principal_get_realm(krb5_context context,
+char *smb_krb5_principal_get_realm(TALLOC_CTX *mem_ctx,
+				   krb5_context context,
 				   krb5_const_principal principal)
 {
 #ifdef HAVE_KRB5_PRINCIPAL_GET_REALM /* Heimdal */
-	return strdup(discard_const_p(char, krb5_principal_get_realm(context, principal)));
+	return talloc_strdup(mem_ctx,
+			     krb5_principal_get_realm(context, principal));
 #elif defined(krb5_princ_realm) /* MIT */
-	krb5_data *realm;
-	realm = discard_const_p(krb5_data,
-				krb5_princ_realm(context, principal));
-	return strndup(realm->data, realm->length);
+	const krb5_data *realm;
+	realm = krb5_princ_realm(context, principal);
+	return talloc_strndup(mem_ctx, realm->data, realm->length);
 #else
 #error UNKNOWN_GET_PRINC_REALM_FUNCTIONS
 #endif
@@ -2879,8 +2884,10 @@ char *smb_krb5_get_realm_from_hostname(TALLOC_CTX *mem_ctx,
 	krb5_error_code kerr;
 	krb5_context ctx = NULL;
 
-	initialize_krb5_error_table();
-	if (krb5_init_context(&ctx)) {
+	kerr = smb_krb5_init_context_common(&ctx);
+	if (kerr) {
+		DBG_ERR("kerberos init context failed (%s)\n",
+			error_message(kerr));
 		return NULL;
 	}
 
@@ -2971,56 +2978,6 @@ char *smb_get_krb5_error_message(krb5_context context,
 	ret = talloc_strdup(mem_ctx, error_message(code));
 	return ret;
 }
-
-
-/**
- * @brief Return the kerberos library setting for: libdefaults:allow_weak_crypto
- *
- * @param[in]  context  The library context
- *
- * @return True if weak crypto is allowed, false if not.
- */
-krb5_boolean smb_krb5_get_allowed_weak_crypto(krb5_context context)
-#if defined(HAVE_KRB5_CONFIG_GET_BOOL_DEFAULT)
-{
-	return krb5_config_get_bool_default(context,
-					    NULL,
-					    FALSE,
-					    "libdefaults",
-					    "allow_weak_crypto",
-					    NULL);
-}
-#elif defined(HAVE_PROFILE_H) && defined(HAVE_KRB5_GET_PROFILE)
-{
-#include <profile.h>
-	krb5_error_code ret;
-	krb5_boolean ret_default = false;
-	profile_t profile;
-	int ret_profile;
-
-	ret = krb5_get_profile(context,
-			       &profile);
-	if (ret) {
-		return ret_default;
-	}
-
-	ret = profile_get_boolean(profile,
-				  "libdefaults",
-				  "allow_weak_crypto",
-				  NULL, /* subsubname */
-				  ret_default, /* def_val */
-				  &ret_profile /* *ret_default */);
-	if (ret) {
-		return ret_default;
-	}
-
-	profile_release(profile);
-
-	return ret_profile;
-}
-#else
-#error UNKNOWN_KRB5_CONFIG_ROUTINES
-#endif
 
 /**
  * @brief Return the type of a krb5_principal
@@ -3230,7 +3187,7 @@ static krb5_error_code ads_create_gss_checksum(krb5_data *in_data, /* [inout] */
 
 	SIVAL(gss_cksum, 20, gss_flags);
 
-	if (orig_length) {
+	if (orig_length && in_data->data != NULL) {
 		SSVAL(gss_cksum, 24, 1); /* The Delegation Option identifier */
 		SSVAL(gss_cksum, 26, orig_length);
 		/* Copy the kerberos KRB_CRED data */
@@ -3501,11 +3458,10 @@ int ads_krb5_cli_get_ticket(TALLOC_CTX *mem_ctx,
 		ENCTYPE_NULL};
 	bool ok;
 
-	initialize_krb5_error_table();
-	retval = krb5_init_context(&context);
+	retval = smb_krb5_init_context_common(&context);
 	if (retval != 0) {
-		DBG_WARNING("krb5_init_context failed (%s)\n",
-			    error_message(retval));
+		DBG_ERR("kerberos init context failed (%s)\n",
+			error_message(retval));
 		goto failed;
 	}
 
@@ -3568,6 +3524,51 @@ failed:
 	}
 
 	return retval;
+}
+
+#ifndef SAMBA4_USES_HEIMDAL /* MITKRB5 tracing callback */
+static void smb_krb5_trace_cb(krb5_context ctx,
+			      const krb5_trace_info *info,
+			      void *data)
+{
+	if (info != NULL) {
+		DBGC_DEBUG(DBGC_KERBEROS, "%s", info->message);
+	}
+}
+#endif
+
+krb5_error_code smb_krb5_init_context_common(krb5_context *_krb5_context)
+{
+	krb5_error_code ret;
+	krb5_context krb5_ctx;
+
+	initialize_krb5_error_table();
+
+	ret = krb5_init_context(&krb5_ctx);
+	if (ret) {
+		DBG_ERR("Krb5 context initialization failed (%s)\n",
+			 error_message(ret));
+		return ret;
+	}
+
+	/* The MIT Kerberos build relies on using the system krb5.conf file.
+	 * If you really want to use another file please set KRB5_CONFIG
+	 * accordingly. */
+#ifndef SAMBA4_USES_HEIMDAL
+	ret = krb5_set_trace_callback(krb5_ctx, smb_krb5_trace_cb, NULL);
+	if (ret) {
+		DBG_ERR("Failed to set MIT kerberos trace callback! (%s)\n",
+			error_message(ret));
+	}
+#endif
+
+#ifdef SAMBA4_USES_HEIMDAL
+	/* Set options in kerberos */
+	krb5_set_dns_canonicalize_hostname(krb5_ctx, false);
+#endif
+
+	*_krb5_context = krb5_ctx;
+	return 0;
 }
 
 #else /* HAVE_KRB5 */

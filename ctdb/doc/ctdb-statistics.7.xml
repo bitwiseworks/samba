@@ -123,7 +123,7 @@ Statistics collected since  : (000 01:49:20) Fri Sep 12 11:43:12 2014
     <refsect2>
       <title>frozen</title>
       <para>
-	1 if the the databases are currently frozen, 0 otherwise.
+	1 if the databases are currently frozen, 0 otherwise.
       </para>
     </refsect2>
 
@@ -378,7 +378,7 @@ Statistics collected since  : (000 01:49:20) Fri Sep 12 11:43:12 2014
     <refsect2>
       <title>pending_calls</title>
       <para>
-	Number of req_call messages which are currenly being processed.
+	Number of req_call messages which are currently being processed.
 	This number indicates the number of record migrations in flight.
       </para>
     </refsect2>
@@ -436,8 +436,10 @@ Statistics collected since  : (000 01:49:20) Fri Sep 12 11:43:12 2014
       <title>hop_count_buckets</title>
       <para>
 	Distribution of migration requests based on hop counts values.
-	Buckets are 1, &lt; 4, &lt; 8, &lt; 16, &lt; 32, &lt; 64, &lt;
-	128, &lt; 256, &lt; 512, &ge; 512.
+	Buckets are 0, &lt;&nbsp;2, &lt;&nbsp;4, &lt;&nbsp;8,
+	&lt;&nbsp;16, &lt;&nbsp;32, &lt;&nbsp;64, &lt;&nbsp;128,
+	&lt;&nbsp;256, &lt;&nbsp;512, &lt;&nbsp;1024, &lt;&nbsp;2048,
+	&lt;&nbsp;4096, &lt;&nbsp;8192, &lt;&nbsp;16384, &ge;&nbsp;16384.
       </para>
     </refsect2>
 
@@ -445,9 +447,10 @@ Statistics collected since  : (000 01:49:20) Fri Sep 12 11:43:12 2014
       <title>lock_buckets</title>
       <para>
 	Distribution of record lock requests based on time required to
-	obtain locks.  Buckets are &lt; 1ms, &lt; 10ms, &lt; 100ms,
-	&lt; 1s, &lt; 2s, &lt; 4s, &lt; 8s, &lt; 16s, &lt; 32s, &lt;
-	64s, &ge; 64s.
+	obtain locks.  Buckets are &lt;&nbsp;1ms, &lt;&nbsp;10ms,
+	&lt;&nbsp;100ms, &lt;&nbsp;1s, &lt;&nbsp;2s, &lt;&nbsp;4s,
+	&lt;&nbsp;8s, &lt;&nbsp;16s, &lt;&nbsp;32s, &lt;&nbsp;64s,
+	&ge;&nbsp;64s.
       </para>
     </refsect2>
 
@@ -595,8 +598,10 @@ DB Statistics: notify_index.tdb
       <title>hop_count_buckets</title>
       <para>
 	Distribution of migration requests based on hop counts values.
-	Buckets are 1, &lt; 4, &lt; 8, &lt; 16, &lt; 32, &lt; 64, &lt;
-	128, &lt; 256, &lt; 512, &ge; 512.
+	Buckets are 0, &lt;&nbsp;2, &lt;&nbsp;4, &lt;&nbsp;8,
+	&lt;&nbsp;16, &lt;&nbsp;32, &lt;&nbsp;64, &lt;&nbsp;128,
+	&lt;&nbsp;256, &lt;&nbsp;512, &lt;&nbsp;1024, &lt;&nbsp;2048,
+	&lt;&nbsp;4096, &lt;&nbsp;8192, &lt;&nbsp;16384, &ge;&nbsp;16384.
       </para>
     </refsect2>
 
@@ -604,9 +609,10 @@ DB Statistics: notify_index.tdb
       <title>lock_buckets</title>
       <para>
 	Distribution of record lock requests based on time required to
-	obtain locks.  Buckets are &lt; 1ms, &lt; 10ms, &lt; 100ms,
-	&lt; 1s, &lt; 2s, &lt; 4s, &lt; 8s, &lt; 16s, &lt; 32s, &lt;
-	64s, &ge; 64s.
+	obtain locks.  Buckets are &lt;&nbsp;1ms, &lt;&nbsp;10ms,
+	&lt;&nbsp;100ms, &lt;&nbsp;1s, &lt;&nbsp;2s, &lt;&nbsp;4s,
+	&lt;&nbsp;8s, &lt;&nbsp;16s, &lt;&nbsp;32s, &lt;&nbsp;64s,
+	&ge;&nbsp;64s.
       </para>
     </refsect2>
 

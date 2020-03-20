@@ -3,9 +3,6 @@
 # Copyright (C) 2015 Petr Viktorin <pviktori@redhat.com>
 # Published under the GNU LGPLv3 or later
 
-import sys
-import functools
-
 import ldb
 
 
@@ -91,6 +88,7 @@ class MessageElementTextWrapper(_WrapBase):
     @property
     def set_flags(self):
         return self._wrapped.set_flags
+
 
 _wrap_element = MessageElementTextWrapper._wrap
 

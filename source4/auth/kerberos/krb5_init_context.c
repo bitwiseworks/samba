@@ -478,12 +478,8 @@ smb_krb5_init_context_basic(TALLOC_CTX *tmp_ctx,
 #endif
 	krb5_context krb5_ctx;
 
-	initialize_krb5_error_table();
-
-	ret = krb5_init_context(&krb5_ctx);
+	ret = smb_krb5_init_context_common(&krb5_ctx);
 	if (ret) {
-		DEBUG(1,("krb5_init_context failed (%s)\n",
-			 error_message(ret)));
 		return ret;
 	}
 
@@ -515,6 +511,12 @@ smb_krb5_init_context_basic(TALLOC_CTX *tmp_ctx,
 		return ret;
 	}
 
+	/*
+	 * This is already called in smb_krb5_init_context_common(),
+	 * but krb5_set_config_files() may resets it.
+	 */
+	krb5_set_dns_canonicalize_hostname(krb5_ctx, false);
+
 	realm = lpcfg_realm(lp_ctx);
 	if (realm != NULL) {
 		ret = krb5_set_default_realm(krb5_ctx, realm);
@@ -540,8 +542,6 @@ krb5_error_code smb_krb5_init_context(void *parent_ctx,
 #ifdef SAMBA4_USES_HEIMDAL
 	krb5_log_facility *logf;
 #endif
-
-	initialize_krb5_error_table();
 
 	tmp_ctx = talloc_new(parent_ctx);
 	*smb_krb5_context = talloc_zero(tmp_ctx, struct smb_krb5_context);
@@ -584,12 +584,6 @@ krb5_error_code smb_krb5_init_context(void *parent_ctx,
 		return ret;
 	}
 	krb5_set_warn_dest(kctx, logf);
-
-	/* Set options in kerberos */
-
-	krb5_set_dns_canonicalize_hostname(kctx,
-			lpcfg_parm_bool(lp_ctx, NULL, "krb5",
-					"set_dns_canonicalize", false));
 #endif
 	talloc_steal(parent_ctx, *smb_krb5_context);
 	talloc_free(tmp_ctx);

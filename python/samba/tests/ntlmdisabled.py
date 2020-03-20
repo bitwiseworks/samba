@@ -24,12 +24,12 @@ from samba.credentials import Credentials, DONT_USE_KERBEROS, MUST_USE_KERBEROS
 from samba import NTSTATUSError, ntstatus
 import ctypes
 
-from samba import credentials
 from samba.dcerpc import srvsvc, samr, lsa
 
 """
 Tests behaviour when NTLM is disabled
 """
+
 
 class NtlmDisabledTests(TestCase):
 
@@ -56,7 +56,7 @@ class NtlmDisabledTests(TestCase):
             self.assertIsNotNone(conn)
         except NTSTATUSError as e:
             # NTLM might be blocked on this server
-            enum = ctypes.c_uint32(e[0]).value
+            enum = ctypes.c_uint32(e.args[0]).value
             if enum == ntstatus.NT_STATUS_NTLM_BLOCKED:
                 self.fail("NTLM is disabled on this server")
             else:
@@ -77,7 +77,7 @@ class NtlmDisabledTests(TestCase):
             conn.ChangePasswordUser2(server, username, None, None, True, None, None)
         except NTSTATUSError as e:
             # changing passwords should be rejected when NTLM is disabled
-            enum = ctypes.c_uint32(e[0]).value
+            enum = ctypes.c_uint32(e.args[0]).value
             if enum == ntstatus.NT_STATUS_NTLM_BLOCKED:
                 self.fail("NTLM is disabled on this server")
             elif enum == ntstatus.NT_STATUS_WRONG_PASSWORD:
@@ -85,4 +85,3 @@ class NtlmDisabledTests(TestCase):
                 pass
             else:
                 raise
-

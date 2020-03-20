@@ -25,16 +25,18 @@
 #include "dsdb/samdb/samdb.h"
 #include "lib/util/dlinklist.h"
 #include "librpc/gen_ndr/ndr_dnsserver.h"
+#include "dns_server/dnsserver_common.h"
 #include "dnsserver.h"
 
-#define DCESRV_INTERFACE_DNSSERVER_BIND(call, iface) \
-	dcesrv_interface_dnsserver_bind(call, iface)
-static NTSTATUS dcesrv_interface_dnsserver_bind(struct dcesrv_call_state *dce_call,
+#define DCESRV_INTERFACE_DNSSERVER_BIND(context, iface) \
+	dcesrv_interface_dnsserver_bind(context, iface)
+static NTSTATUS dcesrv_interface_dnsserver_bind(struct dcesrv_connection_context *context,
 					        const struct dcesrv_interface *iface)
 {
-	return dcesrv_interface_bind_require_integrity(dce_call, iface);
+	return dcesrv_interface_bind_require_integrity(context, iface);
 }
 
+#define DNSSERVER_STATE_MAGIC 0xc9657ab4
 struct dnsserver_state {
 	struct loadparm_context *lp_ctx;
 	struct ldb_context *samdb;
@@ -102,16 +104,21 @@ static void dnsserver_reload_zones(struct dnsserver_state *dsstate)
 
 static struct dnsserver_state *dnsserver_connect(struct dcesrv_call_state *dce_call)
 {
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
 	struct dnsserver_state *dsstate;
 	struct dnsserver_zone *zones, *z, *znext;
 	struct dnsserver_partition *partitions, *p;
+	NTSTATUS status;
 
-	dsstate = talloc_get_type(dce_call->context->private_data, struct dnsserver_state);
+	dsstate = dcesrv_iface_state_find_conn(dce_call,
+					       DNSSERVER_STATE_MAGIC,
+					       struct dnsserver_state);
 	if (dsstate != NULL) {
 		return dsstate;
 	}
 
-	dsstate = talloc_zero(dce_call->context, struct dnsserver_state);
+	dsstate = talloc_zero(dce_call, struct dnsserver_state);
 	if (dsstate == NULL) {
 		return NULL;
 	}
@@ -122,7 +129,7 @@ static struct dnsserver_state *dnsserver_connect(struct dcesrv_call_state *dce_c
 	dsstate->samdb = samdb_connect(dsstate,
 				       dce_call->event_ctx,
 				       dsstate->lp_ctx,
-				       dce_call->conn->auth_state.session_info,
+				       session_info,
 				       dce_call->conn->remote_address,
 				       0);
 	if (dsstate->samdb == NULL) {
@@ -170,7 +177,12 @@ static struct dnsserver_state *dnsserver_connect(struct dcesrv_call_state *dce_c
 		}
 	}
 
-	dce_call->context->private_data = dsstate;
+	status = dcesrv_iface_state_store_conn(dce_call,
+					       DNSSERVER_STATE_MAGIC,
+					       dsstate);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto failed;
+	}
 
 	return dsstate;
 
@@ -362,6 +374,7 @@ static WERROR dnsserver_query_server(struct dnsserver_state *dsstate,
 	}
 
 	is_integer = 0;
+	answer_integer = 0;
 
 	if (strcasecmp(operation, "AddressAnswerLimit") == 0) {
 		answer_integer = serverinfo->cAddressAnswerLimit;
@@ -822,7 +835,7 @@ static WERROR dnsserver_query_zone(struct dnsserver_state *dsstate,
 					union DNSSRV_RPC_UNION *r)
 {
 	uint8_t is_integer, is_addresses, is_string;
-	uint32_t answer_integer;
+	uint32_t answer_integer = 0;
 	struct IP4_ARRAY *answer_iparray;
 	struct DNS_ADDR_ARRAY *answer_addrarray;
 	char *answer_string;
@@ -1116,6 +1129,7 @@ static WERROR dnsserver_operate_server(struct dnsserver_state *dsstate,
 	} else if (strcasecmp(operation, "ZoneCreate") == 0) {
 		struct dnsserver_zone *z, *z2;
 		WERROR status;
+		int len;
 
 		z = talloc_zero(mem_ctx, struct dnsserver_zone);
 		W_ERROR_HAVE_NO_MEMORY(z);
@@ -1125,20 +1139,32 @@ static WERROR dnsserver_operate_server(struct dnsserver_state *dsstate,
 		W_ERROR_HAVE_NO_MEMORY_AND_FREE(z->zoneinfo, z);
 
 		if (typeid == DNSSRV_TYPEID_ZONE_CREATE_W2K) {
-			z->name = talloc_strdup(z, r->ZoneCreateW2K->pszZoneName);
+			len = strlen(r->ZoneCreateW2K->pszZoneName);
+			if (r->ZoneCreateW2K->pszZoneName[len-1] == '.') {
+				len -= 1;
+			}
+			z->name = talloc_strndup(z, r->ZoneCreateW2K->pszZoneName, len);
 			z->zoneinfo->dwZoneType = r->ZoneCreateW2K->dwZoneType;
 			z->zoneinfo->fAllowUpdate = r->ZoneCreateW2K->fAllowUpdate;
 			z->zoneinfo->fAging = r->ZoneCreateW2K->fAging;
 			z->zoneinfo->Flags = r->ZoneCreateW2K->dwFlags;
 		} else if (typeid == DNSSRV_TYPEID_ZONE_CREATE_DOTNET) {
-			z->name = talloc_strdup(z, r->ZoneCreateDotNet->pszZoneName);
+			len = strlen(r->ZoneCreateDotNet->pszZoneName);
+			if (r->ZoneCreateDotNet->pszZoneName[len-1] == '.') {
+				len -= 1;
+			}
+			z->name = talloc_strndup(z, r->ZoneCreateDotNet->pszZoneName, len);
 			z->zoneinfo->dwZoneType = r->ZoneCreateDotNet->dwZoneType;
 			z->zoneinfo->fAllowUpdate = r->ZoneCreateDotNet->fAllowUpdate;
 			z->zoneinfo->fAging = r->ZoneCreateDotNet->fAging;
 			z->zoneinfo->Flags = r->ZoneCreateDotNet->dwFlags;
 			z->partition->dwDpFlags = r->ZoneCreateDotNet->dwDpFlags;
 		} else if (typeid == DNSSRV_TYPEID_ZONE_CREATE) {
-			z->name = talloc_strdup(z, r->ZoneCreate->pszZoneName);
+			len = strlen(r->ZoneCreate->pszZoneName);
+			if (r->ZoneCreate->pszZoneName[len-1] == '.') {
+				len -= 1;
+			}
+			z->name = talloc_strndup(z, r->ZoneCreate->pszZoneName, len);
 			z->zoneinfo->dwZoneType = r->ZoneCreate->dwZoneType;
 			z->zoneinfo->fAllowUpdate = r->ZoneCreate->fAllowUpdate;
 			z->zoneinfo->fAging = r->ZoneCreate->fAging;
@@ -1701,6 +1727,10 @@ static WERROR dnsserver_enumerate_root_records(struct dnsserver_state *dsstate,
 							NULL, NULL);
 			talloc_free(rname);
 			talloc_free(res);
+			if (!W_ERROR_IS_OK(status)) {
+				talloc_free(tmp_ctx);
+				return status;
+			}
 		}
 	}
 
@@ -1733,6 +1763,7 @@ static WERROR dnsserver_enumerate_records(struct dnsserver_state *dsstate,
 	struct DNS_RPC_RECORDS_ARRAY *recs;
 	char **add_names = NULL;
 	char *rname;
+	const char *preference_name = NULL;
 	int add_count = 0;
 	int i, ret, len;
 	WERROR status;
@@ -1749,6 +1780,7 @@ static WERROR dnsserver_enumerate_records(struct dnsserver_state *dsstate,
 		ret = ldb_search(dsstate->samdb, tmp_ctx, &res, z->zone_dn,
 				 LDB_SCOPE_ONELEVEL, attrs,
 				 "(&(objectClass=dnsNode)(!(dNSTombstoned=TRUE)))");
+		preference_name = "@";
 	} else {
 		char *encoded_name
 			= ldb_binary_encode_string(tmp_ctx, name);
@@ -1756,6 +1788,7 @@ static WERROR dnsserver_enumerate_records(struct dnsserver_state *dsstate,
 				 LDB_SCOPE_ONELEVEL, attrs,
 				 "(&(objectClass=dnsNode)(|(name=%s)(name=*.%s))(!(dNSTombstoned=TRUE)))",
 				 encoded_name, encoded_name);
+		preference_name = name;
 	}
 	if (ret != LDB_SUCCESS) {
 		talloc_free(tmp_ctx);
@@ -1769,16 +1802,18 @@ static WERROR dnsserver_enumerate_records(struct dnsserver_state *dsstate,
 	recs = talloc_zero(mem_ctx, struct DNS_RPC_RECORDS_ARRAY);
 	W_ERROR_HAVE_NO_MEMORY_AND_FREE(recs, tmp_ctx);
 
-	/* Sort the names, so that the first record is the parent record */
-	ldb_qsort(res->msgs, res->count, sizeof(struct ldb_message *), name,
-			(ldb_qsort_cmp_fn_t)dns_name_compare);
+	/*
+	 * Sort the names, so that the records are in order by the child
+	 * component below "name".
+	 *
+	 * A full tree sort is not required, so we pass in "name" so
+	 * we know which level to sort, as only direct children are
+	 * eventually returned
+	 */
+	LDB_TYPESAFE_QSORT(res->msgs, res->count, name, dns_name_compare);
 
 	/* Build a tree of name components from dns name */
-	if (strcasecmp(name, z->name) == 0) {
-		tree = dns_build_tree(tmp_ctx, "@", res);
-	} else {
-		tree = dns_build_tree(tmp_ctx, name, res);
-	}
+	tree = dns_build_tree(tmp_ctx, preference_name, res);
 	W_ERROR_HAVE_NO_MEMORY_AND_FREE(tree, tmp_ctx);
 
 	/* Find the parent record in the tree */
@@ -1859,6 +1894,10 @@ static WERROR dnsserver_enumerate_records(struct dnsserver_state *dsstate,
 							NULL, NULL);
 			talloc_free(rname);
 			talloc_free(res);
+			if (!W_ERROR_IS_OK(status)) {
+				talloc_free(tmp_ctx);
+				return status;
+			}
 		}
 	}
 
@@ -1866,6 +1905,37 @@ static WERROR dnsserver_enumerate_records(struct dnsserver_state *dsstate,
 	*buffer = recs;
 
 	return WERR_OK;
+}
+
+/*
+ * Check str1 + '.' + str2 = name, for example:
+ * ("dc0", "example.com", "dc0.example.com") = true
+ */
+static bool cname_self_reference(const char* node_name,
+				 const char* zone_name,
+				 struct DNS_RPC_NAME name) {
+	size_t node_len, zone_len;
+
+	if (node_name == NULL || zone_name == NULL) {
+		return false;
+	}
+
+	node_len = strlen(node_name);
+	zone_len = strlen(zone_name);
+
+	if (node_len == 0 ||
+	    zone_len == 0 ||
+	    (name.len != node_len + zone_len + 1)) {
+		return false;
+	}
+
+	if (strncmp(node_name, name.str, node_len) == 0 &&
+	    name.str[node_len] == '.' &&
+	    strncmp(zone_name, name.str + node_len + 1, zone_len) == 0) {
+		return true;
+	}
+
+	return false;
 }
 
 /* dnsserver update function */
@@ -1894,6 +1964,13 @@ static WERROR dnsserver_update_record(struct dnsserver_state *dsstate,
 		name = dns_split_node_name(tmp_ctx, node_name, z->name);
 	}
 	W_ERROR_HAVE_NO_MEMORY_AND_FREE(name, tmp_ctx);
+
+	/* CNAMEs can't point to themselves */
+	if (add_buf != NULL && add_buf->rec.wType == DNS_TYPE_CNAME) {
+		if (cname_self_reference(node_name, z->name, add_buf->rec.data.name)) {
+			return WERR_DNS_ERROR_CNAME_LOOP;
+		}
+	}
 
 	if (add_buf != NULL) {
 		if (del_buf == NULL) {
@@ -1955,7 +2032,12 @@ static WERROR dcesrv_DnssrvOperation(struct dcesrv_call_state *dce_call, TALLOC_
 						&r->in.pData);
 	} else {
 		z = dnsserver_find_zone(dsstate->zones, r->in.pszZone);
-		if (z == NULL && request_filter == 0) {
+		/*
+		 * In the case that request_filter is not 0 and z is NULL,
+		 * the request is for a multizone operation, which we do not
+		 * yet support, so just error on NULL zone name.
+		 */
+		if (z == NULL) {
 			return WERR_DNS_ERROR_ZONE_DOES_NOT_EXIST;
 		}
 
@@ -2162,7 +2244,12 @@ static WERROR dcesrv_DnssrvOperation2(struct dcesrv_call_state *dce_call, TALLOC
 						&r->in.pData);
 	} else {
 		z = dnsserver_find_zone(dsstate->zones, r->in.pszZone);
-		if (z == NULL && request_filter == 0) {
+		/*
+		 * In the case that request_filter is not 0 and z is NULL,
+		 * the request is for a multizone operation, which we do not
+		 * yet support, so just error on NULL zone name.
+		 */
+		if (z == NULL) {
 			return WERR_DNS_ERROR_ZONE_DOES_NOT_EXIST;
 		}
 

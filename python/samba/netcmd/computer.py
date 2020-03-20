@@ -25,6 +25,8 @@ import ldb
 import socket
 import samba
 import re
+import os
+import tempfile
 from samba import sd_utils
 from samba.dcerpc import dnsserver, dnsp, security
 from samba.dnsserver import ARecord, AAAARecord
@@ -32,6 +34,9 @@ from samba.ndr import ndr_unpack, ndr_pack, ndr_print
 from samba.remove_dc import remove_dns_references
 from samba.auth import system_session
 from samba.samdb import SamDB
+from samba.compat import get_bytes
+from subprocess import check_call, CalledProcessError
+from . import common
 
 from samba import (
     credentials,
@@ -39,15 +44,14 @@ from samba import (
     Ldb,
     werror,
     WERRORError
-    )
+)
 
 from samba.netcmd import (
     Command,
     CommandError,
     SuperCommand,
     Option,
-    )
-
+)
 
 def _is_valid_ip(ip_string, address_families=None):
     """Check ip string is valid address"""
@@ -181,7 +185,7 @@ accounts are also referred to as security principals and are assigned a
 security identifier (SID).
 
 Example1:
-samba-tool computer create Computer1 -H ldap://samba.samdom.example.com \
+samba-tool computer create Computer1 -H ldap://samba.samdom.example.com \\
     -Uadministrator%passw1rd
 
 Example1 shows how to create a new computer in the domain against a remote LDAP
@@ -207,10 +211,10 @@ Example3 shows how to create a new computer in the OrgUnit organizational unit.
         Option("-H", "--URL", help="LDB URL for database or target server",
                type=str, metavar="URL", dest="H"),
         Option("--computerou",
-                help=("DN of alternative location (with or without domainDN "
-                      "counterpart) to default CN=Computers in which new "
-                      "computer object will be created. E.g. 'OU=<OU name>'"),
-                type=str),
+               help=("DN of alternative location (with or without domainDN "
+                     "counterpart) to default CN=Computers in which new "
+                     "computer object will be created. E.g. 'OU=<OU name>'"),
+               type=str),
         Option("--description", help="Computers's description", type=str),
         Option("--prepare-oldjoin",
                help="Prepare enabled machine account for oldjoin mechanism",
@@ -234,7 +238,7 @@ Example3 shows how to create a new computer in the OrgUnit organizational unit.
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
         "versionopts": options.VersionOptions,
-        }
+    }
 
     def run(self, computername, credopts=None, sambaopts=None, versionopts=None,
             H=None, computerou=None, description=None, prepare_oldjoin=False,
@@ -323,7 +327,7 @@ userid. The -H or --URL= option can be used to execute the command against
 a remote server.
 
 Example1:
-samba-tool computer delete Computer1 -H ldap://samba.samdom.example.com \
+samba-tool computer delete Computer1 -H ldap://samba.samdom.example.com \\
     -Uadministrator%passw1rd
 
 Example1 shows how to delete a computer in the domain against a remote LDAP
@@ -351,7 +355,7 @@ sudo is used so a computer may run the command as root.
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
         "versionopts": options.VersionOptions,
-        }
+    }
 
     def run(self, computername, credopts=None, sambaopts=None,
             versionopts=None, H=None):
@@ -376,7 +380,7 @@ sudo is used so a computer may run the command as root.
             computer_dn = res[0].dn
             computer_ac = int(res[0]["userAccountControl"][0])
             if "dNSHostName" in res[0]:
-                computer_dns_host_name = res[0]["dNSHostName"][0]
+                computer_dns_host_name = str(res[0]["dNSHostName"][0])
             else:
                 computer_dns_host_name = None
         except IndexError:
@@ -384,7 +388,7 @@ sudo is used so a computer may run the command as root.
 
         computer_is_workstation = (
             computer_ac & dsdb.UF_WORKSTATION_TRUST_ACCOUNT)
-        if computer_is_workstation == False:
+        if not computer_is_workstation:
             raise CommandError('Failed to remove computer "%s": '
                                'Computer is not a workstation - removal denied'
                                % computername)
@@ -400,6 +404,121 @@ sudo is used so a computer may run the command as root.
         self.outf.write("Deleted computer %s\n" % computername)
 
 
+class cmd_computer_edit(Command):
+    """Modify Computer AD object.
+
+    This command will allow editing of a computer account in the Active
+    Directory domain. You will then be able to add or change attributes and
+    their values.
+
+    The computername specified on the command is the sAMaccountName with or
+    without the trailing $ (dollar sign).
+
+    The command may be run from the root userid or another authorized userid.
+
+    The -H or --URL= option can be used to execute the command against a remote
+    server.
+
+    Example1:
+    samba-tool computer edit Computer1 -H ldap://samba.samdom.example.com \\
+        -U administrator --password=passw1rd
+
+    Example1 shows how to edit a computers attributes in the domain against a
+    remote LDAP server.
+
+    The -H parameter is used to specify the remote target server.
+
+    Example2:
+    samba-tool computer edit Computer2
+
+    Example2 shows how to edit a computers attributes in the domain against a
+    local LDAP server.
+
+    Example3:
+    samba-tool computer edit Computer3 --editor=nano
+
+    Example3 shows how to edit a computers attributes in the domain against a
+    local LDAP server using the 'nano' editor.
+    """
+    synopsis = "%prog <computername> [options]"
+
+    takes_options = [
+        Option("-H", "--URL", help="LDB URL for database or target server",
+               type=str, metavar="URL", dest="H"),
+        Option("--editor", help="Editor to use instead of the system default,"
+               " or 'vi' if no system default is set.", type=str),
+    ]
+
+    takes_args = ["computername"]
+    takes_optiongroups = {
+        "sambaopts": options.SambaOptions,
+        "credopts": options.CredentialsOptions,
+        "versionopts": options.VersionOptions,
+    }
+
+    def run(self, computername, credopts=None, sambaopts=None, versionopts=None,
+            H=None, editor=None):
+        lp = sambaopts.get_loadparm()
+        creds = credopts.get_credentials(lp, fallback_machine=True)
+        samdb = SamDB(url=H, session_info=system_session(),
+                      credentials=creds, lp=lp)
+
+        samaccountname = computername
+        if not computername.endswith('$'):
+            samaccountname = "%s$" % computername
+
+        filter = ("(&(sAMAccountType=%d)(sAMAccountName=%s))" %
+                  (dsdb.ATYPE_WORKSTATION_TRUST,
+                   ldb.binary_encode(samaccountname)))
+
+        domaindn = samdb.domain_dn()
+
+        try:
+            res = samdb.search(base=domaindn,
+                               expression=filter,
+                               scope=ldb.SCOPE_SUBTREE)
+            computer_dn = res[0].dn
+        except IndexError:
+            raise CommandError('Unable to find computer "%s"' % (computername))
+
+        if len(res) != 1:
+            raise CommandError('Invalid number of results: for "%s": %d' %
+                               ((computername), len(res)))
+
+        msg = res[0]
+        result_ldif = common.get_ldif_for_editor(samdb, msg)
+
+        if editor is None:
+            editor = os.environ.get('EDITOR')
+            if editor is None:
+                editor = 'vi'
+
+        with tempfile.NamedTemporaryFile(suffix=".tmp") as t_file:
+            t_file.write(get_bytes(result_ldif))
+            t_file.flush()
+            try:
+                check_call([editor, t_file.name])
+            except CalledProcessError as e:
+                raise CalledProcessError("ERROR: ", e)
+            with open(t_file.name) as edited_file:
+                edited_message = edited_file.read()
+
+        msgs_edited = samdb.parse_ldif(edited_message)
+        msg_edited = next(msgs_edited)[1]
+
+        res_msg_diff = samdb.msg_diff(msg, msg_edited)
+        if len(res_msg_diff) == 0:
+            self.outf.write("Nothing to do\n")
+            return
+
+        try:
+            samdb.modify(res_msg_diff)
+        except Exception as e:
+            raise CommandError("Failed to modify computer '%s': " %
+                               (computername, e))
+
+        self.outf.write("Modified computer '%s' successfully\n" % computername)
+
 class cmd_computer_list(Command):
     """List all computers."""
 
@@ -408,32 +527,54 @@ class cmd_computer_list(Command):
     takes_options = [
         Option("-H", "--URL", help="LDB URL for database or target server",
                type=str, metavar="URL", dest="H"),
-        ]
+        Option("-b", "--base-dn",
+               help="Specify base DN to use",
+               type=str),
+        Option("--full-dn", dest="full_dn",
+               default=False,
+               action="store_true",
+               help="Display DN instead of the sAMAccountName.")
+    ]
 
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
         "versionopts": options.VersionOptions,
-        }
+    }
 
-    def run(self, sambaopts=None, credopts=None, versionopts=None, H=None):
+    def run(self,
+            sambaopts=None,
+            credopts=None,
+            versionopts=None,
+            H=None,
+            base_dn=None,
+            full_dn=False):
         lp = sambaopts.get_loadparm()
         creds = credopts.get_credentials(lp, fallback_machine=True)
 
         samdb = SamDB(url=H, session_info=system_session(),
-            credentials=creds, lp=lp)
+                      credentials=creds, lp=lp)
 
         filter = "(sAMAccountType=%u)" % (dsdb.ATYPE_WORKSTATION_TRUST)
 
-        domain_dn = samdb.domain_dn()
-        res = samdb.search(domain_dn, scope=ldb.SCOPE_SUBTREE,
+        search_dn = samdb.domain_dn()
+        if base_dn:
+            search_dn = samdb.normalize_dn_in_domain(base_dn)
+
+        res = samdb.search(search_dn,
+                           scope=ldb.SCOPE_SUBTREE,
                            expression=filter,
                            attrs=["samaccountname"])
         if (len(res) == 0):
             return
 
         for msg in res:
+            if full_dn:
+                self.outf.write("%s\n" % msg.get("dn"))
+                continue
+
             self.outf.write("%s\n" % msg.get("samaccountname", idx=0))
+
 
 class cmd_computer_show(Command):
     """Display a computer AD object.
@@ -449,7 +590,7 @@ The -H or --URL= option can be used to execute the command against a remote
 server.
 
 Example1:
-samba-tool computer show Computer1 -H ldap://samba.samdom.example.com \
+samba-tool computer show Computer1 -H ldap://samba.samdom.example.com \\
     -U administrator
 
 Example1 shows how display a computers attributes in the domain against a
@@ -485,7 +626,7 @@ attribute.
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
         "versionopts": options.VersionOptions,
-        }
+    }
 
     def run(self, computername, credopts=None, sambaopts=None, versionopts=None,
             H=None, computer_attrs=None):
@@ -518,8 +659,9 @@ attribute.
                                samaccountname)
 
         for msg in res:
-            computer_ldif = samdb.write_ldif(msg, ldb.CHANGETYPE_NONE)
+            computer_ldif = common.get_ldif_for_editor(samdb, msg)
             self.outf.write(computer_ldif)
+
 
 class cmd_computer_move(Command):
     """Move a computer to an organizational unit/container."""
@@ -531,12 +673,12 @@ class cmd_computer_move(Command):
                type=str, metavar="URL", dest="H"),
     ]
 
-    takes_args = [ "computername", "new_ou_dn" ]
+    takes_args = ["computername", "new_ou_dn"]
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
         "versionopts": options.VersionOptions,
-        }
+    }
 
     def run(self, computername, new_ou_dn, credopts=None, sambaopts=None,
             versionopts=None, H=None):
@@ -565,7 +707,7 @@ class cmd_computer_move(Command):
         if not full_new_ou_dn.is_child_of(domain_dn):
             full_new_ou_dn.add_base(domain_dn)
         new_computer_dn = ldb.Dn(samdb, str(computer_dn))
-        new_computer_dn.remove_base_components(len(computer_dn)-1)
+        new_computer_dn.remove_base_components(len(computer_dn) -1)
         new_computer_dn.add_base(full_new_ou_dn)
         try:
             samdb.rename(computer_dn, new_computer_dn)
@@ -581,6 +723,7 @@ class cmd_computer(SuperCommand):
     subcommands = {}
     subcommands["create"] = cmd_computer_create()
     subcommands["delete"] = cmd_computer_delete()
+    subcommands["edit"] = cmd_computer_edit()
     subcommands["list"] = cmd_computer_list()
     subcommands["show"] = cmd_computer_show()
     subcommands["move"] = cmd_computer_move()

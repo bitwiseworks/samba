@@ -36,18 +36,18 @@ bitFields["searchflags"] = {
     'fTUPLEINDEX': 26,       # TP
     'fSUBTREEATTINDEX': 25,  # ST
     'fCONFIDENTIAL': 24,     # CF
-    'fCONFIDENTAIL': 24, # typo
+    'fCONFIDENTAIL': 24,  # typo
     'fNEVERVALUEAUDIT': 23,  # NV
     'fRODCAttribute': 22,    # RO
 
 
     # missing in ADTS but required by LDIF
     'fRODCFilteredAttribute': 22,    # RO
-    'fRODCFILTEREDATTRIBUTE': 22, # case
+    'fRODCFILTEREDATTRIBUTE': 22,  # case
     'fEXTENDEDLINKTRACKING': 21,  # XL
     'fBASEONLY': 20,  # BO
     'fPARTITIONSECRET': 19,  # SE
-    }
+}
 
 # ADTS: 2.2.10
 bitFields["systemflags"] = {
@@ -64,28 +64,29 @@ bitFields["systemflags"] = {
     'FLAG_CONFIG_ALLOW_MOVE': 2,     # AM
     'FLAG_CONFIG_ALLOW_RENAME': 1,     # AR
     'FLAG_DISALLOW_DELETE': 0     # DD
-    }
+}
 
 # ADTS: 2.2.11
 bitFields["schemaflagsex"] = {
     'FLAG_ATTR_IS_CRITICAL': 31
-    }
+}
 
 # ADTS: 3.1.1.2.2.2
 oMObjectClassBER = {
-    '1.3.12.2.1011.28.0.702' : base64.b64encode(b'\x2B\x0C\x02\x87\x73\x1C\x00\x85\x3E').decode('utf8'),
+    '1.3.12.2.1011.28.0.702': base64.b64encode(b'\x2B\x0C\x02\x87\x73\x1C\x00\x85\x3E').decode('utf8'),
     '1.2.840.113556.1.1.1.12': base64.b64encode(b'\x2A\x86\x48\x86\xF7\x14\x01\x01\x01\x0C').decode('utf8'),
-    '2.6.6.1.2.5.11.29'      : base64.b64encode(b'\x56\x06\x01\x02\x05\x0B\x1D').decode('utf8'),
+    '2.6.6.1.2.5.11.29': base64.b64encode(b'\x56\x06\x01\x02\x05\x0B\x1D').decode('utf8'),
     '1.2.840.113556.1.1.1.11': base64.b64encode(b'\x2A\x86\x48\x86\xF7\x14\x01\x01\x01\x0B').decode('utf8'),
-    '1.3.12.2.1011.28.0.714' : base64.b64encode(b'\x2B\x0C\x02\x87\x73\x1C\x00\x85\x4A').decode('utf8'),
-    '1.3.12.2.1011.28.0.732' : base64.b64encode(b'\x2B\x0C\x02\x87\x73\x1C\x00\x85\x5C').decode('utf8'),
-    '1.2.840.113556.1.1.1.6' : base64.b64encode(b'\x2A\x86\x48\x86\xF7\x14\x01\x01\x01\x06').decode('utf8')
+    '1.3.12.2.1011.28.0.714': base64.b64encode(b'\x2B\x0C\x02\x87\x73\x1C\x00\x85\x4A').decode('utf8'),
+    '1.3.12.2.1011.28.0.732': base64.b64encode(b'\x2B\x0C\x02\x87\x73\x1C\x00\x85\x5C').decode('utf8'),
+    '1.2.840.113556.1.1.1.6': base64.b64encode(b'\x2A\x86\x48\x86\xF7\x14\x01\x01\x01\x06').decode('utf8')
 }
 
 # separated by commas in docs, and must be broken up
-multivalued_attrs = set(["auxiliaryclass","maycontain","mustcontain","posssuperiors",
-                         "systemauxiliaryclass","systemmaycontain","systemmustcontain",
+multivalued_attrs = set(["auxiliaryclass", "maycontain", "mustcontain", "posssuperiors",
+                         "systemauxiliaryclass", "systemmaycontain", "systemmustcontain",
                          "systemposssuperiors"])
+
 
 def __read_folded_line(f, buffer):
     """ reads a line from an LDIF file, unfolding it"""
@@ -174,6 +175,7 @@ def fix_dn(dn):
     else:
         return dn
 
+
 def __convert_bitfield(key, value):
     """Evaluate the OR expression in 'value'"""
     assert(isinstance(value, string_types))
@@ -193,6 +195,7 @@ def __convert_bitfield(key, value):
 
     return str(o)
 
+
 def __write_ldif_one(entry):
     """Write out entry as LDIF"""
     out = []
@@ -210,8 +213,8 @@ def __write_ldif_one(entry):
         for v in vl:
             out.append("%s: %s" % (l[0], v))
 
-
     return "\n".join(out)
+
 
 def __transform_entry(entry, objectClass):
     """Perform transformations required to convert the LDIF-like schema
@@ -286,30 +289,33 @@ def __transform_entry(entry, objectClass):
 
     return entry
 
+
 def __parse_schema_file(filename, objectClass):
     """Load and transform a schema file."""
 
     out = []
 
-    f = open(filename, "rU")
+    from io import open
+    f = open(filename, "r", encoding='latin-1')
     for entry in __read_raw_entries(f):
         out.append(__write_ldif_one(__transform_entry(entry, objectClass)))
 
     return "\n\n".join(out)
 
 
-def read_ms_schema(attr_file, classes_file, dump_attributes = True, dump_classes = True, debug = False):
+def read_ms_schema(attr_file, classes_file, dump_attributes=True, dump_classes=True, debug=False):
     """Read WSPP documentation-derived schema files."""
 
     attr_ldif = ""
     classes_ldif = ""
 
     if dump_attributes:
-        attr_ldif =  __parse_schema_file(attr_file, "attributeSchema")
+        attr_ldif = __parse_schema_file(attr_file, "attributeSchema")
     if dump_classes:
         classes_ldif = __parse_schema_file(classes_file, "classSchema")
 
     return attr_ldif + "\n\n" + classes_ldif + "\n\n"
+
 
 if __name__ == '__main__':
     import sys

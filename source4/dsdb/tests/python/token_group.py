@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # test tokengroups attribute against internal token calculation
 
@@ -49,6 +49,7 @@ lp = sambaopts.get_loadparm()
 creds = credopts.get_credentials(lp)
 creds.set_gensec_features(creds.get_gensec_features() | gensec.FEATURE_SEAL)
 
+
 def closure(vSet, wSet, aSet):
     for edge in aSet:
         start, end = edge
@@ -56,6 +57,7 @@ def closure(vSet, wSet, aSet):
             if end not in wSet and end in vSet:
                 wSet.add(end)
                 closure(vSet, wSet, aSet)
+
 
 class StaticTokenTest(samba.tests.TestCase):
 
@@ -69,9 +71,9 @@ class StaticTokenTest(samba.tests.TestCase):
 
         self.user_sid_dn = "<SID=%s>" % str(ndr_unpack(samba.dcerpc.security.dom_sid, res[0]["tokenGroups"][0]))
 
-        session_info_flags = ( AUTH_SESSION_INFO_DEFAULT_GROUPS |
-                               AUTH_SESSION_INFO_AUTHENTICATED |
-                               AUTH_SESSION_INFO_SIMPLE_PRIVILEGES)
+        session_info_flags = (AUTH_SESSION_INFO_DEFAULT_GROUPS |
+                              AUTH_SESSION_INFO_AUTHENTICATED |
+                              AUTH_SESSION_INFO_SIMPLE_PRIVILEGES)
         if creds.get_kerberos_state() == DONT_USE_KERBEROS:
             session_info_flags |= AUTH_SESSION_INFO_NTLM
 
@@ -147,7 +149,7 @@ class StaticTokenTest(samba.tests.TestCase):
 
         client_finished = False
         server_finished = False
-        server_to_client = ""
+        server_to_client = b""
 
         # Run the actual call loop.
         while client_finished == False and server_finished == False:
@@ -171,6 +173,7 @@ class StaticTokenTest(samba.tests.TestCase):
             print("token sids don't match")
             print("difference : %s" % sidset1.difference(sidset2))
             self.fail(msg="calculated groups don't match against user PAC tokenGroups")
+
 
 class DynamicTokenTest(samba.tests.TestCase):
 
@@ -206,7 +209,7 @@ class DynamicTokenTest(samba.tests.TestCase):
         self.test_group0_sid = ndr_unpack(samba.dcerpc.security.dom_sid, res[0]["objectSid"][0])
 
         self.admin_ldb.add_remove_group_members(self.test_group0, [self.test_user],
-                                       add_members_operation=True)
+                                                add_members_operation=True)
 
         self.test_group1 = "tokengroups_group1"
         self.admin_ldb.newgroup(self.test_group1, grouptype=dsdb.GTYPE_SECURITY_GLOBAL_GROUP)
@@ -215,7 +218,7 @@ class DynamicTokenTest(samba.tests.TestCase):
         self.test_group1_sid = ndr_unpack(samba.dcerpc.security.dom_sid, res[0]["objectSid"][0])
 
         self.admin_ldb.add_remove_group_members(self.test_group1, [self.test_user],
-                                       add_members_operation=True)
+                                                add_members_operation=True)
 
         self.test_group2 = "tokengroups_group2"
         self.admin_ldb.newgroup(self.test_group2, grouptype=dsdb.GTYPE_SECURITY_UNIVERSAL_GROUP)
@@ -225,7 +228,7 @@ class DynamicTokenTest(samba.tests.TestCase):
         self.test_group2_sid = ndr_unpack(samba.dcerpc.security.dom_sid, res[0]["objectSid"][0])
 
         self.admin_ldb.add_remove_group_members(self.test_group2, [self.test_user],
-                                       add_members_operation=True)
+                                                add_members_operation=True)
 
         self.test_group3 = "tokengroups_group3"
         self.admin_ldb.newgroup(self.test_group3, grouptype=dsdb.GTYPE_SECURITY_UNIVERSAL_GROUP)
@@ -235,7 +238,7 @@ class DynamicTokenTest(samba.tests.TestCase):
         self.test_group3_sid = ndr_unpack(samba.dcerpc.security.dom_sid, res[0]["objectSid"][0])
 
         self.admin_ldb.add_remove_group_members(self.test_group3, [self.test_group1],
-                                       add_members_operation=True)
+                                                add_members_operation=True)
 
         self.test_group4 = "tokengroups_group4"
         self.admin_ldb.newgroup(self.test_group4, grouptype=dsdb.GTYPE_SECURITY_UNIVERSAL_GROUP)
@@ -245,7 +248,7 @@ class DynamicTokenTest(samba.tests.TestCase):
         self.test_group4_sid = ndr_unpack(samba.dcerpc.security.dom_sid, res[0]["objectSid"][0])
 
         self.admin_ldb.add_remove_group_members(self.test_group4, [self.test_group3],
-                                       add_members_operation=True)
+                                                add_members_operation=True)
 
         self.test_group5 = "tokengroups_group5"
         self.admin_ldb.newgroup(self.test_group5, grouptype=dsdb.GTYPE_SECURITY_DOMAIN_LOCAL_GROUP)
@@ -280,9 +283,9 @@ class DynamicTokenTest(samba.tests.TestCase):
 
         self.test_user_dn = res[0].dn
 
-        session_info_flags = ( AUTH_SESSION_INFO_DEFAULT_GROUPS |
-                               AUTH_SESSION_INFO_AUTHENTICATED |
-                               AUTH_SESSION_INFO_SIMPLE_PRIVILEGES)
+        session_info_flags = (AUTH_SESSION_INFO_DEFAULT_GROUPS |
+                              AUTH_SESSION_INFO_AUTHENTICATED |
+                              AUTH_SESSION_INFO_SIMPLE_PRIVILEGES)
 
         if creds.get_kerberos_state() == DONT_USE_KERBEROS:
             session_info_flags |= AUTH_SESSION_INFO_NTLM
@@ -298,21 +301,21 @@ class DynamicTokenTest(samba.tests.TestCase):
     def tearDown(self):
         super(DynamicTokenTest, self).tearDown()
         delete_force(self.admin_ldb, "CN=%s,%s,%s" %
-                          (self.test_user, "cn=users", self.base_dn))
+                     (self.test_user, "cn=users", self.base_dn))
         delete_force(self.admin_ldb, "CN=%s,%s,%s" %
-                          (self.test_group0, "cn=users", self.base_dn))
+                     (self.test_group0, "cn=users", self.base_dn))
         delete_force(self.admin_ldb, "CN=%s,%s,%s" %
-                          (self.test_group1, "cn=users", self.base_dn))
+                     (self.test_group1, "cn=users", self.base_dn))
         delete_force(self.admin_ldb, "CN=%s,%s,%s" %
-                          (self.test_group2, "cn=users", self.base_dn))
+                     (self.test_group2, "cn=users", self.base_dn))
         delete_force(self.admin_ldb, "CN=%s,%s,%s" %
-                          (self.test_group3, "cn=users", self.base_dn))
+                     (self.test_group3, "cn=users", self.base_dn))
         delete_force(self.admin_ldb, "CN=%s,%s,%s" %
-                          (self.test_group4, "cn=users", self.base_dn))
+                     (self.test_group4, "cn=users", self.base_dn))
         delete_force(self.admin_ldb, "CN=%s,%s,%s" %
-                          (self.test_group5, "cn=users", self.base_dn))
+                     (self.test_group5, "cn=users", self.base_dn))
         delete_force(self.admin_ldb, "CN=%s,%s,%s" %
-                          (self.test_group6, "cn=users", self.base_dn))
+                     (self.test_group6, "cn=users", self.base_dn))
 
     def test_rootDSE_tokenGroups(self):
         """Testing rootDSE tokengroups against internal calculation"""
@@ -379,7 +382,7 @@ class DynamicTokenTest(samba.tests.TestCase):
 
         client_finished = False
         server_finished = False
-        server_to_client = ""
+        server_to_client = b""
 
         # Run the actual call loop.
         while client_finished == False and server_finished == False:
@@ -403,7 +406,6 @@ class DynamicTokenTest(samba.tests.TestCase):
             print("token sids don't match")
             print("difference : %s" % sidset1.difference(sidset2))
             self.fail(msg="calculated groups don't match against user PAC tokenGroups")
-
 
     def test_tokenGroups_manual(self):
         # Manually run the tokenGroups algorithm from MS-ADTS 3.1.1.4.5.19 and MS-DRSR 4.1.8.3
@@ -463,7 +465,6 @@ class DynamicTokenTest(samba.tests.TestCase):
         if len(tokenGroupsSet.difference(wSet)):
             self.fail(msg="additional tokenGroups: %s" % tokenGroupsSet.difference(wSet))
 
-
     def filtered_closure(self, wSet, filter_grouptype):
         res = self.admin_ldb.search(base=self.base_dn, scope=ldb.SCOPE_SUBTREE,
                                     expression="(|(objectclass=user)(objectclass=group))",
@@ -510,7 +511,6 @@ class DynamicTokenTest(samba.tests.TestCase):
                 uSet.add(v)
 
         closure(uSet, wSet, aSet)
-
 
     def test_tokenGroupsGlobalAndUniversal_manual(self):
         # Manually run the tokenGroups algorithm from MS-ADTS 3.1.1.4.5.19 and MS-DRSR 4.1.8.3
@@ -561,15 +561,15 @@ class DynamicTokenTest(samba.tests.TestCase):
         samr_conn = samba.dcerpc.samr.samr("ncacn_ip_tcp:%s[seal]" % host, lp, creds)
         samr_handle = samr_conn.Connect2(None, security.SEC_FLAG_MAXIMUM_ALLOWED)
         samr_domain = samr_conn.OpenDomain(samr_handle, security.SEC_FLAG_MAXIMUM_ALLOWED,
-                                      domain_sid)
+                                           domain_sid)
         user_handle = samr_conn.OpenUser(samr_domain, security.SEC_FLAG_MAXIMUM_ALLOWED, user_rid)
         rids = samr_conn.GetGroupsForUser(user_handle)
         samr_dns = set()
         for rid in rids.rids:
-            self.assertEqual(rid.attributes, samr.SE_GROUP_MANDATORY | samr.SE_GROUP_ENABLED_BY_DEFAULT| samr.SE_GROUP_ENABLED)
+            self.assertEqual(rid.attributes, security.SE_GROUP_MANDATORY | security.SE_GROUP_ENABLED_BY_DEFAULT | security.SE_GROUP_ENABLED)
             sid = "%s-%d" % (domain_sid, rid.rid)
             res = self.admin_ldb.search(base="<SID=%s>" % sid, scope=ldb.SCOPE_BASE,
-                                  attrs=[])
+                                        attrs=[])
             samr_dns.add(res[0].dn.get_casefold())
 
         user_info = samr_conn.QueryUserInfo(user_handle, 1)
@@ -644,11 +644,12 @@ class DynamicTokenTest(samba.tests.TestCase):
         rids = samr_conn.GetGroupsForUser(user_handle)
         user_info = samr_conn.QueryUserInfo(user_handle, 1)
         delete_force(self.admin_ldb, "CN=%s,%s,%s" %
-                          (test_user, "cn=users", self.base_dn))
+                     (test_user, "cn=users", self.base_dn))
         self.assertEqual(len(rids.rids), 1)
         self.assertEqual(rids.rids[0].rid, user_info.primary_gid)
 
-if not "://" in url:
+
+if "://" not in url:
     if os.path.isfile(url):
         url = "tdb://%s" % url
     else:

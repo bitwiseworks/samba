@@ -26,20 +26,12 @@
 #include "../libcli/util/ntstatus.h" /* for map_nt_error_from_tdb() */
 #include "../../lib/util/util_tdb.h"
 
-int tdb_trans_store_bystring(TDB_CONTEXT *tdb, const char *keystr,
-			     TDB_DATA data, int flags);
-int tdb_trans_store(struct tdb_context *tdb, TDB_DATA key, TDB_DATA dbuf,
-		    int flag);
-int tdb_trans_delete(struct tdb_context *tdb, TDB_DATA key);
-
 /*
  * The tdb_unpack() and tdb_pack[_append]() helpers are deprecated. Consider
  * using idl/ndr for marshalling of complex data types instead.
  */
 int tdb_unpack(const uint8_t *buf, int bufsize, const char *fmt, ...);
 size_t tdb_pack(uint8_t *buf, int bufsize, const char *fmt, ...);
-bool tdb_pack_append(TALLOC_CTX *mem_ctx, uint8_t **buf, size_t *len,
-		     const char *fmt, ...);
 
 struct tdb_context *tdb_open_log(const char *name, int hash_size,
 				 int tdb_flags, int open_flags, mode_t mode);

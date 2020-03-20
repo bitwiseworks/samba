@@ -1,8 +1,8 @@
 #!/bin/sh
 # Blackbox test for wbinfo name lookup
-if [ $# -lt 2 ]; then
+if [ $# -lt 3 ]; then
 cat <<EOF
-Usage: test_wbinfo.sh DOMAIN DC_USERNAME
+Usage: test_wbinfo.sh DOMAIN REALM DC_USERNAME
 EOF
 exit 1;
 fi
@@ -29,6 +29,21 @@ testit "name-to-sid.at_domain" \
 
 testit "name-to-sid.upn" \
        $wbinfo -n $DC_USERNAME@$REALM || \
+	failed=$(expr $failed + 1)
+
+testit "name-to-sid.realm-user" \
+       $wbinfo -n $REALM/$DC_USERNAME || \
+	failed=$(expr $failed + 1)
+
+# For the name-to-sid.realm-user query, ensure
+# that this does not change subsequent sid-to-name
+# queries.
+sid=$($wbinfo -n $REALM/$DC_USERNAME | sed -e 's/ .*//')
+out=$($wbinfo -s $sid | sed -e 's/ .//')
+# winbindd returns usernames in lowercase
+lcuser=$(echo $DC_USERNAME | tr A-Z a-z)
+testit "Verify DOMAIN/USER output" \
+       test "$out" = "$DOMAIN/$lcuser" || \
 	failed=$(expr $failed + 1)
 
 # Two separator characters should fail

@@ -44,6 +44,7 @@ from samba.kcc.graph import Vertex
 
 from samba.kcc.debug import DEBUG, DEBUG_FN, logger
 from samba.kcc import debug
+from samba.compat import cmp_fn
 
 
 def sort_dsa_by_gc_and_guid(dsa1, dsa2):
@@ -60,7 +61,7 @@ def sort_dsa_by_gc_and_guid(dsa1, dsa2):
         return -1
     if not dsa1.is_gc() and dsa2.is_gc():
         return +1
-    return cmp(ndr_pack(dsa1.dsa_guid), ndr_pack(dsa2.dsa_guid))
+    return cmp_fn(ndr_pack(dsa1.dsa_guid), ndr_pack(dsa2.dsa_guid))
 
 
 def is_smtp_replication_available():
@@ -497,6 +498,11 @@ class KCC(object):
                 packed_guid = ndr_pack(cn_conn.guid)
                 local_connections.append((cn_conn, s_dnstr,
                                           packed_guid, removable))
+
+        # Avoid "ValueError: r cannot be bigger than the iterable" in
+        # for a, b in itertools.permutations(local_connections, 2):
+        if (len(local_connections) < 2):
+            return
 
         for a, b in itertools.permutations(local_connections, 2):
             cn_conn, s_dnstr, packed_guid, removable = a
@@ -1608,7 +1614,7 @@ class KCC(object):
         # here, but using vertex seems to make more sense. That is,
         # the docs want this:
         #
-        #bh = self.get_bridgehead(local_vertex.site, vertex.part, transport,
+        # bh = self.get_bridgehead(local_vertex.site, vertex.part, transport,
         #                         local_vertex.is_black(), detect_failed)
         #
         # TODO WHY?????
@@ -2055,7 +2061,7 @@ class KCC(object):
         for dc_s in self.my_site.dsa_table.values():
             # If this partition (nc_x) doesn't appear as a
             # replica (f_of_x) on (dc_s) then continue
-            if not nc_x.nc_dnstr in dc_s.current_rep_table:
+            if nc_x.nc_dnstr not in dc_s.current_rep_table:
                 continue
 
             # Pull out the NCReplica (f) of (x) with the dn
@@ -2137,7 +2143,7 @@ class KCC(object):
                 # If this partition NC (x) doesn't appear as a
                 # replica (p) of NC (x) on the dsa DC (s) then
                 # continue
-                if not nc_x.nc_dnstr in dc_s.current_rep_table:
+                if nc_x.nc_dnstr not in dc_s.current_rep_table:
                     continue
 
                 # Pull out the NCReplica with the dn that
@@ -2193,27 +2199,27 @@ class KCC(object):
 
         # For each r(i) from (0 <= i < |R|-1)
         i = 0
-        while i < (r_len-1):
+        while i < (r_len - 1):
             # Add an edge from r(i) to r(i+1) if r(i) is a full
             # replica or r(i+1) is a partial replica
-            if not r_list[i].is_partial() or r_list[i+1].is_partial():
-                graph_list[i+1].add_edge_from(r_list[i].rep_dsa_dnstr)
+            if not r_list[i].is_partial() or r_list[i +1].is_partial():
+                graph_list[i + 1].add_edge_from(r_list[i].rep_dsa_dnstr)
 
             # Add an edge from r(i+1) to r(i) if r(i+1) is a full
             # replica or ri is a partial replica.
-            if not r_list[i+1].is_partial() or r_list[i].is_partial():
-                graph_list[i].add_edge_from(r_list[i+1].rep_dsa_dnstr)
+            if not r_list[i + 1].is_partial() or r_list[i].is_partial():
+                graph_list[i].add_edge_from(r_list[i + 1].rep_dsa_dnstr)
             i = i + 1
 
         # Add an edge from r|R|-1 to r0 if r|R|-1 is a full replica
         # or r0 is a partial replica.
-        if not r_list[r_len-1].is_partial() or r_list[0].is_partial():
-            graph_list[0].add_edge_from(r_list[r_len-1].rep_dsa_dnstr)
+        if not r_list[r_len - 1].is_partial() or r_list[0].is_partial():
+            graph_list[0].add_edge_from(r_list[r_len - 1].rep_dsa_dnstr)
 
         # Add an edge from r0 to r|R|-1 if r0 is a full replica or
         # r|R|-1 is a partial replica.
-        if not r_list[0].is_partial() or r_list[r_len-1].is_partial():
-            graph_list[r_len-1].add_edge_from(r_list[0].rep_dsa_dnstr)
+        if not r_list[0].is_partial() or r_list[r_len -1].is_partial():
+            graph_list[r_len - 1].add_edge_from(r_list[0].rep_dsa_dnstr)
 
         DEBUG("r_list is length %s" % len(r_list))
         DEBUG('\n'.join(str((x.rep_dsa_guid, x.rep_dsa_dnstr))
@@ -2586,7 +2592,8 @@ class KCC(object):
                 dot_colours = []
                 for link in self.sitelink_table.values():
                     from hashlib import md5
-                    colour = '#' + md5(link.dnstr).hexdigest()[:6]
+                    tmp_str = link.dnstr.encode('utf8')
+                    colour = '#' + md5(tmp_str).hexdigest()[:6]
                     for a, b in itertools.combinations(link.site_list, 2):
                         dot_edges.append((a[1], b[1]))
                         dot_colours.append(colour)

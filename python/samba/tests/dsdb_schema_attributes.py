@@ -23,7 +23,6 @@
 #  PYTHONPATH="$PYTHONPATH:$samba4srcdir/dsdb/tests/python" $SUBUNITRUN dsdb_schema_attributes
 #
 
-import sys
 import time
 import random
 
@@ -31,7 +30,6 @@ import samba.tests
 import ldb
 from ldb import SCOPE_BASE, LdbError
 
-import samba.tests
 
 class SchemaAttributesTestCase(samba.tests.TestCase):
 
@@ -74,7 +72,7 @@ objectClass: attributeSchema
 adminDescription: """ + attr_name + """
 adminDisplayName: """ + attr_name + """
 cn: """ + attr_name + """
-attributeId: 1.3.6.1.4.1.7165.4.6.1.8.%d.""" % sub_oid + str(random.randint(1,100000)) + """
+attributeId: 1.3.6.1.4.1.7165.4.6.1.8.%d.""" % sub_oid + str(random.randint(1, 100000)) + """
 attributeSyntax: 2.5.5.12
 omSyntax: 64
 instanceType: 4
@@ -103,14 +101,13 @@ systemOnly: FALSE
 
         self.assertIn(attr_ldap_name, attr_res[0])
         self.assertEquals(len(attr_res[0][attr_ldap_name]), 1)
-        self.assertEquals(attr_res[0][attr_ldap_name][0], "CASE_INSENSITIVE")
+        self.assertEquals(str(attr_res[0][attr_ldap_name][0]), "CASE_INSENSITIVE")
 
         # Check @INDEXLIST
 
         idx_res = self.samdb.search(base="@INDEXLIST", scope=ldb.SCOPE_BASE)
 
         self.assertIn(attr_ldap_name, [str(x) for x in idx_res[0]["@IDXATTR"]])
-
 
     def test_AddUnIndexedAttribute(self):
         # create names for an attribute to add
@@ -127,14 +124,13 @@ systemOnly: FALSE
 
         self.assertIn(attr_ldap_name, attr_res[0])
         self.assertEquals(len(attr_res[0][attr_ldap_name]), 1)
-        self.assertEquals(attr_res[0][attr_ldap_name][0], "CASE_INSENSITIVE")
+        self.assertEquals(str(attr_res[0][attr_ldap_name][0]), "CASE_INSENSITIVE")
 
         # Check @INDEXLIST
 
         idx_res = self.samdb.search(base="@INDEXLIST", scope=ldb.SCOPE_BASE)
 
         self.assertNotIn(attr_ldap_name, [str(x) for x in idx_res[0]["@IDXATTR"]])
-
 
     def test_AddTwoIndexedAttributes(self):
         # create names for an attribute to add
@@ -161,11 +157,11 @@ systemOnly: FALSE
 
         self.assertIn(attr_ldap_name, attr_res[0])
         self.assertEquals(len(attr_res[0][attr_ldap_name]), 1)
-        self.assertEquals(attr_res[0][attr_ldap_name][0], "CASE_INSENSITIVE")
+        self.assertEquals(str(attr_res[0][attr_ldap_name][0]), "CASE_INSENSITIVE")
 
         self.assertIn(attr_ldap_name2, attr_res[0])
         self.assertEquals(len(attr_res[0][attr_ldap_name2]), 1)
-        self.assertEquals(attr_res[0][attr_ldap_name2][0], "CASE_INSENSITIVE")
+        self.assertEquals(str(attr_res[0][attr_ldap_name2][0]), "CASE_INSENSITIVE")
 
         # Check @INDEXLIST
 
@@ -189,7 +185,7 @@ systemOnly: FALSE
         self.assertEquals(len(res[0]), 1)
         self.assertTrue("@TEST_EXTRA" in res[0])
         self.assertEquals(len(res[0]["@TEST_EXTRA"]), 1)
-        self.assertEquals(res[0]["@TEST_EXTRA"][0], "HIDDEN")
+        self.assertEquals(str(res[0]["@TEST_EXTRA"][0]), "HIDDEN")
 
         samdb2 = samba.tests.connect_samdb(self.lp.samdb_url())
 
@@ -208,7 +204,6 @@ systemOnly: FALSE
         self.assertEquals(len(res[0]), 0)
         self.assertFalse("@TEST_EXTRA" in res[0])
 
-
     def test_modify_at_indexlist(self):
         m = {"dn": "@INDEXLIST",
              "@TEST_EXTRA": ["1"]
@@ -224,7 +219,7 @@ systemOnly: FALSE
         self.assertEquals(len(res[0]), 1)
         self.assertTrue("@TEST_EXTRA" in res[0])
         self.assertEquals(len(res[0]["@TEST_EXTRA"]), 1)
-        self.assertEquals(res[0]["@TEST_EXTRA"][0], "1")
+        self.assertEquals(str(res[0]["@TEST_EXTRA"][0]), "1")
 
         samdb2 = samba.tests.connect_samdb(self.lp.samdb_url())
 

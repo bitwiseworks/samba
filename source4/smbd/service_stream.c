@@ -91,7 +91,8 @@ void stream_terminate_connection(struct stream_connection *srv_conn, const char 
 	srv_conn->event.fde = NULL;
 	imessaging_cleanup(srv_conn->msg_ctx);
 	TALLOC_FREE(srv_conn);
-	model_ops->terminate(event_ctx, lp_ctx, reason, process_context);
+	model_ops->terminate_connection(
+	    event_ctx, lp_ctx, reason, process_context);
 	TALLOC_FREE(frame);
 }
 

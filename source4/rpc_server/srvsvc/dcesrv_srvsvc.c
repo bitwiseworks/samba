@@ -32,7 +32,8 @@
 #include "param/param.h"
 
 #define SRVSVC_CHECK_ADMIN_ACCESS do { \
-	struct security_token *t = dce_call->conn->auth_state.session_info->security_token; \
+	struct auth_session_info *si = dcesrv_call_session_info(dce_call); \
+	struct security_token *t = si->security_token; \
 	if (!security_token_has_builtin_administrators(t) && \
 	    !security_token_has_sid(t, &global_sid_Builtin_Server_Operators)) { \
 	    	return WERR_ACCESS_DENIED; \
@@ -1436,6 +1437,8 @@ static WERROR dcesrv_srvsvc_NetSrvGetInfo(struct dcesrv_call_state *dce_call, TA
 {
 	struct dcesrv_context *dce_ctx = dce_call->conn->dce_ctx;
 	struct dcerpc_server_info *server_info = lpcfg_dcerpc_server_info(mem_ctx, dce_ctx->lp_ctx);
+	const struct loadparm_substitution *lp_sub =
+		lpcfg_noop_substitution();
 
 	ZERO_STRUCTP(r->out.info);
 
@@ -1468,7 +1471,7 @@ static WERROR dcesrv_srvsvc_NetSrvGetInfo(struct dcesrv_call_state *dce_call, TA
 		info101->version_major	= server_info->version_major;
 		info101->version_minor	= server_info->version_minor;
 		info101->server_type	= dcesrv_common_get_server_type(mem_ctx, dce_call->event_ctx, dce_ctx);
-		info101->comment	= lpcfg_server_string(dce_ctx->lp_ctx, mem_ctx);
+		info101->comment	= lpcfg_server_string(dce_ctx->lp_ctx, lp_sub, mem_ctx);
 		W_ERROR_HAVE_NO_MEMORY(info101->comment);
 
 		r->out.info->info101 = info101;
@@ -1488,7 +1491,7 @@ static WERROR dcesrv_srvsvc_NetSrvGetInfo(struct dcesrv_call_state *dce_call, TA
 		info102->version_major	= server_info->version_major;
 		info102->version_minor	= server_info->version_minor;
 		info102->server_type	= dcesrv_common_get_server_type(mem_ctx, dce_call->event_ctx, dce_ctx);
-		info102->comment	= lpcfg_server_string(dce_ctx->lp_ctx, mem_ctx);
+		info102->comment	= lpcfg_server_string(dce_ctx->lp_ctx, lp_sub, mem_ctx);
 		W_ERROR_HAVE_NO_MEMORY(info102->comment);
 
 		info102->users		= dcesrv_common_get_users(mem_ctx, dce_ctx);
@@ -2045,6 +2048,8 @@ static WERROR dcesrv_srvsvc_NetShareDelCommit(struct dcesrv_call_state *dce_call
 static WERROR dcesrv_srvsvc_NetGetFileSecurity(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
 		       struct srvsvc_NetGetFileSecurity *r)
 {
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
 	struct sec_desc_buf *sd_buf;
 	struct ntvfs_context *ntvfs_ctx = NULL;
 	struct ntvfs_request *ntvfs_req;
@@ -2055,7 +2060,7 @@ static WERROR dcesrv_srvsvc_NetGetFileSecurity(struct dcesrv_call_state *dce_cal
 	if (!NT_STATUS_IS_OK(nt_status)) return ntstatus_to_werror(nt_status);
 
 	ntvfs_req = ntvfs_request_create(ntvfs_ctx, mem_ctx,
-					 dce_call->conn->auth_state.session_info,
+					 session_info,
 					 0,
 					 dce_call->time,
 					 NULL, NULL, 0);
@@ -2087,6 +2092,8 @@ static WERROR dcesrv_srvsvc_NetGetFileSecurity(struct dcesrv_call_state *dce_cal
 static WERROR dcesrv_srvsvc_NetSetFileSecurity(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
 		       struct srvsvc_NetSetFileSecurity *r)
 {
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
 	struct ntvfs_context *ntvfs_ctx;
 	struct ntvfs_request *ntvfs_req;
 	union smb_setfileinfo *io;
@@ -2096,7 +2103,7 @@ static WERROR dcesrv_srvsvc_NetSetFileSecurity(struct dcesrv_call_state *dce_cal
 	if (!NT_STATUS_IS_OK(nt_status)) return ntstatus_to_werror(nt_status);
 
 	ntvfs_req = ntvfs_request_create(ntvfs_ctx, mem_ctx,
-					 dce_call->conn->auth_state.session_info,
+					 session_info,
 					 0,
 					 dce_call->time,
 					 NULL, NULL, 0);

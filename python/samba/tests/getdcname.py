@@ -22,12 +22,9 @@
 from samba import auth
 from samba import WERRORError, werror
 import samba.tests
-import time
-import json
 import os
 from samba.credentials import Credentials
 from samba.dcerpc import netlogon
-from samba.tests import delete_force
 from samba.dcerpc.misc import GUID
 
 
@@ -278,7 +275,8 @@ class GetDCNameEx(samba.tests.TestCase):
                                                     flags=netlogon.DS_RETURN_DNS_NAME,
                                                     ex2=False)
         except WERRORError as e:
-            self.fail("Failed to succeed over winbind: " + str(e))
+            self.fail("get_dc_name (domain=%s,site=%s) over winbind failed: %s"
+                      % (self.trust_domain, site, e))
 
         self.assertTrue(response_trust is not None)
         self.assertEqual(response_trust.domain_name.lower(),

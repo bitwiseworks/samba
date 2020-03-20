@@ -2,18 +2,20 @@
                  type="string"
                  context="G"
                  handler="handle_debug_list"
+                 substitution="1"
                  xmlns:samba="http://www.samba.org/samba/DTD/samba-doc">
 <synonym>debuglevel</synonym>
 <description>
     <para>
-    The value of the parameter (a astring) allows the debug level (logging level) to be specified in the 
+    The value of the parameter (a string) allows the debug level (logging level) to be specified in the
     <filename moreinfo="none">smb.conf</filename> file. 
     </para>
 
     <para>This parameter has been extended since the 2.2.x 
     series, now it allows one to specify the debug level for multiple 
-    debug classes. This is to give greater flexibility in the configuration 
-    of the system. The following debug classes are currently implemented:
+    debug classes and distinct logfiles for debug classes. This is to give
+    greater flexibility in the configuration of the system. The following
+    debug classes are currently implemented:
     </para>
 
     <itemizedlist>
@@ -54,9 +56,14 @@
         <listitem><para><parameter moreinfo="none">dsdb_transaction_json_audit</parameter></para></listitem>
     </itemizedlist>
 
+    <para>To configure the logging for specific classes to go into a different
+    file then <smbconfoption name="log file"/>, you can append
+    <emphasis>@PATH</emphasis> to the class, eg <parameter>log level = 1
+    full_audit:1@/var/log/audit.log</parameter>.</para>
+
     <para>Authentication and authorization audit information is logged
     under the auth_audit, and if Samba was not compiled with
-    --without-json-audit, a JSON representation is logged under
+    --without-json, a JSON representation is logged under
     auth_json_audit.</para>
 
     <para>Support is comprehensive for all authentication and authorisation
@@ -91,4 +98,5 @@
 </description>
 <value type="default">0</value>
 <value type="example">3 passdb:5 auth:10 winbind:2</value>
+<value type="example">1 full_audit:1@/var/log/audit.log winbind:2</value>
 </samba:parameter>

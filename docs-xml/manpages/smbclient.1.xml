@@ -69,7 +69,7 @@
 		<arg choice="opt">-R &lt;name resolve order&gt;</arg>
 		<arg choice="opt">-s &lt;smb config file&gt;</arg>
 		<arg choice="opt">-t &lt;per-operation timeout in seconds&gt;</arg>
-		<arg choice="opt">-T&lt;c|x&gt;IXFqgbNan</arg>
+		<arg choice="opt">-T&lt;c|x&gt;IXFvgbNan</arg>
 		<arg choice="opt">-k</arg>
 	</cmdsynopsis>
 </refsynopsisdiv>
@@ -261,9 +261,9 @@
 		<listitem><para>This allows the user to select the
 		highest SMB protocol level that smbclient will use to
 		connect to the server. By default this is set to
-		NT1, which is the highest available SMB1 protocol.
-		To connect using SMB2 or SMB3 protocol, use the
-		strings SMB2 or SMB3 respectively. Note that to connect
+		highest available SMB3 protocol version.
+		To connect using SMB2 or SMB1 protocol, use the
+		strings SMB2 or NT1 respectively. Note that to connect
 		to a Windows 2012 server with encrypted transport selecting
 		a max-protocol of SMB3 is required.
 		</para></listitem>
@@ -369,6 +369,13 @@
 			file. This flag is mutually exclusive with the
 			<parameter>x</parameter> flag. </para></listitem>
 
+			<listitem><para><parameter>n</parameter> - In
+			combination with the <parameter>c</parameter>
+			flag, do not actually create the archive,
+			instead perform a dry run that attempts
+			everything that involved in creation other than
+			writing the file.</para></listitem>
+
 			<listitem><para><parameter>x</parameter> - Extract (restore) a local
 			tar file back to a share. Unless the -D option is given, the tar
 			files will be restored from the top level of the share. Must be
@@ -406,8 +413,9 @@
 			files that have the archive bit set. Useful only with the
 			<parameter>c</parameter> flag. </para></listitem>
 
-			<listitem><para><parameter>q</parameter> - Quiet. Keeps tar from printing
-			diagnostics as it works.  This is the same as tarmode quiet.
+			<listitem><para><parameter>v</parameter> - Verbose. Makes tar
+			print out the files being processed. By default tar is not verbose.
+			This is the same as tarmode verbose.
 			</para></listitem>
 
 			<listitem><para><parameter>r</parameter> - Use wildcard
@@ -1095,7 +1103,7 @@
 		</varlistentry>
 
 		<varlistentry>
-		<term>tarmode &lt;full|inc|reset|noreset|system|nosystem|hidden|nohidden&gt;</term>
+		<term>tarmode &lt;full|inc|reset|noreset|system|nosystem|hidden|nohidden|verbose|noverbose&gt;</term>
 		<listitem><para>Changes tar's behavior with regard to DOS
 		attributes. There are 4 modes which can be turned on or
 		off.</para>

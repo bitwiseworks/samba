@@ -7,7 +7,8 @@
    Copyright (C) Jim McDonough (jmcd@us.ibm.com)  2003.
    Copyright (C) James J Myers 2003
    Copyright (C) Volker Lendecke 2010
-   
+   Copyright (C) Swen Schillig 2019
+
    This program is free software; you can redistribute it and/or modify
    it under the terms of the GNU General Public License as published by
    the Free Software Foundation; either version 3 of the License, or
@@ -46,6 +47,158 @@
  * @file
  * @brief Misc utility functions
  */
+
+/**
+ * Convert a string to an unsigned long integer
+ *
+ * @param nptr		pointer to string which is to be converted
+ * @param endptr	[optional] reference to remainder of the string
+ * @param base		base of the numbering scheme
+ * @param err		error occured during conversion
+ * @flags		controlling conversion feature
+ * @result		result of the conversion as provided by strtoul
+ *
+ * The following flags are supported
+ *	SMB_STR_STANDARD # raise error if negative or non-numeric
+ *	SMB_STR_ALLOW_NEGATIVE # allow strings with a leading "-"
+ *	SMB_STR_FULL_STR_CONV # entire string must be converted
+ *	SMB_STR_ALLOW_NO_CONVERSION # allow empty strings or non-numeric
+ *	SMB_STR_GLIBC_STANDARD # act exactly as the standard glibc strtoul
+ *
+ * The following errors are detected
+ * - wrong base
+ * - value overflow
+ * - string with a leading "-" indicating a negative number
+ * - no conversion due to empty string or not representing a number
+ */
+unsigned long int
+smb_strtoul(const char *nptr, char **endptr, int base, int *err, int flags)
+{
+	unsigned long int val;
+	int saved_errno = errno;
+	char *needle = NULL;
+	char *tmp_endptr = NULL;
+
+	errno = 0;
+	*err = 0;
+
+	val = strtoul(nptr, &tmp_endptr, base);
+
+	if (endptr != NULL) {
+		*endptr = tmp_endptr;
+	}
+
+	if (errno != 0) {
+		*err = errno;
+		errno = saved_errno;
+		return val;
+	}
+
+	if ((flags & SMB_STR_ALLOW_NO_CONVERSION) == 0) {
+		/* got an invalid number-string resulting in no conversion */
+		if (nptr == tmp_endptr) {
+			*err = EINVAL;
+			goto out;
+		}
+	}
+
+	if ((flags & SMB_STR_ALLOW_NEGATIVE ) == 0) {
+		/* did we convert a negative "number" ? */
+		needle = strchr(nptr, '-');
+		if (needle != NULL && needle < tmp_endptr) {
+			*err = EINVAL;
+			goto out;
+		}
+	}
+
+	if ((flags & SMB_STR_FULL_STR_CONV) != 0) {
+		/* did we convert the entire string ? */
+		if (tmp_endptr[0] != '\0') {
+			*err = EINVAL;
+			goto out;
+		}
+	}
+
+out:
+	errno = saved_errno;
+	return val;
+}
+
+/**
+ * Convert a string to an unsigned long long integer
+ *
+ * @param nptr		pointer to string which is to be converted
+ * @param endptr	[optional] reference to remainder of the string
+ * @param base		base of the numbering scheme
+ * @param err		error occured during conversion
+ * @flags		controlling conversion feature
+ * @result		result of the conversion as provided by strtoull
+ *
+ * The following flags are supported
+ *	SMB_STR_STANDARD # raise error if negative or non-numeric
+ *	SMB_STR_ALLOW_NEGATIVE # allow strings with a leading "-"
+ *	SMB_STR_FULL_STR_CONV # entire string must be converted
+ *	SMB_STR_ALLOW_NO_CONVERSION # allow empty strings or non-numeric
+ *	SMB_STR_GLIBC_STANDARD # act exactly as the standard glibc strtoul
+ *
+ * The following errors are detected
+ * - wrong base
+ * - value overflow
+ * - string with a leading "-" indicating a negative number
+ * - no conversion due to empty string or not representing a number
+ */
+unsigned long long int
+smb_strtoull(const char *nptr, char **endptr, int base, int *err, int flags)
+{
+	unsigned long long int val;
+	int saved_errno = errno;
+	char *needle = NULL;
+	char *tmp_endptr = NULL;
+
+	errno = 0;
+	*err = 0;
+
+	val = strtoull(nptr, &tmp_endptr, base);
+
+	if (endptr != NULL) {
+		*endptr = tmp_endptr;
+	}
+
+	if (errno != 0) {
+		*err = errno;
+		errno = saved_errno;
+		return val;
+	}
+
+	if ((flags & SMB_STR_ALLOW_NO_CONVERSION) == 0) {
+		/* got an invalid number-string resulting in no conversion */
+		if (nptr == tmp_endptr) {
+			*err = EINVAL;
+			goto out;
+		}
+	}
+
+	if ((flags & SMB_STR_ALLOW_NEGATIVE ) == 0) {
+		/* did we convert a negative "number" ? */
+		needle = strchr(nptr, '-');
+		if (needle != NULL && needle < tmp_endptr) {
+			*err = EINVAL;
+			goto out;
+		}
+	}
+
+	if ((flags & SMB_STR_FULL_STR_CONV) != 0) {
+		/* did we convert the entire string ? */
+		if (tmp_endptr[0] != '\0') {
+			*err = EINVAL;
+			goto out;
+		}
+	}
+
+out:
+	errno = saved_errno;
+	return val;
+}
 
 /**
  Find a suitable temporary directory. The result should be copied immediately
@@ -194,37 +347,34 @@ _PUBLIC_ bool directory_create_or_exist(const char *dname,
 					mode_t dir_perms)
 {
 	int ret;
-	struct stat st;
 	mode_t old_umask;
-
-	ret = lstat(dname, &st);
-	if (ret == 0) {
-		return true;
-	}
-
-	if (errno != ENOENT) {
-		DBG_WARNING("lstat failed on directory %s: %s\n",
-			    dname, strerror(errno));
-		return false;
-	}
 
 	/* Create directory */
 	old_umask = umask(0);
 	ret = mkdir(dname, dir_perms);
 	if (ret == -1 && errno != EEXIST) {
-		DEBUG(0, ("mkdir failed on directory "
-			  "%s: %s\n", dname,
-			  strerror(errno)));
+		int dbg_level = geteuid() == 0 ? DBGLVL_ERR : DBGLVL_NOTICE;
+
+		DBG_PREFIX(dbg_level,
+			   ("mkdir failed on directory %s: %s\n",
+			    dname,
+			    strerror(errno)));
 		umask(old_umask);
 		return false;
 	}
 	umask(old_umask);
 
-	ret = lstat(dname, &st);
-	if (ret == -1) {
-		DEBUG(0, ("lstat failed on created directory %s: %s\n",
-			  dname, strerror(errno)));
-		return false;
+	if (ret != 0 && errno == EEXIST) {
+		struct stat sbuf;
+
+		ret = lstat(dname, &sbuf);
+		if (ret != 0) {
+			return false;
+		}
+
+		if (!S_ISDIR(sbuf.st_mode)) {
+			return false;
+		}
 	}
 
 	return true;

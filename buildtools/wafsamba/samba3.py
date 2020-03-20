@@ -1,11 +1,10 @@
 # a waf tool to add autoconf-like macros to the configure section
 # and for SAMBA_ macros for building libraries, binaries etc
 
-import Options, Build, os
-from samba_utils import os_path_relpath, TO_LIST, samba_add_onoff_option
+import os
+from waflib import Build
+from samba_utils import TO_LIST
 from samba_autoconf import library_flags
-
-Options.Handler.SAMBA3_ADD_OPTION = samba_add_onoff_option
 
 def SAMBA3_IS_STATIC_MODULE(bld, module):
     '''Check whether module is in static list'''
@@ -32,7 +31,7 @@ def s3_fix_kwargs(bld, kwargs):
     '''fix the build arguments for s3 build rules to include the
     necessary includes, subdir and cflags options '''
     s3dir = os.path.join(bld.env.srcdir, 'source3')
-    s3reldir = os_path_relpath(s3dir, bld.curdir)
+    s3reldir = os.path.relpath(s3dir, bld.path.abspath())
 
     # the extra_includes list is relative to the source3 directory
     extra_includes = [ '.', 'include', 'lib' ]
@@ -41,7 +40,8 @@ def s3_fix_kwargs(bld, kwargs):
         extra_includes += [ '../source4/heimdal/lib/com_err',
                             '../source4/heimdal/lib/krb5',
                             '../source4/heimdal/lib/gssapi',
-                            '../source4/heimdal_build',
+                            '../source4/heimdal/lib/gssapi/gssapi',
+                            '../source4/heimdal_build/include',
                             '../bin/default/source4/heimdal/lib/asn1' ]
 
     if bld.CONFIG_SET('USING_SYSTEM_TDB'):

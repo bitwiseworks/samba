@@ -42,22 +42,23 @@ extern bool override_logfile;
 static void set_logfile(poptContext con, const char * arg)
 {
 
-	char *lfile = NULL;
+	char lfile[PATH_MAX];
 	const char *pname;
+	int ret;
 
 	/* Find out basename of current program */
-	pname = strrchr_m(poptGetInvocationName(con),'/');
-
-	if (!pname)
+	pname = strrchr_m(poptGetInvocationName(con), '/');
+	if (pname == NULL) {
 		pname = poptGetInvocationName(con);
-	else
+	} else {
 		pname++;
+	}
 
-	if (asprintf(&lfile, "%s/log.%s", arg, pname) < 0) {
+	ret = snprintf(lfile, sizeof(lfile), "%s/log.%s", arg, pname);
+	if (ret >= sizeof(lfile)) {
 		return;
 	}
 	lp_set_logfile(lfile);
-	SAFE_FREE(lfile);
 }
 
 static bool PrintSambaVersionString;
@@ -72,11 +73,16 @@ static void popt_common_callback(poptContext con,
 			   const struct poptOption *opt,
 			   const char *arg, const void *data)
 {
+	TALLOC_CTX *mem_ctx = talloc_new(NULL);
+	if (mem_ctx == NULL) {
+		exit(1);
+	}
 
 	if (reason == POPT_CALLBACK_REASON_PRE) {
 		set_logfile(con, get_dyn_LOGFILEBASE());
 		talloc_set_log_fn(popt_s3_talloc_log_fn);
 		talloc_set_abort_fn(smb_panic);
+		talloc_free(mem_ctx);
 		return;
 	}
 
@@ -84,16 +90,29 @@ static void popt_common_callback(poptContext con,
 
 		if (PrintSambaVersionString) {
 			printf( "Version %s\n", samba_version_string());
+			talloc_free(mem_ctx);
 			exit(0);
 		}
 
 		if (is_default_dyn_CONFIGFILE()) {
-			if(getenv("SMB_CONF_PATH")) {
+			if (getenv("SMB_CONF_PATH")) {
 				set_dyn_CONFIGFILE(getenv("SMB_CONF_PATH"));
 			}
 		}
 
+		if (override_logfile) {
+			const struct loadparm_substitution *lp_sub =
+				loadparm_s3_global_substitution();
+			char *logfile = lp_logfile(mem_ctx, lp_sub);
+			if (logfile == NULL) {
+				talloc_free(mem_ctx);
+				exit(1);
+			}
+			setup_logging(logfile, DEBUG_FILE);
+		}
+
 		/* Further 'every Samba program must do this' hooks here. */
+		talloc_free(mem_ctx);
 		return;
 	}
 
@@ -101,18 +120,21 @@ static void popt_common_callback(poptContext con,
 	case OPT_OPTION:
 	{
 		struct loadparm_context *lp_ctx;
+		bool ok;
 
-		lp_ctx = loadparm_init_s3(talloc_tos(), loadparm_s3_helpers());
+		lp_ctx = loadparm_init_s3(mem_ctx, loadparm_s3_helpers());
 		if (lp_ctx == NULL) {
 			fprintf(stderr, "loadparm_init_s3() failed!\n");
+			talloc_free(mem_ctx);
 			exit(1);
 		}
 
-		if (!lpcfg_set_option(lp_ctx, arg)) {
+		ok = lpcfg_set_option(lp_ctx, arg);
+		if (!ok) {
 			fprintf(stderr, "Error setting option '%s'\n", arg);
+			talloc_free(mem_ctx);
 			exit(1);
 		}
-		TALLOC_FREE(lp_ctx);
 		break;
 	}
 	case 'd':
@@ -163,261 +185,153 @@ static void popt_common_callback(poptContext con,
 		}
 		break;
 	}
+
+	talloc_free(mem_ctx);
 }
 
 struct poptOption popt_common_connection[] = {
-	{ NULL, 0, POPT_ARG_CALLBACK, (void *)popt_common_callback },
-	{ "socket-options", 'O', POPT_ARG_STRING, NULL, 'O', "socket options to use",
-	  "SOCKETOPTIONS" },
-	{ "netbiosname", 'n', POPT_ARG_STRING, NULL, 'n', "Primary netbios name", "NETBIOSNAME" },
-	{ "workgroup", 'W', POPT_ARG_STRING, NULL, 'W', "Set the workgroup name", "WORKGROUP" },
-	{ "scope", 'i', POPT_ARG_STRING, NULL, 'i', "Use this Netbios scope", "SCOPE" },
-
+	{
+		.argInfo    = POPT_ARG_CALLBACK,
+		.arg        = (void *)popt_common_callback,
+	},
+	{
+		.longName   = "socket-options",
+		.shortName  = 'O',
+		.argInfo    = POPT_ARG_STRING,
+		.val        = 'O',
+		.descrip    = "socket options to use",
+		.argDescrip = "SOCKETOPTIONS",
+	},
+	{
+		.longName   = "netbiosname",
+		.shortName  = 'n',
+		.argInfo    = POPT_ARG_STRING,
+		.val        = 'n',
+		.descrip    = "Primary netbios name",
+		.argDescrip = "NETBIOSNAME"
+	},
+	{
+		.longName   = "workgroup",
+		.shortName  = 'W',
+		.argInfo    = POPT_ARG_STRING,
+		.val        = 'W',
+		.descrip    = "Set the workgroup name",
+		.argDescrip = "WORKGROUP"
+	},
+	{
+		.longName   = "scope",
+		.shortName  = 'i',
+		.argInfo    = POPT_ARG_STRING,
+		.val        = 'i',
+		.descrip    = "Use this Netbios scope",
+		.argDescrip = "SCOPE"
+	},
 	POPT_TABLEEND
 };
 
 struct poptOption popt_common_samba[] = {
-	{ NULL, 0, POPT_ARG_CALLBACK|POPT_CBFLAG_PRE|POPT_CBFLAG_POST, (void *)popt_common_callback },
-	{ "debuglevel", 'd', POPT_ARG_STRING, NULL, 'd', "Set debug level", "DEBUGLEVEL" },
-	{ "configfile", 's', POPT_ARG_STRING, NULL, 's', "Use alternate configuration file", "CONFIGFILE" },
-	{ "log-basename", 'l', POPT_ARG_STRING, NULL, 'l', "Base name for log files", "LOGFILEBASE" },
-	{ "version", 'V', POPT_ARG_NONE, NULL, 'V', "Print version" },
-	{ "option",         0, POPT_ARG_STRING, NULL, OPT_OPTION, "Set smb.conf option from command line", "name=value" },
+	{
+		.argInfo    = POPT_ARG_CALLBACK|POPT_CBFLAG_PRE|POPT_CBFLAG_POST,
+		.arg        = (void *)popt_common_callback,
+	},
+	{
+		.longName   = "debuglevel",
+		.shortName  = 'd',
+		.argInfo    = POPT_ARG_STRING,
+		.val        = 'd',
+		.descrip    = "Set debug level",
+		.argDescrip = "DEBUGLEVEL",
+	},
+	{
+		.longName   = "configfile",
+		.shortName  = 's',
+		.argInfo    = POPT_ARG_STRING,
+		.val        = 's',
+		.descrip    = "Use alternate configuration file",
+		.argDescrip = "CONFIGFILE",
+	},
+	{
+		.longName   = "log-basename",
+		.shortName  = 'l',
+		.argInfo    = POPT_ARG_STRING,
+		.val        = 'l',
+		.descrip    = "Base name for log files",
+		.argDescrip = "LOGFILEBASE",
+	},
+	{
+		.longName   = "version",
+		.shortName  = 'V',
+		.argInfo    = POPT_ARG_NONE,
+		.val        = 'V',
+		.descrip    = "Print version",
+	},
+	{
+		.longName   = "option",
+		.argInfo    = POPT_ARG_STRING,
+		.val        = OPT_OPTION,
+		.descrip    = "Set smb.conf option from command line",
+		.argDescrip = "name=value",
+	},
 	POPT_TABLEEND
 };
 
 struct poptOption popt_common_configfile[] = {
-	{ NULL, 0, POPT_ARG_CALLBACK|POPT_CBFLAG_PRE|POPT_CBFLAG_POST, (void *)popt_common_callback },
-	{ "configfile", 0, POPT_ARG_STRING, NULL, 's', "Use alternate configuration file", "CONFIGFILE" },
+	{
+		.argInfo    = POPT_ARG_CALLBACK|POPT_CBFLAG_PRE|POPT_CBFLAG_POST,
+		.arg        = (void *)popt_common_callback,
+	},
+	{
+		.longName   = "configfile",
+		.argInfo    = POPT_ARG_STRING,
+		.val        = 's',
+		.descrip    = "Use alternate configuration file",
+		.argDescrip = "CONFIGFILE",
+	},
 	POPT_TABLEEND
 };
 
 struct poptOption popt_common_version[] = {
-	{ NULL, 0, POPT_ARG_CALLBACK|POPT_CBFLAG_POST, (void *)popt_common_callback },
-	{ "version", 'V', POPT_ARG_NONE, NULL, 'V', "Print version" },
+	{
+		.argInfo    = POPT_ARG_CALLBACK|POPT_CBFLAG_POST,
+		.arg        = (void *)popt_common_callback
+	},
+	{
+		.longName   = "version",
+		.shortName  = 'V',
+		.argInfo    = POPT_ARG_NONE,
+		.val        = 'V',
+		.descrip    = "Print version",
+	},
 	POPT_TABLEEND
 };
 
 struct poptOption popt_common_debuglevel[] = {
-	{ NULL, 0, POPT_ARG_CALLBACK, (void *)popt_common_callback },
-	{ "debuglevel", 'd', POPT_ARG_STRING, NULL, 'd', "Set debug level", "DEBUGLEVEL" },
+	{
+		.argInfo    = POPT_ARG_CALLBACK,
+		.arg        = (void *)popt_common_callback,
+	},
+	{
+		.longName   = "debuglevel",
+		.shortName  = 'd',
+		.argInfo    = POPT_ARG_STRING,
+		.val        = 'd',
+		.descrip    = "Set debug level",
+		.argDescrip = "DEBUGLEVEL",
+	},
 	POPT_TABLEEND
 };
 
 struct poptOption popt_common_option[] = {
-	{ NULL, 0, POPT_ARG_CALLBACK|POPT_CBFLAG_POST, (void *)popt_common_callback },
-	{ "option",         0, POPT_ARG_STRING, NULL, OPT_OPTION, "Set smb.conf option from command line", "name=value" },
-	POPT_TABLEEND
-};
-
-/* Handle command line options:
- *		-U,--user
- *		-A,--authentication-file
- *		-k,--use-kerberos
- *		-N,--no-pass
- *		-S,--signing
- *              -P --machine-pass
- * 		-e --encrypt
- * 		-C --use-ccache
- */
-
-static struct user_auth_info *cmdline_auth_info;
-
-struct user_auth_info *popt_get_cmdline_auth_info(void)
-{
-	return cmdline_auth_info;
-}
-void popt_free_cmdline_auth_info(void)
-{
-	TALLOC_FREE(cmdline_auth_info);
-}
-
-static bool popt_common_credentials_ignore_missing_conf;
-static bool popt_common_credentials_delay_post;
-
-void popt_common_credentials_set_ignore_missing_conf(void)
-{
-	popt_common_credentials_delay_post = true;
-}
-
-void popt_common_credentials_set_delay_post(void)
-{
-	popt_common_credentials_delay_post = true;
-}
-
-void popt_common_credentials_post(void)
-{
-	if (get_cmdline_auth_info_use_machine_account(cmdline_auth_info) &&
-	    !set_cmdline_auth_info_machine_account_creds(cmdline_auth_info))
 	{
-		fprintf(stderr,
-			"Failed to use machine account credentials\n");
-		exit(1);
-	}
-
-	set_cmdline_auth_info_getpass(cmdline_auth_info);
-
-	/*
-	 * When we set the username during the handling of the options passed to
-	 * the binary we haven't loaded the config yet. This means that we
-	 * didnn't take the 'winbind separator' into account.
-	 *
-	 * The username might contain the domain name and thus it hasn't been
-	 * correctly parsed yet. If we have a username we need to set it again
-	 * to run the string parser for the username correctly.
-	 */
-	reset_cmdline_auth_info_username(cmdline_auth_info);
-}
-
-static void popt_common_credentials_callback(poptContext con,
-					enum poptCallbackReason reason,
-					const struct poptOption *opt,
-					const char *arg, const void *data)
-{
-	if (reason == POPT_CALLBACK_REASON_PRE) {
-		struct user_auth_info *auth_info =
-				user_auth_info_init(NULL);
-		if (auth_info == NULL) {
-			fprintf(stderr, "user_auth_info_init() failed\n");
-			exit(1);
-		}
-		cmdline_auth_info = auth_info;
-		return;
-	}
-
-	if (reason == POPT_CALLBACK_REASON_POST) {
-		bool ok;
-
-		if (override_logfile) {
-			setup_logging(lp_logfile(talloc_tos()), DEBUG_FILE );
-		}
-
-		ok = lp_load_client(get_dyn_CONFIGFILE());
-		if (!ok) {
-			const char *pname = poptGetInvocationName(con);
-
-			fprintf(stderr, "%s: Can't load %s - run testparm to debug it\n",
-				pname, get_dyn_CONFIGFILE());
-			if (!popt_common_credentials_ignore_missing_conf) {
-				exit(1);
-			}
-		}
-
-		load_interfaces();
-
-		set_cmdline_auth_info_guess(cmdline_auth_info);
-
-		if (popt_common_credentials_delay_post) {
-			return;
-		}
-
-		popt_common_credentials_post();
-		return;
-	}
-
-	switch(opt->val) {
-	case 'U':
-		set_cmdline_auth_info_username(cmdline_auth_info, arg);
-		break;
-
-	case 'A':
-		set_cmdline_auth_info_from_file(cmdline_auth_info, arg);
-		break;
-
-	case 'k':
-#ifndef HAVE_KRB5
-		d_printf("No kerberos support compiled in\n");
-		exit(1);
-#else
-		set_cmdline_auth_info_use_krb5_ticket(cmdline_auth_info);
-#endif
-		break;
-
-	case 'S':
-		if (!set_cmdline_auth_info_signing_state(cmdline_auth_info,
-				arg)) {
-			fprintf(stderr, "Unknown signing option %s\n", arg );
-			exit(1);
-		}
-		break;
-	case 'P':
-		set_cmdline_auth_info_use_machine_account(cmdline_auth_info);
-		break;
-	case 'N':
-		set_cmdline_auth_info_password(cmdline_auth_info, "");
-		break;
-	case 'e':
-		set_cmdline_auth_info_smb_encrypt(cmdline_auth_info);
-		break;
-	case 'C':
-		set_cmdline_auth_info_use_ccache(cmdline_auth_info, true);
-		break;
-	case 'H':
-		set_cmdline_auth_info_use_pw_nt_hash(cmdline_auth_info, true);
-		break;
-	}
-}
-
-/**
- * @brief Burn the commandline password.
- *
- * This function removes the password from the command line so we
- * don't leak the password e.g. in 'ps aux'.
- *
- * It should be called after processing the options and you should pass down
- * argv from main().
- *
- * @param[in]  argc     The number of arguments.
- *
- * @param[in]  argv[]   The argument array we will find the array.
- */
-void popt_burn_cmdline_password(int argc, char *argv[])
-{
-	bool found = false;
-	char *p = NULL;
-	int i, ulen = 0;
-
-	for (i = 0; i < argc; i++) {
-		p = argv[i];
-		if (strncmp(p, "-U", 2) == 0) {
-			ulen = 2;
-			found = true;
-		} else if (strncmp(p, "--user", 6) == 0) {
-			ulen = 6;
-			found = true;
-		}
-
-		if (found) {
-			if (p == NULL) {
-				return;
-			}
-
-			if (strlen(p) == ulen) {
-				continue;
-			}
-
-			p = strchr_m(p, '%');
-			if (p != NULL) {
-				memset(p, '\0', strlen(p));
-			}
-			found = false;
-		}
-	}
-}
-
-struct poptOption popt_common_credentials[] = {
-	{ NULL, 0, POPT_ARG_CALLBACK|POPT_CBFLAG_PRE|POPT_CBFLAG_POST,
-	  (void *)popt_common_credentials_callback, 0, NULL },
-	{ "user", 'U', POPT_ARG_STRING, NULL, 'U', "Set the network username", "USERNAME" },
-	{ "no-pass", 'N', POPT_ARG_NONE, NULL, 'N', "Don't ask for a password" },
-	{ "kerberos", 'k', POPT_ARG_NONE, NULL, 'k', "Use kerberos (active directory) authentication" },
-	{ "authentication-file", 'A', POPT_ARG_STRING, NULL, 'A', "Get the credentials from a file", "FILE" },
-	{ "signing", 'S', POPT_ARG_STRING, NULL, 'S', "Set the client signing state", "on|off|required" },
-	{"machine-pass", 'P', POPT_ARG_NONE, NULL, 'P', "Use stored machine account password" },
-	{"encrypt", 'e', POPT_ARG_NONE, NULL, 'e', "Encrypt SMB transport" },
-	{"use-ccache", 'C', POPT_ARG_NONE, NULL, 'C',
-	 "Use the winbind ccache for authentication" },
-	{"pw-nt-hash", '\0', POPT_ARG_NONE, NULL, 'H',
-	 "The supplied password is the NT hash" },
+		.argInfo    = POPT_ARG_CALLBACK|POPT_CBFLAG_POST,
+		.arg        = (void *)popt_common_callback,
+	},
+	{
+		.longName   = "option",
+		.argInfo    = POPT_ARG_STRING,
+		.val        = OPT_OPTION,
+		.descrip    = "Set smb.conf option from command line",
+		.argDescrip = "name=value",
+	},
 	POPT_TABLEEND
 };

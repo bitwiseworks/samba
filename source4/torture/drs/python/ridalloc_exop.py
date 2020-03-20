@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Tests various RID allocation scenarios
@@ -39,11 +39,14 @@ from samba.dcerpc import drsuapi, misc
 from samba.drs_utils import drs_DsBind
 from samba.samdb import SamDB
 
-import shutil, tempfile, os
+import shutil
+import tempfile
+import os
 from samba.auth import system_session, admin_session
 from samba.dbchecker import dbcheck
 from samba.ndr import ndr_pack
 from samba.dcerpc import security
+
 
 class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
     """Intended as a semi-black box test case for DsGetNCChanges
@@ -83,7 +86,7 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
         # determine the owner dc
         res = self.ldb_dc1.search(fsmo_obj_dn,
                                   scope=SCOPE_BASE, attrs=["fSMORoleOwner"])
-        assert len(res) == 1, "Only one fSMORoleOwner value expected for %s!"%fsmo_obj_dn
+        assert len(res) == 1, "Only one fSMORoleOwner value expected for %s!" % fsmo_obj_dn
         fsmo_owner = res[0]["fSMORoleOwner"][0]
         if fsmo_owner == self.info_dc1["dsServiceName"][0]:
             return (fsmo_info_1, fsmo_info_2)
@@ -219,14 +222,14 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             ldb_dc1.modify(m)
         except ldb.LdbError as e1:
             (num, msg) = e1.args
-            self.fail("Failed to reassign RID Master " +  msg)
+            self.fail("Failed to reassign RID Master " + msg)
 
         try:
             # 2. Perform a RID alloc
             req8 = self._exop_req8(dest_dsa=fsmo_owner["ntds_guid"],
-                    invocation_id=fsmo_not_owner["invocation_id"],
-                    nc_dn_str=fsmo_dn,
-                    exop=drsuapi.DRSUAPI_EXOP_FSMO_RID_ALLOC)
+                                   invocation_id=fsmo_not_owner["invocation_id"],
+                                   nc_dn_str=fsmo_dn,
+                                   exop=drsuapi.DRSUAPI_EXOP_FSMO_RID_ALLOC)
 
             (drs, drs_handle) = self._ds_bind(fsmo_not_owner["dns_name"])
             # 3. Make sure the allocation succeeds
@@ -260,7 +263,7 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
                 ldb_dc2.modify(m)
             except ldb.LdbError as e:
                 (num, msg) = e.args
-                self.fail("Failed to restore RID Master " +  msg)
+                self.fail("Failed to restore RID Master " + msg)
 
     def test_offline_samba_tool_seized_ridalloc(self):
         """Perform a join against the non-RID manager and then seize the RID Manager role"""
@@ -292,7 +295,7 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
 
             (result, out, err) = self.runsubcmd("fsmo", "seize", "--role", "rid", "-H", ldb_url, "-s", smbconf, "--force")
             self.assertCmdSuccess(result, out, err)
-            self.assertEquals(err,"","Shouldn't be any error messages")
+            self.assertEquals(err, "", "Shouldn't be any error messages")
 
             # 3. Assert we get the RID Set
             res = new_ldb.search(base=server_ref_dn,
@@ -348,8 +351,8 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             m = ldb.Message()
             m.dn = fsmo_dn
             m["fSMORoleOwner"] = ldb.MessageElement(serviceName,
-                                                   ldb.FLAG_MOD_REPLACE,
-                                                   "fSMORoleOwner")
+                                                    ldb.FLAG_MOD_REPLACE,
+                                                    "fSMORoleOwner")
             new_ldb.modify(m)
 
             # 1. Get server name
@@ -399,8 +402,8 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             m = ldb.Message()
             m.dn = fsmo_dn
             m["fSMORoleOwner"] = ldb.MessageElement(serviceName,
-                                                   ldb.FLAG_MOD_REPLACE,
-                                                   "fSMORoleOwner")
+                                                    ldb.FLAG_MOD_REPLACE,
+                                                    "fSMORoleOwner")
             new_ldb.modify(m)
 
             # 1. Get server name
@@ -449,8 +452,8 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             m = ldb.Message()
             m.dn = fsmo_dn
             m["fSMORoleOwner"] = ldb.MessageElement(serviceName,
-                                                   ldb.FLAG_MOD_REPLACE,
-                                                   "fSMORoleOwner")
+                                                    ldb.FLAG_MOD_REPLACE,
+                                                    "fSMORoleOwner")
             new_ldb.modify(m)
 
             # 1. Get server name
@@ -587,7 +590,6 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             self._test_force_demote(fsmo_owner['dns_name'], "RIDALLOCTEST6")
             shutil.rmtree(targetdir, ignore_errors=True)
 
-
     def test_rid_set_dbcheck_after_seize(self):
         """Perform a join against the RID manager and assert we have a RID Set.
         We seize the RID master role, then using dbcheck, we assert that we can
@@ -621,7 +623,7 @@ class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
             # 4. Seize the RID Manager role
             (result, out, err) = self.runsubcmd("fsmo", "seize", "--role", "rid", "-H", ldb_url, "-s", smbconf, "--force")
             self.assertCmdSuccess(result, out, err)
-            self.assertEquals(err,"","Shouldn't be any error messages")
+            self.assertEquals(err, "", "Shouldn't be any error messages")
 
             # 5. Add a new user (triggers RID set work)
             new_ldb.newuser("ridalloctestuser", "P@ssword!")

@@ -33,15 +33,16 @@ fi
 
 load_system_config ()
 {
-	if [ -z "$1" ] ; then
-		return
-	fi
+	for _i ; do
 
-	if [ -f "${CTDB_SYS_ETCDIR}/sysconfig/$1" ]; then
-		. "${CTDB_SYS_ETCDIR}/sysconfig/$1"
-	elif [ -f "${CTDB_SYS_ETCDIR}/default/$1" ]; then
-		. "${CTDB_SYS_ETCDIR}/default/$1"
-	fi
+		if [ -f "${CTDB_SYS_ETCDIR}/sysconfig/${_i}" ]; then
+			. "${CTDB_SYS_ETCDIR}/sysconfig/${_i}"
+			return
+		elif [ -f "${CTDB_SYS_ETCDIR}/default/${_i}" ]; then
+			. "${CTDB_SYS_ETCDIR}/default/${_i}"
+			return
+		fi
+	done
 }
 
 # load_script_options [ component script ]
@@ -227,8 +228,6 @@ ctdb_get_ip_address ()
 	    awk -F '|' 'NR == 2 { print $3 }' >"$_ip_addr_file"
     fi
 
-    # ip_address is used by caller
-    # shellcheck disable=SC2034
     cat "$_ip_addr_file"
 }
 
@@ -976,10 +975,16 @@ update_tickles ()
 	_my_connections="${tickledir}/${_port}.connections.$$"
 	# Parentheses are needed around the filters for precedence but
 	# the parentheses can't be empty!
+	#
+	# Recent versions of ss print square brackets around IPv6
+	# addresses.  While it is desirable to update CTDB's address
+	# parsing and printing code, something needs to be done here
+	# for backward compatibility, so just delete the brackets.
 	ss -tn state established \
 	   "${_ip_filter:+( ${_ip_filter} )}" \
 	   "${_port_filter:+( ${_port_filter} )}" |
 	awk 'NR > 1 {print $4, $3}' |
+	tr -d '][' |
 	sort >"$_my_connections"
 
 	# Record our current tickles in a temporary file

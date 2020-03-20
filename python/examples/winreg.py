@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 #  tool to manipulate a remote registry
 #  Copyright Andrew Tridgell 2005
@@ -18,8 +18,8 @@ import samba.getopt as options
 parser = optparse.OptionParser("%s <BINDING> [path]" % sys.argv[0])
 sambaopts = options.SambaOptions(parser)
 parser.add_option_group(sambaopts)
-parser.add_option("--createkey", type="string", metavar="KEYNAME", 
-        help="create a key")
+parser.add_option("--createkey", type="string", metavar="KEYNAME",
+                  help="create a key")
 
 opts, args = parser.parse_args()
 
@@ -31,6 +31,7 @@ binding = args[0]
 
 print "Connecting to " + binding
 conn = winreg.winreg(binding, sambaopts.get_loadparm())
+
 
 def list_values(key):
     (num_values, max_valnamelen, max_valbufsize) = conn.QueryInfoKey(key, winreg.String())[4:8]
@@ -53,6 +54,7 @@ def list_values(key):
 #            printf("\t\t0x%llx (%lld)\n", v.value, v.value)
 #        }
 
+
 def list_path(key, path):
     count = 0
     (num_subkeys, max_subkeylen, max_subkeysize) = conn.QueryInfoKey(key, winreg.String())[1:4]
@@ -66,6 +68,7 @@ def list_path(key, path):
         count += list_path(subkey, "%s\\%s" % (path, name))
         list_values(subkey)
     return count
+
 
 if len(args) > 1:
     root = args[1]

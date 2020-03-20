@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Tests various schema replication scenarios
@@ -35,6 +35,7 @@ import ldb
 
 from ldb import (
     SCOPE_BASE, LdbError, ERR_NO_SUCH_OBJECT)
+
 
 class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
     """Intended as a black box test case for DsReplicaSync
@@ -137,9 +138,9 @@ objectClass: organizationalUnit
         # Deleted Object base DN
         dodn = self._deleted_objects_dn(sam_ldb)
         # now check properties of the user
-        name_cur  = ou_cur["ou"][0]
-        self.assertEquals(ou_cur["isDeleted"][0],"TRUE")
-        self.assertTrue(not("objectCategory" in ou_cur))
+        name_cur = ou_cur["ou"][0]
+        self.assertEquals(ou_cur["isDeleted"][0], b"TRUE")
+        self.assertTrue(not(b"objectCategory" in ou_cur))
         self.assertTrue(dodn in str(ou_cur["dn"]),
                         "OU %s is deleted but it is not located under %s!" % (name_cur, dodn))
 
@@ -162,9 +163,9 @@ objectClass: organizationalUnit
 
         # Check that DC2 got the DC1 object, and OU1 was make into conflict
         res1 = self.ldb_dc2.search(base="<GUID=%s>" % self.ou1,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res2 = self.ldb_dc2.search(base="<GUID=%s>" % self.ou2,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         print(res1[0]["name"][0])
         print(res2[0]["name"][0])
         self.assertFalse('CNF:%s' % self.ou2 in str(res2[0]["name"][0]))
@@ -202,9 +203,9 @@ objectClass: organizationalUnit
 
         # Check that DC2 got the DC1 object, and OU1 was make into conflict
         res1 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou1,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res2 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou2,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         print(res1[0]["name"][0])
         print(res2[0]["name"][0])
         self.assertTrue('CNF:%s' % self.ou1 in str(res1[0]["name"][0]))
@@ -241,9 +242,9 @@ objectClass: organizationalUnit
 
         # Check that DC2 got the DC1 object, and OU2 was make into conflict
         res1 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou1,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res2 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou2,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         print(res1[0]["name"][0])
         print(res2[0]["name"][0])
         self.assertTrue('CNF:%s' % self.ou2 in str(res2[0]["name"][0]), "Got %s for %s" % (str(res2[0]["name"][0]), self.ou2))
@@ -283,9 +284,9 @@ objectClass: organizationalUnit
 
         # Check that DC2 got the DC1 object, and SELF.OU1 was make into conflict
         res1 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou1,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res2 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou2,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         print(res1[0]["name"][0])
         print(res2[0]["name"][0])
         self.assertTrue('CNF:%s' % self.ou1 in str(res1[0]["name"][0]))
@@ -332,9 +333,9 @@ objectClass: organizationalUnit
 
         # Check that DC2 got the DC1 object, and SELF.OU1 was made into conflict
         res1 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou1,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res2 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou2,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         print(res1[0]["name"][0])
         print(res2[0]["name"][0])
         self.assertTrue('CNF:%s' % self.ou1 in str(res1[0]["name"][0]))
@@ -371,9 +372,9 @@ objectClass: organizationalUnit
 
         # Check that DC2 got the DC1 object, and OU2 was made into conflict
         res1 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou1,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res2 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou2,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         print(res1[0]["name"][0])
         print(res2[0]["name"][0])
         self.assertTrue('CNF:%s' % self.ou2 in str(res2[0]["name"][0]))
@@ -414,9 +415,9 @@ objectClass: organizationalUnit
 
         # Check that DC2 got the DC1 object, and SELF.OU1 was make into conflict
         res1 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou1,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res2 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou2,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         print(res1[0]["name"][0])
         print(res2[0]["name"][0])
         self.assertTrue('CNF:%s' % self.ou1 in str(res1[0]["name"][0]))
@@ -437,7 +438,6 @@ objectClass: organizationalUnit
         # Check deleted on DC2
         self._check_deleted(self.ldb_dc2, self.ou1)
         self._check_deleted(self.ldb_dc2, self.ou2)
-
 
     def test_ReplConflictsRenameRemoteWin_with_child(self):
         """Tests that objects created in conflict become conflict DNs"""
@@ -462,9 +462,9 @@ objectClass: organizationalUnit
 
         # Check that DC2 got the DC1 object, and SELF.OU1 was make into conflict
         res1 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou1,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res2 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou2,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         print(res1[0]["name"][0])
         print(res2[0]["name"][0])
         self.assertTrue('CNF:%s' % self.ou1 in str(res1[0]["name"][0]))
@@ -492,7 +492,6 @@ objectClass: organizationalUnit
         self._check_deleted(self.ldb_dc2, ou1_child)
         self._check_deleted(self.ldb_dc2, ou2_child)
 
-
     def test_ReplConflictsRenameLocalWin(self):
         """Tests that objects created in conflict become conflict DNs"""
         self._disable_inbound_repl(self.dnsname_dc1)
@@ -513,9 +512,9 @@ objectClass: organizationalUnit
 
         # Check that DC2 got the DC1 object, and OU2 was make into conflict
         res1 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou1,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res2 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou2,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         print(res1[0]["name"][0])
         print(res2[0]["name"][0])
         self.assertTrue('CNF:%s' % self.ou2 in str(res2[0]["name"][0]))
@@ -565,9 +564,9 @@ objectClass: organizationalUnit
 
         # Check that DC2 got the DC1 object, and one or other object was make into conflict
         res1 = self.ldb_dc1.search(base="<GUID=%s>" % ou1_child,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res2 = self.ldb_dc1.search(base="<GUID=%s>" % ou2_child,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         print(res1[0]["name"][0])
         print(res2[0]["name"][0])
         self.assertTrue('CNF:%s' % ou1_child in str(res1[0]["name"][0]) or 'CNF:%s' % ou2_child in str(res2[0]["name"][0]))
@@ -582,7 +581,6 @@ objectClass: organizationalUnit
         self.ldb_dc1.delete('<GUID=%s>' % ou2_child)
 
         self._net_drs_replicate(DC=self.dnsname_dc2, fromDC=self.dnsname_dc1, forced=True, full_sync=False)
-
 
         # Check all deleted on DC1
         self._check_deleted(self.ldb_dc1, self.ou1)
@@ -630,17 +628,17 @@ objectClass: organizationalUnit
 
         # Check that DC2 got the DC1 object, and the renames are all correct
         res1 = self.ldb_dc2.search(base="<GUID=%s>" % ou1_child,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res2 = self.ldb_dc2.search(base="<GUID=%s>" % ou2_child,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res3 = self.ldb_dc2.search(base="<GUID=%s>" % ou3_child,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         print(res1[0].dn)
         print(res2[0].dn)
         print(res3[0].dn)
-        self.assertEqual('Test Child 2', res1[0]["name"][0])
-        self.assertEqual('Test Child', res2[0]["name"][0])
-        self.assertEqual('Test CASE Child', res3[0]["name"][0])
+        self.assertEqual('Test Child 2', str(res1[0]["name"][0]))
+        self.assertEqual('Test Child', str(res2[0]["name"][0]))
+        self.assertEqual('Test CASE Child', str(res3[0]["name"][0]))
         self.assertEqual(str(res1[0].dn), "OU=Test Child 2,OU=Original parent 3,%s" % self.top_ou)
         self.assertEqual(str(res2[0].dn), "OU=Test Child,OU=Original parent 3,%s" % self.top_ou)
         self.assertEqual(str(res3[0].dn), "OU=Test CASE Child,OU=Original parent 2,%s" % self.top_ou)
@@ -650,17 +648,17 @@ objectClass: organizationalUnit
 
         # Check that DC1 got the DC2 object, and the renames are all correct
         res1 = self.ldb_dc1.search(base="<GUID=%s>" % ou1_child,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res2 = self.ldb_dc1.search(base="<GUID=%s>" % ou2_child,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res3 = self.ldb_dc1.search(base="<GUID=%s>" % ou3_child,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         print(res1[0].dn)
         print(res2[0].dn)
         print(res3[0].dn)
-        self.assertEqual('Test Child 2', res1[0]["name"][0])
-        self.assertEqual('Test Child', res2[0]["name"][0])
-        self.assertEqual('Test CASE Child', res3[0]["name"][0])
+        self.assertEqual('Test Child 2', str(res1[0]["name"][0]))
+        self.assertEqual('Test Child', str(res2[0]["name"][0]))
+        self.assertEqual('Test CASE Child', str(res3[0]["name"][0]))
         self.assertEqual(str(res1[0].dn), "OU=Test Child 2,OU=Original parent 3,%s" % self.top_ou)
         self.assertEqual(str(res2[0].dn), "OU=Test Child,OU=Original parent 3,%s" % self.top_ou)
         self.assertEqual(str(res3[0].dn), "OU=Test CASE Child,OU=Original parent 2,%s" % self.top_ou)
@@ -674,7 +672,6 @@ objectClass: organizationalUnit
         self.ldb_dc1.delete('<GUID=%s>' % self.ou2)
 
         self._net_drs_replicate(DC=self.dnsname_dc2, fromDC=self.dnsname_dc1, forced=True, full_sync=False)
-
 
         # Check all deleted on DC1
         self._check_deleted(self.ldb_dc1, self.ou1)
@@ -730,9 +727,9 @@ objectClass: organizationalUnit
 
         # Check the latest change won and SELF.OU1 was made into a conflict
         res1 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou1,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         res2 = self.ldb_dc1.search(base="<GUID=%s>" % self.ou2,
-                                  scope=SCOPE_BASE, attrs=["name"])
+                                   scope=SCOPE_BASE, attrs=["name"])
         print(res1[0]["name"][0])
         print(res2[0]["name"][0])
         self.assertTrue('CNF:%s' % self.ou1 in str(res1[0]["name"][0]))
@@ -749,4 +746,3 @@ objectClass: organizationalUnit
         # Check deleted on DC2
         self._check_deleted(self.ldb_dc2, self.ou1)
         self._check_deleted(self.ldb_dc2, self.ou2)
-

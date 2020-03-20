@@ -295,12 +295,21 @@ again:
 		proc->result.sig = WTERMSIG(status);
 	}
 
-	/* Active run_proc request */
-	if (proc->req != NULL) {
-		run_proc_done(proc->req);
+	/* Confirm that all data has been read from the pipe */
+	if (proc->fd != -1) {
+		proc_read_handler(ev, proc->fde, 0, proc);
+		TALLOC_FREE(proc->fde);
+		proc->fd = -1;
 	}
 
 	DLIST_REMOVE(run_ctx->plist, proc);
+
+	/* Active run_proc request */
+	if (proc->req != NULL) {
+		run_proc_done(proc->req);
+	} else {
+		talloc_free(proc);
+	}
 
 	goto again;
 }
@@ -419,6 +428,7 @@ static void run_proc_done(struct tevent_req *req)
 	if (state->proc->output != NULL) {
 		state->output = talloc_steal(state, state->proc->output);
 	}
+	talloc_steal(state, state->proc);
 
 	tevent_req_done(req);
 }

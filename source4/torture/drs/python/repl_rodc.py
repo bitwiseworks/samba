@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Test replication scenarios involving an RODC
@@ -43,6 +43,7 @@ from samba.credentials import Credentials
 import random
 import time
 
+
 def drs_get_rodc_partial_attribute_set(samdb, samdb1, exceptions=[]):
     '''get a list of attributes for RODC replication'''
     partial_attribute_set = drsuapi.DsPartialAttributeSet()
@@ -60,19 +61,19 @@ def drs_get_rodc_partial_attribute_set(samdb, samdb1, exceptions=[]):
                               "searchFlags"])
 
     for r in res:
-        ldap_display_name = r["lDAPDisplayName"][0]
+        ldap_display_name = str(r["lDAPDisplayName"][0])
         if "systemFlags" in r:
-            system_flags      = r["systemFlags"][0]
+            system_flags      = str(r["systemFlags"][0])
             if (int(system_flags) & (samba.dsdb.DS_FLAG_ATTR_NOT_REPLICATED |
                                      samba.dsdb.DS_FLAG_ATTR_IS_CONSTRUCTED)):
                 continue
         if "searchFlags" in r:
-            search_flags = r["searchFlags"][0]
+            search_flags = str(r["searchFlags"][0])
             if (int(search_flags) & samba.dsdb.SEARCH_FLAG_RODC_ATTRIBUTE):
                 continue
         try:
             attid = samdb1.get_attid_from_lDAPDisplayName(ldap_display_name)
-            if not attid in exceptions:
+            if attid not in exceptions:
                 attids.append(int(attid))
         except:
             pass
@@ -83,6 +84,7 @@ def drs_get_rodc_partial_attribute_set(samdb, samdb1, exceptions=[]):
     partial_attribute_set.attids         = attids
     partial_attribute_set.num_attids = len(attids)
     return partial_attribute_set
+
 
 class DrsRodcTestCase(drs_base.DrsBaseTestCase):
     """Intended as a semi-black box test case for replication involving
@@ -100,7 +102,6 @@ class DrsRodcTestCase(drs_base.DrsBaseTestCase):
         self.rodc_pass = "password12#"
         self.computer_dn = "CN=%s,OU=Domain Controllers,%s" % (self.rodc_name, self.base_dn)
 
-
         self.rodc_ctx = DCJoinContext(server=self.ldb_dc1.host_dns_name(),
                                       creds=self.get_credentials(),
                                       lp=self.get_loadparm(), site=self.site,
@@ -113,7 +114,7 @@ class DrsRodcTestCase(drs_base.DrsBaseTestCase):
 
         rodc_creds = Credentials()
         rodc_creds.guess(self.rodc_ctx.lp)
-        rodc_creds.set_username(self.rodc_name+'$')
+        rodc_creds.set_username(self.rodc_name + '$')
         rodc_creds.set_password(self.rodc_pass)
         self.rodc_creds = rodc_creds
 
@@ -198,7 +199,7 @@ class DrsRodcTestCase(drs_base.DrsBaseTestCase):
             self.fail("Successfully replicated secrets to an RODC that shouldn't have been replicated.")
         except WERRORError as e:
             (enum, estr) = e.args
-            self.assertEquals(enum, 8630) # ERROR_DS_DRA_SECRETS_DENIED
+            self.assertEquals(enum, 8630)  # ERROR_DS_DRA_SECRETS_DENIED
 
         # send the same request again and we should get the same response
         try:
@@ -206,7 +207,7 @@ class DrsRodcTestCase(drs_base.DrsBaseTestCase):
             self.fail("Successfully replicated secrets to an RODC that shouldn't have been replicated.")
         except WERRORError as e1:
             (enum, estr) = e1.args
-            self.assertEquals(enum, 8630) # ERROR_DS_DRA_SECRETS_DENIED
+            self.assertEquals(enum, 8630)  # ERROR_DS_DRA_SECRETS_DENIED
 
         # Retry with Administrator credentials, ignores password replication groups
         (level, ctr) = self.drs.DsGetNCChanges(self.drs_handle, 10, req10)
@@ -293,7 +294,7 @@ class DrsRodcTestCase(drs_base.DrsBaseTestCase):
         (packed_attrs_1, unpacked_attrs_1) = self._assert_in_revealed_users(user_dn, expected_user_attributes)
 
         # Change the user's password on DC1
-        self.ldb_dc1.setpassword("(sAMAccountName=%s)" % user_name, password+"1", False, user_name)
+        self.ldb_dc1.setpassword("(sAMAccountName=%s)" % user_name, password + "1", False, user_name)
 
         (packed_attrs_2, unpacked_attrs_2) = self._assert_in_revealed_users(user_dn, expected_user_attributes)
         self._assert_attrlist_equals(unpacked_attrs_1, unpacked_attrs_2)
@@ -369,7 +370,7 @@ class DrsRodcTestCase(drs_base.DrsBaseTestCase):
         (packed_attrs_1, unpacked_attrs_1) = self._assert_in_revealed_users(user_dn, expected_user_attributes)
 
         # Change the user's password on DC1
-        self.ldb_dc1.setpassword("(sAMAccountName=%s)" % user_name, password+"1", False, user_name)
+        self.ldb_dc1.setpassword("(sAMAccountName=%s)" % user_name, password + "1", False, user_name)
 
         (packed_attrs_2, unpacked_attrs_2) = self._assert_in_revealed_users(user_dn, expected_user_attributes)
         self._assert_attrlist_equals(unpacked_attrs_1, unpacked_attrs_2)
@@ -472,7 +473,7 @@ class DrsRodcTestCase(drs_base.DrsBaseTestCase):
 
         other_rodc_creds = Credentials()
         other_rodc_creds.guess(other_rodc_ctx.lp)
-        other_rodc_creds.set_username(other_rodc_name+'$')
+        other_rodc_creds.set_username(other_rodc_name + '$')
         other_rodc_creds.set_password(self.rodc_pass)
 
         (other_rodc_drs, other_rodc_drs_handle) = self._ds_bind(self.dnsname_dc1, other_rodc_creds)
@@ -511,7 +512,7 @@ class DrsRodcTestCase(drs_base.DrsBaseTestCase):
             self.fail("Successfully replicated secrets to an RODC that shouldn't have been replicated.")
         except WERRORError as e3:
             (enum, estr) = e3.args
-            self.assertEquals(enum, 8630) # ERROR_DS_DRA_SECRETS_DENIED
+            self.assertEquals(enum, 8630)  # ERROR_DS_DRA_SECRETS_DENIED
 
         req10 = self._getnc_req10(dest_dsa=str(self.rodc_ctx.ntds_guid),
                                   invocation_id=self.ldb_dc1.get_invocation_id(),
@@ -526,7 +527,7 @@ class DrsRodcTestCase(drs_base.DrsBaseTestCase):
             self.fail("Successfully replicated secrets to an RODC that shouldn't have been replicated.")
         except WERRORError as e4:
             (enum, estr) = e4.args
-            self.assertEquals(enum, 8630) # ERROR_DS_DRA_SECRETS_DENIED
+            self.assertEquals(enum, 8630)  # ERROR_DS_DRA_SECRETS_DENIED
 
     def test_msDSRevealedUsers_local_deny_allow(self):
         """
@@ -596,7 +597,7 @@ class DrsRodcTestCase(drs_base.DrsBaseTestCase):
             self.fail("Successfully replicated secrets to an RODC that shouldn't have been replicated.")
         except WERRORError as e5:
             (enum, estr) = e5.args
-            self.assertEquals(enum, 8630) # ERROR_DS_DRA_SECRETS_DENIED
+            self.assertEquals(enum, 8630)  # ERROR_DS_DRA_SECRETS_DENIED
 
         m = ldb.Message()
         m.dn = ldb.Dn(self.ldb_dc1, self.computer_dn)
@@ -613,7 +614,7 @@ class DrsRodcTestCase(drs_base.DrsBaseTestCase):
             self.fail("Successfully replicated secrets to an RODC that shouldn't have been replicated.")
         except WERRORError as e6:
             (enum, estr) = e6.args
-            self.assertEquals(enum, 8630) # ERROR_DS_DRA_SECRETS_DENIED
+            self.assertEquals(enum, 8630)  # ERROR_DS_DRA_SECRETS_DENIED
 
     def _assert_in_revealed_users(self, user_dn, attrlist):
         res = self.ldb_dc1.search(scope=ldb.SCOPE_BASE, base=self.computer_dn,
@@ -623,7 +624,8 @@ class DrsRodcTestCase(drs_base.DrsBaseTestCase):
         packed_attrs = []
         unpacked_attrs = []
         for attribute in revealed_users:
-            dsdb_dn = dsdb_Dn(self.ldb_dc1, attribute.decode('utf8'))
+            attribute = attribute.decode('utf8')
+            dsdb_dn = dsdb_Dn(self.ldb_dc1, attribute)
             metadata = ndr_unpack(drsblobs.replPropertyMetaData1, dsdb_dn.get_bytes())
             if user_dn in attribute:
                 unpacked_attrs.append(metadata)
@@ -659,34 +661,33 @@ class DrsRodcTestCase(drs_base.DrsBaseTestCase):
             else:
                 self.assertEquals(list_1[i].originating_change_time, list_2[i].originating_change_time)
 
-
     def _create_rodc(self, ctx):
-         ctx.nc_list = [ ctx.base_dn, ctx.config_dn, ctx.schema_dn ]
-         ctx.full_nc_list = [ ctx.base_dn, ctx.config_dn, ctx.schema_dn ]
-         ctx.krbtgt_dn = "CN=krbtgt_%s,CN=Users,%s" % (ctx.myname, ctx.base_dn)
+        ctx.nc_list = [ctx.base_dn, ctx.config_dn, ctx.schema_dn]
+        ctx.full_nc_list = [ctx.base_dn, ctx.config_dn, ctx.schema_dn]
+        ctx.krbtgt_dn = "CN=krbtgt_%s,CN=Users,%s" % (ctx.myname, ctx.base_dn)
 
-         ctx.never_reveal_sid = [ "<SID=%s-%s>" % (ctx.domsid, security.DOMAIN_RID_RODC_DENY),
-                                 "<SID=%s>" % security.SID_BUILTIN_ADMINISTRATORS,
-                                 "<SID=%s>" % security.SID_BUILTIN_SERVER_OPERATORS,
-                                 "<SID=%s>" % security.SID_BUILTIN_BACKUP_OPERATORS,
-                                 "<SID=%s>" % security.SID_BUILTIN_ACCOUNT_OPERATORS ]
-         ctx.reveal_sid = "<SID=%s-%s>" % (ctx.domsid, security.DOMAIN_RID_RODC_ALLOW)
+        ctx.never_reveal_sid = ["<SID=%s-%s>" % (ctx.domsid, security.DOMAIN_RID_RODC_DENY),
+                                "<SID=%s>" % security.SID_BUILTIN_ADMINISTRATORS,
+                                "<SID=%s>" % security.SID_BUILTIN_SERVER_OPERATORS,
+                                "<SID=%s>" % security.SID_BUILTIN_BACKUP_OPERATORS,
+                                "<SID=%s>" % security.SID_BUILTIN_ACCOUNT_OPERATORS]
+        ctx.reveal_sid = "<SID=%s-%s>" % (ctx.domsid, security.DOMAIN_RID_RODC_ALLOW)
 
-         mysid = ctx.get_mysid()
-         admin_dn = "<SID=%s>" % mysid
-         ctx.managedby = admin_dn
+        mysid = ctx.get_mysid()
+        admin_dn = "<SID=%s>" % mysid
+        ctx.managedby = admin_dn
 
-         ctx.userAccountControl = (samba.dsdb.UF_WORKSTATION_TRUST_ACCOUNT |
-                                   samba.dsdb.UF_TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION |
-                                   samba.dsdb.UF_PARTIAL_SECRETS_ACCOUNT)
+        ctx.userAccountControl = (samba.dsdb.UF_WORKSTATION_TRUST_ACCOUNT |
+                                  samba.dsdb.UF_TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION |
+                                  samba.dsdb.UF_PARTIAL_SECRETS_ACCOUNT)
 
-         ctx.connection_dn = "CN=RODC Connection (FRS),%s" % ctx.ntds_dn
-         ctx.secure_channel_type = misc.SEC_CHAN_RODC
-         ctx.RODC = True
-         ctx.replica_flags  =  (drsuapi.DRSUAPI_DRS_INIT_SYNC |
-                                drsuapi.DRSUAPI_DRS_PER_SYNC |
-                                drsuapi.DRSUAPI_DRS_GET_ANC |
-                                drsuapi.DRSUAPI_DRS_NEVER_SYNCED |
-                                drsuapi.DRSUAPI_DRS_SPECIAL_SECRET_PROCESSING)
+        ctx.connection_dn = "CN=RODC Connection (FRS),%s" % ctx.ntds_dn
+        ctx.secure_channel_type = misc.SEC_CHAN_RODC
+        ctx.RODC = True
+        ctx.replica_flags = (drsuapi.DRSUAPI_DRS_INIT_SYNC |
+                             drsuapi.DRSUAPI_DRS_PER_SYNC |
+                             drsuapi.DRSUAPI_DRS_GET_ANC |
+                             drsuapi.DRSUAPI_DRS_NEVER_SYNCED |
+                             drsuapi.DRSUAPI_DRS_SPECIAL_SECRET_PROCESSING)
 
-         ctx.join_add_objects()
+        ctx.join_add_objects()

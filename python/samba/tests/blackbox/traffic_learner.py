@@ -17,9 +17,10 @@
 
 """Blackbox tests for traffic_leaner"""
 
-from contextlib import contextmanager
 import os
+import json
 import tempfile
+from samba.emulate import traffic
 
 from samba.tests import BlackboxTestCase
 
@@ -27,36 +28,44 @@ LEARNER  = "script/traffic_learner"
 DATA_DIR = "python/samba/tests/blackbox/testdata"
 
 
-@contextmanager
-def temp_file(temp_dir):
-    try:
-        tf   = tempfile.NamedTemporaryFile(dir=temp_dir)
-        name = tf.name
-        tf.close()
-        yield name
-    finally:
-        if os.path.exists(name):
-            os.remove(name)
-
-
 class TrafficLearnerTests(BlackboxTestCase):
 
     def test_no_output_file(self):
-        """Run the script with no output file specified"""
-        expected = ("No output file was specified to write the model to.\n"
-                    "Please specify a filename using the --out option.\n")
-        actual = self.check_output(LEARNER)
-        self.assertEquals(expected, actual)
+        """Run the script with no output file specified. Should fail."""
+        self.check_exit_code(LEARNER, 1)
 
     def test_model_generation(self):
         """Ensure a model is generated from a summary file and it is
            correct"""
 
-        with temp_file(self.tempdir) as output:
-            summary  = os.path.join(DATA_DIR, "traffic-sample-very-short.txt")
-            command  = "%s %s --out %s" % (LEARNER, summary, output)
+        with self.mktemp() as output:
+            summary = os.path.join(DATA_DIR, "traffic-sample-very-short.txt")
+            command = "%s %s --out %s" % (LEARNER, summary, output)
             self.check_run(command)
+
             expected_fn = os.path.join(DATA_DIR, "traffic_learner.expected")
-            expected = open(expected_fn).readlines()
-            actual = open(output).readlines()
-            self.assertEquals(expected, actual)
+            expected = traffic.TrafficModel()
+            f=open(expected_fn)
+            expected.load(f)
+            f.close()
+
+            f=open(output)
+            actual = traffic.TrafficModel()
+            actual.load(f)
+            f.close()
+
+            actual_ngrams = {k: sorted(v) for k, v in actual.ngrams.items()}
+            expected_ngrams = {k: sorted(v) for k, v in expected.ngrams.items()}
+
+            self.assertEquals(expected_ngrams, actual_ngrams)
+
+            actual_details = {k: sorted(v) for k, v in actual.query_details.items()}
+            expected_details = {k: sorted(v) for k, v in expected.query_details.items()}
+            self.assertEquals(expected_details, actual_details)
+            self.assertEquals(expected.cumulative_duration, actual.cumulative_duration)
+            self.assertEquals(expected.packet_rate, actual.packet_rate)
+
+            with open(expected_fn) as f1, open(output) as f2:
+                expected_json = json.load(f1)
+                actual_json = json.load(f2)
+                self.assertEqual(expected_json, actual_json)

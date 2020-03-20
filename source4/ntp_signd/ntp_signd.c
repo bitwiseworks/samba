@@ -37,9 +37,12 @@
 #include "libcli/ldap/ldap_ndr.h"
 #include <ldb.h>
 #include <ldb_errors.h>
-#include "../lib/crypto/md5.h"
 #include "system/network.h"
 #include "system/passwd.h"
+
+#include "lib/crypto/gnutls_helpers.h"
+#include <gnutls/gnutls.h>
+#include <gnutls/crypto.h>
 
 NTSTATUS server_service_ntp_signd_init(TALLOC_CTX *);
 
@@ -109,9 +112,10 @@ static NTSTATUS ntp_signd_process(struct ntp_signd_connection *ntp_signd_conn,
 	enum ndr_err_code ndr_err;
 	struct ldb_result *res;
 	const char *attrs[] = { "unicodePwd", "userAccountControl", "cn", NULL };
-	MD5_CTX ctx;
+	gnutls_hash_hd_t hash_hnd = NULL;
 	struct samr_Password *nt_hash;
 	uint32_t user_account_control;
+	struct dom_sid_buf buf;
 	int ret;
 
 	ndr_err = ndr_pull_struct_blob_all(input, mem_ctx,
@@ -171,7 +175,7 @@ static NTSTATUS ntp_signd_process(struct ntp_signd_connection *ntp_signd_conn,
 	if (ret != LDB_SUCCESS) {
 		DEBUG(2, ("Failed to search for SID %s in SAM for NTP signing: "
 			  "%s\n",
-			  dom_sid_string(mem_ctx, sid),
+			  dom_sid_str_buf(sid, &buf),
 			  ldb_errstring(ntp_signd_conn->ntp_signd->samdb)));
 		return signing_failure(ntp_signd_conn,
 				       mem_ctx,
@@ -181,14 +185,15 @@ static NTSTATUS ntp_signd_process(struct ntp_signd_connection *ntp_signd_conn,
 
 	if (res->count == 0) {
 		DEBUG(2, ("Failed to find SID %s in SAM for NTP signing\n",
-			  dom_sid_string(mem_ctx, sid)));
+			  dom_sid_str_buf(sid, &buf)));
 		return signing_failure(ntp_signd_conn,
 				       mem_ctx,
 				       output,
 				       sign_request.packet_id);
 	} else if (res->count != 1) {
 		DEBUG(1, ("Found SID %s %u times in SAM for NTP signing\n",
-			  dom_sid_string(mem_ctx, sid), res->count));
+			  dom_sid_str_buf(sid, &buf),
+			  res->count));
 		return signing_failure(ntp_signd_conn,
 				       mem_ctx,
 				       output,
@@ -202,21 +207,22 @@ static NTSTATUS ntp_signd_process(struct ntp_signd_connection *ntp_signd_conn,
 	if (user_account_control & UF_ACCOUNTDISABLE) {
 		DEBUG(1, ("Account %s for SID [%s] is disabled\n",
 			  ldb_dn_get_linearized(res->msgs[0]->dn),
-			  dom_sid_string(mem_ctx, sid)));
+			  dom_sid_str_buf(sid, &buf)));
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
 	if (!(user_account_control & (UF_INTERDOMAIN_TRUST_ACCOUNT|UF_SERVER_TRUST_ACCOUNT|UF_WORKSTATION_TRUST_ACCOUNT))) {
 		DEBUG(1, ("Account %s for SID [%s] is not a trust account\n",
 			  ldb_dn_get_linearized(res->msgs[0]->dn),
-			  dom_sid_string(mem_ctx, sid)));
+			  dom_sid_str_buf(sid, &buf)));
 		return NT_STATUS_ACCESS_DENIED;
 	}
 
 	nt_hash = samdb_result_hash(mem_ctx, res->msgs[0], "unicodePwd");
 	if (!nt_hash) {
 		DEBUG(1, ("No unicodePwd found on record of SID %s "
-			  "for NTP signing\n", dom_sid_string(mem_ctx, sid)));
+			  "for NTP signing\n",
+			  dom_sid_str_buf(sid, &buf)));
 		return signing_failure(ntp_signd_conn,
 				       mem_ctx,
 				       output,
@@ -241,11 +247,29 @@ static NTSTATUS ntp_signd_process(struct ntp_signd_connection *ntp_signd_conn,
 	SIVAL(signed_reply.signed_packet.data, sign_request.packet_to_sign.length, sign_request.key_id);
 
 	/* Sign the NTP response with the unicodePwd */
-	MD5Init(&ctx);
-	MD5Update(&ctx, nt_hash->hash, sizeof(nt_hash->hash));
-	MD5Update(&ctx, sign_request.packet_to_sign.data, sign_request.packet_to_sign.length);
-	MD5Final(signed_reply.signed_packet.data + sign_request.packet_to_sign.length + 4, &ctx);
+	ret = gnutls_hash_init(&hash_hnd, GNUTLS_DIG_MD5);
+	if (ret < 0) {
+		return gnutls_error_to_ntstatus(ret, NT_STATUS_HASH_NOT_SUPPORTED);
+	}
 
+	ret = gnutls_hash(hash_hnd,
+			  nt_hash->hash,
+			  sizeof(nt_hash->hash));
+	if (ret < 0) {
+		gnutls_hash_deinit(hash_hnd, NULL);
+		return gnutls_error_to_ntstatus(ret, NT_STATUS_HASH_NOT_SUPPORTED);
+	}
+	ret = gnutls_hash(hash_hnd,
+			  sign_request.packet_to_sign.data,
+			  sign_request.packet_to_sign.length);
+	if (ret < 0) {
+		gnutls_hash_deinit(hash_hnd, NULL);
+		return gnutls_error_to_ntstatus(ret, NT_STATUS_HASH_NOT_SUPPORTED);
+	}
+
+	gnutls_hash_deinit(hash_hnd,
+			   signed_reply.signed_packet.data +
+			   sign_request.packet_to_sign.length + 4);
 
 	/* Place it into the packet for the wire */
 	ndr_err = ndr_push_struct_blob(output, mem_ctx, &signed_reply,
@@ -489,7 +513,7 @@ static const struct stream_server_ops ntp_signd_stream_ops = {
 /*
   startup the ntp_signd task
 */
-static void ntp_signd_task_init(struct task_server *task)
+static NTSTATUS ntp_signd_task_init(struct task_server *task)
 {
 	struct ntp_signd_server *ntp_signd;
 	NTSTATUS status;
@@ -501,7 +525,7 @@ static void ntp_signd_task_init(struct task_server *task)
 					      lpcfg_ntp_signd_socket_directory(task->lp_ctx));
 		task_server_terminate(task,
 				      error, true);
-		return;
+		return NT_STATUS_UNSUCCESSFUL;
 	}
 
 	task_server_set_title(task, "task[ntp_signd]");
@@ -509,7 +533,7 @@ static void ntp_signd_task_init(struct task_server *task)
 	ntp_signd = talloc(task, struct ntp_signd_server);
 	if (ntp_signd == NULL) {
 		task_server_terminate(task, "ntp_signd: out of memory", true);
-		return;
+		return NT_STATUS_NO_MEMORY;
 	}
 
 	ntp_signd->task = task;
@@ -523,10 +547,15 @@ static void ntp_signd_task_init(struct task_server *task)
 					 0);
 	if (ntp_signd->samdb == NULL) {
 		task_server_terminate(task, "ntp_signd failed to open samdb", true);
-		return;
+		return NT_STATUS_UNSUCCESSFUL;
 	}
 
 	address = talloc_asprintf(ntp_signd, "%s/socket", lpcfg_ntp_signd_socket_directory(task->lp_ctx));
+	if (address == NULL) {
+		task_server_terminate(
+		    task, "ntp_signd out of memory in talloc_asprintf()", true);
+		return NT_STATUS_NO_MEMORY;
+	}
 
 	status = stream_setup_socket(ntp_signd->task,
 				     ntp_signd->task->event_ctx,
@@ -540,8 +569,10 @@ static void ntp_signd_task_init(struct task_server *task)
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("Failed to bind to %s - %s\n",
 			 address, nt_errstr(status)));
-		return;
+		return status;
 	}
+
+	return NT_STATUS_OK;
 
 }
 
@@ -549,10 +580,11 @@ static void ntp_signd_task_init(struct task_server *task)
 /* called at smbd startup - register ourselves as a server service */
 NTSTATUS server_service_ntp_signd_init(TALLOC_CTX *ctx)
 {
-	struct service_details details = {
+	static const struct service_details details = {
 		.inhibit_fork_on_accept = true,
-		.inhibit_pre_fork = true
+		.inhibit_pre_fork = true,
+		.task_init = ntp_signd_task_init,
+		.post_fork = NULL
 	};
-	return register_server_service(ctx, "ntp_signd", ntp_signd_task_init,
-				       &details);
+	return register_server_service(ctx, "ntp_signd", &details);
 }

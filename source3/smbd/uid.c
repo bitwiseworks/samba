@@ -25,6 +25,7 @@
 #include "libcli/security/security.h"
 #include "passdb/lookup_sid.h"
 #include "auth.h"
+#include "../auth/auth_util.h"
 
 /* what user is current? */
 extern struct current_user current_user;
@@ -52,8 +53,6 @@ bool change_to_guest(void)
 
 	current_user.conn = NULL;
 	current_user.vuid = UID_FIELD_INVALID;
-	current_user.need_chdir = false;
-	current_user.done_chdir = false;
 
 	TALLOC_FREE(pass);
 
@@ -77,7 +76,6 @@ static void free_conn_session_info_if_unused(connection_struct *conn)
 		}
 	}
 	/* Not used, safe to free. */
-	conn->user_ev_ctx = NULL;
 	TALLOC_FREE(conn->session_info);
 }
 
@@ -203,7 +201,6 @@ static bool check_user_ok(connection_struct *conn,
 			}
 			free_conn_session_info_if_unused(conn);
 			conn->session_info = ent->session_info;
-			conn->user_ev_ctx = ent->user_ev_ctx;
 			conn->read_only = ent->read_only;
 			conn->share_access = ent->share_access;
 			conn->vuid = ent->vuid;
@@ -252,11 +249,9 @@ static bool check_user_ok(connection_struct *conn,
 		ent->session_info->unix_token->uid = sec_initial_uid();
 	}
 
-	ent->user_ev_ctx = conn->sconn->raw_ev_ctx;
-
 	/*
 	 * It's actually OK to call check_user_ok() with
-	 * vuid == UID_FIELD_INVALID as called from change_to_user_by_session().
+	 * vuid == UID_FIELD_INVALID as called from become_user_by_session().
 	 * All this will do is throw away one entry in the cache.
 	 */
 
@@ -266,7 +261,6 @@ static bool check_user_ok(connection_struct *conn,
 	free_conn_session_info_if_unused(conn);
 	conn->session_info = ent->session_info;
 	conn->vuid = ent->vuid;
-	conn->user_ev_ctx = ent->user_ev_ctx;
 	if (vuid == UID_FIELD_INVALID) {
 		/*
 		 * Not strictly needed, just make it really
@@ -275,7 +269,6 @@ static bool check_user_ok(connection_struct *conn,
 		ent->read_only = false;
 		ent->share_access = 0;
 		ent->session_info = NULL;
-		ent->user_ev_ctx = NULL;
 	}
 
 	conn->read_only = readonly_share;
@@ -284,18 +277,43 @@ static bool check_user_ok(connection_struct *conn,
 	return(True);
 }
 
+static void print_impersonation_info(connection_struct *conn)
+{
+	struct smb_filename *cwdfname = NULL;
+
+	if (!CHECK_DEBUGLVL(DBGLVL_INFO)) {
+		return;
+	}
+
+	cwdfname = vfs_GetWd(talloc_tos(), conn);
+	if (cwdfname == NULL) {
+		return;
+	}
+
+	DBG_INFO("Impersonated user: uid=(%d,%d), gid=(%d,%d), cwd=[%s]\n",
+		 (int)getuid(),
+		 (int)geteuid(),
+		 (int)getgid(),
+		 (int)getegid(),
+		 cwdfname->base_name);
+	TALLOC_FREE(cwdfname);
+}
+
 /****************************************************************************
  Become the user of a connection number without changing the security context
  stack, but modify the current_user entries.
 ****************************************************************************/
 
-static bool change_to_user_internal(connection_struct *conn,
-				    const struct auth_session_info *session_info,
-				    uint64_t vuid)
+static bool change_to_user_impersonate(connection_struct *conn,
+				       const struct auth_session_info *session_info,
+				       uint64_t vuid)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	int snum;
 	gid_t gid;
 	uid_t uid;
+	const char *force_group_name;
 	char group_c;
 	int num_groups = 0;
 	gid_t *group_list = NULL;
@@ -303,7 +321,6 @@ static bool change_to_user_internal(connection_struct *conn,
 
 	if ((current_user.conn == conn) &&
 	    (current_user.vuid == vuid) &&
-	    (current_user.need_chdir == conn->tcon_done) &&
 	    (current_user.ut.uid == session_info->unix_token->uid))
 	{
 		DBG_INFO("Skipping user change - already user\n");
@@ -335,9 +352,39 @@ static bool change_to_user_internal(connection_struct *conn,
 	 * See if we should force group for this service. If so this overrides
 	 * any group set in the force user code.
 	 */
-	if((group_c = *lp_force_group(talloc_tos(), snum))) {
+	force_group_name = lp_force_group(talloc_tos(), lp_sub, snum);
+	group_c = *force_group_name;
 
-		SMB_ASSERT(conn->force_group_gid != (gid_t)-1);
+	if ((group_c != '\0') && (conn->force_group_gid == (gid_t)-1)) {
+		/*
+		 * This can happen if "force group" is added to a
+		 * share definition whilst an existing connection
+		 * to that share exists. In that case, don't change
+		 * the existing credentials for force group, only
+		 * do so for new connections.
+		 *
+		 * BUG: https://bugzilla.samba.org/show_bug.cgi?id=13690
+		 */
+		DBG_INFO("Not forcing group %s on existing connection to "
+			"share %s for SMB user %s (unix user %s)\n",
+			force_group_name,
+			lp_const_servicename(snum),
+			session_info->unix_info->sanitized_username,
+			session_info->unix_info->unix_name);
+	}
+
+	if((group_c != '\0') && (conn->force_group_gid != (gid_t)-1)) {
+		/*
+		 * Only force group for connections where
+		 * conn->force_group_gid has already been set
+		 * to the correct value (i.e. the connection
+		 * happened after the 'force group' definition
+		 * was added to the share definition. Connections
+		 * that were made before force group was added
+		 * should stay with their existing credentials.
+		 *
+		 * BUG: https://bugzilla.samba.org/show_bug.cgi?id=13690
+		 */
 
 		if (group_c == '+') {
 			int i;
@@ -378,68 +425,64 @@ static bool change_to_user_internal(connection_struct *conn,
 
 	current_user.conn = conn;
 	current_user.vuid = vuid;
-	current_user.need_chdir = conn->tcon_done;
-
-	if (current_user.need_chdir) {
-		ok = chdir_current_service(conn);
-		if (!ok) {
-			DBG_ERR("chdir_current_service() failed!\n");
-			return false;
-		}
-		current_user.done_chdir = true;
-	}
-
-	if (CHECK_DEBUGLVL(DBGLVL_INFO)) {
-		struct smb_filename *cwdfname = vfs_GetWd(talloc_tos(), conn);
-		if (cwdfname == NULL) {
-			return false;
-		}
-		DBG_INFO("Impersonated user: uid=(%d,%d), gid=(%d,%d), cwd=[%s]\n",
-			 (int)getuid(),
-			 (int)geteuid(),
-			 (int)getgid(),
-			 (int)getegid(),
-			 cwdfname->base_name);
-		TALLOC_FREE(cwdfname);
-	}
-
 	return true;
 }
 
-bool change_to_user(connection_struct *conn, uint64_t vuid)
+/**
+ * Impersonate user and change directory to service
+ *
+ * change_to_user_and_service() is used to impersonate the user associated with
+ * the given vuid and to change the working directory of the process to the
+ * service base directory.
+ **/
+bool change_to_user_and_service(connection_struct *conn, uint64_t vuid)
 {
-	struct user_struct *vuser;
 	int snum = SNUM(conn);
+	struct auth_session_info *si = NULL;
+	NTSTATUS status;
+	bool ok;
 
-	if (!conn) {
-		DEBUG(2,("Connection not open\n"));
-		return(False);
+	if (conn == NULL) {
+		DBG_WARNING("Connection not open\n");
+		return false;
 	}
 
-	vuser = get_valid_user_struct(conn->sconn, vuid);
-	if (vuser == NULL) {
-		/* Invalid vuid sent */
+	status = smbXsrv_session_info_lookup(conn->sconn->client,
+					     vuid,
+					     &si);
+	if (!NT_STATUS_IS_OK(status)) {
 		DBG_WARNING("Invalid vuid %llu used on share %s.\n",
 			    (unsigned long long)vuid,
 			    lp_const_servicename(snum));
 		return false;
 	}
 
-	return change_to_user_internal(conn, vuser->session_info, vuid);
+	ok = change_to_user_impersonate(conn, si, vuid);
+	if (!ok) {
+		return false;
+	}
+
+	if (conn->tcon_done) {
+		ok = chdir_current_service(conn);
+		if (!ok) {
+			return false;
+		}
+	}
+
+	print_impersonation_info(conn);
+	return true;
 }
 
-bool change_to_user_by_fsp(struct files_struct *fsp)
+/**
+ * Impersonate user and change directory to service
+ *
+ * change_to_user_and_service_by_fsp() is used to impersonate the user
+ * associated with the given vuid and to change the working directory of the
+ * process to the service base directory.
+ **/
+bool change_to_user_and_service_by_fsp(struct files_struct *fsp)
 {
-	return change_to_user(fsp->conn, fsp->vuid);
-}
-
-static bool change_to_user_by_session(connection_struct *conn,
-				      const struct auth_session_info *session_info)
-{
-	SMB_ASSERT(conn != NULL);
-	SMB_ASSERT(session_info != NULL);
-
-	return change_to_user_internal(conn, session_info, UID_FIELD_INVALID);
+	return change_to_user_and_service(fsp->conn, fsp->vuid);
 }
 
 /****************************************************************************
@@ -456,8 +499,6 @@ bool smbd_change_to_root_user(void)
 
 	current_user.conn = NULL;
 	current_user.vuid = UID_FIELD_INVALID;
-	current_user.need_chdir = false;
-	current_user.done_chdir = false;
 
 	return(True);
 }
@@ -519,8 +560,6 @@ static void push_conn_ctx(void)
 
 	ctx_p->conn = current_user.conn;
 	ctx_p->vuid = current_user.vuid;
-	ctx_p->need_chdir = current_user.need_chdir;
-	ctx_p->done_chdir = current_user.done_chdir;
 	ctx_p->user_info = current_user_info;
 
 	DEBUG(4, ("push_conn_ctx(%llu) : conn_ctx_stack_ndx = %d\n",
@@ -547,25 +586,8 @@ static void pop_conn_ctx(void)
 			      ctx_p->user_info.unix_name,
 			      ctx_p->user_info.domain);
 
-	/*
-	 * Check if the current context did a chdir_current_service()
-	 * and restore the cwd_fname of the previous context
-	 * if needed.
-	 */
-	if (current_user.done_chdir && ctx_p->need_chdir) {
-		int ret;
-
-		ret = vfs_ChDir(ctx_p->conn, ctx_p->conn->cwd_fname);
-		if (ret != 0) {
-			DBG_ERR("vfs_ChDir() failed!\n");
-			smb_panic("vfs_ChDir() failed!\n");
-		}
-	}
-
 	current_user.conn = ctx_p->conn;
 	current_user.vuid = ctx_p->vuid;
-	current_user.need_chdir = ctx_p->need_chdir;
-	current_user.done_chdir = ctx_p->done_chdir;
 
 	*ctx_p = (struct conn_ctx) {
 		.vuid = UID_FIELD_INVALID,
@@ -603,36 +625,38 @@ void smbd_unbecome_root(void)
  Saves and restores the connection context.
 ****************************************************************************/
 
-bool become_user(connection_struct *conn, uint64_t vuid)
+bool become_user_without_service(connection_struct *conn, uint64_t vuid)
 {
-	if (!push_sec_ctx())
-		return False;
+	struct auth_session_info *session_info = NULL;
+	int snum = SNUM(conn);
+	NTSTATUS status;
+	bool ok;
 
-	push_conn_ctx();
-
-	if (!change_to_user(conn, vuid)) {
-		pop_sec_ctx();
-		pop_conn_ctx();
-		return False;
+	if (conn == NULL) {
+		DBG_WARNING("Connection not open\n");
+		return false;
 	}
 
-	return True;
-}
-
-bool become_user_by_fsp(struct files_struct *fsp)
-{
-	return become_user(fsp->conn, fsp->vuid);
-}
-
-bool become_user_by_session(connection_struct *conn,
-			    const struct auth_session_info *session_info)
-{
-	if (!push_sec_ctx())
+	status = smbXsrv_session_info_lookup(conn->sconn->client,
+					     vuid,
+					     &session_info);
+	if (!NT_STATUS_IS_OK(status)) {
+		/* Invalid vuid sent */
+		DBG_WARNING("Invalid vuid %llu used on share %s.\n",
+			    (unsigned long long)vuid,
+			    lp_const_servicename(snum));
 		return false;
+	}
+
+	ok = push_sec_ctx();
+	if (!ok) {
+		return false;
+	}
 
 	push_conn_ctx();
 
-	if (!change_to_user_by_session(conn, session_info)) {
+	ok = change_to_user_impersonate(conn, session_info, vuid);
+	if (!ok) {
 		pop_sec_ctx();
 		pop_conn_ctx();
 		return false;
@@ -641,7 +665,37 @@ bool become_user_by_session(connection_struct *conn,
 	return true;
 }
 
-bool unbecome_user(void)
+bool become_user_without_service_by_fsp(struct files_struct *fsp)
+{
+	return become_user_without_service(fsp->conn, fsp->vuid);
+}
+
+bool become_user_without_service_by_session(connection_struct *conn,
+			    const struct auth_session_info *session_info)
+{
+	bool ok;
+
+	SMB_ASSERT(conn != NULL);
+	SMB_ASSERT(session_info != NULL);
+
+	ok = push_sec_ctx();
+	if (!ok) {
+		return false;
+	}
+
+	push_conn_ctx();
+
+	ok = change_to_user_impersonate(conn, session_info, UID_FIELD_INVALID);
+	if (!ok) {
+		pop_sec_ctx();
+		pop_conn_ctx();
+		return false;
+	}
+
+	return true;
+}
+
+bool unbecome_user_without_service(void)
 {
 	pop_sec_ctx();
 	pop_conn_ctx();

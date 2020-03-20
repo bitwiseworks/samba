@@ -15,8 +15,10 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 #
 
-import os, ldb
+import os
+import ldb
 from samba.tests.samba_tool.base import SambaToolCmdTest
+
 
 class FsmoCmdTestCase(SambaToolCmdTest):
     """Test for samba-tool fsmo show subcommand"""
@@ -26,17 +28,17 @@ class FsmoCmdTestCase(SambaToolCmdTest):
         (result, out, err) = self.runsubcmd("fsmo", "show")
 
         self.assertCmdSuccess(result, out, err)
-        self.assertEquals(err,"","Shouldn't be any error messages")
+        self.assertEquals(err, "", "Shouldn't be any error messages")
 
         # Check that the output is sensible
         samdb = self.getSamDB("-H", "ldap://%s" % os.environ["SERVER"],
-            "-U%s%%%s" % (os.environ["USERNAME"], os.environ["PASSWORD"]))
+                              "-U%s%%%s" % (os.environ["USERNAME"], os.environ["PASSWORD"]))
 
         try:
             res = samdb.search(base=ldb.Dn(samdb, "CN=Infrastructure,DC=DomainDnsZones") + samdb.get_default_basedn(),
-                       scope=ldb.SCOPE_BASE, attrs=["fsmoRoleOwner"])
+                               scope=ldb.SCOPE_BASE, attrs=["fsmoRoleOwner"])
 
-            self.assertTrue("DomainDnsZonesMasterRole owner: " + res[0]["fsmoRoleOwner"][0] in out)
+            self.assertTrue("DomainDnsZonesMasterRole owner: " + str(res[0]["fsmoRoleOwner"][0]) in out)
         except ldb.LdbError as e:
             (enum, string) = e.args
             if enum == ldb.ERR_NO_SUCH_OBJECT:
@@ -47,4 +49,4 @@ class FsmoCmdTestCase(SambaToolCmdTest):
         res = samdb.search(base=samdb.get_default_basedn(),
                            scope=ldb.SCOPE_BASE, attrs=["fsmoRoleOwner"])
 
-        self.assertTrue("DomainNamingMasterRole owner: " + res[0]["fsmoRoleOwner"][0] in out)
+        self.assertTrue("DomainNamingMasterRole owner: " + str(res[0]["fsmoRoleOwner"][0]) in out)

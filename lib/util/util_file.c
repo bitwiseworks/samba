@@ -24,6 +24,8 @@
 #include "system/filesys.h"
 #include <talloc.h>
 #include "lib/util/samba_util.h"
+#include "lib/util/sys_popen.h"
+#include "lib/util/sys_rw.h"
 #include "lib/util/debug.h"
 
 /**
@@ -72,7 +74,7 @@ _PUBLIC_ char *afdgets(int fd, TALLOC_CTX *mem_ctx, size_t hint)
 
 		offset += ret;
 
-	} while (ret == hint);
+	} while ((size_t)ret == hint);
 
 	data[offset] = '\0';
 
@@ -138,7 +140,7 @@ char *fgets_slash(TALLOC_CTX *mem_ctx, char *s2, size_t maxlen, FILE *f)
 			    s[len] = 0;
 		}
 		if ((s2 == NULL) && (len > maxlen-3)) {
-			int m;
+			size_t m;
 			char *t;
 
 			m = maxlen * 2;
@@ -168,30 +170,63 @@ load a file into memory from a fd.
 **/
 _PUBLIC_ char *fd_load(int fd, size_t *psize, size_t maxsize, TALLOC_CTX *mem_ctx)
 {
-	struct stat sbuf;
-	char *p;
-	size_t size;
+	FILE *file;
+	char *p = NULL;
+	size_t size = 0;
+	size_t chunk = 1024;
+	int err;
 
-	if (fstat(fd, &sbuf) != 0) return NULL;
-
-	size = sbuf.st_size;
-
-	if (maxsize) {
-		size = MIN(size, maxsize);
+	if (maxsize == 0) {
+		maxsize = SIZE_MAX;
 	}
 
-	p = (char *)talloc_size(mem_ctx, size+1);
-	if (!p) return NULL;
-
-	if (read(fd, p, size) != size) {
-		talloc_free(p);
+	file = fdopen(fd, "r");
+	if (file == NULL) {
 		return NULL;
 	}
-	p[size] = 0;
 
-	if (psize) *psize = size;
+	while (size < maxsize) {
+		size_t newbufsize;
+		size_t nread;
 
+		chunk = MIN(chunk, (maxsize - size));
+
+		newbufsize = size + (chunk+1); /* chunk+1 can't overflow */
+		if (newbufsize < size) {
+			goto fail; /* overflow */
+		}
+
+		p = talloc_realloc(mem_ctx, p, char, newbufsize);
+		if (p == NULL) {
+			goto fail;
+		}
+
+		nread = fread(p+size, 1, chunk, file);
+		size += nread;
+
+		if (nread != chunk) {
+			break;
+		}
+	}
+
+	err = ferror(file);
+	if (err != 0) {
+		goto fail;
+	}
+
+	p[size] = '\0';
+
+	if (psize != NULL) {
+		*psize = size;
+	}
+
+	fclose(file);
 	return p;
+
+fail:
+	TALLOC_FREE(p);
+	fclose(file);
+	return NULL;
 }
 
 /**
@@ -220,7 +255,7 @@ parse a buffer into lines
 **/
 char **file_lines_parse(char *p, size_t size, int *numlines, TALLOC_CTX *mem_ctx)
 {
-	int i;
+	unsigned int i;
 	char *s, **ret;
 
 	if (!p) return NULL;
@@ -238,11 +273,11 @@ char **file_lines_parse(char *p, size_t size, int *numlines, TALLOC_CTX *mem_ctx
 	talloc_steal(ret, p);
 
 	ret[0] = p;
-	for (s = p, i=0; s < p+size; s++) {
+	for (s = p, i=1; s < p+size; s++) {
 		if (s[0] == '\n') {
 			s[0] = 0;
-			i++;
 			ret[i] = s+1;
+			i++;
 		}
 		if (s[0] == '\r') s[0] = 0;
 	}
@@ -292,12 +327,14 @@ _PUBLIC_ char **fd_lines_load(int fd, int *numlines, size_t maxsize, TALLOC_CTX 
 _PUBLIC_ bool file_save_mode(const char *fname, const void *packet,
 			     size_t length, mode_t mode)
 {
+	ssize_t num_written;
 	int fd;
-	fd = open(fname, O_WRONLY|O_CREAT|O_TRUNC, mode);
+	fd = open(fname, O_WRONLY|O_CREAT|O_EXCL, mode);
 	if (fd == -1) {
 		return false;
 	}
-	if (write(fd, packet, length) != (size_t)length) {
+	num_written = write(fd, packet, length);
+	if (num_written == -1 || (size_t)num_written != length) {
 		close(fd);
 		return false;
 	}
@@ -345,20 +382,93 @@ _PUBLIC_ int fdprintf(int fd, const char *format, ...)
  */
 bool file_compare(const char *path1, const char *path2)
 {
-	size_t size1, size2;
-	char *p1, *p2;
-	TALLOC_CTX *mem_ctx = talloc_new(NULL);
+	FILE *f1 = NULL, *f2 = NULL;
+	uint8_t buf1[1024], buf2[1024];
+	bool ret = false;
 
-	p1 = file_load(path1, &size1, 0, mem_ctx);
-	p2 = file_load(path2, &size2, 0, mem_ctx);
-	if (!p1 || !p2 || size1 != size2) {
-		talloc_free(mem_ctx);
-		return false;
+	f1 = fopen(path1, "r");
+	if (f1 == NULL) {
+		goto done;
 	}
-	if (memcmp(p1, p2, size1) != 0) {
-		talloc_free(mem_ctx);
-		return false;
+	f2 = fopen(path2, "r");
+	if (f2 == NULL) {
+		goto done;
 	}
-	talloc_free(mem_ctx);
-	return true;
+
+	while (!feof(f1)) {
+		size_t n1 = fread(buf1, 1, sizeof(buf1), f1);
+		size_t n2 = fread(buf2, 1, sizeof(buf2), f2);
+
+		if (n1 != n2) {
+			goto done;
+		}
+		if (n1 == 0) {
+			ret = (feof(f1) && feof(f2));
+			goto done;
+		}
+		if (memcmp(buf1, buf2, n1) != 0) {
+			goto done;
+		}
+		if (n1 < sizeof(buf1)) {
+			bool has_error = (ferror(f1) || ferror(f2));
+			if (has_error) {
+				goto done;
+			}
+		}
+	}
+	ret = true;
+done:
+	if (f2 != NULL) {
+		fclose(f2);
+	}
+	if (f1 != NULL) {
+		fclose(f1);
+	}
+	return ret;
+}
+
+/**
+ Load from a pipe into memory.
+**/
+char *file_ploadv(char * const argl[], size_t *size)
+{
+	int fd, n;
+	char *p = NULL;
+	char buf[1024];
+	size_t total;
+
+	fd = sys_popenv(argl);
+	if (fd == -1) {
+		return NULL;
+	}
+
+	total = 0;
+
+	while ((n = sys_read(fd, buf, sizeof(buf))) > 0) {
+		p = talloc_realloc(NULL, p, char, total + n + 1);
+		if (p == NULL) {
+		        DBG_ERR("failed to expand buffer!\n");
+			close(fd);
+			return NULL;
+		}
+		memcpy(p+total, buf, n);
+		total += n;
+	}
+
+	if (p != NULL) {
+		p[total] = 0;
+	}
+
+	/*
+	 * FIXME: Perhaps ought to check that the command completed
+	 * successfully (returned 0); if not the data may be
+	 * truncated.
+	 */
+	sys_pclose(fd);
+
+	if (size) {
+		*size = total;
+	}
+
+	return p;
 }

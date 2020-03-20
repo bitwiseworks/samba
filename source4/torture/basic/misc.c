@@ -451,6 +451,19 @@ enum benchrw_stage {
 	FINISHED
 };
 
+struct bench_params {
+		struct unclist{
+			const char *host;
+			const char *share;
+		} **unc;
+		const char *workgroup;
+		int retry;
+		unsigned int writeblocks;
+		unsigned int blocksize;
+		unsigned int writeratio;
+		int num_parallel_requests;
+};
+
 struct benchrw_state {
 	struct torture_context *tctx;
 	char *dname;
@@ -465,18 +478,7 @@ struct benchrw_state {
 	int num_parallel_requests;
 	void *req_params;
 	enum benchrw_stage mode;
-	struct params{
-		struct unclist{
-			const char *host;
-			const char *share;
-		} **unc;
-		const char *workgroup;
-		int retry;
-		unsigned int writeblocks;
-		unsigned int blocksize;
-		unsigned int writeratio;
-		int num_parallel_requests;
-	} *lpcfg_params;
+	struct bench_params *lpcfg_params;
 };
 
 /* 
@@ -484,7 +486,7 @@ struct benchrw_state {
  	return number of unclist entries
 */
 static int init_benchrw_params(struct torture_context *tctx,
-			       struct params *lpar)
+			       struct bench_params *lpar)
 {
 	char **unc_list = NULL;
 	int num_unc_names = 0, conn_index=0, empty_lines=0;
@@ -892,7 +894,7 @@ bool run_benchrw(struct torture_context *tctx)
 	int i , num_unc_names;
 	struct tevent_context 	*ev	;	
 	struct composite_context *req1;
-	struct params lpparams;
+	struct bench_params lpparams;
 	union smb_mkdir parms;
 	int finished = 0;
 	bool success=true;
@@ -931,8 +933,8 @@ bool run_benchrw(struct torture_context *tctx)
 			switch (state[i]->mode){
 			/*open multiple connections with the same userid */
 			case START:
-				smb_con = talloc(
-					tctx,struct smb_composite_connect) ;
+				smb_con = talloc_zero(
+					tctx,struct smb_composite_connect);
 				state[i]->req_params=smb_con; 
 				state[i]->mode=OPEN_CONNECTION;
 				req1 = torture_connect_async(

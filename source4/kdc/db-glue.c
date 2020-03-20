@@ -359,10 +359,10 @@ static krb5_error_code samba_kdc_message2entry_keys(krb5_context context,
 
 	/* If UF_USE_DES_KEY_ONLY has been set, then don't allow use of the newer enc types */
 	if (userAccountControl & UF_USE_DES_KEY_ONLY) {
-		supported_enctypes = ENC_CRC32|ENC_RSA_MD5;
+		supported_enctypes = 0;
 	} else {
 		/* Otherwise, add in the default enc types */
-		supported_enctypes |= ENC_CRC32 | ENC_RSA_MD5 | ENC_RC4_HMAC_MD5;
+		supported_enctypes |= ENC_RC4_HMAC_MD5;
 	}
 
 	/* Is this the krbtgt or a RODC krbtgt */
@@ -914,7 +914,7 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 			krb5_clear_error_message(context);
 			goto out;
 		}
-	} else if (flags & SDB_F_CANON && flags & SDB_F_FOR_AS_REQ) {
+	} else if ((flags & SDB_F_CANON) && (flags & SDB_F_FOR_AS_REQ)) {
 		/*
 		 * SDB_F_CANON maps from the canonicalize flag in the
 		 * packet, and has a different meaning between AS-REQ
@@ -1030,7 +1030,8 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 		entry_ex->entry.flags.invalid = 0;
 		entry_ex->entry.flags.server = 1;
 
-		realm = smb_krb5_principal_get_realm(context, principal);
+		realm = smb_krb5_principal_get_realm(
+			mem_ctx, context, principal);
 		if (realm == NULL) {
 			ret = ENOMEM;
 			goto out;
@@ -1048,7 +1049,7 @@ static krb5_error_code samba_kdc_message2entry(krb5_context context,
 			entry_ex->entry.flags.change_pw = 1;
 		}
 
-		SAFE_FREE(realm);
+		TALLOC_FREE(realm);
 
 		entry_ex->entry.flags.client = 0;
 		entry_ex->entry.flags.forwardable = 1;
@@ -1655,8 +1656,8 @@ static krb5_error_code samba_kdc_lookup_client(krb5_context context,
 		}
 
 		num_comp = krb5_princ_size(context, fallback_principal);
-		fallback_realm = smb_krb5_principal_get_realm(context,
-							      fallback_principal);
+		fallback_realm = smb_krb5_principal_get_realm(
+			mem_ctx, context, fallback_principal);
 		if (fallback_realm == NULL) {
 			krb5_free_principal(context, fallback_principal);
 			return ENOMEM;
@@ -1669,7 +1670,7 @@ static krb5_error_code samba_kdc_lookup_client(krb5_context context,
 						context, fallback_principal, 0);
 			if (fallback_account == NULL) {
 				krb5_free_principal(context, fallback_principal);
-				SAFE_FREE(fallback_realm);
+				TALLOC_FREE(fallback_realm);
 				return ENOMEM;
 			}
 
@@ -1687,7 +1688,7 @@ static krb5_error_code samba_kdc_lookup_client(krb5_context context,
 			with_dollar = talloc_asprintf(mem_ctx, "%s$",
 						     fallback_account);
 			if (with_dollar == NULL) {
-				SAFE_FREE(fallback_realm);
+				TALLOC_FREE(fallback_realm);
 				return ENOMEM;
 			}
 			TALLOC_FREE(fallback_account);
@@ -1698,11 +1699,11 @@ static krb5_error_code samba_kdc_lookup_client(krb5_context context,
 						      with_dollar, NULL);
 			TALLOC_FREE(with_dollar);
 			if (ret != 0) {
-				SAFE_FREE(fallback_realm);
+				TALLOC_FREE(fallback_realm);
 				return ret;
 			}
 		}
-		SAFE_FREE(fallback_realm);
+		TALLOC_FREE(fallback_realm);
 
 		if (fallback_principal != NULL) {
 			char *fallback_string = NULL;
@@ -1774,17 +1775,13 @@ static krb5_error_code samba_kdc_fetch_krbtgt(krb5_context context,
 	krb5_error_code ret;
 	struct ldb_message *msg = NULL;
 	struct ldb_dn *realm_dn = ldb_get_default_basedn(kdc_db_ctx->samdb);
-	char *realm_from_princ, *realm_from_princ_malloc;
+	char *realm_from_princ;
 	char *realm_princ_comp = smb_krb5_principal_get_comp_string(mem_ctx, context, principal, 1);
 
-	realm_from_princ_malloc = smb_krb5_principal_get_realm(context, principal);
-	if (realm_from_princ_malloc == NULL) {
-		/* can't happen */
-		return SDB_ERR_NOENTRY;
-	}
-	realm_from_princ = talloc_strdup(mem_ctx, realm_from_princ_malloc);
-	free(realm_from_princ_malloc);
+	realm_from_princ = smb_krb5_principal_get_realm(
+		mem_ctx, context, principal);
 	if (realm_from_princ == NULL) {
+		/* can't happen */
 		return SDB_ERR_NOENTRY;
 	}
 
@@ -2118,7 +2115,6 @@ static krb5_error_code samba_kdc_lookup_realm(krb5_context context,
 	TALLOC_CTX *frame = talloc_stackframe();
 	NTSTATUS status;
 	krb5_error_code ret;
-	char *_realm = NULL;
 	bool check_realm = false;
 	const char *realm = NULL;
 	struct dsdb_trust_routing_table *trt = NULL;
@@ -2145,8 +2141,8 @@ static krb5_error_code samba_kdc_lookup_realm(krb5_context context,
 		return 0;
 	}
 
-	_realm = smb_krb5_principal_get_realm(context, principal);
-	if (_realm == NULL) {
+	realm = smb_krb5_principal_get_realm(frame, context, principal);
+	if (realm == NULL) {
 		TALLOC_FREE(frame);
 		return ENOMEM;
 	}
@@ -2154,21 +2150,13 @@ static krb5_error_code samba_kdc_lookup_realm(krb5_context context,
 	/*
 	 * The requested realm needs to be our own
 	 */
-	ok = lpcfg_is_my_domain_or_realm(kdc_db_ctx->lp_ctx, _realm);
+	ok = lpcfg_is_my_domain_or_realm(kdc_db_ctx->lp_ctx, realm);
 	if (!ok) {
 		/*
 		 * The request is not for us...
 		 */
-		SAFE_FREE(_realm);
 		TALLOC_FREE(frame);
 		return SDB_ERR_NOENTRY;
-	}
-
-	realm = talloc_strdup(frame, _realm);
-	SAFE_FREE(_realm);
-	if (realm == NULL) {
-		TALLOC_FREE(frame);
-		return ENOMEM;
 	}
 
 	if (smb_krb5_principal_get_type(context, principal) == KRB5_NT_ENTERPRISE_PRINCIPAL) {
@@ -2196,16 +2184,11 @@ static krb5_error_code samba_kdc_lookup_realm(krb5_context context,
 			return ret;
 		}
 
-		enterprise_realm = smb_krb5_principal_get_realm(context,
-							enterprise_principal);
+		enterprise_realm = smb_krb5_principal_get_realm(
+			frame, context, enterprise_principal);
 		krb5_free_principal(context, enterprise_principal);
 		if (enterprise_realm != NULL) {
-			realm = talloc_strdup(frame, enterprise_realm);
-			SAFE_FREE(enterprise_realm);
-			if (realm == NULL) {
-				TALLOC_FREE(frame);
-				return ENOMEM;
-			}
+			realm = enterprise_realm;
 		}
 	}
 
@@ -2610,10 +2593,10 @@ samba_kdc_check_pkinit_ms_upn_match(krb5_context context,
 	 * comparison */
 	if (!(orig_sid && target_sid && dom_sid_equal(orig_sid, target_sid))) {
 		talloc_free(mem_ctx);
-#ifdef KRB5_KDC_ERR_CLIENT_NAME_MISMATCH /* Heimdal */
-		return KRB5_KDC_ERR_CLIENT_NAME_MISMATCH;
-#elif defined(KRB5KDC_ERR_CLIENT_NAME_MISMATCH) /* MIT */
+#if defined(KRB5KDC_ERR_CLIENT_NAME_MISMATCH) /* MIT */
 		return KRB5KDC_ERR_CLIENT_NAME_MISMATCH;
+#else /* Heimdal (where this is an enum) */
+		return KRB5_KDC_ERR_CLIENT_NAME_MISMATCH;
 #endif
 	}
 

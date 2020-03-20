@@ -21,6 +21,7 @@ from __future__ import print_function
 
 import re
 
+
 def __read_folded_line(f, buffer):
     """Read a line from an LDIF file, unfolding it"""
     line = buffer
@@ -53,9 +54,11 @@ def __read_folded_line(f, buffer):
 
     return (line, buffer)
 
+
 # Only compile regexp once.
 # Will not match options after the attribute type.
 attr_type_re = re.compile("^([A-Za-z][A-Za-z0-9-]*):")
+
 
 def __read_raw_entries(f):
     """Read an LDIF entry, only unfolding lines"""
@@ -91,6 +94,7 @@ def __read_raw_entries(f):
         if l == "":
             break
 
+
 def fix_dn(dn):
     """Fix a string DN to use ${CONFIGDN}"""
 
@@ -99,6 +103,7 @@ def fix_dn(dn):
         return dn.replace("<Configuration NC Distinguished Name>", "${CONFIGDN}")
     else:
         return dn
+
 
 def __write_ldif_one(entry):
     """Write out entry as LDIF"""
@@ -112,6 +117,7 @@ def __write_ldif_one(entry):
             out.append("%s:: %s" % (l[0], l[1]))
 
     return "\n".join(out)
+
 
 def __transform_entry(entry):
     """Perform required transformations to the Microsoft-provided LDIF"""
@@ -164,16 +170,19 @@ def __transform_entry(entry):
 
     return entry
 
+
 def read_ms_ldif(filename):
     """Read and transform Microsoft-provided LDIF file."""
 
     out = []
 
-    f = open(filename, "rU")
+    from io import open
+    f = open(filename, "r", encoding='latin-1')
     for entry in __read_raw_entries(f):
         out.append(__write_ldif_one(__transform_entry(entry)))
 
     return "\n\n".join(out) + "\n\n"
+
 
 if __name__ == '__main__':
     import sys
@@ -185,4 +194,3 @@ if __name__ == '__main__':
         sys.exit(1)
 
     print(read_ms_ldif(display_specifiers_file))
-

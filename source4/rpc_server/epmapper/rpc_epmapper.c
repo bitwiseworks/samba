@@ -24,12 +24,12 @@
 #include "librpc/gen_ndr/ndr_epmapper.h"
 #include "rpc_server/dcerpc_server.h"
 
-#define DCESRV_INTERFACE_EPMAPPER_BIND(call, iface) \
-       dcesrv_interface_epmapper_bind(call, iface)
-static NTSTATUS dcesrv_interface_epmapper_bind(struct dcesrv_call_state *dce_call,
+#define DCESRV_INTERFACE_EPMAPPER_BIND(context, iface) \
+       dcesrv_interface_epmapper_bind(context, iface)
+static NTSTATUS dcesrv_interface_epmapper_bind(struct dcesrv_connection_context *context,
 					     const struct dcesrv_interface *iface)
 {
-	return dcesrv_interface_bind_allow_connect(dce_call, iface);
+	return dcesrv_interface_bind_allow_connect(context, iface);
 }
 
 typedef uint32_t error_status_t;
@@ -69,7 +69,7 @@ static uint32_t build_ep_list(TALLOC_CTX *mem_ctx,
 			if (!*eps) {
 				return 0;
 			}
-			(*eps)[total].name = iface->iface.name;
+			(*eps)[total].name = iface->iface->name;
 
 			description = dcerpc_binding_dup(*eps, d->ep_description);
 			if (description == NULL) {
@@ -77,7 +77,7 @@ static uint32_t build_ep_list(TALLOC_CTX *mem_ctx,
 			}
 
 			status = dcerpc_binding_set_abstract_syntax(description,
-							&iface->iface.syntax_id);
+						&iface->iface->syntax_id);
 			if (!NT_STATUS_IS_OK(status)) {
 				return 0;
 			}
@@ -85,8 +85,9 @@ static uint32_t build_ep_list(TALLOC_CTX *mem_ctx,
 			status = dcerpc_binding_build_tower(*eps, description, &(*eps)[total].ep);
 			TALLOC_FREE(description);
 			if (!NT_STATUS_IS_OK(status)) {
-				DEBUG(1, ("Unable to build tower for %s - %s\n",
-					  iface->iface.name, nt_errstr(status)));
+				DBG_ERR("Unable to build tower for %s - %s\n",
+					iface->iface->name,
+					nt_errstr(status));
 				continue;
 			}
 			total++;

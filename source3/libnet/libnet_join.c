@@ -140,10 +140,13 @@ static ADS_STATUS libnet_connect_ads(const char *dns_domain_name,
 
 	my_ads = ads_init(dns_domain_name,
 			  netbios_domain_name,
-			  dc_name);
+			  dc_name,
+			  ADS_SASL_SEAL);
 	if (!my_ads) {
 		return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
 	}
+
+	my_ads->auth.flags |= ADS_AUTH_ALLOW_NTLMSSP;
 
 	if (user_name) {
 		SAFE_FREE(my_ads->auth.user_name);
@@ -205,7 +208,19 @@ static ADS_STATUS libnet_join_connect_ads(TALLOC_CTX *mem_ctx,
 		password = r->in.machine_password;
 		ccname = "MEMORY:libnet_join_machine_creds";
 	} else {
+		char *p = NULL;
+
 		username = r->in.admin_account;
+
+		p = strchr(r->in.admin_account, '@');
+		if (p == NULL) {
+			username = talloc_asprintf(mem_ctx, "%s@%s",
+						   r->in.admin_account,
+						   r->in.admin_domain);
+		}
+		if (username == NULL) {
+			return ADS_ERROR(LDAP_NO_MEMORY);
+		}
 		password = r->in.admin_password;
 
 		/*
@@ -323,13 +338,25 @@ static ADS_STATUS libnet_join_precreate_machine_acct(TALLOC_CTX *mem_ctx,
 	/* Attempt to create the machine account and bail if this fails.
 	   Assume that the admin wants exactly what they requested */
 
+	if (r->in.machine_password == NULL) {
+		r->in.machine_password =
+			trust_pw_new_value(mem_ctx,
+					   r->in.secure_channel_type,
+					   SEC_ADS);
+		if (r->in.machine_password == NULL) {
+			return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		}
+	}
+
 	status = ads_create_machine_acct(r->in.ads,
 					 r->in.machine_name,
+					 r->in.machine_password,
 					 r->in.account_ou,
-					 r->in.desired_encryption_types);
+					 r->in.desired_encryption_types,
+					 r->out.dns_domain_name);
 
 	if (ADS_ERR_OK(status)) {
-		DEBUG(1,("machine account creation created\n"));
+		DBG_WARNING("Machine account successfully created\n");
 		return status;
 	} else  if ((status.error_type == ENUM_ADS_ERROR_LDAP) &&
 		    (status.err.rc == LDAP_ALREADY_EXISTS)) {
@@ -337,7 +364,7 @@ static ADS_STATUS libnet_join_precreate_machine_acct(TALLOC_CTX *mem_ctx,
 	}
 
 	if (!ADS_ERR_OK(status)) {
-		DEBUG(1,("machine account creation failed\n"));
+		DBG_WARNING("Failed to create machine account\n");
 		return status;
 	}
 
@@ -456,6 +483,19 @@ static ADS_STATUS libnet_join_get_machine_spns(TALLOC_CTX *mem_ctx,
 	return status;
 }
 
+static ADS_STATUS add_uniq_spn(TALLOC_CTX *mem_ctx, const  char *spn,
+			       const char ***array, size_t *num)
+{
+	bool ok = ads_element_in_array(*array, *num, spn);
+	if (!ok) {
+		ok = add_string_to_array(mem_ctx, spn, array, num);
+		if (!ok) {
+			return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		}
+	}
+	return ADS_SUCCESS;
+}
+
 /****************************************************************
  Set a machines dNSHostName and servicePrincipalName attributes
 ****************************************************************/
@@ -463,14 +503,15 @@ static ADS_STATUS libnet_join_get_machine_spns(TALLOC_CTX *mem_ctx,
 static ADS_STATUS libnet_join_set_machine_spn(TALLOC_CTX *mem_ctx,
 					      struct libnet_JoinCtx *r)
 {
+	TALLOC_CTX *frame = talloc_stackframe();
 	ADS_STATUS status;
 	ADS_MODLIST mods;
 	fstring my_fqdn;
 	const char **spn_array = NULL;
 	size_t num_spns = 0;
 	char *spn = NULL;
-	bool ok;
 	const char **netbios_aliases = NULL;
+	const char **addl_hostnames = NULL;
 
 	/* Find our DN */
 
@@ -479,7 +520,7 @@ static ADS_STATUS libnet_join_set_machine_spn(TALLOC_CTX *mem_ctx,
 		return status;
 	}
 
-	status = libnet_join_get_machine_spns(mem_ctx,
+	status = libnet_join_get_machine_spns(frame,
 					      r,
 					      discard_const_p(char **, &spn_array),
 					      &num_spns);
@@ -489,134 +530,137 @@ static ADS_STATUS libnet_join_set_machine_spn(TALLOC_CTX *mem_ctx,
 
 	/* Windows only creates HOST/shortname & HOST/fqdn. */
 
-	spn = talloc_asprintf(mem_ctx, "HOST/%s", r->in.machine_name);
-	if (!spn) {
-		return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+	spn = talloc_asprintf(frame, "HOST/%s", r->in.machine_name);
+	if (spn == NULL) {
+		status = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		goto done;
 	}
 	if (!strupper_m(spn)) {
-		return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		status = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		goto done;
 	}
 
-	ok = ads_element_in_array(spn_array, num_spns, spn);
-	if (!ok) {
-		ok = add_string_to_array(spn_array, spn,
-					 &spn_array, &num_spns);
-		if (!ok) {
-			return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
-		}
+	status = add_uniq_spn(frame, spn, &spn_array, &num_spns);
+	if (!ADS_ERR_OK(status)) {
+		goto done;
 	}
 
-	if (!name_to_fqdn(my_fqdn, r->in.machine_name)
-	    || (strchr(my_fqdn, '.') == NULL)) {
-		fstr_sprintf(my_fqdn, "%s.%s", r->in.machine_name,
-			     r->out.dns_domain_name);
-	}
+	fstr_sprintf(my_fqdn, "%s.%s", r->in.machine_name, lp_dnsdomain());
 
 	if (!strlower_m(my_fqdn)) {
-		return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		status = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		goto done;
 	}
 
-	if (!strequal(my_fqdn, r->in.machine_name)) {
-		spn = talloc_asprintf(mem_ctx, "HOST/%s", my_fqdn);
-		if (!spn) {
-			return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+	spn = talloc_asprintf(frame, "HOST/%s", my_fqdn);
+	if (spn == NULL) {
+		status = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		goto done;
+	}
+
+	status = add_uniq_spn(frame, spn, &spn_array, &num_spns);
+	if (!ADS_ERR_OK(status)) {
+		goto done;
+	}
+
+	for (netbios_aliases = lp_netbios_aliases();
+	     netbios_aliases != NULL && *netbios_aliases != NULL;
+	     netbios_aliases++) {
+		/*
+		 * Add HOST/NETBIOSNAME
+		 */
+		spn = talloc_asprintf(frame, "HOST/%s", *netbios_aliases);
+		if (spn == NULL) {
+			status = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+			goto done;
+		}
+		if (!strupper_m(spn)) {
+			status = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+			goto done;
 		}
 
-		ok = ads_element_in_array(spn_array, num_spns, spn);
-		if (!ok) {
-			ok = add_string_to_array(spn_array, spn,
-						 &spn_array, &num_spns);
-			if (!ok) {
-				return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
-			}
+		status = add_uniq_spn(frame, spn, &spn_array, &num_spns);
+		if (!ADS_ERR_OK(status)) {
+			goto done;
+		}
+
+		/*
+		 * Add HOST/netbiosname.domainname
+		 */
+		fstr_sprintf(my_fqdn, "%s.%s",
+			     *netbios_aliases,
+			     lp_dnsdomain());
+
+		spn = talloc_asprintf(frame, "HOST/%s", my_fqdn);
+		if (spn == NULL) {
+			status = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+			goto done;
+		}
+
+		status = add_uniq_spn(frame, spn, &spn_array, &num_spns);
+		if (!ADS_ERR_OK(status)) {
+			goto done;
 		}
 	}
 
-	netbios_aliases = lp_netbios_aliases();
-	if (netbios_aliases != NULL) {
-		for (; *netbios_aliases != NULL; netbios_aliases++) {
-			/*
-			 * Add HOST/NETBIOSNAME
-			 */
-			spn = talloc_asprintf(mem_ctx, "HOST/%s", *netbios_aliases);
-			if (spn == NULL) {
-				TALLOC_FREE(spn);
-				return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
-			}
-			if (!strupper_m(spn)) {
-				TALLOC_FREE(spn);
-				return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
-			}
+	for (addl_hostnames = lp_additional_dns_hostnames();
+	     addl_hostnames != NULL && *addl_hostnames != NULL;
+	     addl_hostnames++) {
 
-			ok = ads_element_in_array(spn_array, num_spns, spn);
-			if (ok) {
-				TALLOC_FREE(spn);
-				continue;
-			}
-			ok = add_string_to_array(spn_array, spn,
-						 &spn_array, &num_spns);
-			if (!ok) {
-				TALLOC_FREE(spn);
-				return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
-			}
-			TALLOC_FREE(spn);
+		spn = talloc_asprintf(frame, "HOST/%s", *addl_hostnames);
+		if (spn == NULL) {
+			status = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+			goto done;
+		}
 
-			/*
-			 * Add HOST/netbiosname.domainname
-			 */
-			if (r->out.dns_domain_name == NULL) {
-				continue;
-			}
-			fstr_sprintf(my_fqdn, "%s.%s",
-				     *netbios_aliases,
-				     r->out.dns_domain_name);
-
-			spn = talloc_asprintf(mem_ctx, "HOST/%s", my_fqdn);
-			if (spn == NULL) {
-				return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
-			}
-
-			ok = ads_element_in_array(spn_array, num_spns, spn);
-			if (ok) {
-				TALLOC_FREE(spn);
-				continue;
-			}
-			ok = add_string_to_array(spn_array, spn,
-						 &spn_array, &num_spns);
-			if (!ok) {
-				TALLOC_FREE(spn);
-				return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
-			}
-			TALLOC_FREE(spn);
+		status = add_uniq_spn(frame, spn, &spn_array, &num_spns);
+		if (!ADS_ERR_OK(status)) {
+			goto done;
 		}
 	}
 
 	/* make sure to NULL terminate the array */
-	spn_array = talloc_realloc(mem_ctx, spn_array, const char *, num_spns + 1);
+	spn_array = talloc_realloc(frame, spn_array, const char *, num_spns + 1);
 	if (spn_array == NULL) {
-		return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		status = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		goto done;
 	}
 	spn_array[num_spns] = NULL;
 
 	mods = ads_init_mods(mem_ctx);
 	if (!mods) {
-		return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		status = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		goto done;
 	}
 
 	/* fields of primary importance */
 
 	status = ads_mod_str(mem_ctx, &mods, "dNSHostName", my_fqdn);
 	if (!ADS_ERR_OK(status)) {
-		return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		goto done;
 	}
 
 	status = ads_mod_strlist(mem_ctx, &mods, "servicePrincipalName",
 				 spn_array);
 	if (!ADS_ERR_OK(status)) {
-		return ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		goto done;
 	}
 
-	return ads_gen_mod(r->in.ads, r->out.dn, mods);
+	addl_hostnames = lp_additional_dns_hostnames();
+	if (addl_hostnames != NULL && *addl_hostnames != NULL) {
+		status = ads_mod_strlist(mem_ctx, &mods,
+					 "msDS-AdditionalDnsHostName",
+					 addl_hostnames);
+		if (!ADS_ERR_OK(status)) {
+			goto done;
+		}
+	}
+
+	status = ads_gen_mod(r->in.ads, r->out.dn, mods);
+
+done:
+	TALLOC_FREE(frame);
+	return status;
 }
 
 /****************************************************************
@@ -941,6 +985,7 @@ static ADS_STATUS libnet_join_post_processing_ads_modify(TALLOC_CTX *mem_ctx,
 
 		if (r->in.ads->auth.ccache_name != NULL) {
 			ads_kdestroy(r->in.ads->auth.ccache_name);
+			r->in.ads->auth.ccache_name = NULL;
 		}
 
 		ads_destroy(&r->in.ads);
@@ -1508,9 +1553,12 @@ static NTSTATUS libnet_join_joindomain_rpc(TALLOC_CTX *mem_ctx,
 	 */
 	old_timeout = rpccli_set_timeout(pipe_hnd, 600000);
 
-	init_samr_CryptPasswordEx(r->in.machine_password,
-				  &session_key,
-				  &crypt_pwd_ex);
+	status = init_samr_CryptPasswordEx(r->in.machine_password,
+					   &session_key,
+					   &crypt_pwd_ex);
+	if (!NT_STATUS_IS_OK(status)) {
+		goto error;
+	}
 
 	user_info.info26.password = crypt_pwd_ex;
 	user_info.info26.password_expired = PASS_DONT_CHANGE_AT_NEXT_LOGON;
@@ -1525,9 +1573,12 @@ static NTSTATUS libnet_join_joindomain_rpc(TALLOC_CTX *mem_ctx,
 
 		/* retry with level 24 */
 
-		init_samr_CryptPassword(r->in.machine_password,
-					&session_key,
-					&crypt_pwd);
+		status = init_samr_CryptPassword(r->in.machine_password,
+						 &session_key,
+						 &crypt_pwd);
+		if (!NT_STATUS_IS_OK(status)) {
+			goto error;
+		}
 
 		user_info.info24.password = crypt_pwd;
 		user_info.info24.password_expired = PASS_DONT_CHANGE_AT_NEXT_LOGON;
@@ -1539,6 +1590,7 @@ static NTSTATUS libnet_join_joindomain_rpc(TALLOC_CTX *mem_ctx,
 						  &result);
 	}
 
+error:
 	old_timeout = rpccli_set_timeout(pipe_hnd, old_timeout);
 
 	if (!NT_STATUS_IS_OK(status)) {
@@ -2598,12 +2650,14 @@ static WERROR libnet_DomainJoin(TALLOC_CTX *mem_ctx,
 		}
 
 		/* The domain parameter is only used as modifier
-		 * to krb5.conf file name. .JOIN is is not a valid
+		 * to krb5.conf file name. _JOIN_ is is not a valid
 		 * NetBIOS name so it cannot clash with another domain
 		 * -- Uri.
 		 */
-		create_local_private_krb5_conf_for_domain(
-		    pre_connect_realm, ".JOIN", sitename, &ss);
+		create_local_private_krb5_conf_for_domain(pre_connect_realm,
+							  "_JOIN_",
+							  sitename,
+							  &ss);
 	}
 
 	status = libnet_join_lookup_dc_rpc(mem_ctx, r, &cli);
@@ -2641,6 +2695,9 @@ static WERROR libnet_DomainJoin(TALLOC_CTX *mem_ctx,
 
 		ads_status = libnet_join_connect_ads_user(mem_ctx, r);
 		if (!ADS_ERR_OK(ads_status)) {
+			libnet_join_set_error_string(mem_ctx, r,
+				"failed to connect to AD: %s",
+				ads_errstr(ads_status));
 			return WERR_NERR_DEFAULTJOINREQUIRED;
 		}
 
@@ -2648,12 +2705,11 @@ static WERROR libnet_DomainJoin(TALLOC_CTX *mem_ctx,
 		if (ADS_ERR_OK(ads_status)) {
 
 			/*
-			 * LDAP object create succeeded, now go to the rpc
-			 * password set routines
+			 * LDAP object creation succeeded.
 			 */
-
 			r->in.join_flags &= ~WKSSVC_JOIN_FLAGS_ACCOUNT_CREATE;
-			goto rpc_join;
+
+			return WERR_OK;
 		}
 
 		if (initial_account_ou != NULL) {
@@ -2664,11 +2720,9 @@ static WERROR libnet_DomainJoin(TALLOC_CTX *mem_ctx,
 			return WERR_NERR_DEFAULTJOINREQUIRED;
 		}
 
-		DEBUG(5, ("failed to precreate account in ou %s: %s",
-			r->in.account_ou, ads_errstr(ads_status)));
+		DBG_INFO("Failed to pre-create account in OU %s: %s\n",
+			 r->in.account_ou, ads_errstr(ads_status));
 	}
- rpc_join:
-
 #endif /* HAVE_ADS */
 
 	if ((r->in.join_flags & WKSSVC_JOIN_FLAGS_JOIN_UNSECURE) &&
@@ -2868,6 +2922,8 @@ static WERROR libnet_DomainUnjoin(TALLOC_CTX *mem_ctx,
 			return ntstatus_to_werror(status);
 		}
 
+		r->out.dns_domain_name = talloc_strdup(mem_ctx,
+				                      r->in.domain_name);
 		r->out.disabled_machine_account = true;
 	}
 

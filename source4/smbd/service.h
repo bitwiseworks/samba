@@ -27,6 +27,14 @@
 #include "smbd/service_stream.h"
 #include "smbd/service_task.h"
 
+struct process_details {
+	unsigned int instances;
+};
+
+static const struct process_details initial_process_details = {
+	.instances = 0
+};
+
 struct service_details {
 	/*
 	 * Prevent the standard process model from forking a new worker
@@ -40,7 +48,31 @@ struct service_details {
 	 * processes. In this mode pre-fork is equivalent to standard with
 	 * inhibit_fork_on_accept set.
 	 */
-	 bool inhibit_pre_fork;
+	bool inhibit_pre_fork;
+	/*
+	 * Initialise the server task.
+	 */
+	NTSTATUS (*task_init) (struct task_server *);
+	/*
+	 * post fork processing this is called:
+	 *   - standard process model
+	 *      immediately after the task_init.
+	 *
+	 *   - single process model
+	 *     immediately after the task_init
+	 *
+	 *   - prefork process model, inhibit_pre_fork = true
+	 *     immediately after the task_init
+	 *
+	 *   - prefork process model, inhibit_pre_fork = false
+	 *     after each service worker has forked. It is not run on the
+	 *      service master process.
+	 *
+	 *   The post fork hook is not called in the standard model if a new
+	 *   process is forked on a new connection. It is instead called
+	 *   immediately after the task_init.
+	 */
+	void (*post_fork) (struct task_server *, struct process_details *);
 };
 
 #include "smbd/service_proto.h"

@@ -211,7 +211,7 @@ static NTSTATUS idmap_xid_to_sid(struct idmap_context *idmap_ctx,
 				 struct dom_sid **sid)
 {
 	int ret;
-	NTSTATUS status = NT_STATUS_NONE_MAPPED;
+	NTSTATUS status;
 	struct ldb_context *ldb = idmap_ctx->ldb_ctx;
 	struct ldb_result *res = NULL;
 	struct ldb_message *msg;
@@ -394,14 +394,15 @@ static NTSTATUS idmap_sid_to_xid(struct idmap_context *idmap_ctx,
 				 struct unixid *unixid)
 {
 	int ret;
-	NTSTATUS status = NT_STATUS_NONE_MAPPED;
+	NTSTATUS status;
 	struct ldb_context *ldb = idmap_ctx->ldb_ctx;
 	struct ldb_dn *dn;
 	struct ldb_message *hwm_msg, *map_msg, *sam_msg;
 	struct ldb_result *res = NULL;
 	int trans = -1;
 	uint32_t low, high, hwm, new_xid;
-	char *sid_string, *unixid_string, *hwm_string;
+	struct dom_sid_buf sid_string;
+	char *unixid_string, *hwm_string;
 	bool hwm_entry_exists;
 	TALLOC_CTX *tmp_ctx = talloc_new(mem_ctx);
 	const char *sam_attrs[] = {"uidNumber", "gidNumber", "samAccountType", NULL};
@@ -445,6 +446,7 @@ static NTSTATUS idmap_sid_to_xid(struct idmap_context *idmap_ctx,
 	 */
 	
 	if (lpcfg_parm_bool(idmap_ctx->lp_ctx, NULL, "idmap_ldb", "use rfc2307", false)) {
+		struct dom_sid_buf buf;
 		ret = dsdb_search_one(idmap_ctx->samdb, tmp_ctx, &sam_msg,
 				      ldb_get_default_basedn(idmap_ctx->samdb),
 				      LDB_SCOPE_SUBTREE, sam_attrs, 0,
@@ -452,7 +454,7 @@ static NTSTATUS idmap_sid_to_xid(struct idmap_context *idmap_ctx,
 				      "(|(sAMaccountType=%u)(sAMaccountType=%u)(sAMaccountType=%u)"
 				      "(sAMaccountType=%u)(sAMaccountType=%u))"
 				      "(|(uidNumber=*)(gidNumber=*)))",
-				      dom_sid_string(tmp_ctx, sid),
+				      dom_sid_str_buf(sid, &buf),
 				      ATYPE_ACCOUNT, ATYPE_WORKSTATION_TRUST, ATYPE_INTERDOMAIN_TRUST,
 				      ATYPE_SECURITY_GLOBAL_GROUP, ATYPE_SECURITY_LOCAL_GROUP);
 	} else {
@@ -461,8 +463,9 @@ static NTSTATUS idmap_sid_to_xid(struct idmap_context *idmap_ctx,
 	}
 
 	if (ret == LDB_ERR_CONSTRAINT_VIOLATION) {
+		struct dom_sid_buf buf;
 		DEBUG(1, ("Search for objectSid=%s gave duplicate results, failing to map to a unix ID!\n",
-			  dom_sid_string(tmp_ctx, sid)));
+			  dom_sid_str_buf(sid, &buf)));
 		status = NT_STATUS_NONE_MAPPED;
 		goto failed;
 	} else if (ret == LDB_SUCCESS) {
@@ -491,8 +494,10 @@ static NTSTATUS idmap_sid_to_xid(struct idmap_context *idmap_ctx,
 			}
 		}
 	} else if (ret != LDB_ERR_NO_SUCH_OBJECT) {
+		struct dom_sid_buf buf;
 		DEBUG(1, ("Search for objectSid=%s gave '%s', failing to map to a SID!\n",
-			  dom_sid_string(tmp_ctx, sid), ldb_errstring(idmap_ctx->samdb)));
+			  dom_sid_str_buf(sid, &buf),
+			  ldb_errstring(idmap_ctx->samdb)));
 
 		status = NT_STATUS_NONE_MAPPED;
 		goto failed;
@@ -546,7 +551,7 @@ static NTSTATUS idmap_sid_to_xid(struct idmap_context *idmap_ctx,
 		goto failed;
 	}
 
-	/* Redo the search to make sure noone changed the mapping while we
+	/* Redo the search to make sure no one changed the mapping while we
 	 * weren't looking */
 	ret = ldb_search(ldb, tmp_ctx, &res, NULL, LDB_SCOPE_SUBTREE,
 				 NULL, "(&(objectClass=sidMap)(objectSid=%s))",
@@ -620,11 +625,7 @@ static NTSTATUS idmap_sid_to_xid(struct idmap_context *idmap_ctx,
 		goto failed;
 	}
 
-	sid_string = dom_sid_string(tmp_ctx, sid);
-	if (sid_string == NULL) {
-		status = NT_STATUS_NO_MEMORY;
-		goto failed;
-	}
+	dom_sid_str_buf(sid, &sid_string);
 
 	unixid_string = talloc_asprintf(tmp_ctx, "%u", new_xid);
 	if (unixid_string == NULL) {
@@ -700,7 +701,7 @@ static NTSTATUS idmap_sid_to_xid(struct idmap_context *idmap_ctx,
 		goto failed;
 	}
 
-	map_msg->dn = ldb_dn_new_fmt(tmp_ctx, ldb, "CN=%s", sid_string);
+	map_msg->dn = ldb_dn_new_fmt(tmp_ctx, ldb, "CN=%s", sid_string.buf);
 	if (map_msg->dn == NULL) {
 		status = NT_STATUS_NO_MEMORY;
 		goto failed;
@@ -731,7 +732,7 @@ static NTSTATUS idmap_sid_to_xid(struct idmap_context *idmap_ctx,
 		goto failed;
 	}
 
-	ret = ldb_msg_add_string(map_msg, "cn", sid_string);
+	ret = ldb_msg_add_string(map_msg, "cn", sid_string.buf);
 	if (ret != LDB_SUCCESS) {
 		status = NT_STATUS_NONE_MAPPED;
 		goto failed;
@@ -840,10 +841,11 @@ NTSTATUS idmap_sids_to_xids(struct idmap_context *idmap_ctx,
 						  &id[i]->xid);
 		}
 		if (!NT_STATUS_IS_OK(status)) {
-			char *str = dom_sid_string(mem_ctx, id[i]->sid);
+			struct dom_sid_buf buf;
 			DEBUG(1, ("idmapping sid_to_xid failed for id[%d]=%s: %s\n",
-				  i, str, nt_errstr(status)));
-			talloc_free(str);
+				  i,
+				  dom_sid_str_buf(id[i]->sid, &buf),
+				  nt_errstr(status)));
 			error_count++;
 			id[i]->status = ID_UNMAPPED;
 		} else {

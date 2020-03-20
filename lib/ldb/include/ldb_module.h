@@ -104,6 +104,11 @@ struct ldb_module;
 #define LDB_SECRET_ATTRIBUTE_LIST_OPAQUE "LDB_SECRET_ATTRIBUTE_LIST"
 
 /*
+ * The scheme to be used for referral entries, i.e. ldap or ldaps
+ */
+#define LDAP_REFERRAL_SCHEME_OPAQUE "LDAP_REFERRAL_SCHEME"
+
+/*
    these function pointers define the operations that a ldb module can intercept
 */
 struct ldb_module_ops {
@@ -509,38 +514,30 @@ int ldb_register_extended_match_rule(struct ldb_context *ldb,
  */
 int ldb_pack_data(struct ldb_context *ldb,
 		  const struct ldb_message *message,
-		  struct ldb_val *data);
+		  struct ldb_val *data,
+		  uint32_t pack_format_version);
 /*
  * Unpack a ldb message from a linear buffer in ldb_val
- *
- * Providing a list of attributes to this function allows selective unpacking.
- * Giving a NULL list (or a list_size of 0) unpacks all the attributes.
  */
-int ldb_unpack_data_only_attr_list(struct ldb_context *ldb,
-				   const struct ldb_val *data,
-				   struct ldb_message *message,
-				   const char* const * list,
-				   unsigned int list_size,
-				   unsigned int *nb_attributes_indb);
 int ldb_unpack_data(struct ldb_context *ldb,
 		    const struct ldb_val *data,
 		    struct ldb_message *message);
+
+/*
+ * filter the specified list of attributes from msg,
+ * adding requested attributes, and perhaps all for *,
+ * but not the DN to filtered_msg.
+ */
+int ldb_filter_attrs(struct ldb_context *ldb,
+		     const struct ldb_message *msg,
+		     const char *const *attrs,
+		     struct ldb_message *filtered_msg);
 /*
  * Unpack a ldb message from a linear buffer in ldb_val
- *
- * Providing a list of attributes to this function allows selective unpacking.
- * Giving a NULL list (or a list_size of 0) unpacks all the attributes.
- *
- * Flags allow control of allocation, so that if
- * LDB_UNPACK_DATA_FLAG_NO_DATA_ALLOC is specified, then data in values are
- * not allocated, instead they point into the supplier constant buffer.
  *
  * If LDB_UNPACK_DATA_FLAG_NO_VALUES_ALLOC is specified, then values
  * array are not allocated individually (for single-valued
  * attributes), instead they point into a single buffer per message.
- *
- * LDB_UNPACK_DATA_FLAG_NO_VALUES_ALLOC is only valid when
- * LDB_UNPACK_DATA_FLAG_NO_DATA_ALLOC is also specified.
  *
  * Likewise if LDB_UNPACK_DATA_FLAG_NO_DN is specified, the DN is omitted.
  *
@@ -548,18 +545,29 @@ int ldb_unpack_data(struct ldb_context *ldb,
  * are unpacked or returned.
  *
  */
-int ldb_unpack_data_only_attr_list_flags(struct ldb_context *ldb,
-					 const struct ldb_val *data,
-					 struct ldb_message *message,
-					 const char * const *list,
-					 unsigned int list_size,
-					 unsigned int flags,
-					 unsigned int *nb_elements_in_db);
+int ldb_unpack_data_flags(struct ldb_context *ldb,
+			  const struct ldb_val *data,
+			  struct ldb_message *message,
+			  unsigned int flags);
 
-#define LDB_UNPACK_DATA_FLAG_NO_DATA_ALLOC   0x0001
+int ldb_unpack_get_format(const struct ldb_val *data,
+			  uint32_t *pack_format_version);
+
+/* currently unused (was NO_DATA_ALLOC)      0x0001 */
 #define LDB_UNPACK_DATA_FLAG_NO_DN           0x0002
 #define LDB_UNPACK_DATA_FLAG_NO_VALUES_ALLOC 0x0004
 #define LDB_UNPACK_DATA_FLAG_NO_ATTRS        0x0008
+#define LDB_UNPACK_DATA_FLAG_READ_LOCKED     0x0010
+
+enum ldb_pack_format {
+
+	/* Old packing format (based on a somewhat arbitrary date) */
+	LDB_PACKING_FORMAT_NODN = 0x26011966,
+
+	/* In-use packing formats */
+	LDB_PACKING_FORMAT,
+	LDB_PACKING_FORMAT_V2
+};
 
 /**
  Forces a specific ldb handle to use the global event context.
@@ -577,4 +585,11 @@ int ldb_unpack_data_only_attr_list_flags(struct ldb_context *ldb,
  */
 void ldb_handle_use_global_event_context(struct ldb_handle *handle);
 
+/**
+ * Get the options passed to ldb_connect.
+ *
+ * This allows the options to be inspected by elements in the module stack
+ *
+ */
+const char **ldb_options_get(struct ldb_context *ldb);
 #endif

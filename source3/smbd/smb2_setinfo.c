@@ -108,7 +108,7 @@ NTSTATUS smbd_smb2_request_process_setinfo(struct smbd_smb2_request *req)
 		return smbd_smb2_request_error(req, NT_STATUS_FILE_CLOSED);
 	}
 
-	subreq = smbd_smb2_setinfo_send(req, req->ev_ctx,
+	subreq = smbd_smb2_setinfo_send(req, req->sconn->ev_ctx,
 					req, in_fsp,
 					in_info_type,
 					in_file_info_class,
@@ -180,6 +180,47 @@ static int defer_rename_state_destructor(struct defer_rename_state *rename_state
 
 static void defer_rename_done(struct tevent_req *subreq);
 
+struct delay_rename_lease_break_state {
+	struct files_struct *fsp;
+	bool delay;
+};
+
+static bool delay_rename_lease_break_fn(
+	struct share_mode_entry *e,
+	void *private_data)
+{
+	struct delay_rename_lease_break_state *state = private_data;
+	struct files_struct *fsp = state->fsp;
+	uint32_t e_lease_type, break_to;
+	bool ours, stale;
+
+	ours = smb2_lease_equal(fsp_client_guid(fsp),
+				&fsp->lease->lease.lease_key,
+				&e->client_guid,
+				&e->lease_key);
+	if (ours) {
+		return false;
+	}
+
+	e_lease_type = get_lease_type(e, fsp->file_id);
+
+	if ((e_lease_type & SMB2_LEASE_HANDLE) == 0) {
+		return false;
+	}
+
+	stale = share_entry_stale_pid(e);
+	if (stale) {
+		return false;
+	}
+
+	break_to = (e_lease_type & ~SMB2_LEASE_HANDLE);
+
+	send_break_message(
+		fsp->conn->sconn->msg_ctx, &fsp->file_id, e, break_to);
+
+	return false;
+}
+
 static struct tevent_req *delay_rename_for_lease_break(struct tevent_req *req,
 				struct smbd_smb2_request *smb2req,
 				struct tevent_context *ev,
@@ -190,51 +231,22 @@ static struct tevent_req *delay_rename_for_lease_break(struct tevent_req *req,
 
 {
 	struct tevent_req *subreq;
-	uint32_t i;
-	struct share_mode_data *d = lck->data;
 	struct defer_rename_state *rename_state;
-	bool delay = false;
+	struct delay_rename_lease_break_state state = { .fsp = fsp };
 	struct timeval timeout;
+	bool ok;
 
 	if (fsp->oplock_type != LEASE_OPLOCK) {
 		return NULL;
 	}
 
-	for (i=0; i<d->num_share_modes; i++) {
-		struct share_mode_entry *e = &d->share_modes[i];
-		struct share_mode_lease *l = NULL;
-		uint32_t e_lease_type = get_lease_type(d, e);
-		uint32_t break_to;
-
-		if (e->op_type != LEASE_OPLOCK) {
-			continue;
-		}
-
-		l = &d->leases[e->lease_idx];
-
-		if (smb2_lease_equal(fsp_client_guid(fsp),
-				&fsp->lease->lease.lease_key,
-				&l->client_guid,
-				&l->lease_key)) {
-			continue;
-		}
-
-		if (share_mode_stale_pid(d, i)) {
-			continue;
-		}
-
-		if (!(e_lease_type & SMB2_LEASE_HANDLE)) {
-			continue;
-		}
-
-		delay = true;
-		break_to = (e_lease_type & ~SMB2_LEASE_HANDLE);
-
-		send_break_message(fsp->conn->sconn->msg_ctx, &fsp->file_id,
-				   e, break_to);
+	ok = share_mode_forall_leases(
+		lck, delay_rename_lease_break_fn, &state);
+	if (!ok) {
+		return NULL;
 	}
 
-	if (!delay) {
+	if (!state.delay) {
 		return NULL;
 	}
 
@@ -253,10 +265,10 @@ static struct tevent_req *delay_rename_for_lease_break(struct tevent_req *req,
 
 	talloc_set_destructor(rename_state, defer_rename_state_destructor);
 
-	subreq = dbwrap_watched_watch_send(
+	subreq = share_mode_watch_send(
 				rename_state,
 				ev,
-				lck->data->record,
+				lck->data->id,
 				(struct server_id){0});
 
 	if (subreq == NULL) {
@@ -284,7 +296,7 @@ static void defer_rename_done(struct tevent_req *subreq)
 	int ret_size = 0;
 	bool ok;
 
-	status = dbwrap_watched_watch_recv(subreq, NULL, NULL);
+	status = share_mode_watch_recv(subreq, NULL, NULL);
 	TALLOC_FREE(subreq);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(5, ("dbwrap_record_watch_recv returned %s\n",
@@ -296,8 +308,9 @@ static void defer_rename_done(struct tevent_req *subreq)
 	/*
 	 * Make sure we run as the user again
 	 */
-	ok = change_to_user(state->smb2req->tcon->compat,
-			    state->smb2req->session->compat->vuid);
+	ok = change_to_user_and_service(
+		state->smb2req->tcon->compat,
+		state->smb2req->session->global->session_wire_id);
 	if (!ok) {
 		tevent_req_nterror(state->req, NT_STATUS_ACCESS_DENIED);
 		return;
@@ -387,7 +400,7 @@ static struct tevent_req *smbd_smb2_setinfo_send(TALLOC_CTX *mem_ctx,
 	}
 
 	switch (in_info_type) {
-	case 0x01:/* SMB2_SETINFO_FILE */
+	case SMB2_0_INFO_FILE:
 	{
 		uint16_t file_info_level;
 		char *data;
@@ -407,7 +420,7 @@ static struct tevent_req *smbd_smb2_setinfo_send(TALLOC_CTX *mem_ctx,
 			 * handle (returned from an NT SMB). NT5.0 seems
 			 * to do this call. JRA.
 			 */
-			if (INFO_LEVEL_IS_UNIX(file_info_level)) {
+			if (fsp->fsp_name->flags & SMB_FILENAME_POSIX_PATH) {
 				/* Always do lstat for UNIX calls. */
 				if (SMB_VFS_LSTAT(conn, fsp->fsp_name)) {
 					DEBUG(3,("smbd_smb2_setinfo_send: "
@@ -444,11 +457,9 @@ static struct tevent_req *smbd_smb2_setinfo_send(TALLOC_CTX *mem_ctx,
 
 				tevent_req_done(req);
 				return tevent_req_post(req, ev);
-			} else {
-				tevent_req_nterror(req,
-					NT_STATUS_OBJECT_PATH_INVALID);
-				return tevent_req_post(req, ev);
 			}
+			tevent_req_nterror(req, NT_STATUS_OBJECT_PATH_INVALID);
+			return tevent_req_post(req, ev);
 		} else {
 			/*
 			 * Original code - this is an open file.
@@ -528,7 +539,7 @@ static struct tevent_req *smbd_smb2_setinfo_send(TALLOC_CTX *mem_ctx,
 		break;
 	}
 
-	case 0x02:/* SMB2_SETINFO_FS */
+	case SMB2_0_INFO_FILESYSTEM:
 	{
 		uint16_t file_info_level = in_file_info_class + 1000;
 
@@ -546,7 +557,7 @@ static struct tevent_req *smbd_smb2_setinfo_send(TALLOC_CTX *mem_ctx,
 		break;
 	}
 
-	case 0x03:/* SMB2_SETINFO_SECURITY */
+	case SMB2_0_INFO_SECURITY:
 	{
 		if (!CAN_WRITE(conn)) {
 			tevent_req_nterror(req, NT_STATUS_ACCESS_DENIED);
@@ -565,7 +576,7 @@ static struct tevent_req *smbd_smb2_setinfo_send(TALLOC_CTX *mem_ctx,
 		break;
 	}
 
-	case 0x04:/* SMB2_SETINFO_QUOTA */
+	case SMB2_0_INFO_QUOTA:
 	{
 #ifdef HAVE_SYS_QUOTAS
 		struct file_quota_information info = {0};

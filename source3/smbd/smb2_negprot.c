@@ -36,7 +36,7 @@ extern fstring remote_proto;
  * this is the entry point if SMB2 is selected via
  * the SMB negprot and the given dialect.
  */
-static void reply_smb20xx(struct smb_request *req, uint16_t dialect)
+static NTSTATUS reply_smb20xx(struct smb_request *req, uint16_t dialect)
 {
 	uint8_t *smb2_inpdu;
 	uint8_t *smb2_hdr;
@@ -48,7 +48,7 @@ static void reply_smb20xx(struct smb_request *req, uint16_t dialect)
 	if (smb2_inpdu == NULL) {
 		DEBUG(0, ("Could not push spnego blob\n"));
 		reply_nterror(req, NT_STATUS_NO_MEMORY);
-		return;
+		return NT_STATUS_NO_MEMORY;
 	}
 	smb2_hdr = smb2_inpdu;
 	smb2_body = smb2_hdr + SMB2_HDR_BODY;
@@ -64,28 +64,27 @@ static void reply_smb20xx(struct smb_request *req, uint16_t dialect)
 
 	req->outbuf = NULL;
 
-	smbd_smb2_process_negprot(req->xconn, 0, smb2_inpdu, len);
-	return;
+	return smbd_smb2_process_negprot(req->xconn, 0, smb2_inpdu, len);
 }
 
 /*
  * this is the entry point if SMB2 is selected via
  * the SMB negprot and the "SMB 2.002" dialect.
  */
-void reply_smb2002(struct smb_request *req, uint16_t choice)
+NTSTATUS reply_smb2002(struct smb_request *req, uint16_t choice)
 {
-	reply_smb20xx(req, SMB2_DIALECT_REVISION_202);
+	return reply_smb20xx(req, SMB2_DIALECT_REVISION_202);
 }
 
 /*
  * this is the entry point if SMB2 is selected via
  * the SMB negprot and the "SMB 2.???" dialect.
  */
-void reply_smb20ff(struct smb_request *req, uint16_t choice)
+NTSTATUS reply_smb20ff(struct smb_request *req, uint16_t choice)
 {
 	struct smbXsrv_connection *xconn = req->xconn;
 	xconn->smb2.allow_2ff = true;
-	reply_smb20xx(req, SMB2_DIALECT_REVISION_2FF);
+	return reply_smb20xx(req, SMB2_DIALECT_REVISION_2FF);
 }
 
 enum protocol_types smbd_smb2_protocol_dialect_match(const uint8_t *indyn,
@@ -108,7 +107,7 @@ enum protocol_types smbd_smb2_protocol_dialect_match(const uint8_t *indyn,
 	size_t i;
 
 	for (i = 0; i < ARRAY_SIZE(pd); i ++) {
-		size_t c = 0;
+		int c = 0;
 
 		if (lp_server_max_protocol() < pd[i].proto) {
 			continue;
@@ -388,7 +387,6 @@ NTSTATUS smbd_smb2_request_process_negprot(struct smbd_smb2_request *req)
 		uint16_t selected_preauth = 0;
 		const uint8_t *p;
 		uint8_t buf[38];
-		DATA_BLOB b;
 		size_t i;
 
 		if (in_preauth->data.length < needed) {
@@ -435,9 +433,12 @@ NTSTATUS smbd_smb2_request_process_negprot(struct smbd_smb2_request *req)
 		SSVAL(buf, 4, selected_preauth);
 		generate_random_buffer(buf + 6, 32);
 
-		b = data_blob_const(buf, sizeof(buf));
-		status = smb2_negotiate_context_add(req, &out_c,
-					SMB2_PREAUTH_INTEGRITY_CAPABILITIES, b);
+		status = smb2_negotiate_context_add(
+			req,
+			&out_c,
+			SMB2_PREAUTH_INTEGRITY_CAPABILITIES,
+			buf,
+			sizeof(buf));
 		if (!NT_STATUS_IS_OK(status)) {
 			return smbd_smb2_request_error(req, status);
 		}
@@ -450,7 +451,6 @@ NTSTATUS smbd_smb2_request_process_negprot(struct smbd_smb2_request *req)
 		uint16_t cipher_count;
 		const uint8_t *p;
 		uint8_t buf[4];
-		DATA_BLOB b;
 		size_t i;
 		bool aes_128_ccm_supported = false;
 		bool aes_128_gcm_supported = false;
@@ -491,22 +491,21 @@ NTSTATUS smbd_smb2_request_process_negprot(struct smbd_smb2_request *req)
 			}
 		}
 
-		/*
-		 * For now we preferr CCM because our implementation
-		 * is faster than GCM, see bug #11451.
-		 */
-		if (aes_128_ccm_supported) {
-			xconn->smb2.server.cipher = SMB2_ENCRYPTION_AES128_CCM;
-		} else if (aes_128_gcm_supported) {
+		if (aes_128_gcm_supported) {
 			xconn->smb2.server.cipher = SMB2_ENCRYPTION_AES128_GCM;
+		} else if (aes_128_ccm_supported) {
+			xconn->smb2.server.cipher = SMB2_ENCRYPTION_AES128_CCM;
 		}
 
 		SSVAL(buf, 0, 1); /* ChiperCount */
 		SSVAL(buf, 2, xconn->smb2.server.cipher);
 
-		b = data_blob_const(buf, sizeof(buf));
-		status = smb2_negotiate_context_add(req, &out_c,
-					SMB2_ENCRYPTION_CAPABILITIES, b);
+		status = smb2_negotiate_context_add(
+			req,
+			&out_c,
+			SMB2_ENCRYPTION_CAPABILITIES,
+			buf,
+			sizeof(buf));
 		if (!NT_STATUS_IS_OK(status)) {
 			return smbd_smb2_request_error(req, status);
 		}

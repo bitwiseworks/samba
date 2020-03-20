@@ -1,7 +1,10 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 from __future__ import print_function
-import sys,os,subprocess
+import sys
+import os
+import subprocess
+from samba.compat import get_string
 
 
 if len(sys.argv) != 3:
@@ -11,6 +14,17 @@ if len(sys.argv) != 3:
 wbinfo = sys.argv[1]
 netcmd = sys.argv[2]
 
+
+def run(cmd):
+    """
+    Run a cmd, return bytes str for py2 and unicode str for py3.
+
+    NOTE: subprocess api always return bytes, in both py2 and py3.
+    """
+    output = subprocess.check_output(cmd).strip()
+    return get_string(output)
+
+
 def flush_cache(sids=[], uids=[], gids=[]):
     for sid in sids:
         os.system(netcmd + (" cache del IDMAP/SID2XID/%s" % (sid)))
@@ -19,31 +33,29 @@ def flush_cache(sids=[], uids=[], gids=[]):
     for gids in gids:
         os.system(netcmd + (" cache del IDMAP/GID2SID/%s" % (gid)))
 
+
 def fill_cache(inids, idtype='gid'):
     for inid in inids:
         if inid is None:
             continue
-        subprocess.Popen([wbinfo, '--%s-to-sid=%s' % (idtype, inid)],
-                         stdout=subprocess.PIPE).communicate()
+        run([wbinfo, '--%s-to-sid=%s' % (idtype, inid)])
 
-domain = subprocess.Popen([wbinfo, "--own-domain"],
-                          stdout=subprocess.PIPE).communicate()[0].strip()
-domsid = subprocess.Popen([wbinfo, "-n", domain + "/"],
-                          stdout=subprocess.PIPE).communicate()[0]
+
+domain = run([wbinfo, "--own-domain"])
+domsid = run([wbinfo, "-n", domain + "/"])
 domsid = domsid.split(' ')[0]
 
-#print domain
-#print domsid
+# print domain
+# print domsid
 
-sids=[ domsid + '-512', 'S-1-5-32-545', domsid + '-513', 'S-1-1-0', 'S-1-3-1', 'S-1-5-1' ]
+sids = [domsid + '-512', 'S-1-5-32-545', domsid + '-513', 'S-1-1-0', 'S-1-3-1', 'S-1-5-1']
 
 flush_cache(sids=sids)
 
-sids2xids = subprocess.Popen([wbinfo, '--sids-to-unix-ids=' +  ','.join(sids)],
-                             stdout=subprocess.PIPE).communicate()[0].strip()
+sids2xids = run([wbinfo, '--sids-to-unix-ids=' + ','.join(sids)])
 
-gids=[]
-uids=[]
+gids = []
+uids = []
 idtypes = []
 
 for line in sids2xids.split('\n'):
@@ -70,14 +82,15 @@ for line in sids2xids.split('\n'):
 
 # Check the list produced by the sids-to-xids call with the
 # singular variant (sid-to-xid) for each sid in turn.
+
+
 def check_singular(sids, ids, idtype='gid'):
     i = 0
     for sid in sids:
         if ids[i] is None:
             continue
 
-        outid = subprocess.Popen([wbinfo, '--sid-to-%s' % idtype, sid],
-                                 stdout=subprocess.PIPE).communicate()[0].strip()
+        outid = run([wbinfo, '--sid-to-%s' % idtype, sid])
         if outid != ids[i]:
             print("Expected %s, got %s\n" % (outid, ids[i]))
             flush_cache(sids=sids, uids=uids, gids=gids)
@@ -86,9 +99,10 @@ def check_singular(sids, ids, idtype='gid'):
 
 # Check the list produced by the sids-to-xids call with the
 # multiple variant (sid-to-xid) for each sid in turn.
+
+
 def check_multiple(sids, idtypes):
-    sids2xids = subprocess.Popen([wbinfo, '--sids-to-unix-ids=' +  ','.join(sids)],
-                                 stdout=subprocess.PIPE).communicate()[0].strip()
+    sids2xids = run([wbinfo, '--sids-to-unix-ids=' + ','.join(sids)])
     # print sids2xids
     i = 0
     for line in sids2xids.split('\n'):
@@ -99,6 +113,7 @@ def check_multiple(sids, idtypes):
             flush_cache(sids=sids, uids=uids, gids=gids)
             sys.exit(1)
         i += 1
+
 
 # first round: with filled cache via sid-to-id
 check_singular(sids, gids, 'gid')

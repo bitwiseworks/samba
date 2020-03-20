@@ -40,11 +40,11 @@
  */
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdint.h>
 #include <setjmp.h>
 #include <cmocka.h>
 
 #include "includes.h"
-#include "../lib/crypto/crypto.h"
 #include "librpc/gen_ndr/netlogon.h"
 #include "libcli/auth/libcli_auth.h"
 #include "auth/credentials/credentials.h"
@@ -179,7 +179,7 @@ static void test_ntlm_allowed(void **state)
 
 static void test_ntlm_allowed_lm_supplied(void **state)
 {
-	return test_ntlm_allowed(state);
+	test_ntlm_allowed(state);
 }
 
 static void test_ntlm_disabled(void **state)
@@ -344,7 +344,7 @@ static void test_ntlmv2_only_ntlm(void **state)
 
 static void test_ntlmv2_only_ntlm_and_lanman(void **state)
 {
-	return test_ntlmv2_only_ntlm(state);
+	test_ntlmv2_only_ntlm(state);
 }
 
 static void test_ntlmv2_only_ntlm_once(void **state)

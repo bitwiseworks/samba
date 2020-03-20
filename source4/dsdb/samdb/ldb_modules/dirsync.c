@@ -51,6 +51,7 @@ struct dirsync_context {
 	uint64_t fromreqUSN;
 	uint32_t cursor_size;
 	bool noextended;
+	int extended_type;
 	bool linkIncrVal;
 	bool localonly;
 	bool partial;
@@ -150,18 +151,31 @@ static int dirsync_filter_entry(struct ldb_request *req,
 	 * list only the attribute that have been modified since last interogation
 	 *
 	 */
-	newmsg = talloc_zero(dsc->req, struct ldb_message);
+	newmsg = ldb_msg_new(dsc->req);
 	if (newmsg == NULL) {
 		return ldb_oom(ldb);
 	}
 	for (i = msg->num_elements - 1; i >= 0; i--) {
-		attr = dsdb_attribute_by_lDAPDisplayName(dsc->schema, msg->elements[i].name);
 		if (ldb_attr_cmp(msg->elements[i].name, "uSNChanged") == 0) {
+			int error = 0;
 			/* Read the USN it will used at the end of the filtering
 			 * to update the max USN in the cookie if we
 			 * decide to keep this entry
 			 */
-			val = strtoull((const char*)msg->elements[i].values[0].data, NULL, 0);
+			val = smb_strtoull(
+				(const char*)msg->elements[i].values[0].data,
+				NULL,
+				0,
+				&error,
+				SMB_STR_STANDARD);
+			if (error != 0) {
+				ldb_set_errstring(ldb,
+						  "Failed to convert USN");
+				return ldb_module_done(dsc->req,
+						       NULL,
+						       NULL,
+						       LDB_ERR_OPERATIONS_ERROR);
+			}
 			continue;
 		}
 
@@ -343,6 +357,10 @@ skip:
 
 		attr = dsdb_attribute_by_lDAPDisplayName(dsc->schema,
 				el->name);
+		if (attr == NULL) {
+			continue;
+		}
+
 		keep = false;
 
 		if (attr->linkID & 1) {
@@ -404,7 +422,7 @@ skip:
 			continue;
 		}
 		/* For links, when our functional level > windows 2000
-		 * we use the RMD_LOCAL_USN information to decide wether
+		 * we use the RMD_LOCAL_USN information to decide whether
 		 * we return the attribute or not.
 		 * For windows 2000 this information is in the replPropertyMetaData
 		 * so it will be handled like any other replicated attribute
@@ -464,7 +482,8 @@ skip:
 				}
 
 				ldb_dn_extended_filter(dn->dn, myaccept);
-				dn_ln = ldb_dn_get_extended_linearized(dn, dn->dn, 1);
+				dn_ln = dsdb_dn_get_extended_linearized(dn, dn,
+							dsc->extended_type);
 				if (dn_ln == NULL)
 				{
 					talloc_free(dn);
@@ -839,6 +858,9 @@ static int dirsync_search_callback(struct ldb_request *req, struct ldb_reply *ar
 		}
 
 		tmp = strchr(tmp, '/');
+		if (tmp == NULL) {
+			return ldb_operr(ldb);
+		}
 		tmp++;
 
 		dn = ldb_dn_new(dsc, ldb, tmp);
@@ -978,6 +1000,7 @@ static int dirsync_ldb_search(struct ldb_module *module, struct ldb_request *req
 	struct ldb_control *control;
 	struct ldb_result *acl_res;
 	struct ldb_dirsync_control *dirsync_ctl;
+	struct ldb_control *extended = NULL;
 	struct ldb_request *down_req;
 	struct dirsync_context *dsc;
 	struct ldb_context *ldb;
@@ -994,7 +1017,7 @@ static int dirsync_ldb_search(struct ldb_module *module, struct ldb_request *req
 	}
 
 	/*
-	 * check if there's an extended dn control
+	 * check if there's a dirsync control
 	 */
 	control = ldb_request_get_control(req, LDB_CONTROL_DIRSYNC_OID);
 	if (control == NULL) {
@@ -1209,7 +1232,19 @@ static int dirsync_ldb_search(struct ldb_module *module, struct ldb_request *req
 		dsc->nbDefaultAttrs = 3;
 	}
 
-	if (!ldb_request_get_control(req, LDB_CONTROL_EXTENDED_DN_OID)) {
+	/* check if there's an extended dn control */
+	extended = ldb_request_get_control(req, LDB_CONTROL_EXTENDED_DN_OID);
+	if (extended != NULL) {
+		struct ldb_extended_dn_control *extended_ctrl = NULL;
+
+		if (extended->data != NULL) {
+			extended_ctrl = talloc_get_type(extended->data,
+						struct ldb_extended_dn_control);
+		}
+		if (extended_ctrl != NULL) {
+			dsc->extended_type = extended_ctrl->type;
+		}
+	} else {
 		ret = ldb_request_add_control(req, LDB_CONTROL_EXTENDED_DN_OID, false, NULL);
 		if (ret != LDB_SUCCESS) {
 			return ret;
@@ -1266,7 +1301,7 @@ static int dirsync_ldb_search(struct ldb_module *module, struct ldb_request *req
 		}
 
 		/*
-		* Let's search for the max usn withing the cookie
+		* Let's search for the max usn within the cookie
 		*/
 		if (GUID_equal(&(cookie.blob.guid1), dsc->our_invocation_id)) {
 			/*
@@ -1323,11 +1358,12 @@ static int dirsync_ldb_search(struct ldb_module *module, struct ldb_request *req
 
 	}
 	/*
-	 * Remove our control from the list of controls
+	 * Mark dirsync control as uncritical (done)
+	 *
+	 * We need this so ranged_results knows how to behave with
+	 * dirsync
 	 */
-	if (!ldb_save_controls(control, req, NULL)) {
-		return ldb_operr(ldb);
-	}
+	control->critical = false;
 	dsc->schema = dsdb_get_schema(ldb, dsc);
 	/*
 	 * At the begining we make the hypothesis that we will return a complete

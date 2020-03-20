@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Unix SMB/CIFS implementation.
@@ -40,10 +40,12 @@ from samba.drs_utils import drs_DsBind
 from ldb import (
     SCOPE_BASE,
     SCOPE_SUBTREE,
-    )
+)
 
-import drs_base, ldb
+import drs_base
+import ldb
 from samba.dcerpc.drsuapi import *
+
 
 class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
 
@@ -107,7 +109,7 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
         return "DrsMoveU_" + time.strftime("%s", time.gmtime())
 
     def _check_metadata(self, user_dn, sam_ldb, drs, metadata, expected):
-        repl = ndr_unpack(drsblobs.replPropertyMetaDataBlob, str(metadata[0]))
+        repl = ndr_unpack(drsblobs.replPropertyMetaDataBlob, metadata[0])
 
         self.assertEqual(len(repl.ctr.array), len(expected))
 
@@ -136,7 +138,7 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
                                      version, o.version))
             i = i + 1
 
-        if drs == None:
+        if drs is None:
             return
 
         req8 = DsGetNCChangesRequest8()
@@ -170,16 +172,16 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
         for o in drs_ctr.first_object.meta_data_ctr.meta_data:
             i = 0
             drs_attid = drs_ctr.first_object.object.attribute_ctr.attributes[att_idx]
-            e = expected[i];
+            e = expected[i]
             (attid, orig_dsa, version) = e
 
             # Skip the RDN from the expected set, it is not sent over DRS
-            if (user_dn.get_rdn_name().upper() == "CN" \
+            if (user_dn.get_rdn_name().upper() == "CN"
                 and attid == DRSUAPI_ATTID_cn) \
-                or (user_dn.get_rdn_name().upper() == "OU" \
+                or (user_dn.get_rdn_name().upper() == "OU"
                     and attid == DRSUAPI_ATTID_ou):
                 i = i + 1
-                e = expected[i];
+                e = expected[i]
                 (attid, orig_dsa, version) = e
 
             self.assertEquals(attid, drs_attid.attid,
@@ -215,10 +217,10 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
                                     "replPropertyMetaData"])
         self.assertEquals(len(res), 1)
         user_cur = res[0]
-        rdn_orig = obj_orig[user_cur.dn.get_rdn_name()][0]
-        rdn_cur  = user_cur[user_cur.dn.get_rdn_name()][0]
-        name_orig = obj_orig["name"][0]
-        name_cur  = user_cur["name"][0]
+        rdn_orig = str(obj_orig[user_cur.dn.get_rdn_name()][0])
+        rdn_cur  = str(user_cur[user_cur.dn.get_rdn_name()][0])
+        name_orig = str(obj_orig["name"][0])
+        name_cur  = str(user_cur["name"][0])
         dn_orig = obj_orig["dn"]
         dn_cur  = user_cur["dn"]
         # now check properties of the user
@@ -248,7 +250,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
                                  expected_metadata)
 
         return user_cur
-
 
     def test_ReplicateMoveObject1(self):
         """Verifies how a moved container with a user inside is replicated between two DCs.
@@ -452,7 +453,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
                                    is_deleted=False,
                                    expected_metadata=modified_metadata)
 
-
         # trigger replication from DC1 to DC2, for cleanup
         self._net_drs_replicate(DC=self.dnsname_dc2, fromDC=self.dnsname_dc1, forced=True)
 
@@ -528,7 +528,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
                                    is_deleted=True,
                                    expected_metadata=deleted_modified_metadata_dc1)
         self.assertFalse("description" in user_cur)
-
 
     def test_ReplicateMoveObject2(self):
         """Verifies how a moved container with a user inside is not
@@ -712,7 +711,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
                                    is_deleted=True,
                                    expected_metadata=deleted_metadata_dc1)
 
-
     def test_ReplicateMoveObject3(self):
         """Verifies how a moved container with a user inside is replicated between two DCs.
            This test should verify that:
@@ -768,7 +766,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
         self._check_obj(sam_ldb=self.ldb_dc1, drs=self.drs_dc1,
                         obj_orig=user_orig, is_deleted=False,
                         expected_metadata=initial_metadata)
-
 
         new_dn = ldb.Dn(self.ldb_dc1, "CN=%s" % username)
         new_dn.add_base(self.ou2_dn)
@@ -894,7 +891,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
                                    is_deleted=True,
                                    expected_metadata=deleted_metadata_dc2)
 
-
     def test_ReplicateMoveObject3b(self):
         """Verifies how a moved container with a user inside is replicated between two DCs.
            This test should verify that:
@@ -950,7 +946,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
         self._check_obj(sam_ldb=self.ldb_dc1, drs=self.drs_dc1,
                         obj_orig=user_orig, is_deleted=False,
                         expected_metadata=initial_metadata)
-
 
         new_dn = ldb.Dn(self.ldb_dc1, "CN=%s" % username)
         new_dn.add_base(self.ou2_dn)
@@ -1075,7 +1070,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
                                    obj_orig=user_moved_orig,
                                    is_deleted=True,
                                    expected_metadata=deleted_metadata_dc2)
-
 
     def test_ReplicateMoveObject4(self):
         """Verifies how a moved container with a user inside is replicated between two DCs.
@@ -1354,7 +1348,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
             (DRSUAPI_ATTID_objectCategory, self.dc1_guid, 2),
             (DRSUAPI_ATTID_isRecycled, self.dc1_guid, 1)]
 
-
         # check user info on DC1 - should be deleted user
         user_cur = self._check_obj(sam_ldb=self.ldb_dc1, drs=self.drs_dc1,
                                    obj_orig=user_moved_orig,
@@ -1477,7 +1470,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
         user_cur = self._check_obj(sam_ldb=self.ldb_dc1, obj_orig=user_moved_orig, is_deleted=True)
         self.assertFalse("description" in user_cur)
 
-
     def test_ReplicateMoveObject6(self):
         """Verifies how a moved container is replicated between two DCs.
            This test should verify that:
@@ -1542,7 +1534,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
         # check user info on DC2 - should be deleted user
         ou_cur = self._check_obj(sam_ldb=self.ldb_dc2, obj_orig=ou_moved_orig, is_deleted=True)
         self.assertFalse("description" in ou_cur)
-
 
     def test_ReplicateMoveObject7(self):
         """Verifies how a moved container is replicated between two DCs.
@@ -1609,7 +1600,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
         ou_cur = self._check_obj(sam_ldb=self.ldb_dc2, obj_orig=ou_moved_orig, is_deleted=True)
         self.assertFalse("description" in ou_cur)
 
-
     def test_ReplicateMoveObject8(self):
         """Verifies how a moved container is replicated between two DCs.
            This test should verify that:
@@ -1674,7 +1664,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
         # check user info on DC2 - should be deleted user
         ou_cur = self._check_obj(sam_ldb=self.ldb_dc2, obj_orig=ou_moved_orig, is_deleted=True)
         self.assertFalse("description" in ou_cur)
-
 
     def test_ReplicateMoveObject9(self):
         """Verifies how a moved container is replicated between two DCs.
@@ -1742,7 +1731,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
         ou_cur = self._check_obj(sam_ldb=self.ldb_dc2, obj_orig=ou_moved_orig, is_deleted=True)
         self.assertFalse("description" in ou_cur)
 
-
     def test_ReplicateMoveObject10(self):
         """Verifies how a moved container is replicated between two DCs.
            This test should verify that:
@@ -1791,7 +1779,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
         ou_cur = self._check_obj(sam_ldb=self.ldb_dc1, obj_orig=ou_orig, is_deleted=True)
         self.assertFalse("description" in ou_cur)
 
-
     def test_ReplicateMoveObject11(self):
         """Verifies how a moved container is replicated between two DCs.
            This test should verify that:
@@ -1839,7 +1826,6 @@ class DrsMoveObjectTestCase(drs_base.DrsBaseTestCase):
         # check user info on DC2 - should be deleted OU
         ou_cur = self._check_obj(sam_ldb=self.ldb_dc2, obj_orig=ou_orig, is_deleted=True)
         self.assertFalse("description" in ou_cur)
-
 
 
 class DrsMoveBetweenTreeOfObjectTestCase(drs_base.DrsBaseTestCase):
@@ -1909,7 +1895,6 @@ class DrsMoveBetweenTreeOfObjectTestCase(drs_base.DrsBaseTestCase):
         self.ou6["objectclass"] = "organizationalUnit"
         self.ou6["ou"] = self.ou6_dn.get_component_value(0)
 
-
     def tearDown(self):
         self.ldb_dc1.delete(self.top_ou, ["tree_delete:1"])
         self._enable_all_repl(self.dnsname_dc1)
@@ -1928,10 +1913,10 @@ class DrsMoveBetweenTreeOfObjectTestCase(drs_base.DrsBaseTestCase):
                              attrs=["*", "parentGUID"])
         self.assertEquals(len(res), 1)
         user_cur = res[0]
-        cn_orig = obj_orig["cn"][0]
-        cn_cur  = user_cur["cn"][0]
-        name_orig = obj_orig["name"][0]
-        name_cur  = user_cur["name"][0]
+        cn_orig = str(obj_orig["cn"][0])
+        cn_cur  = str(user_cur["cn"][0])
+        name_orig = str(obj_orig["name"][0])
+        name_cur  = str(user_cur["name"][0])
         dn_orig = obj_orig["dn"]
         dn_cur  = user_cur["dn"]
         # now check properties of the user
@@ -1951,7 +1936,6 @@ class DrsMoveBetweenTreeOfObjectTestCase(drs_base.DrsBaseTestCase):
         self.assertEqual(name_cur, user_cur.dn.get_rdn_value())
 
         return user_cur
-
 
     def test_ReplicateMoveInTree1(self):
         """Verifies how an object is replicated between two DCs.
@@ -2008,7 +1992,6 @@ class DrsMoveBetweenTreeOfObjectTestCase(drs_base.DrsBaseTestCase):
 
         # trigger replication from DC1 to DC2, for cleanup
         self._net_drs_replicate(DC=self.dnsname_dc2, fromDC=self.dnsname_dc1, forced=True)
-
 
     def test_ReplicateMoveInTree2(self):
         """Verifies how an object is replicated between two DCs.
@@ -2105,7 +2088,6 @@ class DrsMoveBetweenTreeOfObjectTestCase(drs_base.DrsBaseTestCase):
         user_cur = self._check_obj(sam_ldb=self.ldb_dc2, obj_orig=user_moved_orig, is_deleted=True)
         self.assertFalse("description" in user_cur)
 
-
     def test_ReplicateMoveInTree3(self):
         """Verifies how an object is replicated between two DCs.
            This test should verify that:
@@ -2190,7 +2172,6 @@ class DrsMoveBetweenTreeOfObjectTestCase(drs_base.DrsBaseTestCase):
 
         # trigger replication from DC1 to DC2, for cleanup
         self._net_drs_replicate(DC=self.dnsname_dc2, fromDC=self.dnsname_dc1, forced=True)
-
 
     def test_ReplicateMoveInTree3b(self):
         """Verifies how an object is replicated between two DCs.
@@ -2297,7 +2278,6 @@ class DrsMoveBetweenTreeOfObjectTestCase(drs_base.DrsBaseTestCase):
         # trigger replication from DC1 to DC2, for cleanup
         self._net_drs_replicate(DC=self.dnsname_dc2, fromDC=self.dnsname_dc1, forced=True)
 
-
     def test_ReplicateMoveInTree4(self):
         """Verifies how an object is replicated between two DCs.
            This test should verify that:
@@ -2359,7 +2339,6 @@ class DrsMoveBetweenTreeOfObjectTestCase(drs_base.DrsBaseTestCase):
         # trigger replication from DC1 to DC2, for cleanup
         self._net_drs_replicate(DC=self.dnsname_dc2, fromDC=self.dnsname_dc1, forced=True)
 
-
     def test_ReplicateAddInOU(self):
         """Verifies how an object is replicated between two DCs.
            This test should verify that:
@@ -2405,7 +2384,6 @@ class DrsMoveBetweenTreeOfObjectTestCase(drs_base.DrsBaseTestCase):
 
         # trigger replication from DC1 to DC2, for cleanup
         self._net_drs_replicate(DC=self.dnsname_dc2, fromDC=self.dnsname_dc1, forced=True)
-
 
     def test_ReplicateAddInMovedOU(self):
         """Verifies how an object is replicated between two DCs.
@@ -2462,7 +2440,6 @@ class DrsMoveBetweenTreeOfObjectTestCase(drs_base.DrsBaseTestCase):
 
         # trigger replication from DC1 to DC2, for cleanup
         self._net_drs_replicate(DC=self.dnsname_dc2, fromDC=self.dnsname_dc1, forced=True)
-
 
     def test_ReplicateAddInConflictOU_time(self):
         """Verifies how an object is replicated between two DCs, when created in an ambigious location

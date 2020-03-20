@@ -367,7 +367,7 @@ static NTSTATUS resolve_and_ping_netbios(ADS_STRUCT *ads,
 {
 	int count, i;
 	struct ip_service *ip_list;
-	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
+	NTSTATUS status;
 
 	DEBUG(6, ("resolve_and_ping_netbios: (cldap) looking for domain '%s'\n",
 		  domain));
@@ -414,7 +414,7 @@ static NTSTATUS resolve_and_ping_dns(ADS_STRUCT *ads, const char *sitename,
 {
 	int count;
 	struct ip_service *ip_list = NULL;
-	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
+	NTSTATUS status;
 
 	DEBUG(6, ("resolve_and_ping_dns: (cldap) looking for realm '%s'\n",
 		  realm));
@@ -1366,19 +1366,42 @@ char *ads_parent_dn(const char *dn)
 {
 	ADS_STATUS status;
 	char *expr;
-	const char *attrs[] = {"*", "msDS-SupportedEncryptionTypes", "nTSecurityDescriptor", NULL};
+	const char *attrs[] = {
+		/* This is how Windows checks for machine accounts */
+		"objectClass",
+		"SamAccountName",
+		"userAccountControl",
+		"DnsHostName",
+		"ServicePrincipalName",
+		"unicodePwd",
+
+		/* Additional attributes Samba checks */
+		"msDS-SupportedEncryptionTypes",
+		"nTSecurityDescriptor",
+
+		NULL
+	};
+	TALLOC_CTX *frame = talloc_stackframe();
 
 	*res = NULL;
 
 	/* the easiest way to find a machine account anywhere in the tree
 	   is to look for hostname$ */
-	if (asprintf(&expr, "(samAccountName=%s$)", machine) == -1) {
-		DEBUG(1, ("asprintf failed!\n"));
-		return ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
+	expr = talloc_asprintf(frame, "(samAccountName=%s$)", machine);
+	if (expr == NULL) {
+		status = ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
+		goto done;
 	}
 
 	status = ads_search(ads, res, expr, attrs);
-	SAFE_FREE(expr);
+	if (ADS_ERR_OK(status)) {
+		if (ads_count_replies(ads, *res) != 1) {
+			status = ADS_ERROR_LDAP(LDAP_NO_SUCH_OBJECT);
+		}
+	}
+
+done:
+	TALLOC_FREE(frame);
 	return status;
 }
 
@@ -1493,7 +1516,6 @@ ADS_STATUS ads_mod_strlist(TALLOC_CTX *ctx, ADS_MODLIST *mods,
 			       name, (const void **) vals);
 }
 
-#if 0
 /**
  * Add a single ber-encoded value to a mod list
  * @param ctx An initialized TALLOC_CTX
@@ -1514,15 +1536,16 @@ static ADS_STATUS ads_mod_ber(TALLOC_CTX *ctx, ADS_MODLIST *mods,
 	return ads_modlist_add(ctx, mods, LDAP_MOD_REPLACE|LDAP_MOD_BVALUES,
 			       name, (const void **) values);
 }
-#endif
 
 static void ads_print_error(int ret, LDAP *ld)
 {
 	if (ret != 0) {
 		char *ld_error = NULL;
 		ldap_get_option(ld, LDAP_OPT_ERROR_STRING, &ld_error);
-		DEBUG(10,("AD LDAP failure %d (%s):\n%s\n", ret,
-			ldap_err2string(ret), ld_error));
+		DBG_ERR("AD LDAP ERROR: %d (%s): %s\n",
+			ret,
+			ldap_err2string(ret),
+			ld_error);
 		SAFE_FREE(ld_error);
 	}
 }
@@ -1548,6 +1571,8 @@ ADS_STATUS ads_gen_mod(ADS_STRUCT *ads, const char *mod_dn, ADS_MODLIST mods)
 		{0, NULL},
 		(char) 1};
 	LDAPControl *controls[2];
+
+	DBG_INFO("AD LDAP: Modifying %s\n", mod_dn);
 
 	controls[0] = &PermitModify;
 	controls[1] = NULL;
@@ -1580,6 +1605,8 @@ ADS_STATUS ads_gen_add(ADS_STRUCT *ads, const char *new_dn, ADS_MODLIST mods)
 	char *utf8_dn = NULL;
 	size_t converted_size;
 
+	DBG_INFO("AD LDAP: Adding %s\n", new_dn);
+
 	if (!push_utf8_talloc(talloc_tos(), &utf8_dn, new_dn, &converted_size)) {
 		DEBUG(1, ("ads_gen_add: push_utf8_talloc failed!"));
 		return ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
@@ -1590,7 +1617,7 @@ ADS_STATUS ads_gen_add(ADS_STRUCT *ads, const char *new_dn, ADS_MODLIST mods)
 	/* make sure the end of the list is NULL */
 	mods[i] = NULL;
 
-	ret = ldap_add_s(ads->ldap.ld, utf8_dn, (LDAPMod**)mods);
+	ret = ldap_add_ext_s(ads->ldap.ld, utf8_dn, (LDAPMod**)mods, NULL, NULL);
 	ads_print_error(ret, ads->ldap.ld);
 	TALLOC_FREE(utf8_dn);
 	return ADS_ERROR(ret);
@@ -1611,6 +1638,8 @@ ADS_STATUS ads_del_dn(ADS_STRUCT *ads, char *del_dn)
 		DEBUG(1, ("ads_del_dn: push_utf8_talloc failed!"));
 		return ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
 	}
+
+	DBG_INFO("AD LDAP: Deleting %s\n", del_dn);
 
 	ret = ldap_delete_s(ads->ldap.ld, utf8_dn);
 	ads_print_error(ret, ads->ldap.ld);
@@ -1772,7 +1801,7 @@ uint32_t ads_get_kvno(ADS_STRUCT *ads, const char *account_name)
 	char *filter;
 	const char *attrs[] = {"msDS-KeyVersionNumber", NULL};
 	char *dn_string = NULL;
-	ADS_STATUS ret = ADS_ERROR(LDAP_SUCCESS);
+	ADS_STATUS ret;
 
 	DEBUG(5,("ads_get_kvno: Searching for account %s\n", account_name));
 	if (asprintf(&filter, "(samAccountName=%s)", account_name) == -1) {
@@ -1851,15 +1880,15 @@ ADS_STATUS ads_clear_service_principal_names(ADS_STRUCT *ads, const char *machin
 	LDAPMessage *res = NULL;
 	ADS_MODLIST mods;
 	const char *servicePrincipalName[1] = {NULL};
-	ADS_STATUS ret = ADS_ERROR(LDAP_SUCCESS);
+	ADS_STATUS ret;
 	char *dn_string = NULL;
 
 	ret = ads_find_machine_acct(ads, &res, machine_name);
-	if (!ADS_ERR_OK(ret) || ads_count_replies(ads, res) != 1) {
+	if (!ADS_ERR_OK(ret)) {
 		DEBUG(5,("ads_clear_service_principal_names: WARNING: Host Account for %s not found... skipping operation.\n", machine_name));
 		DEBUG(5,("ads_clear_service_principal_names: WARNING: Service Principals for %s have NOT been cleared.\n", machine_name));
 		ads_msgfree(ads, res);
-		return ADS_ERROR(LDAP_NO_SUCH_OBJECT);
+		return ret;
 	}
 
 	DEBUG(5,("ads_clear_service_principal_names: Host account for %s found\n", machine_name));
@@ -2015,12 +2044,12 @@ ADS_STATUS ads_add_service_principal_names(ADS_STRUCT *ads,
 	const char **servicePrincipalName = spns;
 
 	ret = ads_find_machine_acct(ads, &res, machine_name);
-	if (!ADS_ERR_OK(ret) || ads_count_replies(ads, res) != 1) {
+	if (!ADS_ERR_OK(ret)) {
 		DEBUG(1,("ads_add_service_principal_name: WARNING: Host Account for %s not found... skipping operation.\n",
 			machine_name));
 		DEBUG(1,("ads_add_service_principal_name: WARNING: Service Principals have NOT been added.\n"));
 		ads_msgfree(ads, res);
-		return ADS_ERROR(LDAP_NO_SUCH_OBJECT);
+		return ret;
 	}
 
 	DEBUG(1,("ads_add_service_principal_name: Host account for %s found\n", machine_name));
@@ -2069,6 +2098,127 @@ ADS_STATUS ads_add_service_principal_names(ADS_STRUCT *ads,
 	return ret;
 }
 
+static uint32_t ads_get_acct_ctrl(ADS_STRUCT *ads,
+				  LDAPMessage *msg)
+{
+	uint32_t acct_ctrl = 0;
+	bool ok;
+
+	ok = ads_pull_uint32(ads, msg, "userAccountControl", &acct_ctrl);
+	if (!ok) {
+		return 0;
+	}
+
+	return acct_ctrl;
+}
+
+static ADS_STATUS ads_change_machine_acct(ADS_STRUCT *ads,
+					  LDAPMessage *msg,
+					  const struct berval *machine_pw_val)
+{
+	ADS_MODLIST mods;
+	ADS_STATUS ret;
+	TALLOC_CTX *frame = talloc_stackframe();
+	uint32_t acct_control;
+	char *control_str = NULL;
+	const char *attrs[] = {
+		"objectSid",
+		NULL
+	};
+	LDAPMessage *res = NULL;
+	char *dn = NULL;
+
+	dn = ads_get_dn(ads, frame, msg);
+	if (dn == NULL) {
+		ret = ADS_ERROR(LDAP_NO_MEMORY);
+		goto done;
+	}
+
+	acct_control = ads_get_acct_ctrl(ads, msg);
+	if (acct_control == 0) {
+		ret = ADS_ERROR(LDAP_NO_RESULTS_RETURNED);
+		goto done;
+	}
+
+	/*
+	 * Changing the password, disables the account. So we need to change the
+	 * userAccountControl flags to enable it again.
+	 */
+	mods = ads_init_mods(frame);
+	if (mods == NULL) {
+		ret = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		goto done;
+	}
+
+	ads_mod_ber(frame, &mods, "unicodePwd", machine_pw_val);
+
+	ret = ads_gen_mod(ads, dn, mods);
+	if (!ADS_ERR_OK(ret)) {
+		goto done;
+	}
+	TALLOC_FREE(mods);
+
+	/*
+	 * To activate the account, we need to disable and enable it.
+	 */
+	acct_control |= UF_ACCOUNTDISABLE;
+
+	control_str = talloc_asprintf(frame, "%u", acct_control);
+	if (control_str == NULL) {
+		ret = ADS_ERROR(LDAP_NO_MEMORY);
+		goto done;
+	}
+
+	mods = ads_init_mods(frame);
+	if (mods == NULL) {
+		ret = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		goto done;
+	}
+
+	ads_mod_str(frame, &mods, "userAccountControl", control_str);
+
+	ret = ads_gen_mod(ads, dn, mods);
+	if (!ADS_ERR_OK(ret)) {
+		goto done;
+	}
+	TALLOC_FREE(mods);
+	TALLOC_FREE(control_str);
+
+	/*
+	 * Enable the account again.
+	 */
+	acct_control &= ~UF_ACCOUNTDISABLE;
+
+	control_str = talloc_asprintf(frame, "%u", acct_control);
+	if (control_str == NULL) {
+		ret = ADS_ERROR(LDAP_NO_MEMORY);
+		goto done;
+	}
+
+	mods = ads_init_mods(frame);
+	if (mods == NULL) {
+		ret = ADS_ERROR_LDAP(LDAP_NO_MEMORY);
+		goto done;
+	}
+
+	ads_mod_str(frame, &mods, "userAccountControl", control_str);
+
+	ret = ads_gen_mod(ads, dn, mods);
+	if (!ADS_ERR_OK(ret)) {
+		goto done;
+	}
+	TALLOC_FREE(mods);
+	TALLOC_FREE(control_str);
+
+	ret = ads_search_dn(ads, &res, dn, attrs);
+	ads_msgfree(ads, res);
+
+done:
+	talloc_free(frame);
+
+	return ret;
+}
+
 /**
  * adds a machine account to the ADS server
  * @param ads An intialized ADS_STRUCT
@@ -2080,74 +2230,174 @@ ADS_STATUS ads_add_service_principal_names(ADS_STRUCT *ads,
 
 ADS_STATUS ads_create_machine_acct(ADS_STRUCT *ads,
 				   const char *machine_name,
+				   const char *machine_password,
 				   const char *org_unit,
-				   uint32_t etype_list)
+				   uint32_t etype_list,
+				   const char *dns_domain_name)
 {
 	ADS_STATUS ret;
-	char *samAccountName, *controlstr;
-	TALLOC_CTX *ctx;
+	char *samAccountName = NULL;
+	char *controlstr = NULL;
+	TALLOC_CTX *ctx = NULL;
 	ADS_MODLIST mods;
 	char *machine_escaped = NULL;
-	char *new_dn;
-	const char *objectClass[] = {"top", "person", "organizationalPerson",
-				     "user", "computer", NULL};
+	char *dns_hostname = NULL;
+	char *new_dn = NULL;
+	char *utf8_pw = NULL;
+	size_t utf8_pw_len = 0;
+	char *utf16_pw = NULL;
+	size_t utf16_pw_len = 0;
+	struct berval machine_pw_val;
+	bool ok;
+	const char **spn_array = NULL;
+	size_t num_spns = 0;
+	const char *spn_prefix[] = {
+		"HOST",
+		"RestrictedKrbHost",
+	};
+	size_t i;
 	LDAPMessage *res = NULL;
-	uint32_t acct_control = ( UF_WORKSTATION_TRUST_ACCOUNT |\
-	                        UF_DONT_EXPIRE_PASSWD |\
-			        UF_ACCOUNTDISABLE );
-	uint32_t func_level = 0;
+	uint32_t acct_control = UF_WORKSTATION_TRUST_ACCOUNT;
 
-	ret = ads_domain_func_level(ads, &func_level);
-	if (!ADS_ERR_OK(ret)) {
-		return ret;
-	}
-
-	if (!(ctx = talloc_init("ads_add_machine_acct")))
+	ctx = talloc_init("ads_add_machine_acct");
+	if (ctx == NULL) {
 		return ADS_ERROR(LDAP_NO_MEMORY);
-
-	ret = ADS_ERROR(LDAP_NO_MEMORY);
+	}
 
 	machine_escaped = escape_rdn_val_string_alloc(machine_name);
-	if (!machine_escaped) {
+	if (machine_escaped == NULL) {
+		ret = ADS_ERROR(LDAP_NO_MEMORY);
 		goto done;
 	}
+
+	utf8_pw = talloc_asprintf(ctx, "\"%s\"", machine_password);
+	if (utf8_pw == NULL) {
+		ret = ADS_ERROR(LDAP_NO_MEMORY);
+		goto done;
+	}
+	utf8_pw_len = strlen(utf8_pw);
+
+	ok = convert_string_talloc(ctx,
+				   CH_UTF8, CH_UTF16MUNGED,
+				   utf8_pw, utf8_pw_len,
+				   (void *)&utf16_pw, &utf16_pw_len);
+	if (!ok) {
+		ret = ADS_ERROR(LDAP_NO_MEMORY);
+		goto done;
+	}
+
+	machine_pw_val = (struct berval) {
+		.bv_val = utf16_pw,
+		.bv_len = utf16_pw_len,
+	};
+
+	/* Check if the machine account already exists. */
+	ret = ads_find_machine_acct(ads, &res, machine_escaped);
+	if (ADS_ERR_OK(ret)) {
+		/* Change the machine account password */
+		ret = ads_change_machine_acct(ads, res, &machine_pw_val);
+		ads_msgfree(ads, res);
+
+		goto done;
+	}
+	ads_msgfree(ads, res);
 
 	new_dn = talloc_asprintf(ctx, "cn=%s,%s", machine_escaped, org_unit);
+	if (new_dn == NULL) {
+		ret = ADS_ERROR(LDAP_NO_MEMORY);
+		goto done;
+	}
+
+	/* Create machine account */
+
 	samAccountName = talloc_asprintf(ctx, "%s$", machine_name);
-
-	if ( !new_dn || !samAccountName ) {
+	if (samAccountName == NULL) {
+		ret = ADS_ERROR(LDAP_NO_MEMORY);
 		goto done;
 	}
 
-	if (!(controlstr = talloc_asprintf(ctx, "%u", acct_control))) {
+	dns_hostname = talloc_asprintf(ctx,
+				       "%s.%s",
+				       machine_name,
+				       dns_domain_name);
+	if (dns_hostname == NULL) {
+		ret = ADS_ERROR(LDAP_NO_MEMORY);
 		goto done;
 	}
 
-	if (!(mods = ads_init_mods(ctx))) {
-		goto done;
-	}
-
-	ads_mod_str(ctx, &mods, "cn", machine_name);
-	ads_mod_str(ctx, &mods, "sAMAccountName", samAccountName);
-	ads_mod_strlist(ctx, &mods, "objectClass", objectClass);
-	ads_mod_str(ctx, &mods, "userAccountControl", controlstr);
-
-	if (func_level >= DS_DOMAIN_FUNCTION_2008) {
-		const char *etype_list_str;
-
-		etype_list_str = talloc_asprintf(ctx, "%d", (int)etype_list);
-		if (etype_list_str == NULL) {
+	/* Add dns_hostname SPNs */
+	for (i = 0; i < ARRAY_SIZE(spn_prefix); i++) {
+		char *spn = talloc_asprintf(ctx,
+					    "%s/%s",
+					    spn_prefix[i],
+					    dns_hostname);
+		if (spn == NULL) {
+			ret = ADS_ERROR(LDAP_NO_MEMORY);
 			goto done;
 		}
-		ads_mod_str(ctx, &mods, "msDS-SupportedEncryptionTypes",
-			    etype_list_str);
+
+		ok = add_string_to_array(spn_array,
+					 spn,
+					 &spn_array,
+					 &num_spns);
+		if (!ok) {
+			ret = ADS_ERROR(LDAP_NO_MEMORY);
+			goto done;
+		}
 	}
+
+	/* Add machine_name SPNs */
+	for (i = 0; i < ARRAY_SIZE(spn_prefix); i++) {
+		char *spn = talloc_asprintf(ctx,
+					    "%s/%s",
+					    spn_prefix[i],
+					    machine_name);
+		if (spn == NULL) {
+			ret = ADS_ERROR(LDAP_NO_MEMORY);
+			goto done;
+		}
+
+		ok = add_string_to_array(spn_array,
+					 spn,
+					 &spn_array,
+					 &num_spns);
+		if (!ok) {
+			ret = ADS_ERROR(LDAP_NO_MEMORY);
+			goto done;
+		}
+	}
+
+	/* Make sure to NULL terminate the array */
+	spn_array = talloc_realloc(ctx, spn_array, const char *, num_spns + 1);
+	if (spn_array == NULL) {
+		ret = ADS_ERROR(LDAP_NO_MEMORY);
+		goto done;
+	}
+	spn_array[num_spns] = NULL;
+
+	controlstr = talloc_asprintf(ctx, "%u", acct_control);
+	if (controlstr == NULL) {
+		ret = ADS_ERROR(LDAP_NO_MEMORY);
+		goto done;
+	}
+
+	mods = ads_init_mods(ctx);
+	if (mods == NULL) {
+		ret = ADS_ERROR(LDAP_NO_MEMORY);
+		goto done;
+	}
+
+	ads_mod_str(ctx, &mods, "objectClass", "Computer");
+	ads_mod_str(ctx, &mods, "SamAccountName", samAccountName);
+	ads_mod_str(ctx, &mods, "userAccountControl", controlstr);
+	ads_mod_str(ctx, &mods, "DnsHostName", dns_hostname);
+	ads_mod_strlist(ctx, &mods, "ServicePrincipalName", spn_array);
+	ads_mod_ber(ctx, &mods, "unicodePwd", &machine_pw_val);
 
 	ret = ads_gen_add(ads, new_dn, mods);
 
 done:
 	SAFE_FREE(machine_escaped);
-	ads_msgfree(ads, res);
 	talloc_destroy(ctx);
 
 	return ret;
@@ -2229,8 +2479,9 @@ done:
 */
 static void dump_binary(ADS_STRUCT *ads, const char *field, struct berval **values)
 {
-	int i, j;
+	size_t i;
 	for (i=0; values[i]; i++) {
+		ber_len_t j;
 		printf("%s: ", field);
 		for (j=0; j<values[i]->bv_len; j++) {
 			printf("%02X", (unsigned char)values[i]->bv_val[j]);
@@ -2263,13 +2514,15 @@ static void dump_sid(ADS_STRUCT *ads, const char *field, struct berval **values)
 {
 	int i;
 	for (i=0; values[i]; i++) {
+		ssize_t ret;
 		struct dom_sid sid;
-		fstring tmp;
-		if (!sid_parse((const uint8_t *)values[i]->bv_val,
-			       values[i]->bv_len, &sid)) {
+		struct dom_sid_buf tmp;
+		ret = sid_parse((const uint8_t *)values[i]->bv_val,
+				values[i]->bv_len, &sid);
+		if (ret == -1) {
 			return;
 		}
-		printf("%s: %s\n", field, sid_to_fstring(tmp, &sid));
+		printf("%s: %s\n", field, dom_sid_str_buf(&sid, &tmp));
 	}
 }
 
@@ -2540,8 +2793,7 @@ int ads_count_replies(ADS_STRUCT *ads, void *res)
 {
 	char **values;
 	char **ret = NULL;
-	int i;
-	size_t converted_size;
+	size_t i, converted_size;
 
 	values = ldap_get_values(ads->ldap.ld, msg, field);
 	if (!values)
@@ -2773,7 +3025,6 @@ int ads_count_replies(ADS_STRUCT *ads, void *res)
 		   LDAPMessage *msg, const char *field, struct dom_sid **sids)
 {
 	struct berval **values;
-	bool ret;
 	int count, i;
 
 	values = ldap_get_values_len(ads->ldap.ld, msg, field);
@@ -2796,11 +3047,13 @@ int ads_count_replies(ADS_STRUCT *ads, void *res)
 
 	count = 0;
 	for (i=0; values[i]; i++) {
+		ssize_t ret;
 		ret = sid_parse((const uint8_t *)values[i]->bv_val,
 				values[i]->bv_len, &(*sids)[count]);
-		if (ret) {
-			DEBUG(10, ("pulling SID: %s\n",
-				   sid_string_dbg(&(*sids)[count])));
+		if (ret != -1) {
+			struct dom_sid_buf buf;
+			DBG_DEBUG("pulling SID: %s\n",
+				  dom_sid_str_buf(&(*sids)[count], &buf));
 			count++;
 		}
 	}
@@ -2946,7 +3199,7 @@ ADS_STATUS ads_current_time(ADS_STRUCT *ads)
 
 	if ( !ads->ldap.ld ) {
 		if ( (ads_s = ads_init( ads->server.realm, ads->server.workgroup, 
-			ads->server.ldap_server )) == NULL )
+			ads->server.ldap_server, ADS_SASL_PLAIN )) == NULL )
 		{
 			status = ADS_ERROR(LDAP_NO_MEMORY);
 			goto done;
@@ -3008,7 +3261,7 @@ ADS_STATUS ads_domain_func_level(ADS_STRUCT *ads, uint32_t *val)
 
 	if ( !ads->ldap.ld ) {
 		if ( (ads_s = ads_init( ads->server.realm, ads->server.workgroup, 
-			ads->server.ldap_server )) == NULL )
+			ads->server.ldap_server, ADS_SASL_PLAIN )) == NULL )
 		{
 			status = ADS_ERROR_NT(NT_STATUS_NO_MEMORY);
 			goto done;
@@ -3355,6 +3608,7 @@ ADS_STATUS ads_get_sid_from_extended_dn(TALLOC_CTX *mem_ctx,
 		}
 		break;
 	case ADS_EXTENDED_DN_HEX_STRING: {
+		ssize_t ret;
 		fstring buf;
 		size_t buf_len;
 
@@ -3363,7 +3617,8 @@ ADS_STATUS ads_get_sid_from_extended_dn(TALLOC_CTX *mem_ctx,
 			return ADS_ERROR_NT(NT_STATUS_INVALID_PARAMETER);
 		}
 
-		if (!sid_parse((const uint8_t *)buf, buf_len, sid)) {
+		ret = sid_parse((const uint8_t *)buf, buf_len, sid);
+		if (ret == -1) {
 			DEBUG(10,("failed to parse sid\n"));
 			return ADS_ERROR_NT(NT_STATUS_INVALID_PARAMETER);
 		}
@@ -3650,14 +3905,15 @@ ADS_STATUS ads_leave_realm(ADS_STRUCT *ads, const char *hostname)
 	TALLOC_FREE(hostnameDN);
 
 	status = ads_find_machine_acct(ads, &res, host);
-	if (ADS_ERR_OK(status) && ads_count_replies(ads, res) == 1) {
+	if ((status.error_type == ENUM_ADS_ERROR_LDAP) &&
+	    (status.err.rc != LDAP_NO_SUCH_OBJECT)) {
 		DEBUG(3, ("Failed to remove host account.\n"));
 		SAFE_FREE(host);
 		return status;
 	}
 
 	SAFE_FREE(host);
-	return status;
+	return ADS_SUCCESS;
 }
 
 /**

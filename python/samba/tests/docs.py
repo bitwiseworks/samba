@@ -23,15 +23,15 @@ import samba
 import samba.tests
 
 import os
-import re
 import subprocess
 import xml.etree.ElementTree as ET
+
 
 class TestCase(samba.tests.TestCaseInTempDir):
 
     def _format_message(self, parameters, message):
         parameters = list(parameters)
-        parameters = map(str, parameters)
+        parameters = list(map(str, parameters))
         parameters.sort()
         return message + '\n\n    %s' % ('\n    '.join(parameters))
 
@@ -50,7 +50,7 @@ def get_documented_parameters(sourcedir):
     for parameter in root:
         name = parameter.attrib.get('name')
         if parameter.attrib.get('removed') == "1":
-           continue
+            continue
         yield name
         syn = parameter.findall('synonym')
         if syn is not None:
@@ -74,7 +74,7 @@ def get_documented_tuples(sourcedir, omit_no_default=True):
         name = parameter.attrib.get("name")
         param_type = parameter.attrib.get("type")
         if parameter.attrib.get('removed') == "1":
-           continue
+            continue
         values = parameter.findall("value")
         defaults = []
         for value in values:
@@ -96,18 +96,36 @@ def get_documented_tuples(sourcedir, omit_no_default=True):
         yield name, default_text, context, param_type
     p.close()
 
+
 class SmbDotConfTests(TestCase):
 
     # defines the cases where the defaults may differ from the documentation
-    special_cases = set(['log level', 'path',
-                         'panic action', 'homedir map', 'NIS homedir',
-                         'server string', 'netbios name', 'socket options', 'use mmap',
-                         'ctdbd socket', 'printing', 'printcap name', 'queueresume command',
-                         'queuepause command','lpresume command', 'lppause command',
-                         'lprm command', 'lpq command', 'print command', 'template homedir',
-                         'max open files',
-                         'include system krb5 conf', 'rpc server dynamic port range',
-                         'mit kdc command'])
+    special_cases = set([
+        'log level',
+        'path',
+        'panic action',
+        'homedir map',
+        'NIS homedir',
+        'server string',
+        'netbios name',
+        'socket options',
+        'use mmap',
+        'ctdbd socket',
+        'printing',
+        'printcap name',
+        'queueresume command',
+        'queuepause command',
+        'lpresume command',
+        'lppause command',
+        'lprm command',
+        'lpq command',
+        'print command',
+        'template homedir',
+        'max open files',
+        'include system krb5 conf',
+        'mit kdc command',
+        'smbd max async dosmode',
+    ])
 
     def setUp(self):
         super(SmbDotConfTests, self).setUp()
@@ -146,7 +164,6 @@ class SmbDotConfTests(TestCase):
         except:
             self.fail("Unable to load parameters")
 
-
     def tearDown(self):
         super(SmbDotConfTests, self).tearDown()
         os.unlink(self.smbconf)
@@ -163,21 +180,25 @@ class SmbDotConfTests(TestCase):
                           'registry shares',
                           'smb ports',
                           'rpc server dynamic port range',
-                          'name resolve order'])
+                          'name resolve order',
+                          'clustering'])
         self._test_empty(['bin/testparm'])
 
     def test_default_s4(self):
         self._test_default(['bin/samba-tool', 'testparm'])
         self._set_defaults(['bin/samba-tool', 'testparm'])
         self._set_arbitrary(['bin/samba-tool', 'testparm'],
-            exceptions = ['smb ports',
-                          'rpc server dynamic port range',
-                          'name resolve order'])
+                            exceptions=['smb ports',
+                                        'rpc server dynamic port range',
+                                        'name resolve order'])
         self._test_empty(['bin/samba-tool', 'testparm'])
 
     def _test_default(self, program):
+
+        if program[0] == 'bin/samba-tool' and os.getenv("PYTHON", None):
+            program = [os.environ["PYTHON"]] + program
+
         failset = set()
-        count = 0
 
         for tuples in self.defaults:
             param, default, context, param_type = tuples
@@ -193,10 +214,16 @@ class SmbDotConfTests(TestCase):
             elif context == "S":
                 section = "test"
             else:
-                 self.fail("%s has no valid context" % param)
-            p = subprocess.Popen(program + ["-s", self.smbconf,
-                    "--section-name", section, "--parameter-name", param],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.topdir).communicate()
+                self.fail("%s has no valid context" % param)
+            p = subprocess.Popen(program + ["-s",
+                                            self.smbconf,
+                                            "--section-name",
+                                            section,
+                                            "--parameter-name",
+                                            param],
+                                 stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE,
+                                 cwd=self.topdir).communicate()
             result = p[0].decode().upper().strip()
             if result != default.upper():
                 if not (result == "" and default == '""'):
@@ -205,16 +232,24 @@ class SmbDotConfTests(TestCase):
 
         if len(failset) > 0:
             self.fail(self._format_message(failset,
-                "Parameters that do not have matching defaults:"))
+                                           "Parameters that do not have matching defaults:"))
 
     def _set_defaults(self, program):
+
+        if program[0] == 'bin/samba-tool' and os.getenv("PYTHON", None):
+            program = [os.environ["PYTHON"]] + program
+
         failset = set()
-        count = 0
 
         for tuples in self.defaults:
             param, default, context, param_type = tuples
 
-            if param in ['printing', 'rpc server dynamic port range']:
+            exceptions = set([
+                'printing',
+                'smbd max async dosmode',
+            ])
+
+            if param in exceptions:
                 continue
 
             section = None
@@ -223,11 +258,18 @@ class SmbDotConfTests(TestCase):
             elif context == "S":
                 section = "test"
             else:
-                 self.fail("%s has no valid context" % param)
-            p = subprocess.Popen(program + ["-s", self.smbconf,
-                    "--section-name", section, "--parameter-name", param,
-                    "--option", "%s = %s" % (param, default)],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.topdir).communicate()
+                self.fail("%s has no valid context" % param)
+            p = subprocess.Popen(program + ["-s",
+                                            self.smbconf,
+                                            "--section-name",
+                                            section,
+                                            "--parameter-name",
+                                            param,
+                                            "--option",
+                                            "%s = %s" % (param, default)],
+                                 stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE,
+                                 cwd=self.topdir).communicate()
             result = p[0].decode().upper().strip()
             if result != default.upper():
                 if not (result == "" and default == '""'):
@@ -236,26 +278,29 @@ class SmbDotConfTests(TestCase):
 
         if len(failset) > 0:
             self.fail(self._format_message(failset,
-                "Parameters that do not have matching defaults:"))
+                                           "Parameters that do not have matching defaults:"))
 
     def _set_arbitrary(self, program, exceptions=None):
+
+        if program[0] == 'bin/samba-tool' and os.getenv("PYTHON", None):
+            program = [os.environ["PYTHON"]] + program
+
         arbitrary = {'string': 'string', 'boolean': 'yes', 'integer': '5',
                      'boolean-rev': 'yes',
                      'cmdlist': 'a b c',
                      'bytes': '10',
                      'octal': '0123',
                      'ustring': 'ustring',
-                     'enum':'', 'boolean-auto': '', 'char': 'a', 'list': 'a, b, c'}
+                     'enum': '', 'boolean-auto': '', 'char': 'a', 'list': 'a, b, c'}
         opposite_arbitrary = {'string': 'string2', 'boolean': 'no', 'integer': '6',
                               'boolean-rev': 'no',
                               'cmdlist': 'd e f',
                               'bytes': '11',
                               'octal': '0567',
                               'ustring': 'ustring2',
-                              'enum':'', 'boolean-auto': '', 'char': 'b', 'list': 'd, e, f'}
+                              'enum': '', 'boolean-auto': '', 'char': 'b', 'list': 'd, e, f'}
 
         failset = set()
-        count = 0
 
         for tuples in self.defaults_all:
             param, default, context, param_type = tuples
@@ -277,16 +322,23 @@ class SmbDotConfTests(TestCase):
             elif context == "S":
                 section = "test"
             else:
-                 self.fail("%s has no valid context" % param)
+                self.fail("%s has no valid context" % param)
 
             value_to_use = arbitrary.get(param_type)
             if value_to_use is None:
                 self.fail("%s has an invalid type" % param)
 
-            p = subprocess.Popen(program + ["-s", self.smbconf,
-                    "--section-name", section, "--parameter-name", param,
-                    "--option", "%s = %s" % (param, value_to_use)],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.topdir).communicate()
+            p = subprocess.Popen(program + ["-s",
+                                            self.smbconf,
+                                            "--section-name",
+                                            section,
+                                            "--parameter-name",
+                                            param,
+                                            "--option",
+                                            "%s = %s" % (param, value_to_use)],
+                                 stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE,
+                                 cwd=self.topdir).communicate()
             result = p[0].decode().upper().strip()
             if result != value_to_use.upper():
                 # currently no way to distinguish command lists
@@ -315,9 +367,14 @@ class SmbDotConfTests(TestCase):
             finally:
                 g.close()
 
-            p = subprocess.Popen(program + ["-s", tempconf, "--suppress-prompt",
-                    "--option", "%s = %s" % (param, value_to_use)],
-                    stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.topdir).communicate()
+            p = subprocess.Popen(program + ["-s",
+                                            tempconf,
+                                            "--suppress-prompt",
+                                            "--option",
+                                            "%s = %s" % (param, value_to_use)],
+                                 stdout=subprocess.PIPE,
+                                 stderr=subprocess.PIPE,
+                                 cwd=self.topdir).communicate()
 
             os.unlink(tempconf)
 
@@ -345,14 +402,21 @@ class SmbDotConfTests(TestCase):
                         doc_triple = "%s\n      Expected: %s" % (param, value_to_use)
                         failset.add("%s\n      Got: %s" % (doc_triple, value_found))
 
-
         if len(failset) > 0:
             self.fail(self._format_message(failset,
-                "Parameters that were unexpectedly not set:"))
+                                           "Parameters that were unexpectedly not set:"))
 
     def _test_empty(self, program):
-        p = subprocess.Popen(program + ["-s", self.blankconf, "--suppress-prompt"],
-                stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=self.topdir).communicate()
+
+        if program[0] == 'bin/samba-tool' and os.getenv("PYTHON", None):
+            program = [os.environ["PYTHON"]] + program
+
+        p = subprocess.Popen(program + ["-s",
+                                        self.blankconf,
+                                        "--suppress-prompt"],
+                             stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE,
+                             cwd=self.topdir).communicate()
         output = ""
 
         for line in p[0].decode().splitlines():

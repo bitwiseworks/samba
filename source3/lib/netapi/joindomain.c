@@ -137,10 +137,13 @@ WERROR NetJoinDomain_r(struct libnetapi_ctx *ctx,
 			goto done;
 		}
 
-		encode_wkssvc_join_password_buffer(ctx,
-						   r->in.password,
-						   &session_key,
-						   &encrypted_password);
+		werr = encode_wkssvc_join_password_buffer(ctx,
+							  r->in.password,
+							  &session_key,
+							  &encrypted_password);
+		if (!W_ERROR_IS_OK(werr)) {
+			goto done;
+		}
 	}
 
 	old_timeout = rpccli_set_timeout(pipe_cli, 600000);
@@ -279,10 +282,13 @@ WERROR NetUnjoinDomain_r(struct libnetapi_ctx *ctx,
 			goto done;
 		}
 
-		encode_wkssvc_join_password_buffer(ctx,
-						   r->in.password,
-						   &session_key,
-						   &encrypted_password);
+		werr = encode_wkssvc_join_password_buffer(ctx,
+							  r->in.password,
+							  &session_key,
+							  &encrypted_password);
+		if (!W_ERROR_IS_OK(werr)) {
+			goto done;
+		}
 	}
 
 	old_timeout = rpccli_set_timeout(pipe_cli, 60000);
@@ -411,7 +417,10 @@ WERROR NetGetJoinableOUs_l(struct libnetapi_ctx *ctx,
 
 	dc = strip_hostname(info->dc_unc);
 
-	ads = ads_init(info->domain_name, info->domain_name, dc);
+	ads = ads_init(info->domain_name,
+		       info->domain_name,
+		       dc,
+		       ADS_SASL_PLAIN);
 	if (!ads) {
 		return WERR_GEN_FAILURE;
 	}
@@ -481,10 +490,13 @@ WERROR NetGetJoinableOUs_r(struct libnetapi_ctx *ctx,
 			goto done;
 		}
 
-		encode_wkssvc_join_password_buffer(ctx,
-						   r->in.password,
-						   &session_key,
-						   &encrypted_password);
+		werr = encode_wkssvc_join_password_buffer(ctx,
+							  r->in.password,
+							  &session_key,
+							  &encrypted_password);
+		if (!W_ERROR_IS_OK(werr)) {
+			goto done;
+		}
 	}
 
 	status = dcerpc_wkssvc_NetrGetJoinableOus2(b, talloc_tos(),
@@ -534,10 +546,13 @@ WERROR NetRenameMachineInDomain_r(struct libnetapi_ctx *ctx,
 			goto done;
 		}
 
-		encode_wkssvc_join_password_buffer(ctx,
-						   r->in.password,
-						   &session_key,
-						   &encrypted_password);
+		werr = encode_wkssvc_join_password_buffer(ctx,
+							  r->in.password,
+							  &session_key,
+							  &encrypted_password);
+		if (!W_ERROR_IS_OK(werr)) {
+			goto done;
+		}
 	}
 
 	status = dcerpc_wkssvc_NetrRenameMachineInDomain2(b, talloc_tos(),

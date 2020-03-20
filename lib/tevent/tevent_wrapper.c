@@ -25,6 +25,7 @@
 #ifdef HAVE_PTHREAD
 #include "system/threads.h"
 #endif
+#define TEVENT_DEPRECATED 1
 #include "tevent.h"
 #include "tevent_internal.h"
 #include "tevent_util.h"
@@ -207,6 +208,8 @@ static int tevent_wrapper_context_destructor(struct tevent_context *wrap_ev)
 	if (glue == NULL) {
 		tevent_abort(wrap_ev,
 			"tevent_wrapper_context_destructor() active on main");
+		/* static checker support, return below is never reached */
+		return -1;
 	}
 
 	if (glue->destroyed && glue->busy) {
@@ -347,7 +350,7 @@ struct tevent_context *_tevent_context_wrapper_create(struct tevent_context *mai
 		/*
 		 * wrappers conflict with nesting
 		 */
-		tevent_debug(main_ev->wrapper.glue->main_ev, TEVENT_DEBUG_FATAL,
+		tevent_debug(main_ev, TEVENT_DEBUG_FATAL,
 			     "%s: %s() conflicts with nesting\n",
 			     __func__, location);
 		errno = EINVAL;
@@ -371,7 +374,7 @@ struct tevent_context *_tevent_context_wrapper_create(struct tevent_context *mai
 	ev->wrapper.glue->wrap_ev = ev;
 	ev->wrapper.glue->main_ev = main_ev;
 	ev->wrapper.glue->ops = ops;
-	ev->wrapper.glue->private_state = talloc_size(ev->wrapper.glue, psize);
+	ev->wrapper.glue->private_state = talloc_zero_size(ev->wrapper.glue, psize);
 	if (ev->wrapper.glue->private_state == NULL) {
 		talloc_free(ev);
 		return NULL;

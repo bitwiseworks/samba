@@ -44,7 +44,7 @@
  * format_bufr[FORMAT_BUFR_SIZE - 1] should always be reserved
  * for a terminating null byte.
  */
-#define FORMAT_BUFR_SIZE 1024
+#define FORMAT_BUFR_SIZE 4096
 
 /* -------------------------------------------------------------------------- **
  * This module implements Samba's debugging utility.
@@ -86,22 +86,88 @@
 /* state variables for the debug system */
 static struct {
 	bool initialized;
-	int fd;   /* The log file handle */
 	enum debug_logtype logtype; /* The type of logging we are doing: eg stdout, file, stderr */
-	const char *prog_name;
+	char prog_name[255];
 	bool reopening_logs;
 	bool schedule_reopen_logs;
 
 	struct debug_settings settings;
-	char *debugf;
 	debug_callback_fn callback;
 	void *callback_private;
 } state = {
 	.settings = {
 		.timestamp_logs = true
 	},
-	.fd = 2 /* stderr by default */
 };
+
+struct debug_class {
+	/*
+	 * The debug loglevel of the class.
+	 */
+	int loglevel;
+
+	/*
+	 * An optional class specific logfile, may be NULL in which case the
+	 * "global" logfile is used and fd is -1.
+	 */
+	char *logfile;
+	int fd;
+};
+
+static const char *default_classname_table[] = {
+	[DBGC_ALL] =			"all",
+	[DBGC_TDB] =			"tdb",
+	[DBGC_PRINTDRIVERS] =		"printdrivers",
+	[DBGC_LANMAN] =			"lanman",
+	[DBGC_SMB] =			"smb",
+	[DBGC_RPC_PARSE] =		"rpc_parse",
+	[DBGC_RPC_SRV] =		"rpc_srv",
+	[DBGC_RPC_CLI] =		"rpc_cli",
+	[DBGC_PASSDB] =			"passdb",
+	[DBGC_SAM] =			"sam",
+	[DBGC_AUTH] =			"auth",
+	[DBGC_WINBIND] =		"winbind",
+	[DBGC_VFS] =			"vfs",
+	[DBGC_IDMAP] =			"idmap",
+	[DBGC_QUOTA] =			"quota",
+	[DBGC_ACLS] =			"acls",
+	[DBGC_LOCKING] =		"locking",
+	[DBGC_MSDFS] =			"msdfs",
+	[DBGC_DMAPI] =			"dmapi",
+	[DBGC_REGISTRY] =		"registry",
+	[DBGC_SCAVENGER] =		"scavenger",
+	[DBGC_DNS] =			"dns",
+	[DBGC_LDB] =			"ldb",
+	[DBGC_TEVENT] =			"tevent",
+	[DBGC_AUTH_AUDIT] =		"auth_audit",
+	[DBGC_AUTH_AUDIT_JSON] =	"auth_json_audit",
+	[DBGC_KERBEROS] =       	"kerberos",
+	[DBGC_DRS_REPL] =       	"drs_repl",
+	[DBGC_SMB2] =           	"smb2",
+	[DBGC_SMB2_CREDITS] =   	"smb2_credits",
+	[DBGC_DSDB_AUDIT] =		"dsdb_audit",
+	[DBGC_DSDB_AUDIT_JSON] =	"dsdb_json_audit",
+	[DBGC_DSDB_PWD_AUDIT]  =	"dsdb_password_audit",
+	[DBGC_DSDB_PWD_AUDIT_JSON] =	"dsdb_password_json_audit",
+	[DBGC_DSDB_TXN_AUDIT]  =	"dsdb_transaction_audit",
+	[DBGC_DSDB_TXN_AUDIT_JSON] =	"dsdb_transaction_json_audit",
+	[DBGC_DSDB_GROUP_AUDIT] =	"dsdb_group_audit",
+	[DBGC_DSDB_GROUP_AUDIT_JSON] =	"dsdb_group_json_audit",
+};
+
+/*
+ * This is to allow reading of dbgc_config before the debug
+ * system has been initialized.
+ */
+static struct debug_class debug_class_list_initial[ARRAY_SIZE(default_classname_table)] = {
+	[DBGC_ALL] = (struct debug_class) { .fd = 2 },
+};
+
+static size_t debug_num_classes = 0;
+static struct debug_class *dbgc_config = debug_class_list_initial;
+
+static int current_msg_level = 0;
+static int current_msg_class = 0;
 
 #if defined(WITH_SYSLOG) || defined(HAVE_LIBSYSTEMD_JOURNAL) || defined(HAVE_LIBSYSTEMD)
 static int debug_level_to_priority(int level)
@@ -141,10 +207,18 @@ static void debug_file_log(int msg_level,
 			   const char *msg, const char *msg_no_nl)
 {
 	ssize_t ret;
+	int fd;
 
 	check_log_size();
+
+	if (dbgc_config[current_msg_class].fd != -1) {
+		fd = dbgc_config[current_msg_class].fd;
+	} else {
+		fd = dbgc_config[DBGC_ALL].fd;
+	}
+
 	do {
-		ret = write(state.fd, msg, strlen(msg));
+		ret = write(fd, msg, strlen(msg));
 	} while (ret == -1 && errno == EINTR);
 }
 
@@ -153,11 +227,15 @@ static void debug_syslog_reload(bool enabled, bool previously_enabled,
 				const char *prog_name, char *option)
 {
 	if (enabled && !previously_enabled) {
+		const char *ident = NULL;
+		if ((prog_name != NULL) && (prog_name[0] != '\0')) {
+			ident = prog_name;
+		}
 #ifdef LOG_DAEMON
-		openlog(prog_name, LOG_PID, SYSLOG_FACILITY);
+		openlog(ident, LOG_PID, SYSLOG_FACILITY);
 #else
 		/* for old systems that have no facility codes. */
-		openlog(prog_name, LOG_PID );
+		openlog(ident, LOG_PID);
 #endif
 		return;
 	}
@@ -512,55 +590,15 @@ static void debug_backends_log(const char *msg, int msg_level)
 */
 bool    override_logfile;
 
-static const char *default_classname_table[] = {
-	[DBGC_ALL] =		"all",
-	[DBGC_TDB] =		"tdb",
-	[DBGC_PRINTDRIVERS] =	"printdrivers",
-	[DBGC_LANMAN] =		"lanman",
-	[DBGC_SMB] =		"smb",
-	[DBGC_RPC_PARSE] =	"rpc_parse",
-	[DBGC_RPC_SRV] =	"rpc_srv",
-	[DBGC_RPC_CLI] =	"rpc_cli",
-	[DBGC_PASSDB] =		"passdb",
-	[DBGC_SAM] =		"sam",
-	[DBGC_AUTH] =		"auth",
-	[DBGC_WINBIND] =	"winbind",
-	[DBGC_VFS] =		"vfs",
-	[DBGC_IDMAP] =		"idmap",
-	[DBGC_QUOTA] =		"quota",
-	[DBGC_ACLS] =		"acls",
-	[DBGC_LOCKING] =	"locking",
-	[DBGC_MSDFS] =		"msdfs",
-	[DBGC_DMAPI] =		"dmapi",
-	[DBGC_REGISTRY] =	"registry",
-	[DBGC_SCAVENGER] =	"scavenger",
-	[DBGC_DNS] =		"dns",
-	[DBGC_LDB] =		"ldb",
-	[DBGC_TEVENT] =		"tevent",
-	[DBGC_AUTH_AUDIT] =	"auth_audit",
-	[DBGC_AUTH_AUDIT_JSON] = "auth_json_audit",
-	[DBGC_KERBEROS] =       "kerberos",
-	[DBGC_DRS_REPL] =       "drs_repl",
-	[DBGC_SMB2] =           "smb2",
-	[DBGC_SMB2_CREDITS] =   "smb2_credits",
-	[DBGC_DSDB_AUDIT]  =	"dsdb_audit",
-	[DBGC_DSDB_AUDIT_JSON] = "dsdb_json_audit",
-	[DBGC_DSDB_PWD_AUDIT]  =	"dsdb_password_audit",
-	[DBGC_DSDB_PWD_AUDIT_JSON] = "dsdb_password_json_audit",
-	[DBGC_DSDB_TXN_AUDIT]  =	"dsdb_transaction_audit",
-	[DBGC_DSDB_TXN_AUDIT_JSON] = "dsdb_transaction_json_audit",
-	[DBGC_DSDB_GROUP_AUDIT] =	"dsdb_group_audit",
-	[DBGC_DSDB_GROUP_AUDIT_JSON] = "dsdb_group_json_audit",
-};
+int debuglevel_get_class(size_t idx)
+{
+	return dbgc_config[idx].loglevel;
+}
 
-/*
- * This is to allow reading of DEBUGLEVEL_CLASS before the debug
- * system has been initialized.
- */
-static const int debug_class_list_initial[ARRAY_SIZE(default_classname_table)];
-
-static size_t debug_num_classes = 0;
-int     *DEBUGLEVEL_CLASS = discard_const_p(int, debug_class_list_initial);
+void debuglevel_set_class(size_t idx, int level)
+{
+	dbgc_config[idx].loglevel = level;
+}
 
 
 /* -------------------------------------------------------------------------- **
@@ -587,7 +625,6 @@ int     *DEBUGLEVEL_CLASS = discard_const_p(int, debug_class_list_initial);
  */
 
 static int     debug_count    = 0;
-static int     current_msg_level   = 0;
 static char format_bufr[FORMAT_BUFR_SIZE];
 static size_t     format_pos     = 0;
 static bool    log_overflow   = false;
@@ -617,9 +654,10 @@ void gfree_debugsyms(void)
 
 	TALLOC_FREE(classname_table);
 
-	if ( DEBUGLEVEL_CLASS != debug_class_list_initial ) {
-		TALLOC_FREE( DEBUGLEVEL_CLASS );
-		DEBUGLEVEL_CLASS = discard_const_p(int, debug_class_list_initial);
+	if ( dbgc_config != debug_class_list_initial ) {
+		TALLOC_FREE( dbgc_config );
+		dbgc_config = discard_const_p(struct debug_class,
+						   debug_class_list_initial);
 	}
 
 	debug_num_classes = 0;
@@ -644,7 +682,7 @@ char *debug_list_class_names_and_levels(void)
 		buf = talloc_asprintf_append(buf,
 					     "%s:%d%s",
 					     classname_table[i],
-					     DEBUGLEVEL_CLASS[i],
+					     dbgc_config[i].loglevel,
 					     i == (debug_num_classes - 1) ? "\n" : " ");
 		if (buf == NULL) {
 			return NULL;
@@ -661,11 +699,15 @@ static int debug_lookup_classname_int(const char* classname)
 {
 	size_t i;
 
-	if (!classname) return -1;
+	if (classname == NULL) {
+		return -1;
+	}
 
 	for (i=0; i < debug_num_classes; i++) {
-		if (strcmp(classname, classname_table[i])==0)
+		char *entry = classname_table[i];
+		if (entry != NULL && strcmp(classname, entry)==0) {
 			return i;
+		}
 	}
 	return -1;
 }
@@ -677,45 +719,57 @@ static int debug_lookup_classname_int(const char* classname)
 int debug_add_class(const char *classname)
 {
 	int ndx;
-	int *new_class_list;
+	struct debug_class *new_class_list = NULL;
 	char **new_name_list;
 	int default_level;
 
-	if (!classname)
+	if (classname == NULL) {
 		return -1;
+	}
 
 	/* check the init has yet been called */
 	debug_init();
 
 	ndx = debug_lookup_classname_int(classname);
-	if (ndx >= 0)
+	if (ndx >= 0) {
 		return ndx;
+	}
 	ndx = debug_num_classes;
 
-	if (DEBUGLEVEL_CLASS == debug_class_list_initial) {
+	if (dbgc_config == debug_class_list_initial) {
 		/* Initial loading... */
 		new_class_list = NULL;
 	} else {
-		new_class_list = DEBUGLEVEL_CLASS;
+		new_class_list = dbgc_config;
 	}
 
-	default_level = DEBUGLEVEL_CLASS[DBGC_ALL];
+	default_level = dbgc_config[DBGC_ALL].loglevel;
 
-	new_class_list = talloc_realloc(NULL, new_class_list, int, ndx + 1);
-	if (!new_class_list)
+	new_class_list = talloc_realloc(NULL,
+					new_class_list,
+					struct debug_class,
+					ndx + 1);
+	if (new_class_list == NULL) {
 		return -1;
-	DEBUGLEVEL_CLASS = new_class_list;
+	}
 
-	DEBUGLEVEL_CLASS[ndx] = default_level;
+	dbgc_config = new_class_list;
+
+	dbgc_config[ndx] = (struct debug_class) {
+		.loglevel = default_level,
+		.fd = -1,
+	};
 
 	new_name_list = talloc_realloc(NULL, classname_table, char *, ndx + 1);
-	if (!new_name_list)
+	if (new_name_list == NULL) {
 		return -1;
+	}
 	classname_table = new_name_list;
 
 	classname_table[ndx] = talloc_strdup(classname_table, classname);
-	if (! classname_table[ndx])
+	if (classname_table[ndx] == NULL) {
 		return -1;
+	}
 
 	debug_num_classes = ndx + 1;
 
@@ -730,7 +784,7 @@ static int debug_lookup_classname(const char *classname)
 {
 	int ndx;
 
-	if (!classname || !*classname)
+	if (classname == NULL || !*classname)
 		return -1;
 
 	ndx = debug_lookup_classname_int(classname);
@@ -756,13 +810,14 @@ static void debug_dump_status(int level)
 		const char *classname = classname_table[q];
 		DEBUGADD(level, ("  %s: %d\n",
 				 classname,
-				 DEBUGLEVEL_CLASS[q]));
+				 dbgc_config[q].loglevel));
 	}
 }
 
 static bool debug_parse_param(char *param)
 {
 	char *class_name;
+	char *class_file = NULL;
 	char *class_level;
 	char *saveptr = NULL;
 	int ndx;
@@ -772,25 +827,37 @@ static bool debug_parse_param(char *param)
 		return false;
 	}
 
-	class_level = strtok_r(NULL, "\0", &saveptr);
+	class_level = strtok_r(NULL, "@\0", &saveptr);
 	if (class_level == NULL) {
 		return false;
 	}
+
+	class_file = strtok_r(NULL, "\0", &saveptr);
 
 	ndx = debug_lookup_classname(class_name);
 	if (ndx == -1) {
 		return false;
 	}
 
-	DEBUGLEVEL_CLASS[ndx] = atoi(class_level);
+	dbgc_config[ndx].loglevel = atoi(class_level);
 
+	if (class_file == NULL) {
+		return true;
+	}
+
+	TALLOC_FREE(dbgc_config[ndx].logfile);
+
+	dbgc_config[ndx].logfile = talloc_strdup(NULL, class_file);
+	if (dbgc_config[ndx].logfile == NULL) {
+		return false;
+	}
 	return true;
 }
 
 /****************************************************************************
  Parse the debug levels from smb.conf. Example debug level string:
   3 tdb:5 printdrivers:7
- Note: the 1st param has no "name:" preceeding it.
+ Note: the 1st param has no "name:" preceding it.
 ****************************************************************************/
 
 bool debug_parse_levels(const char *params_str)
@@ -814,15 +881,16 @@ bool debug_parse_levels(const char *params_str)
 	 * v.s. "all:10", this is the traditional way to set DEBUGLEVEL
 	 */
 	if (isdigit(tok[0])) {
-		DEBUGLEVEL_CLASS[DBGC_ALL] = atoi(tok);
+		dbgc_config[DBGC_ALL].loglevel = atoi(tok);
 		tok = strtok_r(NULL, LIST_SEP, &saveptr);
 	} else {
-		DEBUGLEVEL_CLASS[DBGC_ALL] = 0;
+		dbgc_config[DBGC_ALL].loglevel = 0;
 	}
 
 	/* Array is debug_num_classes long */
 	for (i = DBGC_ALL+1; i < debug_num_classes; i++) {
-		DEBUGLEVEL_CLASS[i] = DEBUGLEVEL_CLASS[DBGC_ALL];
+		dbgc_config[i].loglevel = dbgc_config[DBGC_ALL].loglevel;
+		TALLOC_FREE(dbgc_config[i].logfile);
 	}
 
 	while (tok != NULL) {
@@ -873,6 +941,7 @@ static void debug_init(void)
 	for (i = 0; i < ARRAY_SIZE(default_classname_table); i++) {
 		debug_add_class(default_classname_table[i]);
 	}
+	dbgc_config[DBGC_ALL].fd = 2;
 
 	for (i = 0; i < ARRAY_SIZE(debug_backends); i++) {
 		debug_backends[i].log_level = -1;
@@ -940,7 +1009,7 @@ void setup_logging(const char *prog_name, enum debug_logtype new_logtype)
 			prog_name = p + 1;
 		}
 
-		state.prog_name = prog_name;
+		strlcpy(state.prog_name, prog_name, sizeof(state.prog_name));
 	}
 	reopen_logs_internal();
 }
@@ -955,14 +1024,14 @@ void debug_set_logfile(const char *name)
 		/* this copes with calls when smb.conf is not loaded yet */
 		return;
 	}
-	TALLOC_FREE(state.debugf);
-	state.debugf = talloc_strdup(NULL, name);
+	TALLOC_FREE(dbgc_config[DBGC_ALL].logfile);
+	dbgc_config[DBGC_ALL].logfile = talloc_strdup(NULL, name);
 #ifdef __OS2__
 	/* Remove trailing dots that may appear after using % variables in the
 	 * file name specification - rename() barfs on them. */
-	size_t len = strlen(state.debugf);
-	while (len && state.debugf[--len] == '.')
-		state.debugf[len] = '\0';
+	size_t len = strlen(dbgc_config[DBGC_ALL].logfile);
+	while (len && dbgc_config[DBGC_ALL].logfile[--len] == '.')
+		dbgc_config[DBGC_ALL].logfile = '\0';
 #endif
 }
 
@@ -1019,6 +1088,33 @@ static void debug_callback_log(const char *msg, int msg_level)
  Fix from dgibson@linuxcare.com.
 **************************************************************************/
 
+static bool reopen_one_log(int *fd, const char *logfile)
+{
+	int old_fd = *fd;
+	int new_fd;
+
+	if (logfile == NULL) {
+		debug_close_fd(old_fd);
+		*fd = -1;
+		return true;
+	}
+
+	new_fd = open(logfile, O_WRONLY|O_APPEND|O_CREAT, 0644);
+	if (new_fd == -1) {
+		log_overflow = true;
+		DBG_ERR("Unable to open new log file '%s': %s\n",
+			logfile, strerror(errno));
+		log_overflow = false;
+		return false;
+	}
+
+	debug_close_fd(old_fd);
+	smb_set_close_on_exec(new_fd);
+	*fd = new_fd;
+
+	return true;
+}
+
 /**
   reopen the log file (usually called because the log file name might have changed)
 */
@@ -1026,8 +1122,8 @@ bool reopen_logs_internal(void)
 {
 	mode_t oldumask;
 	int new_fd = 0;
-	int old_fd = 0;
-	bool ret = true;
+	size_t i;
+	bool ok;
 
 	if (state.reopening_logs) {
 		return true;
@@ -1041,14 +1137,14 @@ bool reopen_logs_internal(void)
 		return true;
 	case DEBUG_STDOUT:
 	case DEBUG_DEFAULT_STDOUT:
-		debug_close_fd(state.fd);
-		state.fd = 1;
+		debug_close_fd(dbgc_config[DBGC_ALL].fd);
+		dbgc_config[DBGC_ALL].fd = 1;
 		return true;
 
 	case DEBUG_DEFAULT_STDERR:
 	case DEBUG_STDERR:
-		debug_close_fd(state.fd);
-		state.fd = 2;
+		debug_close_fd(dbgc_config[DBGC_ALL].fd);
+		dbgc_config[DBGC_ALL].fd = 2;
 		return true;
 
 	case DEBUG_FILE:
@@ -1057,24 +1153,23 @@ bool reopen_logs_internal(void)
 
 	oldumask = umask( 022 );
 
-	if (!state.debugf) {
+	for (i = DBGC_ALL; i < debug_num_classes; i++) {
+		if (dbgc_config[DBGC_ALL].logfile != NULL) {
+			break;
+		}
+	}
+	if (i == debug_num_classes) {
 		return false;
 	}
 
 	state.reopening_logs = true;
 
-	new_fd = open( state.debugf, O_WRONLY|O_APPEND|O_CREAT, 0644);
-
-	if (new_fd == -1) {
-		log_overflow = true;
-		DEBUG(0, ("Unable to open new log file '%s': %s\n", state.debugf, strerror(errno)));
-		log_overflow = false;
-		ret = false;
-	} else {
-		smb_set_close_on_exec(new_fd);
-		old_fd = state.fd;
-		state.fd = new_fd;
-		debug_close_fd(old_fd);
+	for (i = DBGC_ALL; i < debug_num_classes; i++) {
+		ok = reopen_one_log(&dbgc_config[i].fd,
+				    dbgc_config[i].logfile);
+		if (!ok) {
+			break;
+		}
 	}
 
 	/* Fix from klausr@ITAP.Physik.Uni-Stuttgart.De
@@ -1089,7 +1184,7 @@ bool reopen_logs_internal(void)
 	 * catch output into logs.
 	 */
 	if (new_fd != -1) {
-		if (dup2(state.fd, 2) == -1) {
+		if (dup2(dbgc_config[DBGC_ALL].fd, 2) == -1) {
 			/* Close stderr too, if dup2 can't point it -
 			   at the logfile.  There really isn't much
 			   that can be done on such a fundamental
@@ -1100,7 +1195,7 @@ bool reopen_logs_internal(void)
 
 	state.reopening_logs = false;
 
-	return ret;
+	return ok;
 }
 
 /**************************************************************************
@@ -1122,32 +1217,128 @@ _PUBLIC_ void debug_schedule_reopen_logs(void)
  Check to see if there is any need to check if the logfile has grown too big.
 **************************************************************************/
 
-bool need_to_check_log_size( void )
+bool need_to_check_log_size(void)
 {
 	int maxlog;
+	size_t i;
 
-	if( debug_count < 100)
-		return( false );
+	if (debug_count < 100) {
+		return false;
+	}
 
 	maxlog = state.settings.max_log_size * 1024;
-	if ( state.fd <=2 || maxlog <= 0 ) {
+	if (maxlog <= 0) {
 		debug_count = 0;
-		return(false);
+		return false;
 	}
-	return( true );
+
+	if (dbgc_config[DBGC_ALL].fd > 2) {
+		return true;
+	}
+
+	for (i = DBGC_ALL + 1; i < debug_num_classes; i++) {
+		if (dbgc_config[i].fd != -1) {
+			return true;
+		}
+	}
+
+	debug_count = 0;
+	return false;
 }
 
 /**************************************************************************
  Check to see if the log has grown to be too big.
  **************************************************************************/
 
+static void do_one_check_log_size(off_t maxlog, int *_fd, const char *logfile)
+{
+	char name[strlen(logfile) + 5];
+	struct stat st;
+	int fd = *_fd;
+	int ret;
+	bool ok;
+#ifdef __OS2__
+	int force_trunc = 0;
+#endif
+
+	if (maxlog == 0) {
+		return;
+	}
+
+	ret = fstat(fd, &st);
+	if (ret != 0) {
+		return;
+	}
+	if (st.st_size < maxlog ) {
+		return;
+	}
+
+	/* reopen_logs_internal() modifies *_fd */
+	(void)reopen_logs_internal();
+	fd = *_fd;
+
+	if (fd <= 2) {
+		return;
+	}
+	ret = fstat(fd, &st);
+	if (ret != 0) {
+		return;
+	}
+	if (st.st_size < maxlog) {
+		return;
+	}
+
+	snprintf(name, sizeof(name), "%s.old", logfile);
+
+#ifdef __OS2__
+	/* Renaming an open file is not possible on
+	 * OS/2 so we close it and then rename. Note
+	 * that if this log file is also in use by
+	 * another process, rename will still fail; in
+	 * this case we fall back to simply truncating
+	 * the current file to stop its growth. */
+	debug_close_fd(fd);
+	if (rename(logfile, name) == -1) {
+		/* Most likely, some other samba process
+		 * is using this log file. In either case
+		 * our only option is to truncate it. */
+		force_trunc = 1;
+	}
+	if (reopen_logs_internal() && force_trunc) {
+		ftruncate(*_fd, 0);
+	}
+#else
+	(void)rename(logfile, name);
+
+	ok = reopen_logs_internal();
+	if (ok) {
+		return;
+	}
+	/* We failed to reopen a log - continue using the old name. */
+	(void)rename(name, logfile);
+#endif
+}
+
+static void do_check_log_size(off_t maxlog)
+{
+	size_t i;
+
+	for (i = DBGC_ALL; i < debug_num_classes; i++) {
+		if (dbgc_config[i].fd == -1) {
+			continue;
+		}
+		if (dbgc_config[i].logfile == NULL) {
+			continue;
+		}
+		do_one_check_log_size(maxlog,
+				      &dbgc_config[i].fd,
+				      dbgc_config[i].logfile);
+	}
+}
+
 void check_log_size( void )
 {
-	int         maxlog;
-	struct stat st;
-#ifdef __OS2__
-	int         force_trunc = 0;
-#endif
+	off_t maxlog;
 
 	/*
 	 *  We need to be root to check/change log-file, skip this and let the main
@@ -1174,52 +1365,17 @@ void check_log_size( void )
 	maxlog = state.settings.max_log_size * 1024;
 
 	if (state.schedule_reopen_logs) {
-	    (void)reopen_logs_internal();
-	}
-
-	if (maxlog && (fstat(state.fd, &st) == 0
-	    && st.st_size > maxlog )) {
 		(void)reopen_logs_internal();
-		if (state.fd > 2 && (fstat(state.fd, &st) == 0
-				     && st.st_size > maxlog)) {
-			char name[strlen(state.debugf) + 5];
-
-			snprintf(name, sizeof(name), "%s.old", state.debugf);
-
-#ifdef __OS2__
-			/* Renaming an open file is not possible on
-			 * OS/2 so we close it and then rename. Note
-			 * that if this log file is also in use by
-			 * another process, rename will still fail; in
-			 * this case we fall back to simply truncating
-			 * the current file to stop its growth. */
-			debug_close_fd(state.fd);
-			state.fd = -1;
-			if (rename(state.debugf, name) == -1) {
-				/* Most likely, some other samba process
-				 * is using this log file. In either case
-				 * our only option is to truncate it. */
-				force_trunc = 1;
-			}
-			if (reopen_logs_internal() && force_trunc) {
-				ftruncate(state.fd, 0);
-			}
-#else
-			(void)rename(state.debugf, name);
-
-			if (!reopen_logs_internal()) {
-				/* We failed to reopen a log - continue using the old name. */
-				(void)rename(name, state.debugf);
-			}
-#endif
-		}
 	}
+
+	do_check_log_size(maxlog);
 
 	/*
-	 * Here's where we need to panic if state.fd == 0 or -1 (invalid values)
+	 * Here's where we need to panic if dbgc_config[DBGC_ALL].fd == 0 or -1
+	 * (invalid values)
 	 */
 
-	if (state.fd <= 0) {
+	if (dbgc_config[DBGC_ALL].fd <= 0) {
 		/* This code should only be reached in very strange
 		 * circumstances. If we merely fail to open the new log we
 		 * should stick with the old one. ergo this should only be
@@ -1230,9 +1386,10 @@ void check_log_size( void )
 		int fd = open( "/dev/console", O_WRONLY, 0);
 		if (fd != -1) {
 			smb_set_close_on_exec(fd);
-			state.fd = fd;
-			DEBUG(0,("check_log_size: open of debug file %s failed - using console.\n",
-					state.debugf ));
+			dbgc_config[DBGC_ALL].fd = fd;
+			DBG_ERR("check_log_size: open of debug file %s failed "
+				"- using console.\n",
+				dbgc_config[DBGC_ALL].logfile);
 		} else {
 			/*
 			 * We cannot continue without a debug file handle.
@@ -1262,10 +1419,12 @@ static void Debug1(const char *msg)
 	case DEBUG_STDERR:
 	case DEBUG_DEFAULT_STDOUT:
 	case DEBUG_DEFAULT_STDERR:
-		if (state.fd > 0) {
+		if (dbgc_config[DBGC_ALL].fd > 0) {
 			ssize_t ret;
 			do {
-				ret = write(state.fd, msg, strlen(msg));
+				ret = write(dbgc_config[DBGC_ALL].fd,
+					    msg,
+					    strlen(msg));
 			} while (ret == -1 && errno == EINTR);
 		}
 		break;
@@ -1353,6 +1512,17 @@ void dbgflush( void )
 	bufr_print();
 }
 
+bool dbgsetclass(int level, int cls)
+{
+	/* Set current_msg_level. */
+	current_msg_level = level;
+
+	/* Set current message class */
+	current_msg_class = cls;
+
+	return true;
+}
+
 /***************************************************************************
  Print a Debug Header.
 
@@ -1397,8 +1567,7 @@ bool dbghdrclass(int level, int cls, const char *location, const char *func)
 		return( true );
 	}
 
-	/* Set current_msg_level. */
-	current_msg_level = level;
+	dbgsetclass(level, cls);
 
 	/* Don't print a header if we're logging to stdout. */
 	if ( state.logtype != DEBUG_FILE ) {
@@ -1423,7 +1592,7 @@ bool dbghdrclass(int level, int cls, const char *location, const char *func)
 		goto full;
 	}
 
-	if (unlikely(DEBUGLEVEL_CLASS[ cls ] >= 10)) {
+	if (unlikely(dbgc_config[cls].loglevel >= 10)) {
 		verbose = true;
 	}
 

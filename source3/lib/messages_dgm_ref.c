@@ -75,18 +75,6 @@ void *messaging_dgm_ref(TALLOC_CTX *mem_ctx, struct tevent_context *ev,
 	if (refs == NULL) {
 		int ret;
 
-		if (tevent_context_is_wrapper(ev)) {
-			/*
-			 * This is really a programmer error!
-			 *
-			 * The main/raw tevent context should
-			 * have been registered first!
-			 */
-			DBG_ERR("Should not be used with a wrapper tevent context\n");
-			*err = EINVAL;
-			return NULL;
-		}
-
 		ret = messaging_dgm_init(ev, unique, socket_dir, lockfile_dir,
 					 msg_dgm_ref_recv, NULL);
 		DBG_DEBUG("messaging_dgm_init returned %s\n", strerror(ret));

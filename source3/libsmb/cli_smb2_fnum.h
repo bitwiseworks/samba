@@ -25,28 +25,40 @@ struct smbXcli_session;
 struct cli_state;
 struct file_info;
 
-struct tevent_req *cli_smb2_create_fnum_send(TALLOC_CTX *mem_ctx,
-					     struct tevent_context *ev,
-					     struct cli_state *cli,
-					     const char *fname,
-					     uint32_t create_flags,
-					     uint32_t desired_access,
-					     uint32_t file_attributes,
-					     uint32_t share_access,
-					     uint32_t create_disposition,
-					     uint32_t create_options);
-NTSTATUS cli_smb2_create_fnum_recv(struct tevent_req *req, uint16_t *pfnum,
-				   struct smb_create_returns *cr);
-NTSTATUS cli_smb2_create_fnum(struct cli_state *cli,
-			const char *fname,
-			uint32_t create_flags,
-			uint32_t desired_access,
-			uint32_t file_attributes,
-			uint32_t share_access,
-			uint32_t create_disposition,
-			uint32_t create_options,
-			uint16_t *pfid,
-			struct smb_create_returns *cr);
+struct tevent_req *cli_smb2_create_fnum_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct cli_state *cli,
+	const char *fname,
+	uint32_t create_flags,
+	uint32_t impersonation_level,
+	uint32_t desired_access,
+	uint32_t file_attributes,
+	uint32_t share_access,
+	uint32_t create_disposition,
+	uint32_t create_options,
+	const struct smb2_create_blobs *in_cblobs);
+NTSTATUS cli_smb2_create_fnum_recv(
+	struct tevent_req *req,
+	uint16_t *pfnum,
+	struct smb_create_returns *cr,
+	TALLOC_CTX *mem_ctx,
+	struct smb2_create_blobs *out_cblobs);
+NTSTATUS cli_smb2_create_fnum(
+	struct cli_state *cli,
+	const char *fname,
+	uint32_t create_flags,
+	uint32_t impersonation_level,
+	uint32_t desired_access,
+	uint32_t file_attributes,
+	uint32_t share_access,
+	uint32_t create_disposition,
+	uint32_t create_options,
+	const struct smb2_create_blobs *in_cblobs,
+	uint16_t *pfid,
+	struct smb_create_returns *cr,
+	TALLOC_CTX *mem_ctx,
+	struct smb2_create_blobs *out_cblobs);
 
 struct tevent_req *cli_smb2_close_fnum_send(TALLOC_CTX *mem_ctx,
 					    struct tevent_context *ev,
@@ -62,8 +74,28 @@ struct tevent_req *cli_smb2_delete_on_close_send(TALLOC_CTX *mem_ctx,
 NTSTATUS cli_smb2_delete_on_close_recv(struct tevent_req *req);
 NTSTATUS cli_smb2_delete_on_close(struct cli_state *cli, uint16_t fnum, bool flag);
 NTSTATUS cli_smb2_mkdir(struct cli_state *cli, const char *dirname);
-NTSTATUS cli_smb2_rmdir(struct cli_state *cli, const char *dirname);
-NTSTATUS cli_smb2_unlink(struct cli_state *cli,const char *fname);
+struct tevent_req *cli_smb2_rmdir_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct cli_state *cli,
+	const char *dname,
+	const struct smb2_create_blobs *in_cblobs);
+NTSTATUS cli_smb2_rmdir_recv(struct tevent_req *req);
+NTSTATUS cli_smb2_rmdir(
+	struct cli_state *cli,
+	const char *dname,
+	const struct smb2_create_blobs *in_cblobs);
+struct tevent_req *cli_smb2_unlink_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct cli_state *cli,
+	const char *fname,
+	const struct smb2_create_blobs *in_cblobs);
+NTSTATUS cli_smb2_unlink_recv(struct tevent_req *req);
+NTSTATUS cli_smb2_unlink(
+	struct cli_state *cli,
+	const char *fname,
+	const struct smb2_create_blobs *in_cblobs);
 NTSTATUS cli_smb2_list(struct cli_state *cli,
 			const char *pathname,
 			uint16_t attribute,
@@ -81,6 +113,47 @@ NTSTATUS cli_smb2_qpathinfo_alt_name(struct cli_state *cli,
 			fstring alt_name);
 NTSTATUS cli_smb2_chkpath(struct cli_state *cli,
 			const char *name);
+struct tevent_req *cli_smb2_query_info_fnum_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct cli_state *cli,
+	uint16_t fnum,
+	uint8_t in_info_type,
+	uint8_t in_info_class,
+	uint32_t in_max_output_length,
+	const DATA_BLOB *in_input_buffer,
+	uint32_t in_additional_info,
+	uint32_t in_flags);
+NTSTATUS cli_smb2_query_info_fnum_recv(
+	struct tevent_req *req, TALLOC_CTX *mem_ctx, DATA_BLOB *outbuf);
+struct tevent_req *cli_smb2_set_info_fnum_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct cli_state *cli,
+	uint16_t fnum,
+	uint8_t in_info_type,
+	uint8_t in_info_class,
+	const DATA_BLOB *in_input_buffer,
+	uint32_t in_additional_info);
+NTSTATUS cli_smb2_set_info_fnum_recv(struct tevent_req *req);
+NTSTATUS cli_smb2_set_info_fnum(
+	struct cli_state *cli,
+	uint16_t fnum,
+	uint8_t in_info_type,
+	uint8_t in_info_class,
+	const DATA_BLOB *in_input_buffer,
+	uint32_t in_additional_info);
+NTSTATUS cli_smb2_query_info_fnum(
+	struct cli_state *cli,
+	uint16_t fnum,
+	uint8_t in_info_type,
+	uint8_t in_info_class,
+	uint32_t in_max_output_length,
+	const DATA_BLOB *in_input_buffer,
+	uint32_t in_additional_info,
+	uint32_t in_flags,
+	TALLOC_CTX *mem_ctx,
+	DATA_BLOB *outbuf);
 NTSTATUS cli_smb2_qfileinfo_basic(struct cli_state *cli,
 			uint16_t fnum,
 			uint16_t *mode,
@@ -156,6 +229,15 @@ NTSTATUS cli_smb2_set_security_descriptor(struct cli_state *cli,
 			uint16_t fnum,
 			uint32_t sec_info,
 			const struct security_descriptor *sd);
+struct tevent_req *cli_smb2_query_mxac_send(TALLOC_CTX *mem_ctx,
+					    struct tevent_context *ev,
+					    struct cli_state *cli,
+					    const char *fname);
+NTSTATUS cli_smb2_query_mxac_recv(struct tevent_req *req,
+				  uint32_t *mxac);
+NTSTATUS cli_smb2_query_mxac(struct cli_state *cli,
+			     const char *fname,
+			     uint32_t *mxac);
 NTSTATUS cli_smb2_rename(struct cli_state *cli,
 			 const char *fname_src,
 			 const char *fname_dst,
@@ -237,6 +319,18 @@ NTSTATUS cli_smb2_shadow_copy_data(TALLOC_CTX *mem_ctx,
 NTSTATUS cli_smb2_ftruncate(struct cli_state *cli,
 			uint16_t fnum,
 			uint64_t newsize);
+struct tevent_req *cli_smb2_notify_send(
+	TALLOC_CTX *mem_ctx,
+	struct tevent_context *ev,
+	struct cli_state *cli,
+	uint16_t fnum,
+	uint32_t buffer_size,
+	uint32_t completion_filter,
+	bool recursive);
+NTSTATUS cli_smb2_notify_recv(struct tevent_req *req,
+			      TALLOC_CTX *mem_ctx,
+			      struct notify_change **pchanges,
+			      uint32_t *pnum_changes);
 NTSTATUS cli_smb2_notify(struct cli_state *cli, uint16_t fnum,
 			 uint32_t buffer_size, uint32_t completion_filter,
 			 bool recursive, TALLOC_CTX *mem_ctx,

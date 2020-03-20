@@ -22,6 +22,7 @@
 #include "source3/lib/gencache.h"
 #include "lib/util/debug.h"
 #include "lib/util/strv.h"
+#include "lib/util/util.h"
 #include "lib/util/talloc_stack.h"
 #include "lib/util/charset/charset.h"
 #include "libcli/security/dom_sid.h"
@@ -31,8 +32,8 @@ bool namemap_cache_set_sid2name(const struct dom_sid *sid,
 				enum lsa_SidType type, time_t timeout)
 {
 	char typebuf[16];
-	char sidbuf[DOM_SID_STR_BUFLEN];
-	char keybuf[DOM_SID_STR_BUFLEN+10];
+	struct dom_sid_buf sidbuf;
+	char keybuf[sizeof(sidbuf.buf)+10];
 	char *val = NULL;
 	DATA_BLOB data;
 	int ret;
@@ -70,8 +71,8 @@ bool namemap_cache_set_sid2name(const struct dom_sid *sid,
 		goto fail;
 	}
 
-	dom_sid_string_buf(sid, sidbuf, sizeof(sidbuf));
-	snprintf(keybuf, sizeof(keybuf), "SID2NAME/%s", sidbuf);
+	dom_sid_str_buf(sid, &sidbuf);
+	snprintf(keybuf, sizeof(keybuf), "SID2NAME/%s", sidbuf.buf);
 
 	data = data_blob_const(val, talloc_get_size(val));
 
@@ -85,15 +86,19 @@ fail:
 }
 
 struct namemap_cache_find_sid_state {
-	void (*fn)(const char *domain, const char *name,
-		   enum lsa_SidType type, time_t timeout,
+	void (*fn)(const char *domain,
+		   const char *name,
+		   enum lsa_SidType type,
+		   bool expired,
 		   void *private_data);
 	void *private_data;
 	bool ok;
 };
 
-static void namemap_cache_find_sid_parser(time_t timeout, DATA_BLOB blob,
-					  void *private_data)
+static void namemap_cache_find_sid_parser(
+	const struct gencache_timeout *timeout,
+	DATA_BLOB blob,
+	void *private_data)
 {
 	struct namemap_cache_find_sid_state *state = private_data;
 	const char *strv = (const char *)blob.data;
@@ -101,7 +106,7 @@ static void namemap_cache_find_sid_parser(time_t timeout, DATA_BLOB blob,
 	const char *domain;
 	const char *name;
 	const char *typebuf;
-	char *endptr;
+	int error = 0;
 	unsigned long type;
 
 	state->ok = false;
@@ -119,35 +124,37 @@ static void namemap_cache_find_sid_parser(time_t timeout, DATA_BLOB blob,
 		return;
 	}
 
-	type = strtoul(typebuf, &endptr, 10);
-	if (*endptr != '\0') {
-		return;
-	}
-	if ((type == ULONG_MAX) && (errno == ERANGE)) {
+	type = smb_strtoul(typebuf, NULL, 10, &error, SMB_STR_FULL_STR_CONV);
+	if (error != 0) {
 		return;
 	}
 
-	state->fn(domain, name, (enum lsa_SidType)type, timeout,
+	state->fn(domain,
+		  name,
+		  (enum lsa_SidType)type,
+		  gencache_timeout_expired(timeout),
 		  state->private_data);
 
 	state->ok = true;
 }
 
 bool namemap_cache_find_sid(const struct dom_sid *sid,
-			    void (*fn)(const char *domain, const char *name,
-				       enum lsa_SidType type, time_t timeout,
+			    void (*fn)(const char *domain,
+				       const char *name,
+				       enum lsa_SidType type,
+				       bool expired,
 				       void *private_data),
 			    void *private_data)
 {
 	struct namemap_cache_find_sid_state state = {
 		.fn = fn, .private_data = private_data
 	};
-	char sidbuf[DOM_SID_STR_BUFLEN];
-	char keybuf[DOM_SID_STR_BUFLEN+10];
+	struct dom_sid_buf sidbuf;
+	char keybuf[sizeof(sidbuf.buf)+10];
 	bool ok;
 
-	dom_sid_string_buf(sid, sidbuf, sizeof(sidbuf));
-	snprintf(keybuf, sizeof(keybuf), "SID2NAME/%s", sidbuf);
+	dom_sid_str_buf(sid, &sidbuf);
+	snprintf(keybuf, sizeof(keybuf), "SID2NAME/%s", sidbuf.buf);
 
 	ok = gencache_parse(keybuf, namemap_cache_find_sid_parser, &state);
 	if (!ok) {
@@ -170,7 +177,7 @@ bool namemap_cache_set_name2sid(const char *domain, const char *name,
 				time_t timeout)
 {
 	char typebuf[16];
-	char sidbuf[DOM_SID_STR_BUFLEN];
+	struct dom_sid_buf sidbuf = {{0}};
 	char *key;
 	char *key_upper;
 	char *val = NULL;
@@ -184,10 +191,8 @@ bool namemap_cache_set_name2sid(const char *domain, const char *name,
 	if (name == NULL) {
 		name = "";
 	}
-	if (type == SID_NAME_UNKNOWN) {
-		sidbuf[0] = '\0';
-	} else {
-		dom_sid_string_buf(sid, sidbuf, sizeof(sidbuf));
+	if (type != SID_NAME_UNKNOWN) {
+		dom_sid_str_buf(sid, &sidbuf);
 	}
 
 	snprintf(typebuf, sizeof(typebuf), "%d", (int)type);
@@ -203,7 +208,7 @@ bool namemap_cache_set_name2sid(const char *domain, const char *name,
 		goto fail;
 	}
 
-	ret = strv_add(key, &val, sidbuf);
+	ret = strv_add(key, &val, sidbuf.buf);
 	if (ret != 0) {
 		DBG_DEBUG("strv_add failed: %s\n", strerror(ret));
 		goto fail;
@@ -227,14 +232,17 @@ fail:
 
 struct namemap_cache_find_name_state {
 	void (*fn)(const struct dom_sid *sid,
-		   enum lsa_SidType type, time_t timeout,
+		   enum lsa_SidType type,
+		   bool expired,
 		   void *private_data);
 	void *private_data;
 	bool ok;
 };
 
-static void namemap_cache_find_name_parser(time_t timeout, DATA_BLOB blob,
-					   void *private_data)
+static void namemap_cache_find_name_parser(
+	const struct gencache_timeout *timeout,
+	DATA_BLOB blob,
+	void *private_data)
 {
 	struct namemap_cache_find_name_state *state = private_data;
 	const char *strv = (const char *)blob.data;
@@ -242,7 +250,7 @@ static void namemap_cache_find_name_parser(time_t timeout, DATA_BLOB blob,
 	const char *sidbuf;
 	const char *sid_endptr;
 	const char *typebuf;
-	char *endptr;
+	int error = 0;
 	struct dom_sid sid;
 	unsigned long type;
 	bool ok;
@@ -266,22 +274,24 @@ static void namemap_cache_find_name_parser(time_t timeout, DATA_BLOB blob,
 		return;
 	}
 
-	type = strtoul(typebuf, &endptr, 10);
-	if (*endptr != '\0') {
-		return;
-	}
-	if ((type == ULONG_MAX) && (errno == ERANGE)) {
+	type = smb_strtoul(typebuf, NULL, 10, &error, SMB_STR_FULL_STR_CONV);
+	if (error != 0) {
 		return;
 	}
 
-	state->fn(&sid, (enum lsa_SidType)type, timeout, state->private_data);
+	state->fn(&sid,
+		  (enum lsa_SidType)type,
+		  gencache_timeout_expired(timeout),
+		  state->private_data);
 
 	state->ok = true;
 }
 
-bool namemap_cache_find_name(const char *domain, const char *name,
+bool namemap_cache_find_name(const char *domain,
+			     const char *name,
 			     void (*fn)(const struct dom_sid *sid,
-					enum lsa_SidType type, time_t timeout,
+					enum lsa_SidType type,
+					bool expired,
 					void *private_data),
 			     void *private_data)
 {

@@ -54,7 +54,7 @@ struct {
 
 bool debug_level_parse(const char *log_string, int *log_level)
 {
-	int i;
+	size_t i;
 
 	if (log_string == NULL) {
 		return false;
@@ -63,7 +63,7 @@ bool debug_level_parse(const char *log_string, int *log_level)
 	if (isdigit(log_string[0])) {
 		int level = atoi(log_string);
 
-		if (level >= 0 && level < ARRAY_SIZE(log_string_map)) {
+		if (level >= 0 && (size_t)level < ARRAY_SIZE(log_string_map)) {
 			*log_level = level;
 			return true;
 		}
@@ -83,9 +83,9 @@ bool debug_level_parse(const char *log_string, int *log_level)
 
 const char *debug_level_to_string(int log_level)
 {
-	int i;
+	size_t i;
 
-	for (i=0; ARRAY_SIZE(log_string_map); i++) {
+	for (i=0; i < ARRAY_SIZE(log_string_map); i++) {
 		if (log_string_map[i].log_level == log_level) {
 			return log_string_map[i].log_string;
 		}
@@ -253,12 +253,12 @@ static int debug_level_to_priority(int level)
         };
         int priority;
 
-        if( level >= ARRAY_SIZE(priority_map) || level < 0)
-                priority = LOG_DEBUG;
-        else
-                priority = priority_map[level];
-
-        return priority;
+	if ((size_t)level >= ARRAY_SIZE(priority_map) || level < 0) {
+		priority = LOG_DEBUG;
+	} else {
+		priority = priority_map[level];
+	}
+	return priority;
 }
 
 struct syslog_log_state {
@@ -604,7 +604,7 @@ static int log_backend_parse(TALLOC_CTX *mem_ctx,
 {
 	struct log_backend *b = NULL;
 	char *t, *name, *option;
-	int i;
+	size_t i;
 
 	t = talloc_strdup(mem_ctx, logging);
 	if (t == NULL) {
@@ -674,6 +674,7 @@ int logging_init(TALLOC_CTX *mem_ctx, const char *logging,
 {
 	struct log_backend *backend = NULL;
 	char *option = NULL;
+	int level;
 	int ret;
 
 	setup_logging(app_name, DEBUG_STDERR);
@@ -681,9 +682,10 @@ int logging_init(TALLOC_CTX *mem_ctx, const char *logging,
 	if (debug_level == NULL) {
 		debug_level = getenv("CTDB_DEBUGLEVEL");
 	}
-	if (! debug_level_parse(debug_level, &DEBUGLEVEL)) {
+	if (! debug_level_parse(debug_level, &level)) {
 		return EINVAL;
 	}
+	debuglevel_set(level);
 
 	if (logging == NULL) {
 		logging = getenv("CTDB_LOGGING");

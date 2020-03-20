@@ -25,7 +25,8 @@ from samba.netcmd import (
     CommandError,
     SuperCommand,
     Option
-    )
+)
+
 
 class cmd_forest_show(Command):
     """Display forest settings.
@@ -41,19 +42,19 @@ class cmd_forest_show(Command):
         "sambaopts": options.SambaOptions,
         "versionopts": options.VersionOptions,
         "credopts": options.CredentialsOptions,
-        }
+    }
 
     takes_options = [
         Option("-H", "--URL", help="LDB URL for database or target server",
-                type=str, metavar="URL", dest="H"),
-        ]
+               type=str, metavar="URL", dest="H"),
+    ]
 
     def run(self, H=None, credopts=None, sambaopts=None, versionopts=None):
         lp = sambaopts.get_loadparm()
         creds = credopts.get_credentials(lp)
 
         samdb = SamDB(url=H, session_info=system_session(),
-            credentials=creds, lp=lp)
+                      credentials=creds, lp=lp)
 
         domain_dn = samdb.domain_dn()
         object_dn = "%s,%s" % (self.objectdn, domain_dn)
@@ -74,6 +75,7 @@ class cmd_forest_show(Command):
             except KeyError:
                 self.outf.write("%s: <NO VALUE>\n" % attr)
 
+
 class cmd_forest_set(Command):
     """Modify forest settings.
 
@@ -89,12 +91,12 @@ class cmd_forest_set(Command):
         "sambaopts": options.SambaOptions,
         "versionopts": options.VersionOptions,
         "credopts": options.CredentialsOptions,
-        }
+    }
 
     takes_options = [
         Option("-H", "--URL", help="LDB URL for database or target server",
-                type=str, metavar="URL", dest="H"),
-        ]
+               type=str, metavar="URL", dest="H"),
+    ]
 
     takes_args = ["value"]
 
@@ -103,7 +105,7 @@ class cmd_forest_set(Command):
         creds = credopts.get_credentials(lp)
 
         samdb = SamDB(url=H, session_info=system_session(),
-            credentials=creds, lp=lp)
+                      credentials=creds, lp=lp)
 
         domain_dn = samdb.domain_dn()
         object_dn = "%s,%s" % (self.objectdn, domain_dn)
@@ -129,6 +131,7 @@ class cmd_forest_show_directory_service(cmd_forest_show):
     objectdn = "CN=Directory Service,CN=Windows NT,CN=Services,CN=Configuration"
     attributes = ['dsheuristics']
 
+
 class cmd_forest_set_directory_service_dsheuristics(cmd_forest_set):
     """Set the value of dsheuristics on the Directory Service.
 
@@ -148,12 +151,14 @@ class cmd_forest_set_directory_service_dsheuristics(cmd_forest_set):
     objectdn = "CN=Directory Service,CN=Windows NT,CN=Services,CN=Configuration"
     attribute = 'dsheuristics'
 
+
 class cmd_forest_directory_service(SuperCommand):
     """Forest configuration partition management."""
 
     subcommands = {}
     subcommands["show"] = cmd_forest_show_directory_service()
     subcommands["dsheuristics"] = cmd_forest_set_directory_service_dsheuristics()
+
 
 class cmd_forest(SuperCommand):
     """Forest management."""

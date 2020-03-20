@@ -46,7 +46,10 @@ struct tevent_req *winbindd_getusersids_send(TALLOC_CTX *mem_ctx,
 	/* Ensure null termination */
 	request->data.sid[sizeof(request->data.sid)-1]='\0';
 
-	DEBUG(3, ("getusersids %s\n", request->data.sid));
+	DBG_NOTICE("[%s (%u)] getusersids %s\n",
+		   cli->client_name,
+		   (unsigned int)cli->pid,
+		   request->data.sid);
 
 	if (!string_to_sid(&state->sid, request->data.sid)) {
 		DEBUG(1, ("Could not get convert sid %s from string\n",
@@ -85,13 +88,15 @@ NTSTATUS winbindd_getusersids_recv(struct tevent_req *req,
 {
 	struct winbindd_getusersids_state *state = tevent_req_data(
 		req, struct winbindd_getusersids_state);
+	struct dom_sid_buf sidbuf;
 	NTSTATUS status;
 	int i;
 	char *result;
 
 	if (tevent_req_is_nterror(req, &status)) {
 		DEBUG(5, ("Could not convert sid %s: %s\n",
-			  sid_string_dbg(&state->sid), nt_errstr(status)));
+			  dom_sid_str_buf(&state->sid, &sidbuf),
+			  nt_errstr(status)));
 		return status;
 	}
 
@@ -101,13 +106,10 @@ NTSTATUS winbindd_getusersids_recv(struct tevent_req *req,
 	}
 
 	for (i=0; i<state->num_sids; i++) {
-		char *str = sid_string_tos(&state->sids[i]);
-		if (str == NULL) {
-			TALLOC_FREE(result);
-			return NT_STATUS_NO_MEMORY;
-		}
-		result = talloc_asprintf_append_buffer(result, "%s\n", str);
-		TALLOC_FREE(str);
+		result = talloc_asprintf_append_buffer(
+			result,
+			"%s\n",
+			dom_sid_str_buf(&state->sids[i], &sidbuf));
 		if (result == NULL) {
 			return NT_STATUS_NO_MEMORY;
 		}

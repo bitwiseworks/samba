@@ -37,7 +37,9 @@
  */
 void ctdb_tcp_read_cb(uint8_t *data, size_t cnt, void *args)
 {
-	struct ctdb_incoming *in = talloc_get_type(args, struct ctdb_incoming);
+	struct ctdb_node *node = talloc_get_type_abort(args, struct ctdb_node);
+	struct ctdb_tcp_node *tnode = talloc_get_type_abort(
+		node->transport_data, struct ctdb_tcp_node);
 	struct ctdb_req_header *hdr = (struct ctdb_req_header *)data;
 
 	if (data == NULL) {
@@ -69,11 +71,13 @@ void ctdb_tcp_read_cb(uint8_t *data, size_t cnt, void *args)
 	}
 
 	/* tell the ctdb layer above that we have a packet */
-	in->ctdb->upcalls->recv_pkt(in->ctdb, data, cnt);
+	tnode->ctdb->upcalls->recv_pkt(tnode->ctdb, data, cnt);
 	return;
 
 failed:
-	TALLOC_FREE(in);
+	TALLOC_FREE(tnode->in_queue);
+	node->ctdb->upcalls->node_dead(node);
+
 	TALLOC_FREE(data);
 }
 
@@ -82,7 +86,12 @@ failed:
 */
 int ctdb_tcp_queue_pkt(struct ctdb_node *node, uint8_t *data, uint32_t length)
 {
-	struct ctdb_tcp_node *tnode = talloc_get_type(node->private_data,
+	struct ctdb_tcp_node *tnode = talloc_get_type(node->transport_data,
 						      struct ctdb_tcp_node);
+	if (tnode->out_queue == NULL) {
+		DBG_DEBUG("No outgoing connection, dropping packet\n");
+		return 0;
+	}
+
 	return ctdb_queue_send(tnode->out_queue, data, length);
 }

@@ -28,6 +28,11 @@
 #include "libcli/util/ntstatus.h"
 #include "lib/util/util_str_hex.h"
 
+#ifdef HAVE_ICU_I18N
+#include <unicode/ustring.h>
+#include <unicode/utrans.h>
+#endif
+
 #ifdef strcasecmp
 #undef strcasecmp
 #endif
@@ -69,29 +74,84 @@ static size_t iconv_swab  (void *,const char **, size_t *, char **, size_t *);
 
 static const struct charset_functions builtin_functions[] = {
 	/* windows is closest to UTF-16 */
-	{"UCS-2LE",  iconv_copy, iconv_copy},
-	{"UTF-16LE",  iconv_copy, iconv_copy},
-	{"UCS-2BE",  iconv_swab, iconv_swab},
-	{"UTF-16BE",  iconv_swab, iconv_swab},
+	{
+		.name = "UCS-2LE",
+		.pull = iconv_copy,
+		.push = iconv_copy
+	},
+	{
+		.name = "UTF-16LE",
+		.pull = iconv_copy,
+		.push = iconv_copy
+	},
+	{
+		.name = "UCS-2BE",
+		.pull = iconv_swab,
+		.push = iconv_swab
+	},
+	{
+		.name = "UTF-16BE",
+		.pull = iconv_swab,
+		.push = iconv_swab
+	},
 
 	/* we include the UTF-8 alias to cope with differing locale settings */
-	{"UTF8",   utf8_pull,  utf8_push},
-	{"UTF-8",   utf8_pull,  utf8_push},
+	{
+		.name = "UTF8",
+		.pull = utf8_pull,
+		.push = utf8_push
+	},
+	{
+		.name = "UTF-8",
+		.pull = utf8_pull,
+		.push = utf8_push
+	},
 
 	/* this handles the munging needed for String2Key */
-	{"UTF16_MUNGED",   utf16_munged_pull,  iconv_copy, true},
+	{
+		.name = "UTF16_MUNGED",
+		.pull = utf16_munged_pull,
+		.push = iconv_copy,
+		.samba_internal_charset = true
+	},
 
-	{"ASCII", ascii_pull, ascii_push},
-	{"646", ascii_pull, ascii_push},
-	{"ISO-8859-1", latin1_pull, latin1_push},
+	{
+		.name = "ASCII",
+		.pull = ascii_pull,
+		.push = ascii_push
+	},
+	{
+		.name = "646",
+		.pull = ascii_pull,
+		.push = ascii_push
+	},
+	{
+		.name = "ISO-8859-1",
+		.pull = latin1_pull,
+		.push = latin1_push
+	},
 #ifdef DEVELOPER
-	{"WEIRD", weird_pull, weird_push, true},
+	{
+		.name = "WEIRD",
+		.pull = weird_pull,
+		.push = weird_push,
+		.samba_internal_charset = true
+	},
 #endif
 #ifdef DARWINOS
-	{"MACOSXFS", macosxfs_encoding_pull, macosxfs_encoding_push, true},
+	{
+		.name = "MACOSXFS",
+		.pull = macosxfs_encoding_pull,
+		.push = macosxfs_encoding_push,
+		.samba_internal_charset = true
+	},
 #endif
-	{"UCS2-HEX", ucs2hex_pull, ucs2hex_push, true}
-
+	{
+		.name = "UCS2-HEX",
+		.pull = ucs2hex_pull,
+		.push = ucs2hex_push,
+		.samba_internal_charset = true
+	}
 };
 
 #if defined(__OS2__)
@@ -135,6 +195,109 @@ static size_t sys_iconv(void *cd,
 			   outbuf, outbytesleft);
 	if (ret == (size_t)-1) iconv(cd, NULL, NULL, NULL, NULL);
 	return ret;
+}
+#endif
+
+#ifdef HAVE_ICU_I18N
+static size_t sys_uconv(void *cd,
+			const char **inbuf,
+			size_t *inbytesleft,
+			char **outbuf,
+			size_t *outbytesleft)
+{
+	UTransliterator *t = (UTransliterator *)cd;
+	size_t bufsize = *inbytesleft * 2;
+	UChar ustr[bufsize];
+	UChar *up = NULL;
+	char *p = NULL;
+	int32_t ustrlen;
+	int32_t limit;
+	int32_t converted_len;
+	size_t inbuf_consumed;
+	size_t outbut_consumed;
+	UErrorCode ue;
+
+	/* Convert from UTF8 to UCS2 */
+	ue = 0;
+	up = u_strFromUTF8(ustr,           /* dst */
+			   bufsize,        /* dst buflen */
+			   &converted_len, /* dst written */
+			   *inbuf,         /* src */
+			   *inbytesleft,   /* src length */
+			   &ue);
+	if (up == NULL || U_FAILURE(ue)) {
+		return -1;
+	}
+	if (converted_len > bufsize) {
+		/*
+		 * u_strFromUTF8() returns the required size in
+		 * converted_len. In theory this should never overflow as the
+		 * ustr[] array is allocated with a size twice as big as
+		 * inbytesleft and converted_len should be equal to inbytesleft,
+		 * but you never know...
+		 */
+		errno = EOVERFLOW;
+		return -1;
+	}
+	inbuf_consumed = converted_len;
+
+	/*
+	 * The following transliteration function takes two parameters, the
+	 * lenght of the text to be converted (converted_len) and a limit which
+	 * may be smaller then converted_len. We just set limit to converted_len
+	 * and also ignore the value returned in limit.
+	 */
+	limit = converted_len;
+
+	/* Inplace transliteration */
+	utrans_transUChars(t,
+			   ustr,           /* text */
+			   &converted_len, /* text length */
+			   bufsize,        /* text buflen */
+			   0,              /* start */
+			   &limit,         /* limit */
+			   &ue);
+	if (U_FAILURE(ue)) {
+		return -1;
+	}
+	if (converted_len > bufsize) {
+		/*
+		 * In theory this should never happen as the ustr[] array is
+		 * allocated with a size twice as big as inbytesleft and
+		 * converted_len should be equal to inbytesleft, but you never
+		 * know...
+		 */
+		errno = EOVERFLOW;
+		return -1;
+	}
+	ustrlen = converted_len;
+
+	/* Convert from UCS2 back to UTF8 */
+	ue = 0;
+	p = u_strToUTF8(*outbuf,        /* dst */
+			*outbytesleft,  /* dst buflen */
+			&converted_len, /* dst required length */
+			ustr,           /* src */
+			ustrlen,        /* src length */
+			&ue);
+	if (p == NULL || U_FAILURE(ue)) {
+		return -1;
+	}
+
+	outbut_consumed = converted_len;
+	if (converted_len > *outbytesleft) {
+		/*
+		 * The caller's result buffer is too small...
+		*/
+		outbut_consumed = *outbytesleft;
+	}
+
+	*inbuf += inbuf_consumed;
+	*inbytesleft -= inbuf_consumed;
+	*outbuf += outbut_consumed;
+	*outbytesleft -= outbut_consumed;
+
+	return converted_len;
 }
 #endif
 
@@ -201,6 +364,16 @@ static bool is_utf16(const char *name)
 
 static int smb_iconv_t_destructor(smb_iconv_t hwd)
 {
+#ifdef HAVE_ICU_I18N
+	/*
+	 * This has to come first, as the cd_direct member won't be an iconv
+	 * handle and must not be passed to iconv_close().
+	 */
+	if (hwd->direct == sys_uconv) {
+		utrans_close(hwd->cd_direct);
+		return 0;
+	}
+#endif
 #ifdef HAVE_NATIVE_ICONV
 	if (hwd->cd_pull != NULL && hwd->cd_pull != (iconv_t)-1)
 		iconv_close(hwd->cd_pull);
@@ -272,6 +445,52 @@ _PUBLIC_ smb_iconv_t smb_iconv_open_ex(TALLOC_CTX *mem_ctx, const char *tocode,
 		if (ret->cd_push != (iconv_t)-1) {
 			ret->push = sys_iconv;
 		}
+	}
+#endif
+
+#ifdef HAVE_ICU_I18N
+	if (strcasecmp(fromcode, "UTF8-NFD") == 0 &&
+	    strcasecmp(tocode, "UTF8-NFC") == 0)
+	{
+		U_STRING_DECL(t, "any-nfc", 7);
+		UErrorCode ue = 0;
+
+		U_STRING_INIT(t, "any-nfc", 7);
+
+		ret->cd_direct = utrans_openU(t,
+					      strlen("any-nfc"),
+					      UTRANS_FORWARD,
+					      NULL,
+					      0,
+					      NULL,
+					      &ue);
+		if (U_FAILURE(ue)) {
+			return (smb_iconv_t)-1;
+		}
+		ret->direct = sys_uconv;
+		return ret;
+	}
+
+	if (strcasecmp(fromcode, "UTF8-NFC") == 0 &&
+	    strcasecmp(tocode, "UTF8-NFD") == 0)
+	{
+		U_STRING_DECL(tname, "any-nfd", 7);
+		UErrorCode ue = 0;
+
+		U_STRING_INIT(tname, "any-nfd", 7);
+
+		ret->cd_direct = utrans_openU(tname,
+					      7,
+					      UTRANS_FORWARD,
+					      NULL,
+					      0,
+					      NULL,
+					      &ue);
+		if (U_FAILURE(ue)) {
+			return (smb_iconv_t)-1;
+		}
+		ret->direct = sys_uconv;
+		return ret;
 	}
 #endif
 

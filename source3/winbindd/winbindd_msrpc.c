@@ -218,6 +218,7 @@ static NTSTATUS msrpc_name_to_sid(struct winbindd_domain *domain,
 				  const char *domain_name,
 				  const char *name,
 				  uint32_t flags,
+				  const char **pdom_name,
 				  struct dom_sid *sid,
 				  enum lsa_SidType *type)
 {
@@ -226,6 +227,7 @@ static NTSTATUS msrpc_name_to_sid(struct winbindd_domain *domain,
 	enum lsa_SidType *types = NULL;
 	char *full_name = NULL;
 	const char *names[1];
+	const char **domains;
 	NTSTATUS name_map_status = NT_STATUS_UNSUCCESSFUL;
 	char *mapped_name = NULL;
 
@@ -260,12 +262,23 @@ static NTSTATUS msrpc_name_to_sid(struct winbindd_domain *domain,
 	names[0] = full_name;
 
 	result = winbindd_lookup_names(mem_ctx, domain, 1,
-				       names, NULL,
+				       names, &domains,
 				       &sids, &types);
 	if (!NT_STATUS_IS_OK(result))
 		return result;
 
 	/* Return rid and type if lookup successful */
+
+	if (pdom_name != NULL) {
+		const char *dom_name;
+
+		dom_name = talloc_strdup(mem_ctx, domains[0]);
+		if (dom_name == NULL) {
+			return NT_STATUS_NO_MEMORY;
+		}
+
+		*pdom_name = dom_name;
+	}
 
 	sid_copy(sid, &sids[0]);
 	*type = types[0];
@@ -289,9 +302,11 @@ static NTSTATUS msrpc_sid_to_name(struct winbindd_domain *domain,
 	NTSTATUS result;
 	NTSTATUS name_map_status = NT_STATUS_UNSUCCESSFUL;
 	char *mapped_name = NULL;
+	struct dom_sid_buf buf;
 
-	DEBUG(3, ("msrpc_sid_to_name: %s for domain %s\n", sid_string_dbg(sid),
-		 domain->name ));
+	DEBUG(3, ("msrpc_sid_to_name: %s for domain %s\n",
+		  dom_sid_str_buf(sid, &buf),
+		  domain->name));
 
 	result = winbindd_lookup_sids(mem_ctx,
 				      domain,
@@ -403,11 +418,13 @@ static NTSTATUS msrpc_lookup_usergroups(struct winbindd_domain *domain,
 	struct rpc_pipe_client *samr_pipe;
 	struct policy_handle dom_pol;
 	struct dom_sid *user_grpsids = NULL;
+	struct dom_sid_buf buf;
 	uint32_t num_groups = 0;
 	TALLOC_CTX *tmp_ctx;
 	NTSTATUS status;
 
-	DEBUG(3,("msrpc_lookup_usergroups sid=%s\n", sid_string_dbg(user_sid)));
+	DEBUG(3,("msrpc_lookup_usergroups sid=%s\n",
+		 dom_sid_str_buf(user_sid, &buf)));
 
 	*pnum_groups = 0;
 
@@ -549,9 +566,10 @@ static NTSTATUS msrpc_lookup_groupmem(struct winbindd_domain *domain,
 	unsigned int orig_timeout;
 	struct samr_RidAttrArray *rids = NULL;
 	struct dcerpc_binding_handle *b;
+	struct dom_sid_buf buf;
 
 	DEBUG(3,("msrpc_lookup_groupmem: %s sid=%s\n", domain->name,
-		  sid_string_dbg(group_sid)));
+		 dom_sid_str_buf(group_sid, &buf)));
 
 	if ( !winbindd_can_contact_domain( domain ) ) {
 		DEBUG(10,("lookup_groupmem: No incoming trust for domain %s\n",

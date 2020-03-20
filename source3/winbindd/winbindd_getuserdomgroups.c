@@ -46,7 +46,10 @@ struct tevent_req *winbindd_getuserdomgroups_send(TALLOC_CTX *mem_ctx,
 	/* Ensure null termination */
 	request->data.sid[sizeof(request->data.sid)-1]='\0';
 
-	DEBUG(3, ("getuserdomgroups %s\n", request->data.sid));
+	DBG_NOTICE("[%s (%u)] getuserdomgroups %s\n",
+		   cli->client_name,
+		   (unsigned int)cli->pid,
+		   request->data.sid);
 
 	if (!string_to_sid(&state->sid, request->data.sid)) {
 		DEBUG(1, ("Could not get convert sid %s from string\n",
@@ -98,10 +101,10 @@ NTSTATUS winbindd_getuserdomgroups_recv(struct tevent_req *req,
 		return NT_STATUS_NO_MEMORY;
 	}
 	for (i=0; i<state->num_sids; i++) {
-		fstring tmp;
+		struct dom_sid_buf tmp;
 		sidlist = talloc_asprintf_append_buffer(
 			sidlist, "%s\n",
-			sid_to_fstring(tmp, &state->sids[i]));
+			dom_sid_str_buf(&state->sids[i], &tmp));
 		if (sidlist == NULL) {
 			return NT_STATUS_NO_MEMORY;
 		}

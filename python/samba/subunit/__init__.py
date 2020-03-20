@@ -45,7 +45,7 @@ class RemotedTestCase(unittest.TestCase):
     actions.
     """
 
-    def __eq__ (self, other):
+    def __eq__(self, other):
         try:
             return self.__description == other.__description
         except AttributeError:
@@ -57,7 +57,7 @@ class RemotedTestCase(unittest.TestCase):
 
     def error(self, label):
         raise NotImplementedError("%s on RemotedTestCases is not permitted." %
-            label)
+                                  label)
 
     def setUp(self):
         self.error("setUp")
@@ -79,7 +79,8 @@ class RemotedTestCase(unittest.TestCase):
                (self._strclass(), self.__description)
 
     def run(self, result=None):
-        if result is None: result = self.defaultTestResult()
+        if result is None:
+            result = self.defaultTestResult()
         result.startTest(self)
         result.addError(self, RemoteError("Cannot run RemotedTestCases.\n"))
         result.stopTest(self)

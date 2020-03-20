@@ -45,6 +45,7 @@
 #include "libds/common/roles.h"
 #include "lib/util/tfork.h"
 #include "dsdb/samdb/ldb_modules/util.h"
+#include "lib/util/server_id.h"
 
 #ifdef HAVE_PTHREAD
 #include <pthread.h>
@@ -128,7 +129,7 @@ static void sig_hup(int sig)
 
 static void sig_term(int sig)
 {
-#if HAVE_GETPGRP
+#ifdef HAVE_GETPGRP
 	if (getpgrp() == getpid()) {
 		/*
 		 * We're the process group leader, send
@@ -198,7 +199,7 @@ static void server_stdin_handler(struct tevent_context *event_ctx,
 	if (read(0, &c, 1) == 0) {
 		DBG_ERR("%s: EOF on stdin - PID %d terminating\n",
 			state->binary_name, (int)getpid());
-#if HAVE_GETPGRP
+#ifdef HAVE_GETPGRP
 		if (getpgrp() == getpid()) {
 			DBG_ERR("Sending SIGTERM from pid %d\n",
 				(int)getpid());
@@ -227,6 +228,41 @@ _NORETURN_ static void max_runtime_handler(struct tevent_context *ev,
 		(unsigned long long)time(NULL));
 	TALLOC_FREE(state);
 	exit(0);
+}
+
+/*
+ * When doing an in-place upgrade of Samba, the database format may have
+ * changed between versions. E.g. between 4.7 and 4.8 the DB changed from
+ * DN-based indexes to GUID-based indexes, so we have to re-index the DB after
+ * upgrading.
+ * This function handles migrating an older samba DB to a new Samba release.
+ * Note that we have to maintain DB compatibility between *all* older versions
+ * of Samba, not just the ones still under maintenance support.
+ */
+static int handle_inplace_db_upgrade(struct ldb_context *ldb_ctx)
+{
+	int ret;
+
+	/*
+	 * The DSDB stack will handle reindexing the DB (if needed) upon the first
+	 * DB write. Open and close a transaction on the DB now to trigger a
+	 * reindex if required, rather than waiting for the first write.
+	 * We do this here to guarantee that the DB will have been re-indexed by
+	 * the time the main samba code runs.
+	 * Refer to dsdb_schema_set_indices_and_attributes() for the actual reindexing
+	 * code, called from
+	 * source4/dsdb/samdb/ldb_modules/schema_load.c:schema_load_start_transaction()
+	 */
+	ret = ldb_transaction_start(ldb_ctx);
+	if (ret != LDB_SUCCESS) {
+		return ret;
+	}
+
+	ret = ldb_transaction_commit(ldb_ctx);
+	if (ret != LDB_SUCCESS) {
+		return ret;
+	}
+	return LDB_SUCCESS;
 }
 
 /*
@@ -261,6 +297,13 @@ static int prime_ldb_databases(struct tevent_context *event_ctx, bool *am_backup
 		talloc_free(db_context);
 		return LDB_ERR_OPERATIONS_ERROR;
 	}
+
+	ret = handle_inplace_db_upgrade(ldb_ctx);
+	if (ret != LDB_SUCCESS) {
+		talloc_free(db_context);
+		return ret;
+	}
+
 	pdb = privilege_connect(db_context, cmdline_lp_ctx);
 	if (pdb == NULL) {
 		talloc_free(db_context);
@@ -292,6 +335,38 @@ static int prime_ldb_databases(struct tevent_context *event_ctx, bool *am_backup
 }
 
 /*
+  called from 'smbcontrol samba shutdown'
+ */
+static void samba_parent_shutdown(struct imessaging_context *msg,
+				  void *private_data,
+				  uint32_t msg_type,
+				  struct server_id src,
+				  size_t num_fds,
+				  int *fds,
+				  DATA_BLOB *data)
+{
+	struct server_state *state =
+		talloc_get_type_abort(private_data,
+		struct server_state);
+	struct server_id_buf src_buf;
+	struct server_id dst = imessaging_get_server_id(msg);
+	struct server_id_buf dst_buf;
+
+	if (num_fds != 0) {
+		DBG_WARNING("Received %zu fds, ignoring message\n", num_fds);
+		return;
+	}
+
+	DBG_ERR("samba_shutdown of %s %s: from %s\n",
+		state->binary_name,
+		server_id_str_buf(dst, &dst_buf),
+		server_id_str_buf(src, &src_buf));
+
+	TALLOC_FREE(state);
+	exit(0);
+}
+
+/*
   called when a fatal condition occurs in a child task
  */
 static NTSTATUS samba_terminate(struct irpc_message *msg,
@@ -313,10 +388,12 @@ static NTSTATUS setup_parent_messaging(struct server_state *state,
 {
 	struct imessaging_context *msg;
 	NTSTATUS status;
-
+	if (state == NULL) {
+		return NT_STATUS_UNSUCCESSFUL;
+	}
 	msg = imessaging_init(state->event_ctx,
 			      lp_ctx,
-			      cluster_id(0, SAMBA_PARENT_TASKID),
+			      cluster_id(getpid(), SAMBA_PARENT_TASKID),
 			      state->event_ctx);
 	NT_STATUS_HAVE_NO_MEMORY(msg);
 
@@ -325,10 +402,19 @@ static NTSTATUS setup_parent_messaging(struct server_state *state,
 		return status;
 	}
 
+	status = imessaging_register(msg, state, MSG_SHUTDOWN,
+				     samba_parent_shutdown);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
+
 	status = IRPC_REGISTER(msg, irpc, SAMBA_TERMINATE,
 			       samba_terminate, state);
+	if (!NT_STATUS_IS_OK(status)) {
+		return status;
+	}
 
-	return status;
+	return NT_STATUS_OK;
 }
 
 
@@ -417,7 +503,7 @@ static int binary_smbd_main(const char *binary_name,
 	init_module_fn *shared_init;
 	uint16_t stdin_event_flags;
 	NTSTATUS status;
-	const char *model = "standard";
+	const char *model = "prefork";
 	int max_runtime = 0;
 	struct stat st;
 	enum {
@@ -430,24 +516,59 @@ static int binary_smbd_main(const char *binary_name,
 	};
 	struct poptOption long_options[] = {
 		POPT_AUTOHELP
-		{"daemon", 'D', POPT_ARG_NONE, NULL, OPT_DAEMON,
-		 "Become a daemon (default)", NULL },
-		{"foreground", 'F', POPT_ARG_NONE, NULL, OPT_FOREGROUND,
-		 "Run the daemon in foreground", NULL },
-		{"interactive",	'i', POPT_ARG_NONE, NULL, OPT_INTERACTIVE,
-		 "Run interactive (not a daemon)", NULL},
-		{"model", 'M', POPT_ARG_STRING,	NULL, OPT_PROCESS_MODEL,
-		 "Select process model", "MODEL"},
-		{"maximum-runtime",0, POPT_ARG_INT, &max_runtime, 0,
-		 "set maximum runtime of the server process, "
-			"till autotermination", "seconds"},
-		{"show-build", 'b', POPT_ARG_NONE, NULL, OPT_SHOW_BUILD,
-			"show build info", NULL },
-		{"no-process-group", '\0', POPT_ARG_NONE, NULL,
-		  OPT_NO_PROCESS_GROUP, "Don't create a new process group" },
+		{
+			.longName   = "daemon",
+			.shortName  = 'D',
+			.argInfo    = POPT_ARG_NONE,
+			.val        = OPT_DAEMON,
+			.descrip    = "Become a daemon (default)",
+		},
+		{
+			.longName   = "foreground",
+			.shortName  = 'F',
+			.argInfo    = POPT_ARG_NONE,
+			.val        = OPT_FOREGROUND,
+			.descrip    = "Run the daemon in foreground",
+		},
+		{
+			.longName   = "interactive",
+			.shortName  = 'i',
+			.argInfo    = POPT_ARG_NONE,
+			.val        = OPT_INTERACTIVE,
+			.descrip    = "Run interactive (not a daemon)",
+		},
+		{
+			.longName   = "model",
+			.shortName  = 'M',
+			.argInfo    = POPT_ARG_STRING,
+			.val        = OPT_PROCESS_MODEL,
+			.descrip    = "Select process model",
+			.argDescrip = "MODEL",
+		},
+		{
+			.longName   = "maximum-runtime",
+			.argInfo    = POPT_ARG_INT,
+			.arg        = &max_runtime,
+			.descrip    = "set maximum runtime of the server process, "
+			              "till autotermination",
+			.argDescrip = "seconds"
+		},
+		{
+			.longName   = "show-build",
+			.shortName  = 'b',
+			.argInfo    = POPT_ARG_NONE,
+			.val        = OPT_SHOW_BUILD,
+			.descrip    = "show build info",
+		},
+		{
+			.longName   = "no-process-group",
+			.argInfo    = POPT_ARG_NONE,
+			.val        = OPT_NO_PROCESS_GROUP,
+			.descrip    = "Don't create a new process group",
+		},
 		POPT_COMMON_SAMBA
 		POPT_COMMON_VERSION
-		{ NULL }
+		POPT_TABLEEND
 	};
 	struct server_state *state = NULL;
 	struct tevent_signal *se = NULL;
@@ -509,7 +630,7 @@ static int binary_smbd_main(const char *binary_name,
 		binary_name,
 		SAMBA_VERSION_STRING));
 	DEBUGADD(0,("Copyright Andrew Tridgell and the Samba Team"
-		" 1992-2018\n"));
+		" 1992-2020\n"));
 
 	if (sizeof(uint16_t) < 2 ||
 			sizeof(uint32_t) < 4 ||
@@ -533,6 +654,11 @@ static int binary_smbd_main(const char *binary_name,
 	state = talloc_zero(NULL, struct server_state);
 	if (state == NULL) {
 		exit_daemon("Samba cannot create server state", ENOMEM);
+		/*
+		 * return is never reached but is here to satisfy static
+		 * checkers
+		 */
+		return 1;
 	};
 	state->binary_name = binary_name;
 
@@ -554,6 +680,11 @@ static int binary_smbd_main(const char *binary_name,
 			TALLOC_FREE(state);
 			exit_daemon("Samba cannot open schannel store "
 				"for secured NETLOGON operations.", EACCES);
+			/*
+			 * return is never reached but is here to satisfy static
+			 * checkers
+			 */
+			return 1;
 		}
 	}
 
@@ -562,6 +693,11 @@ static int binary_smbd_main(const char *binary_name,
 		TALLOC_FREE(state);
 		exit_daemon("Samba failed to disable recusive "
 			"winbindd calls.", EACCES);
+		/*
+		 * return is never reached but is here to satisfy static
+		 * checkers
+		 */
+		return 1;
 	}
 
 	gensec_init(); /* FIXME: */
@@ -582,6 +718,11 @@ static int binary_smbd_main(const char *binary_name,
 	if (state->event_ctx == NULL) {
 		TALLOC_FREE(state);
 		exit_daemon("Initializing event context failed", EACCES);
+		/*
+		 * return is never reached but is here to satisfy static
+		 * checkers
+		 */
+		return 1;
 	}
 
 	talloc_set_destructor(state->event_ctx, event_ctx_destructor);
@@ -594,7 +735,7 @@ static int binary_smbd_main(const char *binary_name,
 		stdin_event_flags = 0;
 	}
 
-#if HAVE_SETPGID
+#ifdef HAVE_SETPGID
 	/*
 	 * If we're interactive we want to set our own process group for
 	 * signal management, unless --no-process-group specified.
@@ -612,6 +753,11 @@ static int binary_smbd_main(const char *binary_name,
 		TALLOC_FREE(state);
 		exit_daemon("Samba failed to set standard input handler",
 				ENOTTY);
+		/*
+		 * return is never reached but is here to satisfy static
+		 * checkers
+		 */
+		return 1;
 	}
 
 	if (S_ISFIFO(st.st_mode) || S_ISSOCK(st.st_mode)) {
@@ -624,6 +770,11 @@ static int binary_smbd_main(const char *binary_name,
 		if (fde == NULL) {
 			TALLOC_FREE(state);
 			exit_daemon("Initializing stdin failed", ENOMEM);
+			/*
+			 * return is never reached but is here to
+			 * satisfy static checkers
+			 */
+			return 1;
 		}
 	}
 
@@ -640,7 +791,12 @@ static int binary_smbd_main(const char *binary_name,
 		if (te == NULL) {
 			TALLOC_FREE(state);
 			exit_daemon("Maxruntime handler failed", ENOMEM);
-		}
+			/*
+			 * return is never reached but is here to
+			 * satisfy static checkers
+			 */
+			return 1;
+			}
 	}
 
 	se = tevent_add_signal(state->event_ctx,
@@ -652,6 +808,11 @@ static int binary_smbd_main(const char *binary_name,
 	if (se == NULL) {
 		TALLOC_FREE(state);
 		exit_daemon("Initialize SIGTERM handler failed", ENOMEM);
+		/*
+		 * return is never reached but is here to satisfy static
+		 * checkers
+		 */
+		return 1;
 	}
 
 	if (lpcfg_server_role(cmdline_lp_ctx) != ROLE_ACTIVE_DIRECTORY_DC
@@ -678,12 +839,22 @@ static int binary_smbd_main(const char *binary_name,
 	if (ret != LDB_SUCCESS) {
 		TALLOC_FREE(state);
 		exit_daemon("Samba failed to prime database", EINVAL);
+		/*
+		 * return is never reached but is here to satisfy static
+		 * checkers
+		 */
+		return 1;
 	}
 
 	if (db_is_backup) {
 		TALLOC_FREE(state);
 		exit_daemon("Database is a backup. Please run samba-tool domain"
 			    " backup restore", EINVAL);
+		/*
+		 * return is never reached but is here to satisfy static
+		 * checkers
+		 */
+		return 1;
 	}
 
 	status = setup_parent_messaging(state, cmdline_lp_ctx);
@@ -691,6 +862,11 @@ static int binary_smbd_main(const char *binary_name,
 		TALLOC_FREE(state);
 		exit_daemon("Samba failed to setup parent messaging",
 			NT_STATUS_V(status));
+		/*
+		 * return is never reached but is here to satisfy static
+		 * checkers
+		 */
+		return 1;
 	}
 
 	DBG_ERR("%s: using '%s' process model\n", binary_name, model);
@@ -705,6 +881,11 @@ static int binary_smbd_main(const char *binary_name,
 			TALLOC_FREE(state);
 			exit_daemon("Samba failed to open process control pipe",
 				    errno);
+			/*
+			 * return is never reached but is here to satisfy static
+			 * checkers
+			 */
+			return 1;
 		}
 		smb_set_close_on_exec(child_pipe[0]);
 		smb_set_close_on_exec(child_pipe[1]);
@@ -741,6 +922,11 @@ static int binary_smbd_main(const char *binary_name,
 				TALLOC_FREE(state);
 				exit_daemon("Samba failed to start services",
 				NT_STATUS_V(status));
+				/*
+				 * return is never reached but is here to
+				 * satisfy static checkers
+				 */
+				return 1;
 			}
 		}
 	}

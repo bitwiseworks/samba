@@ -36,7 +36,7 @@
 #include "lib/util/blocking.h"
 #include "lib/util/become_daemon.h"
 
-#include "common/version.h"
+#include "version.h"
 #include "ctdb_private.h"
 #include "ctdb_client.h"
 
@@ -72,7 +72,126 @@ static void print_exit_message(void)
 	}
 }
 
+#ifdef HAVE_GETRUSAGE
 
+struct cpu_check_threshold_data {
+	unsigned short percent;
+	struct timeval timeofday;
+	struct timeval ru_time;
+};
+
+static void ctdb_cpu_check_threshold(struct tevent_context *ev,
+				     struct tevent_timer *te,
+				     struct timeval tv,
+				     void *private_data)
+{
+	struct ctdb_context *ctdb = talloc_get_type_abort(
+		private_data, struct ctdb_context);
+	uint32_t interval = 60;
+
+	static unsigned short threshold = 0;
+	static struct cpu_check_threshold_data prev = {
+		.percent = 0,
+		.timeofday = { .tv_sec = 0 },
+		.ru_time = { .tv_sec = 0 },
+	};
+
+	struct rusage usage;
+	struct cpu_check_threshold_data curr = {
+		.percent = 0,
+	};
+	int64_t ru_time_diff, timeofday_diff;
+	bool first;
+	int ret;
+
+	/*
+	 * Cache the threshold so that we don't waste time checking
+	 * the environment variable every time
+	 */
+	if (threshold == 0) {
+		const char *t;
+
+		threshold = 90;
+
+		t = getenv("CTDB_TEST_CPU_USAGE_THRESHOLD");
+		if (t != NULL) {
+			int th;
+
+			th = atoi(t);
+			if (th <= 0 || th > 100) {
+				DBG_WARNING("Failed to parse env var: %s\n", t);
+			} else {
+				threshold = th;
+			}
+		}
+	}
+
+	ret = getrusage(RUSAGE_SELF, &usage);
+	if (ret != 0) {
+		DBG_WARNING("rusage() failed: %d\n", ret);
+		goto next;
+	}
+
+	/* Sum the system and user CPU usage */
+	curr.ru_time = timeval_sum(&usage.ru_utime, &usage.ru_stime);
+
+	curr.timeofday = tv;
+
+	first = timeval_is_zero(&prev.timeofday);
+	if (first) {
+		/* No previous values recorded so no calculation to do */
+		goto done;
+	}
+
+	timeofday_diff = usec_time_diff(&curr.timeofday, &prev.timeofday);
+	if (timeofday_diff <= 0) {
+		/*
+		 * Time went backwards or didn't progress so no (sane)
+		 * calculation can be done
+		 */
+		goto done;
+	}
+
+	ru_time_diff = usec_time_diff(&curr.ru_time, &prev.ru_time);
+
+	curr.percent = ru_time_diff * 100 / timeofday_diff;
+
+	if (curr.percent >= threshold) {
+		/* Log only if the utilisation changes */
+		if (curr.percent != prev.percent) {
+			D_WARNING("WARNING: CPU utilisation %hu%% >= "
+				  "threshold (%hu%%)\n",
+				  curr.percent,
+				  threshold);
+		}
+	} else {
+		/* Log if the utilisation falls below the threshold */
+		if (prev.percent >= threshold) {
+			D_WARNING("WARNING: CPU utilisation %hu%% < "
+				  "threshold (%hu%%)\n",
+				  curr.percent,
+				  threshold);
+		}
+	}
+
+done:
+	prev = curr;
+
+next:
+	tevent_add_timer(ctdb->ev, ctdb,
+			 timeval_current_ofs(interval, 0),
+			 ctdb_cpu_check_threshold,
+			 ctdb);
+}
+
+static void ctdb_start_cpu_check_threshold(struct ctdb_context *ctdb)
+{
+	tevent_add_timer(ctdb->ev, ctdb,
+			 timeval_current(),
+			 ctdb_cpu_check_threshold,
+			 ctdb);
+}
+#endif /* HAVE_GETRUSAGE */
 
 static void ctdb_time_tick(struct tevent_context *ev, struct tevent_timer *te,
 				  struct timeval t, void *private_data)
@@ -111,6 +230,10 @@ static void ctdb_start_periodic_events(struct ctdb_context *ctdb)
 
 	/* start listening to timer ticks */
 	ctdb_start_time_tickd(ctdb);
+
+#ifdef HAVE_GETRUSAGE
+	ctdb_start_cpu_check_threshold(ctdb);
+#endif /* HAVE_GETRUSAGE */
 }
 
 static void ignore_signal(int signum)
@@ -450,15 +573,15 @@ static void reprocess_deferred_call(struct tevent_context *ev,
    fetch-lock has finished.
    at this stage, immediately start reprocessing the queued up deferred
    calls so they get reprocessed immediately (and since we are dmaster at
-   this stage, trigger the waiting smbd processes to pick up and aquire the
+   this stage, trigger the waiting smbd processes to pick up and acquire the
    record right away.
 */
 static int deferred_fetch_queue_destructor(struct ctdb_deferred_fetch_queue *dfq)
 {
 
-	/* need to reprocess the packets from the queue explicitely instead of
-	   just using a normal destructor since we want, need, to
-	   call the clients in the same oder as the requests queued up
+	/* need to reprocess the packets from the queue explicitly instead of
+	   just using a normal destructor since we need to
+	   call the clients in the same order as the requests queued up
 	*/
 	while (dfq->deferred_calls != NULL) {
 		struct ctdb_client *client;
@@ -928,6 +1051,44 @@ static int ctdb_clientpid_destructor(struct ctdb_client_pid_list *client_pid)
 	return 0;
 }
 
+static int get_new_client_id(struct reqid_context *idr,
+			     struct ctdb_client *client,
+			     uint32_t *out)
+{
+	uint32_t client_id;
+
+	client_id = reqid_new(idr, client);
+	/*
+	 * Some places in the code (e.g. ctdb_control_db_attach(),
+	 * ctdb_control_db_detach()) assign a special meaning to
+	 * client_id 0.  The assumption is that if client_id is 0 then
+	 * the control has come from another daemon.  Therefore, we
+	 * should never return client_id == 0.
+	 */
+	if (client_id == 0) {
+		/*
+		 * Don't leak ID 0.  This is safe because the ID keeps
+		 * increasing.  A test will be added to ensure that
+		 * this doesn't change.
+		 */
+		reqid_remove(idr, 0);
+
+		client_id = reqid_new(idr, client);
+	}
+
+	if (client_id == REQID_INVALID) {
+		return EINVAL;
+	}
+
+	if (client_id == 0) {
+		/* Every other ID must have been used and we can't use 0 */
+		reqid_remove(idr, 0);
+		return EINVAL;
+	}
+
+	*out = client_id;
+	return 0;
+}
 
 static void ctdb_accept_client(struct tevent_context *ev,
 			       struct tevent_fd *fde, uint16_t flags,
@@ -971,7 +1132,15 @@ static void ctdb_accept_client(struct tevent_context *ev,
 
 	client->ctdb = ctdb;
 	client->fd = fd;
-	client->client_id = reqid_new(ctdb->idr, client);
+
+	ret = get_new_client_id(ctdb->idr, client, &client->client_id);
+	if (ret != 0) {
+		DBG_ERR("Unable to get client ID (%d)\n", ret);
+		close(fd);
+		talloc_free(client);
+		return;
+	}
+
 	client->pid = peer_pid;
 
 	client_pid = talloc(client, struct ctdb_client_pid_list);
@@ -1004,7 +1173,7 @@ static void ctdb_accept_client(struct tevent_context *ev,
 */
 static int ux_socket_bind(struct ctdb_context *ctdb)
 {
-	struct sockaddr_un addr;
+	struct sockaddr_un addr = { .sun_family = AF_UNIX };
 	int ret;
 
 	ctdb->daemon.sd = socket(AF_UNIX, SOCK_STREAM, 0);
@@ -1012,8 +1181,6 @@ static int ux_socket_bind(struct ctdb_context *ctdb)
 		return -1;
 	}
 
-	memset(&addr, 0, sizeof(addr));
-	addr.sun_family = AF_UNIX;
 	strncpy(addr.sun_path, ctdb->daemon.name, sizeof(addr.sun_path)-1);
 
 	if (! sock_clean(ctdb->daemon.name)) {
@@ -1060,23 +1227,26 @@ failed:
 
 static void initialise_node_flags (struct ctdb_context *ctdb)
 {
-	if (ctdb->pnn == -1) {
-		ctdb_fatal(ctdb, "PNN is set to -1 (unknown value)");
+	unsigned int i;
+
+	/* Always found: PNN correctly set just before this is called */
+	for (i = 0; i < ctdb->num_nodes; i++) {
+		if (ctdb->pnn == ctdb->nodes[i]->pnn) {
+			break;
+		}
 	}
 
-	ctdb->nodes[ctdb->pnn]->flags &= ~NODE_FLAGS_DISCONNECTED;
+	ctdb->nodes[i]->flags &= ~NODE_FLAGS_DISCONNECTED;
 
 	/* do we start out in DISABLED mode? */
 	if (ctdb->start_as_disabled != 0) {
-		DEBUG(DEBUG_ERR,
-		      ("This node is configured to start in DISABLED state\n"));
-		ctdb->nodes[ctdb->pnn]->flags |= NODE_FLAGS_DISABLED;
+		D_ERR("This node is configured to start in DISABLED state\n");
+		ctdb->nodes[i]->flags |= NODE_FLAGS_DISABLED;
 	}
 	/* do we start out in STOPPED mode? */
 	if (ctdb->start_as_stopped != 0) {
-		DEBUG(DEBUG_ERR,
-		      ("This node is configured to start in STOPPED state\n"));
-		ctdb->nodes[ctdb->pnn]->flags |= NODE_FLAGS_STOPPED;
+		D_ERR("This node is configured to start in STOPPED state\n");
+		ctdb->nodes[i]->flags |= NODE_FLAGS_STOPPED;
 	}
 }
 
@@ -1176,7 +1346,7 @@ static void ctdb_create_pidfile(TALLOC_CTX *mem_ctx)
 
 static void ctdb_initialise_vnn_map(struct ctdb_context *ctdb)
 {
-	int i, j, count;
+	unsigned int i, j, count;
 
 	/* initialize the vnn mapping table, skipping any deleted nodes */
 	ctdb->vnn_map = talloc(ctdb, struct ctdb_vnn_map);
@@ -1205,21 +1375,18 @@ static void ctdb_initialise_vnn_map(struct ctdb_context *ctdb)
 
 static void ctdb_set_my_pnn(struct ctdb_context *ctdb)
 {
-	int nodeid;
-
 	if (ctdb->address == NULL) {
 		ctdb_fatal(ctdb,
 			   "Can not determine PNN - node address is not set\n");
 	}
 
-	nodeid = ctdb_ip_to_nodeid(ctdb, ctdb->address);
-	if (nodeid == -1) {
+	ctdb->pnn = ctdb_ip_to_pnn(ctdb, ctdb->address);
+	if (ctdb->pnn == CTDB_UNKNOWN_PNN) {
 		ctdb_fatal(ctdb,
-			   "Can not determine PNN - node address not found in node list\n");
+			   "Can not determine PNN - unknown node address\n");
 	}
 
-	ctdb->pnn = ctdb->nodes[nodeid]->pnn;
-	DEBUG(DEBUG_NOTICE, ("PNN is %u\n", ctdb->pnn));
+	D_NOTICE("PNN is %u\n", ctdb->pnn);
 }
 
 /*
@@ -1230,14 +1397,14 @@ int ctdb_start_daemon(struct ctdb_context *ctdb, bool do_fork)
 	int res, ret = -1;
 	struct tevent_fd *fde;
 
-	become_daemon(do_fork, !do_fork, !do_fork);
+	become_daemon(do_fork, !do_fork, false);
 
 	ignore_signal(SIGPIPE);
 	ignore_signal(SIGUSR1);
 
 	ctdb->ctdbd_pid = getpid();
 	DEBUG(DEBUG_ERR, ("Starting CTDBD (Version %s) as PID: %u\n",
-			  ctdb_version_string, ctdb->ctdbd_pid));
+			  SAMBA_VERSION_STRING, ctdb->ctdbd_pid));
 	ctdb_create_pidfile(ctdb);
 
 	/* create a unix domain stream socket to listen to */

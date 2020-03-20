@@ -19,7 +19,13 @@
 #ifndef __NFS4ACL_XATTR_H__
 #define __NFS4ACL_XATTR_H__
 
-enum nfs4acl_encoding {NFS4ACL_ENCODING_NDR, NFS4ACL_ENCODING_XDR};
+#define NFS4ACL_XDR_MAX_ACES 8192
+
+enum nfs4acl_encoding {
+	NFS4ACL_ENCODING_NDR,
+	NFS4ACL_ENCODING_XDR,
+	NFS4ACL_ENCODING_NFS
+};
 
 struct nfs4acl_config {
 	unsigned nfs_version;
@@ -27,6 +33,8 @@ struct nfs4acl_config {
 	char *xattr_name;
 	struct smbacl4_vfs_params nfs4_params;
 	enum default_acl_style default_acl_style;
+	bool nfs4_id_numeric;
+	bool validate_mode;
 };
 
 #endif /* __NFS4ACL_XATTR_H__ */

@@ -364,7 +364,7 @@ static NTSTATUS scripts_process_group_policy(TALLOC_CTX *mem_ctx,
 		GP_SCRIPTS_INI_LOGOFF
 	};
 	const struct GROUP_POLICY_OBJECT *gpo;
-	char *gpo_cache_path = cache_path(GPO_CACHE_DIR);
+	char *gpo_cache_path = cache_path(talloc_tos(), GPO_CACHE_DIR);
 	if (gpo_cache_path == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -418,7 +418,7 @@ static NTSTATUS scripts_process_group_policy(TALLOC_CTX *mem_ctx,
 			werr = scripts_apply(ini_ctx->mem_ctx, token, root_key,
 					     flags, list[i], gpo, entries, num_entries);
 			if (!W_ERROR_IS_OK(werr)) {
-				continue; /* FIXME: finally fix storing emtpy strings and REG_QWORD! */
+				continue; /* FIXME: finally fix storing empty strings and REG_QWORD! */
 			}
 		}
 

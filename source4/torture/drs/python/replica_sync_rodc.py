@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Test conflict scenarios on the RODC
@@ -32,9 +32,11 @@ import drs_base
 import samba.tests
 import time
 import ldb
+from samba.compat import get_string
 
 from ldb import (
     SCOPE_BASE, LdbError, ERR_NO_SUCH_OBJECT)
+
 
 class DrsReplicaSyncTestCase(drs_base.DrsBaseTestCase):
     """Intended as a black box test case for DsReplicaSync
@@ -61,7 +63,7 @@ objectClass: organizationalUnit
         samdb.add_ldif(ldif)
         res = samdb.search(base="%s,%s" % (name, self.domain_dn),
                            scope=SCOPE_BASE, attrs=["objectGUID"])
-        return self._GUID_string(res[0]["objectGUID"][0])
+        return get_string(self._GUID_string(res[0]["objectGUID"][0]))
 
     def _check_deleted(self, sam_ldb, guid):
         # search the user by guid as it may be deleted
@@ -73,12 +75,11 @@ objectClass: organizationalUnit
         # Deleted Object base DN
         dodn = self._deleted_objects_dn(sam_ldb)
         # now check properties of the user
-        name_cur  = ou_cur["ou"][0]
-        self.assertEquals(ou_cur["isDeleted"][0],"TRUE")
+        name_cur = ou_cur["ou"][0]
+        self.assertEquals(ou_cur["isDeleted"][0], "TRUE")
         self.assertTrue(not("objectCategory" in ou_cur))
         self.assertTrue(dodn in str(ou_cur["dn"]),
                         "OU %s is deleted but it is not located under %s!" % (name_cur, dodn))
-
 
     def test_ReplConflictsRODC(self):
         """Tests that objects created in conflict become conflict DNs"""

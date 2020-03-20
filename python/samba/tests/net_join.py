@@ -27,6 +27,7 @@ from samba.credentials import DONT_USE_KERBEROS
 from samba import NTSTATUSError, ntstatus
 import ctypes
 
+
 class NetJoinTests(samba.tests.TestCaseInTempDir):
 
     def setUp(self):
@@ -57,7 +58,7 @@ class NetJoinTests(samba.tests.TestCaseInTempDir):
                 self.domain, netbios_name, LIBNET_JOIN_AUTOMATIC,
                 machinepass=machinepass)
         except NTSTATUSError as e:
-            code = ctypes.c_uint32(e[0]).value
+            code = ctypes.c_uint32(e.args[0]).value
             if code == ntstatus.NT_STATUS_CONNECTION_DISCONNECTED:
                 self.fail("Connection failure")
             raise

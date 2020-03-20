@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # This is unit with tests for LDAP access checks
 
@@ -7,7 +7,6 @@ import optparse
 import sys
 import base64
 import copy
-import time
 
 sys.path.insert(0, "bin/python")
 import samba
@@ -20,6 +19,13 @@ from ldb import SCOPE_BASE, SCOPE_SUBTREE
 from samba import gensec
 import samba.tests
 from samba.tests import delete_force
+from samba.credentials import Credentials
+
+def create_credential(lp, other):
+    c = Credentials()
+    c.guess(lp)
+    c.set_gensec_features(other.get_gensec_features())
+    return c
 
 parser = optparse.OptionParser("ldap [options] <host>")
 sambaopts = options.SambaOptions(parser)
@@ -40,11 +46,12 @@ host = args[0]
 lp = sambaopts.get_loadparm()
 creds = credopts.get_credentials(lp)
 creds.set_gensec_features(creds.get_gensec_features() | gensec.FEATURE_SEAL)
-creds_machine = copy.deepcopy(creds)
-creds_user1 = copy.deepcopy(creds)
-creds_user2 = copy.deepcopy(creds)
-creds_user3 = copy.deepcopy(creds)
-creds_user4 = copy.deepcopy(creds)
+
+creds_machine = create_credential(lp, creds)
+creds_user1 = create_credential(lp, creds)
+creds_user2 = create_credential(lp, creds)
+creds_user3 = create_credential(lp, creds)
+creds_user4 = create_credential(lp, creds)
 
 class BindTests(samba.tests.TestCase):
 
@@ -111,8 +118,8 @@ unicodePwd:: """ + base64.b64encode(u"\"P@ssw0rd\"".encode('utf-16-le')).decode(
         # create user
         self.ldb.newuser(username=self.username, password=self.password)
         ldb_res = self.ldb.search(base=self.domain_dn,
-                                      scope=SCOPE_SUBTREE,
-                                      expression="(samAccountName=%s)" % self.username)
+                                  scope=SCOPE_SUBTREE,
+                                  expression="(samAccountName=%s)" % self.username)
         self.assertEquals(len(ldb_res), 1)
         user_dn = ldb_res[0]["dn"]
         self.addCleanup(delete_force, self.ldb, user_dn)
@@ -145,8 +152,8 @@ unicodePwd:: """ + base64.b64encode(u"\"P@ssw0rd\"".encode('utf-16-le')).decode(
         # create user
         self.ldb.newuser(username=self.username, password=self.password)
         ldb_res = self.ldb.search(base=self.domain_dn,
-                                      scope=SCOPE_SUBTREE,
-                                      expression="(samAccountName=%s)" % self.username)
+                                  scope=SCOPE_SUBTREE,
+                                  expression="(samAccountName=%s)" % self.username)
         self.assertEquals(len(ldb_res), 1)
         user_dn = ldb_res[0]["dn"]
         self.addCleanup(delete_force, self.ldb, user_dn)
@@ -158,10 +165,11 @@ unicodePwd:: """ + base64.b64encode(u"\"P@ssw0rd\"".encode('utf-16-le')).decode(
         print("BindTest (no domain) with: " + self.username)
         try:
             ldb_user4 = samba.tests.connect_samdb(host, credentials=creds_user4,
-                                              lp=lp, ldap_only=True)
+                                                  lp=lp, ldap_only=True)
         except:
             self.fail("Failed to connect without the domain set")
 
         res = ldb_user4.search(base="", expression="", scope=SCOPE_BASE, attrs=["*"])
+
 
 TestProgram(module=__name__, opts=subunitopts)

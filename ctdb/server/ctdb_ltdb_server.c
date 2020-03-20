@@ -62,7 +62,6 @@ static int ctdb_ltdb_store_server(struct ctdb_db_context *ctdb_db,
 	TDB_DATA rec[2];
 	uint32_t hsize = sizeof(struct ctdb_ltdb_header);
 	int ret;
-	bool seqnum_suppressed = false;
 	bool keep = false;
 	bool schedule_for_deletion = false;
 	bool remove_from_delete_queue = false;
@@ -192,22 +191,6 @@ store:
 	rec[1].dsize = data.dsize;
 	rec[1].dptr = data.dptr;
 
-	/* Databases with seqnum updates enabled only get their seqnum
-	   changes when/if we modify the data */
-	if (ctdb_db->seqnum_update != NULL) {
-		TDB_DATA old;
-		old = tdb_fetch(ctdb_db->ltdb->tdb, key);
-
-		if ((old.dsize == hsize + data.dsize) &&
-		    memcmp(old.dptr + hsize, data.dptr, data.dsize) == 0) {
-			tdb_remove_flags(ctdb_db->ltdb->tdb, TDB_SEQNUM);
-			seqnum_suppressed = true;
-		}
-		if (old.dptr != NULL) {
-			free(old.dptr);
-		}
-	}
-
 	DEBUG(DEBUG_DEBUG, (__location__ " db[%s]: %s record: hash[0x%08x]\n",
 			    ctdb_db->db_name,
 			    keep?"storing":"deleting",
@@ -236,9 +219,6 @@ store:
 
 		schedule_for_deletion = false;
 		remove_from_delete_queue = false;
-	}
-	if (seqnum_suppressed) {
-		tdb_add_flags(ctdb_db->ltdb->tdb, TDB_SEQNUM);
 	}
 
 	if (schedule_for_deletion) {
@@ -373,14 +353,17 @@ int ctdb_ltdb_lock_fetch_requeue(struct ctdb_db_context *ctdb_db,
 
 	ret = ctdb_ltdb_lock_requeue(ctdb_db, key, hdr, recv_pkt, 
 				     recv_context, ignore_generation);
-	if (ret == 0) {
-		ret = ctdb_ltdb_fetch(ctdb_db, key, header, hdr, data);
-		if (ret != 0) {
-			int uret;
-			uret = ctdb_ltdb_unlock(ctdb_db, key);
-			if (uret != 0) {
-				DEBUG(DEBUG_ERR,(__location__ " ctdb_ltdb_unlock() failed with error %d\n", uret));
-			}
+	if (ret != 0) {
+		return ret;
+	}
+
+	ret = ctdb_ltdb_fetch(ctdb_db, key, header, hdr, data);
+	if (ret != 0) {
+		int uret;
+		uret = ctdb_ltdb_unlock(ctdb_db, key);
+		if (uret != 0) {
+			DBG_ERR("ctdb_ltdb_unlock() failed with error %d\n",
+				uret);
 		}
 	}
 	return ret;
@@ -388,7 +371,7 @@ int ctdb_ltdb_lock_fetch_requeue(struct ctdb_db_context *ctdb_db,
 
 
 /*
-  paraoid check to see if the db is empty
+  paranoid check to see if the db is empty
  */
 static void ctdb_check_db_empty(struct ctdb_db_context *ctdb_db)
 {
@@ -442,7 +425,7 @@ int ctdb_load_persistent_health(struct ctdb_context *ctdb,
 int ctdb_update_persistent_health(struct ctdb_context *ctdb,
 				  struct ctdb_db_context *ctdb_db,
 				  const char *given_reason,/* NULL means healthy */
-				  int num_healthy_nodes)
+				  unsigned int num_healthy_nodes)
 {
 	struct tdb_context *tdb = ctdb->db_persistent_health->tdb;
 	int ret;
@@ -785,6 +768,11 @@ static int ctdb_local_attach(struct ctdb_context *ctdb, const char *db_name,
 		ctdb_db->delete_queue = trbt_create(ctdb_db, 0);
 		if (ctdb_db->delete_queue == NULL) {
 			CTDB_NO_MEMORY(ctdb, ctdb_db->delete_queue);
+		}
+
+		ctdb_db->fetch_queue = trbt_create(ctdb_db, 0);
+		if (ctdb_db->fetch_queue == NULL) {
+			CTDB_NO_MEMORY(ctdb, ctdb_db->fetch_queue);
 		}
 
 		ctdb_db->ctdb_ltdb_store_fn = ctdb_ltdb_store_server;
@@ -1278,17 +1266,10 @@ int32_t ctdb_control_db_detach(struct ctdb_context *ctdb, TDB_DATA indata,
 		return -1;
 	}
 
-	/* Detach database from recoverd */
-	if (ctdb_daemon_send_message(ctdb, ctdb->pnn,
-				     CTDB_SRVID_DETACH_DATABASE,
-				     indata) != 0) {
-		DEBUG(DEBUG_ERR, ("Unable to detach DB from recoverd\n"));
-		return -1;
-	}
-
 	/* Disable vacuuming and drop all vacuuming data */
 	talloc_free(ctdb_db->vacuum_handle);
 	talloc_free(ctdb_db->delete_queue);
+	talloc_free(ctdb_db->fetch_queue);
 
 	/* Terminate any deferred fetch */
 	talloc_free(ctdb_db->deferred_fetch);

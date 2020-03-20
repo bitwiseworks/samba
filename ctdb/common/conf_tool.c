@@ -205,7 +205,12 @@ int conf_tool_init(TALLOC_CTX *mem_ctx,
 		return ENOMEM;
 	}
 
-	ret = cmdline_init(ctx, prog, options, conf_commands, &ctx->cmdline);
+	ret = cmdline_init(ctx,
+			   prog,
+			   options,
+			   NULL,
+			   conf_commands,
+			   &ctx->cmdline);
 	if (ret != 0) {
 		D_ERR("Failed to initialize cmdline, ret=%d\n", ret);
 		talloc_free(ctx);
@@ -276,6 +281,7 @@ int main(int argc, const char **argv)
 	TALLOC_CTX *mem_ctx;
 	struct conf_tool_context *ctx;
 	int ret, result;
+	int level;
 	bool ok;
 
 	mem_ctx = talloc_new(NULL);
@@ -297,10 +303,11 @@ int main(int argc, const char **argv)
 	}
 
 	setup_logging("ctdb-config", DEBUG_STDERR);
-	ok = debug_level_parse(conf_data.debug, &DEBUGLEVEL);
+	ok = debug_level_parse(conf_data.debug, &level);
 	if (!ok) {
-		DEBUGLEVEL = DEBUG_ERR;
+		level = DEBUG_ERR;
 	}
+	debuglevel_set(level);
 
 	ret = conf_tool_run(ctx, &result);
 	if (ret != 0) {

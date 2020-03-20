@@ -96,7 +96,7 @@ static int tdb_ftruncate(struct tdb_context *tdb, off_t length)
 	return ret;
 }
 
-#if HAVE_POSIX_FALLOCATE
+#ifdef HAVE_POSIX_FALLOCATE
 static int tdb_posix_fallocate(struct tdb_context *tdb, off_t offset,
 			       off_t len)
 {
@@ -136,8 +136,8 @@ static int tdb_fstat(struct tdb_context *tdb, struct stat *buf)
    see if the database has been expanded by someone else and expand
    if necessary
 */
-static int tdb_oob(struct tdb_context *tdb, tdb_off_t off, tdb_len_t len,
-		   int probe)
+static int tdb_notrans_oob(
+	struct tdb_context *tdb, tdb_off_t off, tdb_len_t len, int probe)
 {
 	struct stat st;
 	if (len + off < len) {
@@ -150,6 +150,11 @@ static int tdb_oob(struct tdb_context *tdb, tdb_off_t off, tdb_len_t len,
 		return -1;
 	}
 
+	/*
+	 * This duplicates functionality from tdb_oob(). Don't remove:
+	 * we still have direct callers of tdb->methods->tdb_oob()
+	 * inside transaction.c.
+	 */
 	if (off + len <= tdb->map_size)
 		return 0;
 	if (tdb->flags & TDB_INTERNAL) {
@@ -216,7 +221,7 @@ static int tdb_write(struct tdb_context *tdb, tdb_off_t off,
 		return -1;
 	}
 
-	if (tdb->methods->tdb_oob(tdb, off, len, 0) != 0)
+	if (tdb_oob(tdb, off, len, 0) != 0)
 		return -1;
 
 	if (tdb->map_ptr) {
@@ -271,7 +276,7 @@ void *tdb_convert(void *buf, uint32_t size)
 static int tdb_read(struct tdb_context *tdb, tdb_off_t off, void *buf,
 		    tdb_len_t len, int cv)
 {
-	if (tdb->methods->tdb_oob(tdb, off, len, 0) != 0) {
+	if (tdb_oob(tdb, off, len, 0) != 0) {
 		return -1;
 	}
 
@@ -413,7 +418,7 @@ static int tdb_expand_file(struct tdb_context *tdb, tdb_off_t size, tdb_off_t ad
 		return -1;
 	}
 
-#if HAVE_POSIX_FALLOCATE
+#ifdef HAVE_POSIX_FALLOCATE
 	ret = tdb_posix_fallocate(tdb, size, addition);
 	if (ret == 0) {
 		return 0;
@@ -596,7 +601,7 @@ int tdb_expand(struct tdb_context *tdb, tdb_off_t size)
 	}
 
 	/* must know about any previous expansions by another process */
-	tdb->methods->tdb_oob(tdb, tdb->map_size, 1, 1);
+	tdb_oob(tdb, tdb->map_size, 1, 1);
 
 	/*
 	 * Note: that we don't care about tdb->hdr_ofs != 0 here
@@ -662,6 +667,12 @@ int tdb_expand(struct tdb_context *tdb, tdb_off_t size)
 	return -1;
 }
 
+int _tdb_oob(struct tdb_context *tdb, tdb_off_t off, tdb_len_t len, int probe)
+{
+	int ret = tdb->methods->tdb_oob(tdb, off, len, probe);
+	return ret;
+}
+
 /* read/write a tdb_off_t */
 int tdb_ofs_read(struct tdb_context *tdb, tdb_off_t offset, tdb_off_t *d)
 {
@@ -714,7 +725,7 @@ int tdb_parse_data(struct tdb_context *tdb, TDB_DATA key,
 		 * Optimize by avoiding the malloc/memcpy/free, point the
 		 * parser directly at the mmap area.
 		 */
-		if (tdb->methods->tdb_oob(tdb, offset, len, 0) != 0) {
+		if (tdb_oob(tdb, offset, len, 0) != 0) {
 			return -1;
 		}
 		data.dptr = offset + (unsigned char *)tdb->map_ptr;
@@ -756,20 +767,20 @@ int tdb_rec_read(struct tdb_context *tdb, tdb_off_t offset, struct tdb_record *r
 		return -1;
 	}
 
-	ret = tdb->methods->tdb_oob(tdb, offset, rec->key_len, 1);
+	ret = tdb_oob(tdb, offset, rec->key_len, 1);
 	if (ret == -1) {
 		return -1;
 	}
-	ret = tdb->methods->tdb_oob(tdb, offset, rec->data_len, 1);
+	ret = tdb_oob(tdb, offset, rec->data_len, 1);
 	if (ret == -1) {
 		return -1;
 	}
-	ret = tdb->methods->tdb_oob(tdb, offset, rec->rec_len, 1);
+	ret = tdb_oob(tdb, offset, rec->rec_len, 1);
 	if (ret == -1) {
 		return -1;
 	}
 
-	return tdb->methods->tdb_oob(tdb, rec->next, sizeof(*rec), 0);
+	return tdb_oob(tdb, rec->next, sizeof(*rec), 0);
 }
 
 int tdb_rec_write(struct tdb_context *tdb, tdb_off_t offset, struct tdb_record *rec)
@@ -782,7 +793,7 @@ static const struct tdb_methods io_methods = {
 	tdb_read,
 	tdb_write,
 	tdb_next_hash_chain,
-	tdb_oob,
+	tdb_notrans_oob,
 	tdb_expand_file,
 };
 

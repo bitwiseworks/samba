@@ -1,4 +1,3 @@
-#!/usr/bin/env python
 # -*- coding: utf-8 -*-
 #
 # Unix SMB/CIFS implementation.
@@ -34,7 +33,6 @@ import samba.tests
 
 from ldb import SCOPE_BASE, LdbError
 
-import samba.tests
 import samba.dcerpc.drsuapi
 from samba.dcerpc.drsblobs import schemaInfoBlob
 from samba.ndr import ndr_unpack
@@ -112,7 +110,7 @@ objectClass: attributeSchema
 adminDescription: """ + attr_name + """
 adminDisplayName: """ + attr_name + """
 cn: """ + attr_name + """
-attributeId: 1.3.6.1.4.1.7165.4.6.1.7.%d.""" % sub_oid + str(random.randint(1,100000)) + """
+attributeId: 1.3.6.1.4.1.7165.4.6.1.7.%d.""" % sub_oid + str(random.randint(1, 100000)) + """
 attributeSyntax: 2.5.5.12
 omSyntax: 64
 instanceType: 4
@@ -149,7 +147,6 @@ systemOnly: FALSE
         self._checkSchemaInfo(schi_before, schi_after)
         pass
 
-
     def _make_class_ldif(self, class_name, class_dn, sub_oid):
         ldif = """
 dn: """ + class_dn + """
@@ -158,7 +155,7 @@ objectClass: classSchema
 adminDescription: """ + class_name + """
 adminDisplayName: """ + class_name + """
 cn: """ + class_name + """
-governsId: 1.3.6.1.4.1.7165.4.6.2.7.%d.""" % sub_oid + str(random.randint(1,100000)) + """
+governsId: 1.3.6.1.4.1.7165.4.6.2.7.%d.""" % sub_oid + str(random.randint(1, 100000)) + """
 instanceType: 4
 objectClassCategory: 1
 subClassOf: organizationalPerson
@@ -168,16 +165,17 @@ systemOnly: FALSE
 """
         return ldif
 
-    def test_AddModifyClass(self):
+    def test_AddModifyClass(self, controls=[], class_pre="schemaInfo-Class-"):
         # get initial schemaInfo
         schi_before = self._getSchemaInfo()
 
         # create names for a Class to add
-        (class_name, class_ldap_name, class_dn) = self._make_obj_names("schemaInfo-Class-")
+        (class_name, class_ldap_name, class_dn) =\
+                self._make_obj_names(class_pre)
         ldif = self._make_class_ldif(class_name, class_dn, 1)
 
         # add the new Class
-        self.sam_db.add_ldif(ldif)
+        self.sam_db.add_ldif(ldif, controls=controls)
         self._ldap_schemaUpdateNow()
         # compare resulting schemaInfo
         schi_after = self._getSchemaInfo()
@@ -186,7 +184,7 @@ systemOnly: FALSE
         # rename the Class
         class_dn_new = class_dn.replace(class_name, class_name + "-NEW")
         try:
-            self.sam_db.rename(class_dn, class_dn_new)
+            self.sam_db.rename(class_dn, class_dn_new, controls=controls)
         except LdbError as e1:
             (num, _) = e1.args
             self.fail("failed to change CN for %s: %s" % (class_name, _))
@@ -195,3 +193,8 @@ systemOnly: FALSE
         schi_after = self._getSchemaInfo()
         self._checkSchemaInfo(schi_before, schi_after)
 
+    def test_AddModifyClassLocalRelaxed(self):
+        lp = self.get_loadparm()
+        self.sam_db = samba.tests.connect_samdb(lp.samdb_url())
+        self.test_AddModifyClass(controls=["relax:0"],
+                                 class_pre="schemaInfo-Relaxed-")

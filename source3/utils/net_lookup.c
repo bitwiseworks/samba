@@ -281,15 +281,15 @@ static int net_lookup_kdc(struct net_context *c, int argc, const char **argv)
 	krb5_context ctx;
 	struct ip_service *kdcs;
 	const char *realm;
+	char **get_host_realms = NULL;
 	int num_kdcs = 0;
 	int i;
 	NTSTATUS status;
 
-	initialize_krb5_error_table();
-	rc = krb5_init_context(&ctx);
+	rc = smb_krb5_init_context_common(&ctx);
 	if (rc) {
-		DEBUG(1,("krb5_init_context failed (%s)\n",
-			 error_message(rc)));
+		DBG_ERR("kerberos init context failed (%s)\n",
+			error_message(rc));
 		return -1;
 	}
 
@@ -298,20 +298,21 @@ static int net_lookup_kdc(struct net_context *c, int argc, const char **argv)
 	} else if (lp_realm() && *lp_realm()) {
 		realm = lp_realm();
 	} else {
-		char **realms;
-
-		rc = krb5_get_host_realm(ctx, NULL, &realms);
+		rc = krb5_get_host_realm(ctx, NULL, &get_host_realms);
 		if (rc) {
 			DEBUG(1,("krb5_gethost_realm failed (%s)\n",
 				 error_message(rc)));
+			krb5_free_context(ctx);
 			return -1;
 		}
-		realm = (const char *) *realms;
+		realm = (const char *) *get_host_realms;
 	}
 
 	status = get_kdc_list(realm, NULL, &kdcs, &num_kdcs);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(1,("get_kdc_list failed (%s)\n", nt_errstr(status)));
+		krb5_free_host_realm(ctx, get_host_realms);
+		krb5_free_context(ctx);
 		return -1;
 	}
 
@@ -323,6 +324,8 @@ static int net_lookup_kdc(struct net_context *c, int argc, const char **argv)
 		d_printf("%s:%u\n", addr, kdcs[i].port);
 	}
 
+	krb5_free_host_realm(ctx, get_host_realms);
+	krb5_free_context(ctx);
 	return 0;
 #endif
 	DEBUG(1, ("No kerberos support\n"));
@@ -333,6 +336,7 @@ static int net_lookup_name(struct net_context *c, int argc, const char **argv)
 {
 	const char *dom, *name;
 	struct dom_sid sid;
+	struct dom_sid_buf buf;
 	enum lsa_SidType type;
 
 	if (argc != 1) {
@@ -348,7 +352,7 @@ static int net_lookup_name(struct net_context *c, int argc, const char **argv)
 		return -1;
 	}
 
-	d_printf("%s %d (%s) %s\\%s\n", sid_string_tos(&sid),
+	d_printf("%s %d (%s) %s\\%s\n", dom_sid_str_buf(&sid, &buf),
 		 type, sid_type_lookup(type), dom, name);
 	return 0;
 }
@@ -357,6 +361,7 @@ static int net_lookup_sid(struct net_context *c, int argc, const char **argv)
 {
 	const char *dom, *name;
 	struct dom_sid sid;
+	struct dom_sid_buf buf;
 	enum lsa_SidType type;
 
 	if (argc != 1) {
@@ -377,7 +382,7 @@ static int net_lookup_sid(struct net_context *c, int argc, const char **argv)
 		return -1;
 	}
 
-	d_printf("%s %d (%s) %s\\%s\n", sid_string_tos(&sid),
+	d_printf("%s %d (%s) %s\\%s\n", dom_sid_str_buf(&sid, &buf),
 		 type, sid_type_lookup(type), dom, name);
 	return 0;
 }
@@ -448,16 +453,45 @@ int net_lookup(struct net_context *c, int argc, const char **argv)
 	int i;
 
 	struct functable table[] = {
-		{"HOST", net_lookup_host},
-		{"LDAP", net_lookup_ldap},
-		{"DC", net_lookup_dc},
-		{"PDC", net_lookup_pdc},
-		{"MASTER", net_lookup_master},
-		{"KDC", net_lookup_kdc},
-		{"NAME", net_lookup_name},
-		{"SID", net_lookup_sid},
-		{"DSGETDCNAME", net_lookup_dsgetdcname},
-		{NULL, NULL}
+		{
+			.funcname = "HOST",
+			.fn       = net_lookup_host,
+		},
+		{
+			.funcname = "LDAP",
+			.fn       = net_lookup_ldap,
+		},
+		{
+			.funcname = "DC",
+			.fn       = net_lookup_dc,
+		},
+		{
+			.funcname = "PDC",
+			.fn       = net_lookup_pdc,
+		},
+		{
+			.funcname = "MASTER",
+			.fn       = net_lookup_master,
+		},
+		{
+			.funcname = "KDC",
+			.fn       = net_lookup_kdc,
+		},
+		{
+			.funcname = "NAME",
+			.fn       = net_lookup_name,
+		},
+		{
+			.funcname = "SID",
+			.fn       = net_lookup_sid,
+		},
+		{
+			.funcname = "DSGETDCNAME",
+			.fn       = net_lookup_dsgetdcname,
+		},
+		{
+			.funcname = NULL,
+		},
 	};
 
 	if (argc < 1) {

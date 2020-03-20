@@ -170,7 +170,7 @@ static void test2_reader(int fd)
 			return;
 		}
 
-		assert(n == pkt_len);
+		assert((size_t)n == pkt_len);
 		pkt_len += 10;
 	}
 }
@@ -178,7 +178,7 @@ static void test2_reader(int fd)
 static void test2_dummy_reader(uint8_t *buf, size_t buflen,
 			       void *private_data)
 {
-	assert(buflen == -1);
+	abort();
 }
 
 static void test2_writer(struct sock_queue *queue)

@@ -58,7 +58,7 @@ static uint32_t ip_distance(ctdb_sock_addr *ip1, ctdb_sock_addr *ip2)
 			/* Count number of leading zeroes.
 			 * FIXME? This could be optimised...
 			 */
-			while ((x & (1 << 31)) == 0) {
+			while ((x & ((uint32_t)1 << 31)) == 0) {
 				x <<= 1;
 				distance += 1;
 			}
@@ -74,7 +74,7 @@ static uint32_t ip_distance(ctdb_sock_addr *ip1, ctdb_sock_addr *ip2)
  */
 static uint32_t ip_distance_2_sum(ctdb_sock_addr *ip,
 				  struct public_ip_list *ips,
-				  int pnn)
+				  unsigned int pnn)
 {
 	struct public_ip_list *t;
 	uint32_t d;
@@ -109,7 +109,8 @@ static uint32_t ip_distance_2_sum(ctdb_sock_addr *ip,
 /* Return the LCP2 imbalance metric for addresses currently assigned
    to the given node.
  */
-static uint32_t lcp2_imbalance(struct public_ip_list * all_ips, int pnn)
+static uint32_t lcp2_imbalance(struct public_ip_list * all_ips,
+			       unsigned int pnn)
 {
 	struct public_ip_list *t;
 
@@ -132,7 +133,7 @@ static bool lcp2_init(struct ipalloc_state *ipalloc_state,
 		      uint32_t **lcp2_imbalances,
 		      bool **rebalance_candidates)
 {
-	int i, numnodes;
+	unsigned int i, numnodes;
 	struct public_ip_list *t;
 
 	numnodes = ipalloc_state->num;
@@ -163,7 +164,7 @@ static bool lcp2_init(struct ipalloc_state *ipalloc_state,
 	 * changes.
 	 */
 	for (t = ipalloc_state->all_ips; t != NULL; t = t->next) {
-		if (t->pnn != -1) {
+		if (t->pnn != CTDB_UNKNOWN_PNN) {
 			(*rebalance_candidates)[t->pnn] = false;
 		}
 	}
@@ -198,9 +199,9 @@ static void lcp2_allocate_unassigned(struct ipalloc_state *ipalloc_state,
 				     uint32_t *lcp2_imbalances)
 {
 	struct public_ip_list *t;
-	int dstnode, numnodes;
+	unsigned int dstnode, numnodes;
 
-	int minnode;
+	unsigned int minnode;
 	uint32_t mindsum, dstdsum, dstimbl;
 	uint32_t minimbl = 0;
 	struct public_ip_list *minip;
@@ -216,13 +217,13 @@ static void lcp2_allocate_unassigned(struct ipalloc_state *ipalloc_state,
 		DEBUG(DEBUG_DEBUG,(" ----------------------------------------\n"));
 		DEBUG(DEBUG_DEBUG,(" CONSIDERING MOVES (UNASSIGNED)\n"));
 
-		minnode = -1;
+		minnode = CTDB_UNKNOWN_PNN;
 		mindsum = 0;
 		minip = NULL;
 
 		/* loop over each unassigned ip. */
 		for (t = ipalloc_state->all_ips; t != NULL ; t = t->next) {
-			if (t->pnn != -1) {
+			if (t->pnn != CTDB_UNKNOWN_PNN) {
 				continue;
 			}
 
@@ -248,7 +249,8 @@ static void lcp2_allocate_unassigned(struct ipalloc_state *ipalloc_state,
 				       dstimbl - lcp2_imbalances[dstnode]));
 
 
-				if ((minnode == -1) || (dstdsum < mindsum)) {
+				if (minnode == CTDB_UNKNOWN_PNN ||
+				    dstdsum < mindsum) {
 					minnode = dstnode;
 					minimbl = dstimbl;
 					mindsum = dstdsum;
@@ -261,7 +263,7 @@ static void lcp2_allocate_unassigned(struct ipalloc_state *ipalloc_state,
 		DEBUG(DEBUG_DEBUG,(" ----------------------------------------\n"));
 
 		/* If we found one then assign it to the given node. */
-		if (minnode != -1) {
+		if (minnode != CTDB_UNKNOWN_PNN) {
 			minip->pnn = minnode;
 			lcp2_imbalances[minnode] = minimbl;
 			DEBUG(DEBUG_INFO,(" %s -> %d [+%d]\n",
@@ -275,7 +277,7 @@ static void lcp2_allocate_unassigned(struct ipalloc_state *ipalloc_state,
 		/* There might be a better way but at least this is clear. */
 		have_unassigned = false;
 		for (t = ipalloc_state->all_ips; t != NULL; t = t->next) {
-			if (t->pnn == -1) {
+			if (t->pnn == CTDB_UNKNOWN_PNN) {
 				have_unassigned = true;
 			}
 		}
@@ -286,7 +288,7 @@ static void lcp2_allocate_unassigned(struct ipalloc_state *ipalloc_state,
 	 */
 	if (have_unassigned) {
 		for (t = ipalloc_state->all_ips; t != NULL; t = t->next) {
-			if (t->pnn == -1) {
+			if (t->pnn == CTDB_UNKNOWN_PNN) {
 				DEBUG(DEBUG_WARNING,
 				      ("Failed to find node to cover ip %s\n",
 				       ctdb_sock_addr_to_string(ipalloc_state,
@@ -302,21 +304,20 @@ static void lcp2_allocate_unassigned(struct ipalloc_state *ipalloc_state,
  * combination to move from the source node.
  */
 static bool lcp2_failback_candidate(struct ipalloc_state *ipalloc_state,
-				    int srcnode,
+				    unsigned int srcnode,
 				    uint32_t *lcp2_imbalances,
 				    bool *rebalance_candidates)
 {
-	int dstnode, mindstnode, numnodes;
-	uint32_t srcimbl, srcdsum, dstimbl, dstdsum;
+	unsigned int dstnode, mindstnode, numnodes;
+	uint32_t srcdsum, dstimbl, dstdsum;
 	uint32_t minsrcimbl, mindstimbl;
 	struct public_ip_list *minip;
 	struct public_ip_list *t;
 
 	/* Find an IP and destination node that best reduces imbalance. */
-	srcimbl = 0;
 	minip = NULL;
 	minsrcimbl = 0;
-	mindstnode = -1;
+	mindstnode = CTDB_UNKNOWN_PNN;
 	mindstimbl = 0;
 
 	numnodes = ipalloc_state->num;
@@ -326,6 +327,8 @@ static bool lcp2_failback_candidate(struct ipalloc_state *ipalloc_state,
 			   srcnode, lcp2_imbalances[srcnode]));
 
 	for (t = ipalloc_state->all_ips; t != NULL; t = t->next) {
+		uint32_t srcimbl;
+
 		/* Only consider addresses on srcnode. */
 		if (t->pnn != srcnode) {
 			continue;
@@ -368,7 +371,7 @@ static bool lcp2_failback_candidate(struct ipalloc_state *ipalloc_state,
 
 			if ((dstimbl < lcp2_imbalances[srcnode]) &&
 			    (dstdsum < srcdsum) &&			\
-			    ((mindstnode == -1) ||				\
+			    ((mindstnode == CTDB_UNKNOWN_PNN) ||				\
 			     ((srcimbl + dstimbl) < (minsrcimbl + mindstimbl)))) {
 
 				minip = t;
@@ -380,7 +383,7 @@ static bool lcp2_failback_candidate(struct ipalloc_state *ipalloc_state,
 	}
 	DEBUG(DEBUG_DEBUG,(" ----------------------------------------\n"));
 
-        if (mindstnode != -1) {
+        if (mindstnode != CTDB_UNKNOWN_PNN) {
 		/* We found a move that makes things better... */
 		DEBUG(DEBUG_INFO,
 		      ("%d [%d] -> %s -> %d [+%d]\n",
@@ -402,7 +405,7 @@ static bool lcp2_failback_candidate(struct ipalloc_state *ipalloc_state,
 
 struct lcp2_imbalance_pnn {
 	uint32_t imbalance;
-	int pnn;
+	unsigned int pnn;
 };
 
 static int lcp2_cmp_imbalance_pnn(const void * a, const void * b)

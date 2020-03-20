@@ -25,7 +25,7 @@ import random
 import string
 from samba.auth import system_session
 from samba.samdb import SamDB
-from cStringIO import StringIO
+from samba.compat import StringIO
 from samba.netcmd.main import cmd_sambatool
 import samba.tests
 
@@ -67,7 +67,6 @@ class SambaToolCmdTest(samba.tests.BlackboxTestCase):
         samdb = SamDB(url=H, session_info=system_session(),
                       credentials=creds, lp=lp)
         return samdb
-
 
     def runcmd(self, name, *args):
         """run a single level command"""
@@ -122,14 +121,7 @@ class SambaToolCmdTest(samba.tests.BlackboxTestCase):
     def randomName(self, count=8):
         """Create a random name, cap letters and numbers, and always starting with a letter"""
         name = random.choice(string.ascii_uppercase)
-        name += ''.join(random.choice(string.ascii_uppercase + string.ascii_lowercase+ string.digits) for x in range(count - 1))
-        return name
-
-    def randomPass(self, count=16):
-        name = random.choice(string.ascii_uppercase)
-        name += random.choice(string.digits)
-        name += random.choice(string.ascii_lowercase)
-        name += ''.join(random.choice(string.ascii_uppercase + string.ascii_lowercase+ string.digits) for x in range(count - 3))
+        name += ''.join(random.choice(string.ascii_uppercase + string.ascii_lowercase + string.digits) for x in range(count - 1))
         return name
 
     def randomXid(self):

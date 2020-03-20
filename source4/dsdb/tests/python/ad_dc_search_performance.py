@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 from __future__ import print_function
 
@@ -162,7 +162,7 @@ class UserTests(samba.tests.TestCase):
     def _test_indexed_search(self):
         expressions = ['(objectclass=group)',
                        '(samaccountname=Administrator)'
-        ]
+                       ]
         for expression in expressions:
             t = time.time()
             for i in range(10000):
@@ -177,7 +177,7 @@ class UserTests(samba.tests.TestCase):
     def _test_complex_search(self):
         classes = ['samaccountname', 'objectCategory', 'dn', 'member']
         values = ['*', '*t*', 'g*', 'user']
-        comparators = ['=', '<=', '>='] # '~=' causes error
+        comparators = ['=', '<=', '>=']  # '~=' causes error
         maybe_not = ['!(', '']
         joiners = ['&', '|']
 
@@ -189,8 +189,6 @@ class UserTests(samba.tests.TestCase):
                                                   comparators, comparators,
                                                   maybe_not, maybe_not))
         random.seed(1)
-
-
 
         for (j, c1, c2, v1, v2,
              o1, o2, n1, n2) in random.sample(all_permutations, 100):
@@ -257,7 +255,6 @@ class UserTests(samba.tests.TestCase):
             self._link_user_and_group(i, 0)
         self.state.next_linked_user = e
 
-
     test_00_01_adding_users_1000 = _test_add_many_users
 
     test_00_10_complex_search_1k_users = _test_complex_search
@@ -271,6 +268,7 @@ class UserTests(samba.tests.TestCase):
     test_01_10_complex_search_3k_users = _test_complex_search
     test_01_11_unindexed_search_3k_users = _test_unindexed_search
     test_01_12_indexed_search_3k_users = _test_indexed_search
+
     def test_01_13_member_search_3k_users(self):
         self._test_member_search(rounds=5)
 
@@ -281,8 +279,10 @@ class UserTests(samba.tests.TestCase):
     test_03_10_complex_search_linked_users = _test_complex_search
     test_03_11_unindexed_search_linked_users = _test_unindexed_search
     test_03_12_indexed_search_linked_users = _test_indexed_search
+
     def test_03_13_member_search_linked_users(self):
         self._test_member_search(rounds=2)
+
 
 if "://" not in host:
     if os.path.isfile(host):

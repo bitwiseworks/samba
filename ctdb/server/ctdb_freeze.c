@@ -86,7 +86,7 @@ static int db_transaction_start_handler(struct ctdb_db_context *ctdb_db,
 static int db_transaction_commit_handler(struct ctdb_db_context *ctdb_db,
 					 void *private_data)
 {
-	int healthy_nodes = *(int *)private_data;
+	unsigned int healthy_nodes = *(unsigned int *)private_data;
 	int ret;
 
 	tdb_add_flags(ctdb_db->ltdb->tdb, TDB_NOLOCK);
@@ -139,6 +139,9 @@ static int ctdb_db_freeze_handle_destructor(struct ctdb_db_freeze_handle *h)
 	}
 	ctdb_db->freeze_mode = CTDB_FREEZE_NONE;
 	ctdb_db->freeze_handle = NULL;
+
+	/* Clear invalid records flag */
+	ctdb_db->invalid_records = false;
 
 	talloc_free(h->lreq);
 	return 0;
@@ -394,11 +397,24 @@ static int db_freeze_waiter_destructor(struct ctdb_db_freeze_waiter *w)
 }
 
 /**
+ * Invalidate the records in the database.
+ * This only applies to volatile databases.
+ */
+static int db_invalidate(struct ctdb_db_context *ctdb_db, void *private_data)
+{
+	if (ctdb_db_volatile(ctdb_db)) {
+		ctdb_db->invalid_records = true;
+	}
+
+	return 0;
+}
+
+/**
  * Count the number of databases
  */
 static int db_count(struct ctdb_db_context *ctdb_db, void *private_data)
 {
-	int *count = (int *)private_data;
+	unsigned int *count = (unsigned int *)private_data;
 
 	*count += 1;
 
@@ -436,15 +452,19 @@ static int db_freeze(struct ctdb_db_context *ctdb_db, void *private_data)
 }
 
 /*
-  start the freeze process for a certain priority
+  start the freeze process for all databases
+  This is only called from ctdb_control_freeze(), which is called
+  only on node becoming INACTIVE.  So mark the records invalid.
  */
 static void ctdb_start_freeze(struct ctdb_context *ctdb)
 {
 	struct ctdb_freeze_handle *h;
 	int ret;
 
+	ctdb_db_iterator(ctdb, db_invalidate, NULL);
+
 	if (ctdb->freeze_mode == CTDB_FREEZE_FROZEN) {
-		int count = 0;
+		unsigned int count = 0;
 
 		/*
 		 * Check if all the databases are frozen
@@ -534,6 +554,8 @@ static int ctdb_freeze_waiter_destructor(struct ctdb_freeze_waiter *w)
 
 /*
   freeze all the databases
+  This control is only used when freezing database on node becoming INACTIVE.
+  So mark the records invalid in ctdb_start_freeze().
  */
 int32_t ctdb_control_freeze(struct ctdb_context *ctdb,
 			    struct ctdb_req_control_old *c, bool *async_reply)
@@ -689,7 +711,7 @@ static int db_cancel_transaction(struct ctdb_db_context *ctdb_db,
 
 struct db_commit_transaction_state {
 	uint32_t transaction_id;
-	int healthy_nodes;
+	unsigned int healthy_nodes;
 };
 
 static int db_commit_transaction(struct ctdb_db_context *ctdb_db,
@@ -787,7 +809,7 @@ int32_t ctdb_control_db_transaction_commit(struct ctdb_context *ctdb,
 		(struct ctdb_transdb *)indata.dptr;
 	struct ctdb_db_context *ctdb_db;
 	struct db_commit_transaction_state state;
-	int healthy_nodes, i;
+	unsigned int healthy_nodes, i;
 
 	ctdb_db = find_ctdb_db(ctdb, w->db_id);
 	if (ctdb_db == NULL) {
@@ -847,10 +869,17 @@ int32_t ctdb_control_wipe_database(struct ctdb_context *ctdb, TDB_DATA indata)
 
 	if (ctdb_db_volatile(ctdb_db)) {
 		talloc_free(ctdb_db->delete_queue);
+		talloc_free(ctdb_db->fetch_queue);
 		ctdb_db->delete_queue = trbt_create(ctdb_db, 0);
 		if (ctdb_db->delete_queue == NULL) {
 			DEBUG(DEBUG_ERR, (__location__ " Failed to re-create "
-					  "the vacuum tree.\n"));
+					  "the delete queue.\n"));
+			return -1;
+		}
+		ctdb_db->fetch_queue = trbt_create(ctdb_db, 0);
+		if (ctdb_db->fetch_queue == NULL) {
+			DEBUG(DEBUG_ERR, (__location__ " Failed to re-create "
+					  "the fetch queue.\n"));
 			return -1;
 		}
 	}

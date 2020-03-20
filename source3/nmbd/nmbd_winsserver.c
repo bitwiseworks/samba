@@ -454,8 +454,10 @@ static void get_global_id_and_update(uint64_t *current_id, bool update)
 
 static void wins_hook(const char *operation, struct name_record *namerec, int ttl)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	char *command = NULL;
-	char *cmd = lp_wins_hook(talloc_tos());
+	char *cmd = lp_wins_hook(talloc_tos(), lp_sub);
 	char *p, *namestr;
 	int i;
 	TALLOC_CTX *ctx = talloc_tos();
@@ -601,7 +603,7 @@ bool initialise_wins(void)
 		return True;
 	}
 
-	db_path = state_path("wins.tdb");
+	db_path = state_path(talloc_tos(), "wins.tdb");
 	if (db_path == NULL) {
 		return false;
 	}
@@ -620,7 +622,7 @@ bool initialise_wins(void)
 
 	add_samba_names_to_subnet(wins_server_subnet);
 
-	list_path = state_path(WINS_LIST);
+	list_path = state_path(talloc_tos(), WINS_LIST);
 	if (list_path == NULL) {
 		tdb_close(wins_tdb);
 		return false;
@@ -2493,7 +2495,7 @@ void wins_write_database(time_t t, bool background)
 		}
 	}
 
-	if (!(fname = state_path(WINS_LIST))) {
+	if (!(fname = state_path(talloc_tos(), WINS_LIST))) {
 		goto err_exit;
 	}
 	/* This is safe as the 0 length means "don't expand". */

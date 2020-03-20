@@ -49,8 +49,8 @@ class SDUtils(object):
             tmp_desc = sd
 
         m["nTSecurityDescriptor"] = MessageElement(ndr_pack(tmp_desc),
-                                                       FLAG_MOD_REPLACE,
-                                                       "nTSecurityDescriptor")
+                                                   FLAG_MOD_REPLACE,
+                                                   "nTSecurityDescriptor")
         self.ldb.modify(m, controls)
 
     def read_sd_on_dn(self, object_dn, controls=None):
@@ -66,7 +66,7 @@ class SDUtils(object):
     def dacl_add_ace(self, object_dn, ace):
         """Add an ACE to an objects security descriptor
         """
-        desc = self.read_sd_on_dn(object_dn,["show_deleted:1"])
+        desc = self.read_sd_on_dn(object_dn, ["show_deleted:1"])
         desc_sddl = desc.as_sddl(self.domain_sid)
         if ace in desc_sddl:
             return

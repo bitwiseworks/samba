@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 # Originally based on ./sam.py
 from __future__ import print_function
@@ -138,7 +138,7 @@ class LATests(samba.tests.TestCase):
             return
 
         try:
-            results = list([x[attr] for x in res][0])
+            results = [str(x) for x in res[0][attr]]
         except KeyError:
             self.fail("missing attr '%s' on %s" % (attr, obj))
 
@@ -331,7 +331,7 @@ class LATests(samba.tests.TestCase):
         # removing a duplicate link in the same message should fail
         self.add_linked_attribute(g2, [u1, u2])
         self.assertRaises(ldb.LdbError,
-                          self.remove_linked_attribute,g2, [u1, u1])
+                          self.remove_linked_attribute, g2, [u1, u1])
 
     def _test_la_links_delete_link_reveal(self):
         u1, u2 = self.add_objects(2, 'user', 'u_del_link_reveal')
@@ -347,7 +347,7 @@ class LATests(samba.tests.TestCase):
                                   show_recycled=1,
                                   show_deactivated_link=0,
                                   reveal_internals=0
-        )
+                                  )
 
     def test_la_links_delete_link_reveal(self):
         if opts.no_reveal_internals:
@@ -491,7 +491,6 @@ class LATests(samba.tests.TestCase):
                                   "replacing duplicate values",
                                   self.replace_linked_attribute, g2,
                                   [u1, u2, u3, u2])
-
 
     def test_la_links_replace2(self):
         users = self.add_objects(12, 'user', 'u_replace2')
@@ -720,6 +719,7 @@ class LATests(samba.tests.TestCase):
         self.assert_forward_links(e1, [], attr='addressBookRoots2')
         self.assert_forward_links(e1, [], attr='addressBookRoots2',
                                   show_deactivated_link=0)
+
 
 if "://" not in host:
     if os.path.isfile(host):

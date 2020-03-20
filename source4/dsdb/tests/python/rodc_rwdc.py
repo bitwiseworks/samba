@@ -27,8 +27,14 @@ from samba.credentials import Credentials, DONT_USE_KERBEROS, MUST_USE_KERBEROS
 from samba import gensec, dsdb
 from ldb import SCOPE_BASE, LdbError, ERR_INVALID_CREDENTIALS
 from samba.dcerpc import security, samr
+import os
 
 import password_lockout_base
+
+def adjust_cmd_for_py_version(parts):
+    if os.getenv("PYTHON", None):
+        parts.insert(0, os.environ["PYTHON"])
+    return parts
 
 def passwd_encode(pw):
     return base64.b64encode(('"%s"' % pw).encode('utf-16-le')).decode('utf8')
@@ -72,20 +78,20 @@ def set_auto_replication(dc, allow):
 
     for opt in ['DISABLE_INBOUND_REPL',
                 'DISABLE_OUTBOUND_REPL']:
-        cmd = ['bin/samba-tool',
+        cmd = adjust_cmd_for_py_version(['bin/samba-tool',
                'drs', 'options',
                credstring, dc,
-               "--dsa-option=%s%s" % (on_or_off, opt)]
+               "--dsa-option=%s%s" % (on_or_off, opt)])
 
         p = subprocess.Popen(cmd,
                              stderr=subprocess.PIPE,
                              stdout=subprocess.PIPE)
         stdout, stderr = p.communicate()
         if p.returncode:
-            if 'LDAP_REFERRAL' not in stderr:
+            if b'LDAP_REFERRAL' not in stderr:
                 raise RodcRwdcTestException()
-            print ("ignoring +%s REFERRAL error; assuming %s is RODC" %
-                   (opt, dc))
+            print("ignoring +%s REFERRAL error; assuming %s is RODC" %
+                  (opt, dc))
 
 
 def preload_rodc_user(user_dn):
@@ -93,16 +99,15 @@ def preload_rodc_user(user_dn):
                                CREDS.get_password())
 
     set_auto_replication(RWDC, True)
-    cmd = ['bin/samba-tool',
+    cmd = adjust_cmd_for_py_version(['bin/samba-tool',
            'rodc', 'preload',
            user_dn,
            credstring,
-           '--server', RWDC,]
+           '--server', RWDC, ])
 
     print(' '.join(cmd))
     subprocess.check_call(cmd)
     set_auto_replication(RWDC, False)
-
 
 
 def get_server_ref_from_samdb(samdb):
@@ -113,8 +118,8 @@ def get_server_ref_from_samdb(samdb):
 
     return res[0]['serverReference'][0]
 
+
 class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
-    counter = itertools.count(1).next
 
     def _check_account_initial(self, dn):
         self.force_replication()
@@ -154,11 +159,11 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
         # XXX feels like a horrendous way to do it.
         credstring = '-U%s%%%s' % (CREDS.get_username(),
                                    CREDS.get_password())
-        cmd = ['bin/samba-tool',
+        cmd = adjust_cmd_for_py_version(['bin/samba-tool',
                'drs', 'replicate',
                RODC, RWDC, base,
                credstring,
-               '--sync-forced']
+               '--sync-forced'])
 
         p = subprocess.Popen(cmd,
                              stderr=subprocess.PIPE,
@@ -187,7 +192,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
         set_auto_replication(RWDC, True)
 
     def setUp(self):
-        self.kerberos = False # To be set later
+        self.kerberos = False  # To be set later
 
         self.rodc_db = SamDB('ldap://%s' % RODC, credentials=CREDS,
                              session_info=system_session(LP), lp=LP)
@@ -338,7 +343,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
         creds = self.lockout1ntlm_creds
 
         # Open a second LDB connection with the user credentials. Use the
-        # command line credentials for informations like the domain, the realm
+        # command line credentials for information like the domain, the realm
         # and the workstation.
         creds_lockout = self.insta_creds(creds)
 
@@ -350,7 +355,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
         badPasswordTime = 0
         logonCount = 0
         lastLogon = 0
-        lastLogonTimestamp=0
+        lastLogonTimestamp = 0
         logoncount_relation = ''
         lastlogon_relation = ''
 
@@ -360,8 +365,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   logonCount=logonCount,
                                   lastLogon=lastLogon,
                                   lastLogonTimestamp=lastLogonTimestamp,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=0,
                                   msg='lastlogontimestamp with wrong password')
         badPasswordTime = int(res[0]["badPasswordTime"][0])
@@ -386,8 +390,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   logonCount=(logoncount_relation, logonCount),
                                   lastLogon=('greater', lastLogon),
                                   lastLogonTimestamp=lastLogonTimestamp,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=0,
                                   msg='badPwdCount not reset on RWDC')
 
@@ -400,7 +403,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
         userpass = creds.get_password()
 
         # Open a second LDB connection with the user credentials. Use the
-        # command line credentials for informations like the domain, the realm
+        # command line credentials for information like the domain, the realm
         # and the workstation.
         creds_lockout = self.insta_creds(creds)
 
@@ -412,7 +415,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
         badPasswordTime = 0
         logonCount = 0
         lastLogon = 0
-        lastLogonTimestamp=0
+        lastLogonTimestamp = 0
         logoncount_relation = ''
         lastlogon_relation = ''
 
@@ -422,8 +425,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   logonCount=logonCount,
                                   lastLogon=lastLogon,
                                   lastLogonTimestamp=lastLogonTimestamp,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=0,
                                   msg='lastlogontimestamp with wrong password')
         badPasswordTime = int(res[0]["badPasswordTime"][0])
@@ -441,8 +443,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   logonCount=(logoncount_relation, logonCount),
                                   lastLogon=('greater', lastLogon),
                                   lastLogonTimestamp=lastLogonTimestamp,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=0,
                                   msg='LLTimestamp is updated to lastlogon')
 
@@ -460,8 +461,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   logonCount=logonCount,
                                   lastLogon=lastLogon,
                                   lastLogonTimestamp=lastLogonTimestamp,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=0)
         badPasswordTime = int(res[0]["badPasswordTime"][0])
 
@@ -482,8 +482,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   logonCount=logonCount,
                                   lastLogon=lastLogon,
                                   lastLogonTimestamp=lastLogonTimestamp,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=0)
         badPasswordTime = int(res[0]["badPasswordTime"][0])
 
@@ -507,8 +506,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   lastLogon=lastLogon,
                                   lastLogonTimestamp=lastLogonTimestamp,
                                   lockoutTime=("greater", badPasswordTime),
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=dsdb.UF_LOCKOUT)
         badPasswordTime = int(res[0]["badPasswordTime"][0])
         lockoutTime = int(res[0]["lockoutTime"][0])
@@ -529,8 +527,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   lastLogon=lastLogon,
                                   lastLogonTimestamp=lastLogonTimestamp,
                                   lockoutTime=lockoutTime,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=dsdb.UF_LOCKOUT)
 
         # The wrong password
@@ -549,8 +546,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   lastLogon=lastLogon,
                                   lastLogonTimestamp=lastLogonTimestamp,
                                   lockoutTime=lockoutTime,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=dsdb.UF_LOCKOUT)
 
         # The correct password, but we are locked out
@@ -569,8 +565,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   lastLogon=lastLogon,
                                   lastLogonTimestamp=lastLogonTimestamp,
                                   lockoutTime=lockoutTime,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=dsdb.UF_LOCKOUT)
 
         # wait for the lockout to end
@@ -584,8 +579,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   lockoutTime=lockoutTime,
                                   lastLogon=lastLogon,
                                   lastLogonTimestamp=lastLogonTimestamp,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=0)
 
         # The correct password after letting the timeout expire
@@ -604,8 +598,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   lastLogon=(lastlogon_relation, lastLogon),
                                   lastLogonTimestamp=lastLogonTimestamp,
                                   lockoutTime=lockoutTime,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=0,
                                   msg="lastLogon is way off")
 
@@ -625,8 +618,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   lockoutTime=lockoutTime,
                                   lastLogon=lastLogon,
                                   lastLogonTimestamp=lastLogonTimestamp,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=0)
         badPasswordTime = int(res[0]["badPasswordTime"][0])
 
@@ -646,8 +638,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   lockoutTime=lockoutTime,
                                   lastLogon=lastLogon,
                                   lastLogonTimestamp=lastLogonTimestamp,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=0)
         badPasswordTime = int(res[0]["badPasswordTime"][0])
 
@@ -660,8 +651,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   lockoutTime=lockoutTime,
                                   lastLogon=lastLogon,
                                   lastLogonTimestamp=lastLogonTimestamp,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=0)
 
         # The wrong password
@@ -680,8 +670,7 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   lockoutTime=lockoutTime,
                                   lastLogon=lastLogon,
                                   lastLogonTimestamp=lastLogonTimestamp,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=0)
         badPasswordTime = int(res[0]["badPasswordTime"][0])
 
@@ -696,12 +685,12 @@ class RodcRwdcCachedTests(password_lockout_base.BasePasswordTestCase):
                                   lockoutTime=lockoutTime,
                                   lastLogon=("greater", lastLogon),
                                   lastLogonTimestamp=lastLogonTimestamp,
-                                  userAccountControl=
-                                    dsdb.UF_NORMAL_ACCOUNT,
+                                  userAccountControl=dsdb.UF_NORMAL_ACCOUNT,
                                   msDSUserAccountControlComputed=0)
 
+
 class RodcRwdcTests(password_lockout_base.BasePasswordTestCase):
-    counter = itertools.count(1).next
+    counter = itertools.count(1, 1)
 
     def force_replication(self, base=None):
         if base is None:
@@ -710,11 +699,11 @@ class RodcRwdcTests(password_lockout_base.BasePasswordTestCase):
         # XXX feels like a horrendous way to do it.
         credstring = '-U%s%%%s' % (CREDS.get_username(),
                                    CREDS.get_password())
-        cmd = ['bin/samba-tool',
+        cmd = adjust_cmd_for_py_version(['bin/samba-tool',
                'drs', 'replicate',
                RODC, RWDC, base,
                credstring,
-               '--sync-forced']
+               '--sync-forced'])
 
         p = subprocess.Popen(cmd,
                              stderr=subprocess.PIPE,
@@ -837,7 +826,7 @@ class RodcRwdcTests(password_lockout_base.BasePasswordTestCase):
             except ldb.LdbError as e:
                 (ecode, emsg) = e.args
                 self.fail("Failed to add %s to rwdc: ldb error: %s %s" %
-                          (ecode, emsg))
+                          (o, ecode, emsg))
 
             if cross_ncs:
                 self.force_replication(base=base)
@@ -925,7 +914,7 @@ class RodcRwdcTests(password_lockout_base.BasePasswordTestCase):
                 res = self.rodc_db.search(dn,
                                           scope=ldb.SCOPE_SUBTREE,
                                           attrs=[attr])
-                results = [x[attr][0] for x in res]
+                results = [str(x[attr][0]) for x in res]
                 self.assertEqual(results, [value])
             except ldb.LdbError as e:
                 self.assertNotEqual(e.args[0], ldb.ERR_NO_SUCH_OBJECT,
@@ -970,7 +959,7 @@ class RodcRwdcTests(password_lockout_base.BasePasswordTestCase):
                 res = self.rodc_db.search(dn,
                                           scope=ldb.SCOPE_SUBTREE,
                                           attrs=[attr])
-                results = [x[attr][0] for x in res]
+                results = [str(x[attr][0]) for x in res]
                 self.assertEqual(results, [value])
             except ldb.LdbError as e:
                 self.assertNotEqual(e.args[0], ldb.ERR_NO_SUCH_OBJECT,
@@ -997,7 +986,7 @@ class RodcRwdcTests(password_lockout_base.BasePasswordTestCase):
         self._test_add_modify_delete()
 
     def _new_user(self):
-        username = "u%sX%s" % (self.tag[:12], self.counter())
+        username = "u%sX%s" % (self.tag[:12], next(self.counter))
         password = 'password#1'
         dn = 'CN=%s,CN=Users,%s' % (username, self.base_dn)
         o = {
@@ -1043,7 +1032,6 @@ class RodcRwdcTests(password_lockout_base.BasePasswordTestCase):
                     self.fail("logon failed to raise correct ldb error"
                               "Expected: %s Got: %s" %
                               (errno, code))
-
 
     def zero_min_password_age(self):
         min_pwd_age = int(self.rwdc_db.get_minPwdAge())
@@ -1159,7 +1147,6 @@ class RodcRwdcTests(password_lockout_base.BasePasswordTestCase):
         # This SHOULD succeed.
         self.try_ldap_logon(RODC, creds2)
 
-
     def test_change_password_reveal_on_demand_ntlm(self):
         CREDS.set_kerberos_state(DONT_USE_KERBEROS)
         self._test_ldap_change_password_reveal_on_demand(ldb.ERR_INVALID_CREDENTIALS)
@@ -1178,7 +1165,7 @@ class RodcRwdcTests(password_lockout_base.BasePasswordTestCase):
         use_kerberos = self.lockout1krb5_creds.get_kerberos_state()
         fail_creds = self.insta_creds(self.template_creds,
                                       username=username,
-                                      userpass=userpass+"X",
+                                      userpass=userpass + "X",
                                       kerberos_state=use_kerberos)
 
         try:
@@ -1208,7 +1195,7 @@ class RodcRwdcTests(password_lockout_base.BasePasswordTestCase):
         use_kerberos = self.lockout1ntlm_creds.get_kerberos_state()
         fail_creds = self.insta_creds(self.template_creds,
                                       username=username,
-                                      userpass=userpass+"X",
+                                      userpass=userpass + "X",
                                       kerberos_state=use_kerberos)
 
         try:
@@ -1233,7 +1220,7 @@ class RodcRwdcTests(password_lockout_base.BasePasswordTestCase):
         use_kerberos = self.lockout1krb5_creds.get_kerberos_state()
         fail_creds = self.insta_creds(self.template_creds,
                                       username=username,
-                                      userpass=userpass+"X",
+                                      userpass=userpass + "X",
                                       kerberos_state=use_kerberos)
 
         try:
@@ -1263,7 +1250,7 @@ class RodcRwdcTests(password_lockout_base.BasePasswordTestCase):
         use_kerberos = self.lockout1ntlm_creds.get_kerberos_state()
         fail_creds = self.insta_creds(self.template_creds,
                                       username=username,
-                                      userpass=userpass+"X",
+                                      userpass=userpass + "X",
                                       kerberos_state=use_kerberos)
 
         try:
@@ -1277,6 +1264,7 @@ class RodcRwdcTests(password_lockout_base.BasePasswordTestCase):
         ldb = SamDB(url=self.host_url, credentials=self.lockout1ntlm_creds, lp=self.lp)
 
         self._test_multiple_logon(self.lockout1ntlm_creds)
+
 
 def main():
     global RODC, RWDC, CREDS, LP
@@ -1311,5 +1299,6 @@ def main():
         TestProgram(module=__name__, opts=subunitopts)
     finally:
         set_auto_replication(RWDC, True)
+
 
 main()

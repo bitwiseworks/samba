@@ -37,6 +37,17 @@ _PUBLIC_ uint32_t generate_random(void)
 	return IVAL(v, 0);
 }
 
+/**
+  @brief generate a random uint64
+**/
+_PUBLIC_ uint64_t generate_random_u64(void)
+{
+	uint8_t v[8];
+	generate_random_buffer(v, 8);
+	return BVAL(v, 0);
+}
+
+
 
 /**
   Microsoft composed the following rules (among others) for quality
@@ -174,7 +185,7 @@ _PUBLIC_ char *generate_random_str_list(TALLOC_CTX *mem_ctx, size_t len, const c
 	char *retstr = talloc_array(mem_ctx, char, len + 1);
 	if (!retstr) return NULL;
 
-	generate_random_buffer((uint8_t *)retstr, len);
+	generate_secret_buffer((uint8_t *)retstr, len);
 	for (i = 0; i < len; i++) {
 		retstr[i] = list[retstr[i] % list_len];
 	}
@@ -236,7 +247,7 @@ _PUBLIC_ char *generate_random_password(TALLOC_CTX *mem_ctx, size_t min, size_t 
 	if (diff > 0 ) {
 		size_t tmp;
 
-		generate_random_buffer((uint8_t *)&tmp, sizeof(tmp));
+		generate_secret_buffer((uint8_t *)&tmp, sizeof(tmp));
 
 		tmp %= diff;
 
@@ -306,7 +317,7 @@ _PUBLIC_ char *generate_random_machine_password(TALLOC_CTX *mem_ctx, size_t min,
 	if (diff > 0) {
 		size_t tmp;
 
-		generate_random_buffer((uint8_t *)&tmp, sizeof(tmp));
+		generate_secret_buffer((uint8_t *)&tmp, sizeof(tmp));
 
 		tmp %= diff;
 

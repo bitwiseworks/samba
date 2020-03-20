@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 #
 # Unix SMB/CIFS implementation.
@@ -31,10 +31,10 @@ import os
 from samba import net
 import samba.tests
 
-if not "ACCOUNT_NAME" in os.environ.keys():
+if "ACCOUNT_NAME" not in os.environ.keys():
     raise Exception("Please supply ACCOUNT_NAME in environment")
 
-if not "NEW_PASS" in os.environ.keys():
+if "NEW_PASS" not in os.environ.keys():
     raise Exception("Please supply NEW_PASS in environment")
 
 account_name = os.environ["ACCOUNT_NAME"]
@@ -43,6 +43,7 @@ new_pass = os.environ["NEW_PASS"]
 #
 # Tests start here
 #
+
 
 class Libnet_SetPwdTest(samba.tests.TestCase):
 
@@ -56,4 +57,3 @@ class Libnet_SetPwdTest(samba.tests.TestCase):
                         credentials=creds)
 
     ########################################################################################
-

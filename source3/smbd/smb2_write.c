@@ -109,7 +109,7 @@ NTSTATUS smbd_smb2_request_process_write(struct smbd_smb2_request *req)
 		return smbd_smb2_request_error(req, NT_STATUS_FILE_CLOSED);
 	}
 
-	subreq = smbd_smb2_write_send(req, req->ev_ctx,
+	subreq = smbd_smb2_write_send(req, req->sconn->ev_ctx,
 				      req, in_fsp,
 				      in_data_buffer,
 				      in_offset,
@@ -287,6 +287,7 @@ static struct tevent_req *smbd_smb2_write_send(TALLOC_CTX *mem_ctx,
 		state->write_through = true;
 	}
 	state->in_length = in_data.length;
+	state->in_offset = in_offset;
 	state->out_count = 0;
 
 	DEBUG(10,("smbd_smb2_write: %s - %s\n",

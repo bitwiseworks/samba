@@ -70,7 +70,15 @@ const ACE4_SYNCHRONIZE          = 0x00100000;
 
 typedef u_int acemask4;
 
+/* ACL structure definition as per RFC 7530 Section-6.2.1 */
 struct nfsace4 {
+        acetype4        type;
+        aceflag4        flag;
+        acemask4        access_mask;
+        utf8str_mixed   who;
+};
+
+struct nfsace4i {
         acetype4        type;
         aceflag4        flag;
         aceiflag4       iflag;
@@ -88,7 +96,16 @@ const ACL4_DEFAULTED            = 0x00000004;
 
 typedef u_int aclflag4;
 
+struct nfsacl40 {
+        nfsace4         na40_aces<>;
+};
+
 struct nfsacl41 {
         aclflag4        na41_flag;
         nfsace4         na41_aces<>;
+};
+
+struct nfsacl41i {
+        aclflag4        na41_flag;
+        nfsace4i        na41_aces<>;
 };

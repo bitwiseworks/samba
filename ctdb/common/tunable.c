@@ -105,7 +105,7 @@ static struct {
 		offsetof(struct ctdb_tunable_list, vacuum_max_run_time) },
 	{ "RepackLimit", 10*1000, false,
 		offsetof(struct ctdb_tunable_list, repack_limit) },
-	{ "VacuumLimit", 5*1000, false,
+	{ "VacuumLimit", 5*1000, true,
 		offsetof(struct ctdb_tunable_list, vacuum_limit) },
 	{ "VacuumFastPathCount", 60, false,
 		offsetof(struct ctdb_tunable_list, vacuum_fast_path_count) },
@@ -157,7 +157,7 @@ static struct {
 		offsetof(struct ctdb_tunable_list, ip_alloc_algorithm) },
 	{ "AllowMixedVersions", 0, false,
 		offsetof(struct ctdb_tunable_list, allow_mixed_versions) },
-	{ NULL, 0, true, }
+	{ .obsolete = true, }
 };
 
 void ctdb_tunable_set_defaults(struct ctdb_tunable_list *tun_list)

@@ -526,6 +526,24 @@ smbc_setOptionUseNTHash(SMBCCTX *c, smbc_bool b)
         }
 }
 
+smbc_bool
+smbc_setOptionProtocols(SMBCCTX *c,
+			const char *min_proto,
+			const char *max_proto)
+{
+	bool ok = true;
+
+	if (min_proto != NULL) {
+		ok = lp_set_cmdline("client min protocol", min_proto);
+	}
+
+	if (max_proto != NULL) {
+		ok &= lp_set_cmdline("client max protocol", max_proto);
+	}
+
+	return ok;
+}
+
 /** Get the function for obtaining authentication data */
 smbc_get_auth_data_fn
 smbc_getFunctionAuthData(SMBCCTX *c)
@@ -887,6 +905,16 @@ smbc_readdirplus_fn smbc_getFunctionReaddirPlus(SMBCCTX *c)
 void smbc_setFunctionReaddirPlus(SMBCCTX *c, smbc_readdirplus_fn fn)
 {
 	c->readdirplus = fn;
+}
+
+smbc_readdirplus2_fn smbc_getFunctionReaddirPlus2(SMBCCTX *c)
+{
+	return c->readdirplus2;
+}
+
+void smbc_setFunctionReaddirPlus2(SMBCCTX *c, smbc_readdirplus2_fn fn)
+{
+	c->readdirplus2 = fn;
 }
 
 smbc_getdents_fn

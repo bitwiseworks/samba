@@ -142,6 +142,18 @@ EOF
        fi
 }
 
+check_expected_userparameters() {
+    if [ x$RELEASE = x"release-4-1-0rc3" ]; then
+	tmpldif=$PREFIX_ABS/$RELEASE/expected-userParameters-after-dbcheck.ldif.tmp
+	TZ=UTC $ldbsearch -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb userParameters=* -s sub -b DC=release-4-1-0rc3,DC=samba,DC=corp userParameters --sorted | grep -v \# > $tmpldif
+	diff -u $tmpldif $release_dir/expected-userParameters-after-dbcheck.ldif
+	if [ "$?" != "0" ]; then
+	    return 1
+	fi
+    fi
+    return 0
+}
+
 reindex() {
        $PYTHON $BINDIR/samba-tool dbcheck --reindex -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb $@
 }
@@ -161,7 +173,7 @@ check_expected_before_values() {
     if [ x$RELEASE = x"release-4-1-0rc3" ]; then
 	tmpldif=$PREFIX_ABS/$RELEASE/expected-replpropertymetadata-before-dbcheck.ldif.tmp
 	TZ=UTC $ldbsearch -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb cn=ops_run_anything -s one -b OU=SUDOers,DC=release-4-1-0rc3,DC=samba,DC=corp \* replpropertymetadata --sorted --show-binary > $tmpldif
-	diff $tmpldif $release_dir/expected-replpropertymetadata-before-dbcheck.ldif
+	diff -u $tmpldif $release_dir/expected-replpropertymetadata-before-dbcheck.ldif
 	if [ "$?" != "0" ]; then
 	    return 1
 	fi
@@ -171,20 +183,20 @@ check_expected_before_values() {
 	# Here we remove originating_change_time and whenChanged as
 	# these are time-dependent, caused by the ldbmodify above.
 
-	diff $tmpldif $release_dir/expected-replpropertymetadata-before-dbcheck2.ldif
+	diff -u $tmpldif $release_dir/expected-replpropertymetadata-before-dbcheck2.ldif
 	if [ "$?" != "0" ]; then
 	    return 1
 	fi
 
 	TZ=UTC $ldbsearch -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb cn=ops_run_anything3 -s one -b OU=SUDOers,DC=release-4-1-0rc3,DC=samba,DC=corp \* replpropertymetadata --sorted --show-binary > $tmpldif
-	diff $tmpldif $release_dir/expected-replpropertymetadata-before-dbcheck3.ldif
+	diff -u $tmpldif $release_dir/expected-replpropertymetadata-before-dbcheck3.ldif
 	if [ "$?" != "0" ]; then
 	    return 1
 	fi
     elif [ x$RELEASE = x"release-4-5-0-pre1" ]; then
         tmpldif=$PREFIX_ABS/$RELEASE/rootdse-version.initial.txt.tmp
         TZ=UTC $ldbsearch -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb -s base -b '' | grep highestCommittedUSN > $tmpldif
-        diff $tmpldif $release_dir/rootdse-version.initial.txt
+        diff -u $tmpldif $release_dir/rootdse-version.initial.txt
         if [ "$?" != "0" ]; then
             return 1
         fi
@@ -195,7 +207,7 @@ check_expected_before_values() {
 # This should 'fail', because it returns the number of modified records
 dbcheck_objectclass() {
     if [ x$RELEASE = x"release-4-1-6-partial-object" ]; then
-	$PYTHON $BINDIR/samba-tool dbcheck --cross-ncs --fix --yes -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb --attrs=objectclass $@
+	$PYTHON $BINDIR/samba-tool dbcheck --selftest-check-expired-tombstones --cross-ncs --fix --yes -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb --attrs=objectclass $@
     else
 	return 1
     fi
@@ -203,37 +215,37 @@ dbcheck_objectclass() {
 
 # This should 'fail', because it returns the number of modified records
 dbcheck() {
-       $PYTHON $BINDIR/samba-tool dbcheck --cross-ncs --fix --yes -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb $@
+       $PYTHON $BINDIR/samba-tool dbcheck --selftest-check-expired-tombstones --cross-ncs --fix --yes -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb $@
 }
 
 check_expected_after_values() {
     if [ x$RELEASE = x"release-4-1-0rc3" ]; then
 	tmpldif=$PREFIX_ABS/$RELEASE/expected-replpropertymetadata-after-dbcheck.ldif.tmp
 	TZ=UTC $ldbsearch -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb cn=ops_run_anything -s one -b OU=SUDOers,DC=release-4-1-0rc3,DC=samba,DC=corp \* replpropertymetadata --sorted --show-binary > $tmpldif
-	diff $tmpldif $release_dir/expected-replpropertymetadata-after-dbcheck.ldif
+	diff -u $tmpldif $release_dir/expected-replpropertymetadata-after-dbcheck.ldif
 	if [ "$?" != "0" ]; then
 	    return 1
 	fi
 	TZ=UTC $ldbsearch -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb cn=ops_run_anything2 -s one -b OU=SUDOers,DC=release-4-1-0rc3,DC=samba,DC=corp \* replpropertymetadata --sorted --show-binary | grep -v originating_change_time| grep -v whenChanged > $tmpldif
-	diff $tmpldif $release_dir/expected-replpropertymetadata-after-dbcheck2.ldif
+	diff -u $tmpldif $release_dir/expected-replpropertymetadata-after-dbcheck2.ldif
 	if [ "$?" != "0" ]; then
 	    return 1
 	fi
 	TZ=UTC $ldbsearch -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb cn=ops_run_anything3 -s one -b OU=SUDOers,DC=release-4-1-0rc3,DC=samba,DC=corp \* replpropertymetadata --sorted --show-binary > $tmpldif
-	diff $tmpldif $release_dir/expected-replpropertymetadata-after-dbcheck3.ldif
+	diff -u $tmpldif $release_dir/expected-replpropertymetadata-after-dbcheck3.ldif
 	if [ "$?" != "0" ]; then
 	    return 1
 	fi
 	# Check DomainDNS partition for replica locations
 	tmpldif=$PREFIX_ABS/$RELEASE/expected-replica-locations-after-dbcheck.ldif.tmp
 	$ldbsearch -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb cn=49a69498-9a85-48af-9be4-aa0b3e0054f9 -s one -b CN=Partitions,CN=Configuration,DC=release-4-1-0rc3,DC=samba,DC=corp msDS-NC-Replica-Locations > $tmpldif
-	diff $tmpldif $release_dir/expected-replica-locations-after-dbcheck.ldif
+	diff -u $tmpldif $release_dir/expected-replica-locations-after-dbcheck.ldif
 	if [ "$?" != "0" ]; then
 	    return 1
 	fi
 	# Check ForestDNS partition for replica locations
 	$ldbsearch -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb cn=7d2a15af-c0d4-487c-847e-e036292bcc65 -s one -b CN=Partitions,CN=Configuration,DC=release-4-1-0rc3,DC=samba,DC=corp msDS-NC-Replica-Locations > $tmpldif
-	diff $tmpldif $release_dir/expected-replica-locations-after-dbcheck2.ldif
+	diff -u $tmpldif $release_dir/expected-replica-locations-after-dbcheck2.ldif
 	if [ "$?" != "0" ]; then
 	    return 1
 	fi
@@ -241,7 +253,7 @@ check_expected_after_values() {
         echo  $RELEASE  checking after values
 	tmpldif=$PREFIX_ABS/$RELEASE/expected-links-after-dbcheck.ldif.tmp
         $ldbsearch -H  tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb --show-recycled --show-deleted  --show-deactivated-link --reveal member memberOf lastKnownParent objectCategory lastKnownParent wellKnownObjects legacyExchangeDN  sAMAccountType uSNChanged --sorted > $tmpldif
-	diff $tmpldif $release_dir/expected-links-after-dbcheck.ldif
+	diff -u $tmpldif $release_dir/expected-links-after-dbcheck.ldif
 	if [ "$?" != "0" ]; then
 	    return 1
 	fi
@@ -250,7 +262,7 @@ check_expected_after_values() {
 	# this test will fail and can be removed.
         tmpversion=$PREFIX_ABS/$RELEASE/rootdse-version.final.txt.tmp
         TZ=UTC $ldbsearch -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb -s base -b '' | grep highestCommittedUSN > $tmpversion
-        diff $tmpversion $release_dir/rootdse-version.final.txt
+        diff -u $tmpversion $release_dir/rootdse-version.final.txt
         if [ "$?" != "0" ]; then
             return 1
         fi
@@ -273,7 +285,7 @@ check_forced_duplicate_values() {
 # This should 'fail', because it returns the number of modified records
 dbcheck_after_dup() {
     if [ x$RELEASE = x"release-4-1-0rc3" ]; then
-	$PYTHON $BINDIR/samba-tool dbcheck --fix --yes -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb cn=administrator,cn=users,DC=release-4-1-0rc3,DC=samba,DC=corp $@
+	$PYTHON $BINDIR/samba-tool dbcheck --selftest-check-expired-tombstones --fix --yes -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb cn=administrator,cn=users,DC=release-4-1-0rc3,DC=samba,DC=corp $@
     else
 	return 1
     fi
@@ -283,7 +295,7 @@ check_expected_after_dup_values() {
     if [ x$RELEASE = x"release-4-1-0rc3" ]; then
 	tmpldif=$PREFIX_ABS/$RELEASE/expected-otherphone-after-dbcheck.ldif.tmp
 	TZ=UTC $ldbsearch -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb cn=administrator -s base -b cn=administrator,cn=users,DC=release-4-1-0rc3,DC=samba,DC=corp otherHomePhone --sorted --show-binary | grep -v \# | sort > $tmpldif
-	diff $tmpldif $release_dir/expected-otherphone-after-dbcheck.ldif
+	diff -u $tmpldif $release_dir/expected-otherphone-after-dbcheck.ldif
 	if [ "$?" != "0" ]; then
 	    return 1
 	fi
@@ -316,7 +328,7 @@ dbcheck_acl_reset_clean() {
 # This should 'fail', because it returns the number of modified records
 dbcheck2() {
     if [ x$RELEASE = x"release-4-1-0rc3" ]; then
-       $PYTHON $BINDIR/samba-tool dbcheck --cross-ncs --fix --yes -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb $@
+       $PYTHON $BINDIR/samba-tool dbcheck --selftest-check-expired-tombstones --cross-ncs --fix --yes -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb $@
     else
 	exit 1
     fi
@@ -324,7 +336,7 @@ dbcheck2() {
 # But having fixed it all up, this should pass
 dbcheck_clean2() {
     if [ x$RELEASE = x"release-4-1-0rc3" ]; then
-       $PYTHON $BINDIR/samba-tool dbcheck --cross-ncs -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb $@
+       $PYTHON $BINDIR/samba-tool dbcheck --selftest-check-expired-tombstones --cross-ncs -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb $@
     fi
 }
 
@@ -341,7 +353,7 @@ rm_deleted_objects() {
 # This should 'fail', because it returns the number of modified records
 dbcheck3() {
     if [ x$RELEASE = x"release-4-1-0rc3" ]; then
-       $PYTHON $BINDIR/samba-tool dbcheck --cross-ncs --fix --yes -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb $@
+       $PYTHON $BINDIR/samba-tool dbcheck --selftest-check-expired-tombstones --cross-ncs --fix --yes -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb $@
     else
 	exit 1
     fi
@@ -349,7 +361,7 @@ dbcheck3() {
 # But having fixed it all up, this should pass
 dbcheck_clean3() {
     if [ x$RELEASE = x"release-4-1-0rc3" ]; then
-       $PYTHON $BINDIR/samba-tool dbcheck --cross-ncs -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb $@
+       $PYTHON $BINDIR/samba-tool dbcheck --selftest-check-expired-tombstones --cross-ncs -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb $@
     fi
 }
 
@@ -357,7 +369,7 @@ check_expected_after_deleted_objects() {
     if [ x$RELEASE = x"release-4-1-0rc3" ]; then
 	tmpldif=$PREFIX_ABS/$RELEASE/expected-deleted_objects-after-dbcheck.ldif.tmp
 	TZ=UTC $ldbsearch -H tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb cn=deleted\ objects -s base -b cn=deleted\ objects,DC=release-4-1-0rc3,DC=samba,DC=corp objectClass description isDeleted isCriticalSystemObject objectGUID showInAdvancedViewOnly systemFlags --sorted --show-binary --show-deleted | grep -v \# | sort > $tmpldif
-	diff $tmpldif $release_dir/expected-deleted_objects-after-dbcheck.ldif
+	diff -u $tmpldif $release_dir/expected-deleted_objects-after-dbcheck.ldif
 	if [ "$?" != "0" ]; then
 	    return 1
 	fi
@@ -376,7 +388,7 @@ referenceprovision() {
 
 ldapcmp() {
     if [ x$RELEASE = x"release-4-0-0" ]; then
-         $PYTHON $BINDIR/samba-tool ldapcmp tdb://$PREFIX_ABS/${RELEASE}_reference/private/sam.ldb tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb --two --skip-missing-dn --filter=dnsRecord,displayName
+         $PYTHON $BINDIR/samba-tool ldapcmp tdb://$PREFIX_ABS/${RELEASE}_reference/private/sam.ldb tdb://$PREFIX_ABS/${RELEASE}/private/sam.ldb --two --skip-missing-dn --filter=dnsRecord,displayName,msDS-SupportedEncryptionTypes
     fi
 }
 
@@ -406,6 +418,7 @@ if [ -d $release_dir ]; then
     testit "add_userparameters3" add_userparameters3
     testit_expect_failure "dbcheck2" dbcheck2
     testit "dbcheck_clean2" dbcheck_clean2
+    testit "check_expected_userparameters" check_expected_userparameters
     testit "rm_deleted_objects" rm_deleted_objects
     # We must re-index again because rm_deleted_objects went behind
     # the back of the main sam.ldb.

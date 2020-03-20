@@ -12,20 +12,66 @@ set -e
 # hook for testing.
 nfs_exports_file="${CTDB_NFS_EXPORTS_FILE:-/var/lib/nfs/etab}"
 
-# Red Hat
-nfs_service="nfs"
-nfslock_service="nfslock"
-nfs_config="/etc/sysconfig/nfs"
+# As above, edit the default value below.  CTDB_NFS_DISTRO_STYLE is a
+# test variable only.
+nfs_distro_style="${CTDB_NFS_DISTRO_STYLE:-systemd-redhat}"
 
-# SUSE
-#nfs_service="nfsserver"
-#nfslock_service=""
-#nfs_config="/etc/sysconfig/nfs"
+case "$nfs_distro_style" in
+systemd-*)
+	# Defaults
+	nfs_service="nfs-server"
+	nfs_lock_service="rpc-statd"
+	nfs_mountd_service="nfs-mountd"
+	nfs_status_service="rpc-statd"
+	nfs_rquotad_service="rpc-rquotad"
+	nfs_config="/etc/sysconfig/nfs"
+	nfs_rquotad_config="" # Not use with systemd, restart via service
 
-# Debian
-#nfs_service="nfs-kernel-server"
-#nfslock_service=""
-#nfs_config="/etc/default/nfs-kernel-server"
+	case "$nfs_distro_style" in
+	*-redhat|*-suse)
+		: # Defaults only
+		;;
+	*-debian)
+		nfs_rquotad_service="quotarpc"
+		;;
+	*)
+		echo "Internal error"
+		exit 1
+	esac
+	;;
+
+sysvinit-*)
+	# Defaults
+	nfs_service="nfs"
+	nfs_lock_service=""
+	nfs_mountd_service=""
+	nfs_status_service=""
+	nfs_rquotad_service=""
+	nfs_config="/etc/sysconfig/nfs"
+	nfs_rquotad_config="$nfs_config"
+
+	case "$nfs_distro_style" in
+	*-redhat)
+		nfs_lock_service="nfslock"
+		;;
+	*-suse)
+		nfs_service="nfsserver"
+		;;
+	*-debian)
+		nfs_service="nfs-kernel-server"
+		nfs_config="/etc/default/nfs-kernel-server"
+		nfs_rquotad_config="/etc/default/quota"
+		;;
+	*)
+		echo "Internal error"
+		exit 1
+	esac
+	;;
+
+*)
+	echo "Internal error"
+	exit 1
+esac
 
 # Override for unit testing
 if [ -z "$PROCFS_PATH" ] ; then
@@ -46,50 +92,70 @@ EOF
     exit 1
 }
 
+##################################################
+
+nfs_load_config ()
+{
+	_config="${1:-${nfs_config}}"
+
+	if [ -r "$_config" ] ; then
+		. "$_config"
+	fi
+}
 
 ##################################################
 # Basic service stop and start
 
 basic_stop ()
 {
-    case "$1" in
+	case "$1" in
 	nfs)
-	    service "$nfs_service" stop
-	    if [ -n "$nfslock_service" ] ; then
-		service "$nfslock_service" stop
-	    fi
-	    ;;
-	nfslock)
-	    if [ -n "$nfslock_service" ] ; then
-		service "$nfslock_service" stop
-	    else
+		if [ -n "$nfs_rquotad_service" ] ; then
+			service "$nfs_rquotad_service" stop
+		fi
+
 		service "$nfs_service" stop
-	    fi
-	    ;;
+
+		if [ -n "$nfs_lock_service" ] ; then
+			service "$nfs_lock_service" stop
+		fi
+		;;
+	nfslock)
+		if [ -n "$nfs_lock_service" ] ; then
+			service "$nfs_lock_service" stop
+		else
+			service "$nfs_service" stop
+		fi
+		;;
 	*)
-	    usage
-    esac
+		usage
+	esac
 }
 
 basic_start ()
 {
-    case "$1" in
+	case "$1" in
 	nfs)
-	    if [ -n "$nfslock_service" ] ; then
-		service "$nfslock_service" start
-	    fi
-	    service "$nfs_service" start
-	    ;;
-	nfslock)
-	    if [ -n "$nfslock_service" ] ; then
-		service "$nfslock_service" start
-	    else
+		if [ -n "$nfs_lock_service" ] ; then
+			service "$nfs_lock_service" start
+		fi
+
 		service "$nfs_service" start
-	    fi
-	    ;;
+
+		if [ -n "$nfs_rquotad_service" ] ; then
+			service "$nfs_rquotad_service" start
+		fi
+		;;
+	nfslock)
+		if [ -n "$nfs_lock_service" ] ; then
+			service "$nfs_lock_service" start
+		else
+			service "$nfs_service" start
+		fi
+		;;
 	*)
-	    usage
-    esac
+		usage
+	esac
 }
 
 ##################################################
@@ -97,32 +163,109 @@ basic_start ()
 
 service_stop ()
 {
-    case "$1" in
+	case "$1" in
 	nfs)
-	    echo 0 >"${PROCFS_PATH}/fs/nfsd/threads"
-	    basic_stop "nfs" >/dev/null 2>&1 || true
-	    pkill -9 nfsd
-	    ;;
+		echo 0 >"${PROCFS_PATH}/fs/nfsd/threads"
+		basic_stop "nfs" >/dev/null 2>&1 || true
+		pkill -9 nfsd
+		;;
 	nlockmgr)
-	    basic_stop "nfslock" >/dev/null 2>&1 || true
-	    ;;
+		basic_stop "nfslock" >/dev/null 2>&1 || true
+		;;
+	mountd)
+		if [ -n "$nfs_mountd_service" ] ; then
+			service "$nfs_mountd_service" stop
+			return
+		fi
+
+		# Default to stopping by hand
+		killall -q -9 rpc.mountd
+		;;
+	rquotad)
+		if [ -n "$nfs_rquotad_service" ] ; then
+			service "$nfs_rquotad_service" stop
+			return
+		fi
+
+		# Default to stopping by hand
+		killall -q -9 rpc.rquotad
+		;;
+	status)
+		if [ -n "$nfs_status_service" ] ; then
+			service "$nfs_status_service" stop
+			return
+		fi
+
+		# Default to stopping by hand
+		killall -q -9 rpc.statd
+		;;
 	*)
-	    usage
-    esac
+		usage
+	esac
 }
 
 service_start ()
 {
-    case "$1" in
+	case "$1" in
 	nfs)
-	    basic_start "nfs"
-	    ;;
+		basic_start "nfs"
+		;;
 	nlockmgr)
-	    basic_start "nfslock"
-	    ;;
+		basic_start "nfslock"
+		;;
+	mountd)
+		if [ -n "$nfs_mountd_service" ] ; then
+			service "$nfs_mountd_service" start
+			return
+		fi
+
+		# Default to starting by hand
+		nfs_load_config
+		if [ -z "$RPCMOUNTDOPTS" ] ; then
+			RPCMOUNTDOPTS="${MOUNTD_PORT:+-p }$MOUNTD_PORT"
+		fi
+		# shellcheck disable=SC2086
+		rpc.mountd $RPCMOUNTDOPTS
+		;;
+	rquotad)
+		if [ -n "$nfs_rquotad_service" ] ; then
+			service "$nfs_rquotad_service" start
+			return
+		fi
+
+		# Default to starting by hand
+		nfs_load_config "$nfs_rquotad_config"
+		if [ -z "$RPCRQUOTADOPTS" ] ; then
+			RPCRQUOTADOPTS="${RQUOTAD_PORT:+-p }$RQUOTAD_PORT"
+		fi
+		# shellcheck disable=SC2086
+		rpc.rquotad $RPCRQUOTADOPTS
+		;;
+	status)
+		if [ -n "$nfs_status_service" ] ; then
+			service "$nfs_status_service" start
+			return
+		fi
+
+		# Default to starting by hand
+		nfs_load_config
+		# Red Hat uses STATDARG, Debian uses STATDOPTS
+		opts="${STATDARG:-${STATDOPTS:-''}}"
+		if [ -z "$opts" ] ; then
+			# shellcheck disable=SC2086
+			set -- \
+			    ${STATD_HA_CALLOUT:+-H} $STATD_HA_CALLOUT \
+			    ${STATD_HOSTNAME:+-n} $STATD_HOSTNAME \
+			    ${STATD_PORT:+-p} $STATD_PORT \
+			    ${STATD_OUTGOING_PORT:+-o} $STATD_OUTGOING_PORT
+			opts="$*"
+		fi
+		# shellcheck disable=SC2086
+		rpc.statd $opts
+		;;
 	*)
-	    usage
-    esac
+		usage
+	esac
 }
 
 ##################################################
@@ -138,8 +281,8 @@ nfs_startup ()
     basic_stop "nfs" || true
     basic_start "nfs"
     _f="${PROCFS_PATH}/sys/net/ipv4/tcp_tw_recycle"
-    if [ "$_f" ] ; then
-	echo 1 >"$_f"
+    if [ -f "$_f" ] ; then
+	    echo 1 >"$_f"
     fi
 }
 
@@ -149,9 +292,7 @@ nfs_startup ()
 nfs_check_thread_count ()
 {
     # Load NFS configuration to get desired number of threads.
-    if [ -r "$nfs_config" ] ; then
-	. "$nfs_config"
-    fi
+    nfs_load_config
 
     # If $RPCNFSDCOUNT/$USE_KERNEL_NFSD_NUMBER isn't set then we could
     # guess the default from the initscript.  However, let's just

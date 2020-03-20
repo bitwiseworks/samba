@@ -17,12 +17,13 @@
 #
 
 import samba.getopt as options
-import common
+from . import common
 from samba.net import Net
 
 from samba.netcmd import (
     Command,
-    )
+)
+
 
 class cmd_time(Command):
     """Retrieve the time on a server.
@@ -45,7 +46,7 @@ Example2 return the date and time of the local server.
         "sambaopts": options.SambaOptions,
         "credopts": options.CredentialsOptions,
         "versionopts": options.VersionOptions,
-        }
+    }
 
     takes_args = ["server_name?"]
 
@@ -56,4 +57,4 @@ Example2 return the date and time of the local server.
         net = Net(creds, lp, server=credopts.ipaddress)
         if server_name is None:
             server_name = common.netcmd_dnsname(lp)
-        self.outf.write(net.time(server_name)+"\n")
+        self.outf.write(net.time(server_name) + "\n")

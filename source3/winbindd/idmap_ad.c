@@ -689,6 +689,7 @@ static NTSTATUS idmap_ad_unixids_to_sids(struct idmap_domain *dom,
 		bool ok;
 		uint32_t atype, xid;
 		enum id_type type;
+		struct dom_sid_buf sidbuf;
 
 		if (tldap_msg_type(msg) != TLDAP_RES_SEARCH_ENTRY) {
 			continue;
@@ -746,14 +747,16 @@ static NTSTATUS idmap_ad_unixids_to_sids(struct idmap_domain *dom,
 		}
 		if (map == NULL) {
 			DBG_DEBUG("Got unexpected sid %s from object %s\n",
-				  sid_string_tos(&sid), dn);
+				  dom_sid_str_buf(&sid, &sidbuf),
+				  dn);
 			continue;
 		}
 
 		sid_copy(map->sid, &sid);
 		map->status = ID_MAPPED;
 
-		DBG_DEBUG("Mapped %s -> %ju (%d)\n", sid_string_dbg(map->sid),
+		DBG_DEBUG("Mapped %s -> %ju (%d)\n",
+			  dom_sid_str_buf(map->sid, &sidbuf),
 			  (uintmax_t)map->xid.id, map->xid.type);
 	}
 
@@ -844,6 +847,7 @@ static NTSTATUS idmap_ad_sids_to_unixids(struct idmap_domain *dom,
 		bool ok;
 		uint64_t account_type, xid;
 		enum id_type type;
+		struct dom_sid_buf buf;
 
 		if (tldap_msg_type(msg) != TLDAP_RES_SEARCH_ENTRY) {
 			continue;
@@ -870,7 +874,8 @@ static NTSTATUS idmap_ad_sids_to_unixids(struct idmap_domain *dom,
 		}
 		if (map == NULL) {
 			DBG_DEBUG("Got unexpected sid %s from object %s\n",
-				  sid_string_tos(&sid), dn);
+				  dom_sid_str_buf(&sid, &buf),
+				  dn);
 			continue;
 		}
 
@@ -910,7 +915,8 @@ static NTSTATUS idmap_ad_sids_to_unixids(struct idmap_domain *dom,
 		map->xid.id = xid;
 		map->status = ID_MAPPED;
 
-		DEBUG(10, ("Mapped %s -> %lu (%d)\n", sid_string_dbg(map->sid),
+		DEBUG(10, ("Mapped %s -> %lu (%d)\n",
+			   dom_sid_str_buf(map->sid, &buf),
 			   (unsigned long)map->xid.id, map->xid.type));
 	}
 

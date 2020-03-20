@@ -1,528 +1,332 @@
-                   =============================
-                   Release Notes for Samba 4.9.0
-                        September 13, 2018
-		   =============================
+                   ==============================
+                   Release Notes for Samba 4.12.0
+                           March 03, 2019
+		   ==============================
 
 
-This is the first stable release of the Samba 4.9 release series.
+This is the first stable release of the Samba 4.12 release series.
 Please read the release notes carefully before upgrading.
 
 
 NEW FEATURES/CHANGES
 ====================
 
-'net ads setspn'
-----------------
+Python 3.5 Required
+-------------------
 
-There is a new 'net ads setspn' sub command for managing Windows SPN(s)
-on the AD. This command aims to give the basic functionality that is
-provided on windows by 'setspn.exe' e.g. ability to add, delete and list
-Windows SPN(s) stored in a Windows AD Computer object.
+Samba's minimum runtime requirement for python was raised to Python
+3.4 with samba 4.11.  Samba 4.12 raises this minimum version to Python
+3.5 both to access new features and because this is the oldest version
+we test with in our CI infrastructure.
 
-The format of the command is:
+(Build time support for the file server with Python 2.6 has not
+changed)
 
-net ads setspn list [machine]
-net ads setspn [add | delete ] SPN [machine]
+Removing in-tree cryptography: GnuTLS 3.4.7 required
+----------------------------------------------------
 
-'machine' is the name of the computer account on the AD that is to be managed.
-If 'machine' is not specified the name of the 'client' running the command
-is used instead.
+Samba is making efforts to remove in-tree cryptographic functionality,
+and to instead rely on externally maintained libraries.  To this end,
+Samba has chosen GnuTLS as our standard cryptographic provider.
 
-The format of a Windows SPN is
-  'serviceclass/host:port/servicename' (servicename and port are optional)
+Samba now requires GnuTLS 3.4.7 to be installed (including development
+headers at build time) for all configurations, not just the Samba AD
+DC.
 
-serviceclass/host is generally sufficient to specify a host based service.
+Thanks to this work Samba no longer ships an in-tree DES
+implementation and on GnuTLS 3.6.5 or later Samba will include no
+in-tree cryptography other than the MD4 hash and that
+implemented in our copy of Heimdal.
 
-'net ads keytab' changes
-------------------------
+Using GnuTLS for SMB3 encryption you will notice huge performance and copy
+speed improvements. Tests with the CIFS Kernel client from Linux Kernel 5.3
+show a 3x speed improvement for writing and a 2.5x speed improvement for reads!
 
-net ads keytab add no longer attempts to convert the passed serviceclass
-(e.g. nfs, html etc.) into a Windows SPN which is added to the Windows AD
-computer object. By default just the keytab file is modified.
+NOTE WELL: The use of GnuTLS means that Samba will honour the
+system-wide 'FIPS mode' (a reference to the US FIPS-140 cryptographic
+standard) and so will not operate in many still common situations if
+this system-wide parameter is in effect, as many of our protocols rely
+on outdated cryptography.
 
-A new keytab subcommand 'add_update_ads' has been added to preserve the
-legacy behaviour. However the new 'net ads setspn add' subcommand should
-really be used instead.
+A future Samba version will mitigate this to some extent where good
+cryptography effectively wraps bad cryptography, but for now that above
+applies.
 
-net ads keytab create no longer tries to generate SPN(s) from existing
-entries in a keytab file. If it is required to add Windows SPN(s) then
-'net ads setspn add' should be used instead.
-
-Local authorization plugin for MIT Kerberos
+zlib library is now required to build Samba
 -------------------------------------------
 
-This plugin controls the relationship between Kerberos principals and AD
-accounts through winbind. The module receives the Kerberos principal and the
-local account name as inputs and can then check if they match. This can resolve
-issues with canonicalized names returned by Kerberos within AD. If the user
-tries to log in as 'alice', but the samAccountName is set to ALICE (uppercase),
-Kerberos would return ALICE as the username. Kerberos would not be able to map
-'alice' to 'ALICE' in this case and auth would fail.  With this plugin, account
-names can be correctly mapped. This only applies to GSSAPI authentication,
-not for getting the initial ticket granting ticket.
+Samba no longer includes a local copy of zlib in our source tarball.
+By removing this we do not need to ship (even where we did not
+build) the old, broken zip encryption code found there.
 
-VFS audit modules
------------------
+New Spotlight backend for Elasticsearch
+---------------------------------------
 
-The vfs_full_audit module has changed its default set of monitored successful
-and failed operations from "all" to "none". That helps to prevent potential
-denial of service caused by simple addition of the module to the VFS objects.
+Support for the macOS specific Spotlight search protocol has been enhanced
+significantly. Starting with 4.12 Samba supports using Elasticsearch as search
+backend. Various new parameters have been added to configure this:
 
-Also, modules vfs_audit, vfs_ext_audit and vfs_full_audit now accept any valid
-syslog(3) facility, in accordance with the manual page.
+  spotlight backend = noindex | elasticsearch | tracker
+  elasticsearch:address = ADDRESS
+  elasticsearch:port = PORT
+  elasticsearch:use tls = BOOLEAN
+  elasticsearch:index = INDEXNAME
+  elasticsearch:mappings = PATH
+  elasticsearch:max results = NUMBER
 
-Database audit support
-----------------------
+Samba also ships a Spotlight client command "mdfind" which can be used to search
+any SMB server that runs the Spotlight RPC service. See the manpage of mdfind
+for details.
 
-Changes to the Samba AD's sam.ldb database are now logged to Samba's debug log
-under the "dsdb_audit" debug class and "dsdb_json_audit" for JSON formatted log
-entries.
+Note that when upgrading existing installations that are using the previous
+default Spotlight backend Gnome Tracker must explicitly set "spotlight backend =
+tracker" as the new default is "noindex".
 
-Transaction commits and roll backs are now logged to Samba's debug logs under
-the "dsdb_transaction_audit" debug class and "dsdb_transaction_json_audit" for
-JSON formatted log entries.
+'net ads kerberos pac save' and 'net eventlog export'
+-----------------------------------------------------
 
-Password change audit support
------------------------------
+The 'net ads kerberos pac save' and 'net eventlog export' tools will
+no longer silently overwrite an existing file during data export.  If
+the filename given exits, an error will be shown.
 
-Password changes in the AD DC are now logged to Samba's debug logs under the
-"dsdb_password_audit" debug class and "dsdb_password_json_audit" for JSON
-formatted log entries.
+Fuzzing
+-------
 
-Group membership change audit support
--------------------------------------
+A large number of fuzz targets have been added to Samba, and Samba has
+been registered in Google's oss-fuzz cloud fuzzing service.  In
+particular, we now have good fuzzing coverage of our generated NDR
+parsing code.
 
-Group membership changes on the AD DC are now logged to
-Samba's debug log under the "dsdb_group_audit" debug class and
-"dsdb_group_json_audit" for JSON formatted log entries.
+A large number of issues have been found and fixed thanks to this
+effort.
 
-Log Authentication duration
----------------------------
+'samba-tool' improvements add contacts as member to groups
+----------------------------------------------------------
 
-For NTLM and Kerberos KDC authentication, the authentication duration is now
-logged. Note that the duration is only included in the JSON formatted log
-entries.
+Previously 'samba-tool group addmemers' can just add users, groups and
+computers as members to groups. But also contacts can be members of
+groups. Samba 4.12 adds the functionality to add contacts to
+groups. Since contacts have no sAMAccountName, it's possible that
+there are more than one contact with the same name in different
+organizational units. Therefore it's necessary to have an option to
+handle group members by their DN.
 
-JSON library Jansson required for the AD DC
--------------------------------------------
+To get the DN of an object there is now the "--full-dn" option available
+for all necessary commands.
 
-By default, the Jansson JSON library is required for Samba to build.
-It is strictly required for the Samba AD DC, and is optional for
-builds "--without-ad-dc" by specifying "--without-json-audit" at configure
-time.
+The MS Windows UI allows to search for specific types of group members
+when searching for new members for a group. This feature is included
+here with the new samba-tool group addmembers "--object-type=OBJECTYPE"
+option. The different types are selected accordingly to the Windows
+UI. The default samba-toole behaviour shouldn't be changed.
 
-New experimental LMDB LDB backend
----------------------------------
+Allow filtering by OU or subtree in samba-tool
+----------------------------------------------
 
-A new experimental LDB backend using LMDB is now available. This allows
-databases larger than 4Gb (Currently the limit is set to 6Gb, but this will be
-increased in a future release). To enable lmdb, provision or join a domain using
-the "--backend-store=mdb" option.
+A new "--base-dn" and "--member-base-dn" option is added to relevant
+samba-tool user, group and ou management commands to allow operation
+on just one part of the AD tree, such as a single OU.
 
-This requires that a version of lmdb greater than 0.9.16 is installed and that
-samba has not been built with the "--without-ldb-lmdb" option.
+VFS
+===
 
-Please note this is an experimental feature and is not recommended for
-production deployments.
+SMB_VFS_NTIMES
+--------------
 
-Password Settings Objects
+Samba now uses a sentinel value based on utimensat(2) UTIME_OMIT to denote
+to-be-ignored timestamp variables passed to the SMB_VFS_NTIMES() VFS function.
+
+VFS modules can check whether any of the time values inside a struct
+smb_file_time is to be ignored by calling is_omit_timespec() on the value.
+
+'io_uring' vfs module
+---------------------
+
+The module makes use of the new io_uring infrastructure
+(intruduced in Linux 5.1), see https://lwn.net/Articles/776703/
+
+Currently this implements SMB_VFS_{PREAD,PWRITE,FSYNC}_SEND/RECV
+and avoids the overhead of the userspace threadpool in the default
+vfs backend. See also vfs_io_uring(8).
+
+In order to build the module you need the liburing userspace library
+and its developement headers installed, see
+https://git.kernel.dk/cgit/liburing/
+
+At runtime you'll need a Linux kernel with version 5.1 or higher.
+Note that 5.4.14 and 5.4.15 have a regression that breaks the Samba
+module! The regression was fixed in Linux 5.4.16 again.
+
+MS-DFS changes in the VFS
 -------------------------
 
-Support has been added for Password Settings Objects (PSOs). This AD feature is
-also known as Fine-Grained Password Policies (FGPP).
+This release changes set getting and setting of MS-DFS redirects
+on the filesystem to go through two new VFS functions:
 
-PSOs allow AD administrators to override the domain password policy settings
-for specific users, or groups of users. For example, PSOs can force certain
-users to have longer password lengths, or relax the complexity constraints for
-other users, and so on. PSOs can be applied to groups or to individual users.
-When multiple PSOs apply to the same user, essentially the PSO with the best
-precedence takes effect.
+SMB_VFS_CREATE_DFS_PATHAT()
+SMB_VFS_READ_DFS_PATHAT()
 
-PSOs can be configured and applied to users/groups using the 'samba-tool domain
-passwordsettings pso' set of commands.
+instead of smbd explicitly storing MS-DFS redirects inside
+symbolic links on the filesystem. The underlying default
+implementations of this has not changed, the redirects are
+still stored inside symbolic links on the filesystem, but
+moving the creation and reading of these links into the VFS
+as first-class functions now allows alternate methods of
+storing them (maybe in extended attributes) for OEMs who
+don't want to mis-use filesystem symbolic links in this
+way.
 
-Domain backup and restore
--------------------------
-
-A new 'samba-tool' subcommand has been added that allows administrators to
-create a backup-file of their domain DB. In the event of a catastrophic failure
-of the domain, this backup-file can be used to restore Samba services.
-
-The new 'samba-tool domain backup online' command takes a snapshot of the
-domain DB from a given DC. In the event of a catastrophic DB failure, all DCs
-in the domain should be taken offline, and the backup-file can then be used to
-recreate a fresh new DC, using the 'samba-tool domain backup restore' command.
-Once the backed-up domain DB has been restored on the new DC, other DCs can
-then subsequently be joined to the new DC, in order to repopulate the Samba
-network.
-
-Domain rename tool
-------------------
-
-Basic support has been added for renaming a Samba domain. The rename feature is
-designed for the following cases:
-1). Running a temporary alternate domain, in the event of a catastrophic
-failure of the regular domain. Using a completely different domain name and
-realm means that the original domain and the renamed domain can both run at the
-same time, without interfering with each other. This is an advantage over
-creating a regular 'online' backup - it means the renamed/alternate domain can
-provide core Samba network services, while trouble-shooting the fault on the
-original domain can be done in parallel.
-2). Creating a realistic lab domain or pre-production domain for testing.
-
-Note that the renamed tool is currently not intended to support a long-term
-rename of the production domain. Currently renaming the GPOs is not supported
-and would need to be done manually.
-
-The domain rename is done in two steps: first, the 'samba-tool domain backup
-rename' command will clone the domain DB, renaming it in the process, and
-producing a backup-file. Then, the 'samba-tool domain backup restore' command
-takes the backup-file and restores the renamed DB to disk on a fresh DC.
-
-New samba-tool options for diagnosing DRS replication issues
-------------------------------------------------------------
-
-The 'samba-tool drs showrepl' command has two new options controlling
-the output. With --summary, the command says very little when DRS
-replication is working well. With --json, JSON is produced. These
-options are intended for human and machine audiences, respectively.
-
-The 'samba-tool visualize uptodateness' visualizes replication lag as
-a heat-map matrix based on the DRS uptodateness vectors. This will
-show you if (but not why) changes are failing to replicate to some DCs.
-
-Automatic site coverage and GetDCName improvements
---------------------------------------------------
-
-Samba's AD DC now automatically claims otherwise empty sites based on
-which DC is the nearest in the replication topology.
-
-This, combined with efforts to correctly identify the client side in
-the GetDCName Netlogon call will improve service to sites without a
-local DC.
-
-Improved 'samba-tool computer' command
---------------------------------------
-
-The 'samba-tool computer' command allow manipulation of computer
-accounts including creating a new computer and resetting the password.
-This allows an 'offline join' of a member server or workstation to the
-Samba AD domain.
-
-New 'samba-tool ou' command
----------------------------
-
-The new 'samba-tool ou' command allows to manage organizational units.
-
-Available subcommands are:
-  create       - Create an organizational unit.
-  delete       - Delete an organizational unit.
-  list         - List all organizational units
-  listobjects  - List all objects in an organizational unit.
-  move         - Move an organizational unit.
-  rename       - Rename an organizational unit.
-
-In addition to the ou commands, there are new subcommands for the user
-and group management, which can make use of the organizational units:
-  group move   - Move a group to an organizational unit/container.
-  user move    - Move a user to an organizational unit/container.
-  user show    - Display a user AD object.
-
-Samba performance tool now operates against Microsoft Windows AD
-----------------------------------------------------------------
-
-The Samba AD performance testing tool 'traffic_reply' can now operate
-against a Windows based AD domain.  Previously it only operated
-correctly against Samba.
-
-DNS entries are now cleaned up during DC demote
------------------------------------------------
-
-DNS records are now cleaned up as part of the 'samba-tool domain
-demote' including both the default and '--remove-other-dead-server'
-modes.
-
-Additionally, DNS records can be automatically cleaned up for a given
-name with the 'samba-tool dns cleanup' command, which aids in cleaning
-up partially removed DCs.
-
-samba-tool ntacl sysvolreset is now much faster
------------------------------------------------
-
-The 'samba-tool ntacl sysvolreset' command, used on the Samba AD DC,
-is now much faster than in previous versions, after an internal
-rework.
-
-Samba now tested with CI GitLab
--------------------------------
-
-Samba developers now have pre-commit testing available in GitLab,
-giving reviewers confidence that the submitted patches pass a full CI
-before being submitted to the Samba Team's own autobuild system.
-
-Dynamic DNS record scavenging support
--------------------------------------
-
-It is now possible to enable scavenging of DNS Zones to remove DNS
-records that were dynamically created and have not been touched in
-some time.
-
-This support should however only be enabled on new zones or new
-installations.  Sadly old Samba versions suffer from BUG 12451 and
-mark dynamic DNS records as static and static records as dynamic.
-While a dbcheck rule may be able to find these in the future,
-currently a reliable test has not been devised.
-
-Finally, there is not currently a command-line tool to enable this
-feature, currently it should be enabled from the DNS Manager tool from
-Windows. Also the feature needs to have been enabled by setting the smb.conf
-parameter "dns zone scavenging = yes".
-
-Improved support for trusted domains (as AD DC)
------------------------------------------------
-
-The support for trusted domains/forests has been further improved.
-
-External domain trusts, as well a transitive forest trusts,
-are supported in both directions (inbound and outbound)
-for Kerberos and NTLM authentication.
-
-The following features are new in 4.9 (compared to 4.8):
-
-- It's now possible to add users/groups of a trusted domain
-  into domain groups. The group memberships are expanded
-  on trust boundaries.
-- foreignSecurityPrincipal objects (FPO) are now automatically
-  created when members (as SID) of a trusted domain/forest
-  are added to a group.
-- The 'samba-tool group *members' commands allow
-  members to be specified as foreign SIDs.
-
-However there are currently still a few limitations:
-
-- Both sides of the trust need to fully trust each other!
-- No SID filtering rules are applied at all!
-- This means DCs of domain A can grant domain admin rights
-  in domain B.
-- Selective (CROSS_ORGANIZATION) authentication is
-  not supported. It's possible to create such a trust,
-  but the KDC and winbindd ignore them.
-- Samba can still only operate in a forest with just
-  one single domain.
 
 CTDB changes
-------------
+============
 
-There are many changes to CTDB in this release.
+* The ctdb_mutex_fcntl_helper periodically re-checks the lock file
 
-* Configuration has been completely overhauled
+  The re-check period is specified using a 2nd argument to this
+  helper.  The default re-check period is 5s.
 
-  - Daemon and tool options are now specified in a new ctdb.conf
-    Samba-style configuration file.  See ctdb.conf(5) for details.
-
-  - Event script configuration is no longer specified in the top-level
-    configuration file.  It can now be specified per event script.
-    For example, configuration options for the 50.samba event script
-    can be placed alongside the event script in a file called
-    50.samba.options.  Script options can also be specified in a new
-    script.options file.  See ctdb-script.options(5) for details.
-
-  - Options that affect CTDB startup should be configured in the
-    distribution-specific configuration file.  See ctdb.sysconfig(5)
-    for details.
-
-  - Tunable settings are now loaded from ctdb.tunables.  Using
-    CTDB_SET_TunableVariable=<value> in the main configuration file is
-    no longer supported.  See ctdb-tunables(7) for details.
-
-  A example script to migrate an old-style configuration to the new
-  style is available in ctdb/doc/examples/config_migrate.sh.
-
-* The following configuration variables and corresponding ctdbd
-  command-line options have been removed and not replaced with
-  counterparts in the new configuration scheme:
-
-    CTDB_PIDFILE                     --pidfile
-    CTDB_SOCKET			     --socket
-    CTDB_NODES			     --nlist
-    CTDB_PUBLIC_ADDRESSES	     --public-addresses
-    CTDB_EVENT_SCRIPT_DIR	     --event-script-dir
-    CTDB_NOTIFY_SCRIPT		     --notification-script
-    CTDB_PUBLIC_INTERFACE	     --public-interface
-    CTDB_MAX_PERSISTENT_CHECK_ERRORS --max-persistent-check-errors
-
-  - The compile-time defaults should be used for the first 6 of these.
-  - Use a symbolic link from the configuration directory to specify a
-    different location for nodes or public_addresses (e.g. in the
-    cluster filesystem).
-  - Executable notification scripts in the notify.d/ subdirectory of
-    the configuration directory are now run by unconditionally.
-  - Interfaces for public IP addresses must always be specified in the
-    public_addresses file using the currently supported format.
-
-  Some related items that have been removed are:
-
-  - The ctdb command's --socket command-line option
-  - The ctdb command's CTDB_NODES environment variable
-
-  When writing tests there are still mechanisms available to change
-  the locations of certain directories and files.
-
-* The following ctdbd.conf and ctdbd options have been replaced by new
-  ctdb.conf options:
-
-    CTDB_LOGGING/--logging                     logging  -> location
-    CTDB_DEBUGLEVEL/-d                         logging  -> log level
-    CTDB_TRANSPORT/--transport                 cluster  -> transport
-    CTDB_NODE_ADDRESS/--listen                 cluster  -> node address
-    CTDB_RECOVERY_LOCK/--reclock               cluster  -> recovery lock
-    CTDB_DBDIR/--dbdir                         database -> volatile database directory
-    CTDB_DBDIR_PERSISTENT/--dbdir-persistent   database -> peristent database directory
-    CTDB_DBDIR_STATE/--dbdir-state             database -> state database directory
-    CTDB_DEBUG_LOCKS                           database -> lock debug script
-    CTDB_DEBUG_HUNG_SCRIPT                     event    -> debug script
-    CTDB_NOSETSCHED/--nosetsched               legacy   -> realtime scheduling
-    CTDB_CAPABILITY_RECMASTER/--no-recmaster   legacy   -> recmaster capability
-    CTDB_CAPABILITY_LMASTER/--no-lmaster       legacy   -> lmaster capability
-    CTDB_START_AS_STOPPED/--start-as-stopped   legacy   -> start as stopped
-    CTDB_START_AS_DISABLED/--start-as-disabled legacy   -> start as disabled
-    CTDB_SCRIPT_LOG_LEVEL/--script-log-level   legacy   -> script log level
-
-* Event scripts have moved to the scripts/legacy subdirectory of the
-  configuration directory
-
-  Event scripts must now end with a ".script" suffix.
-
-* The "ctdb event" command has changed in 2 ways:
-
-  - A component is now required for all commands
-
-    In this release the only valid component is "legacy".
-
-  - There is no longer a default event when running "ctdb event status"
-
-    Listing the status of the "monitor" event is now done via:
-
-      ctdb event status legacy monitor
-
-   See ctdb(1) for details.
-
-* The following service-related event script options have been
-  removed:
-
-    CTDB_MANAGES_SAMBA
-    CTDB_MANAGES_WINBIND
-
-    CTDB_MANAGES_CLAMD
-    CTDB_MANAGES_HTTPD
-    CTDB_MANAGES_ISCSI
-    CTDB_MANAGES_NFS
-    CTDB_MANAGES_VSFTPD
-
-    CTDB_MANAGED_SERVICES
-
-  Event scripts for services are now disabled by default.  To enable
-  an event script and, therefore, manage a service use a command like
-  the following:
-
-    ctdb event script enable legacy 50.samba
-
-* Notification scripts have moved to the scripts/notification
-  subdirectory of the configuration directory
-
-  Notification scripts must now end with a ".script" suffix.
-
-* Support for setting CTDB_DBDIR=tmpfs has been removed
-
-  This feature has not been implemented in the new configuration
-  system.  If this is desired then a tmpfs filesystem should be
-  manually mounted on the directory pointed to by the "volatile
-  database directory" option.  See ctdb.conf(5) for more details.
-
-* The following tunable options are now ctdb.conf options:
-
-    DisabledIPFailover    failover -> disabled
-    TDBMutexEnabled       database -> tdb mutexes
-
-* Support for the NoIPHostOnAllDisabled tunable has been removed
-
-  If all nodes are unhealthy or disabled then CTDB will not host
-  public IP addresses.  That is, CTDB now behaves as if
-  NoIPHostOnAllDisabled were set to 1.
-
-* The onnode command's CTDB_NODES_FILE environment variable has been
-  removed
-
-  The -f option can still be used to specify an alternate node file.
-
-* The 10.external event script has been removed
-
-* The CTDB_SHUTDOWN_TIMEOUT configuration variable has been removed
-
-  As with other daemons, if ctdbd does not shut down when requested
-  then manual intervention is required.  There is no safe way of
-  automatically killing ctdbd after a failed shutdown.
-
-* CTDB_SUPPRESS_COREFILE and CTDB_MAX_OPEN_FILES configuration
-  variable have been removed
-
-  These should be setup in the systemd unit/system file or, for SYSV
-  init, in the distribution-specific configuration file for the ctdb
-  service.
-
-* CTDB_PARTIALLY_ONLINE_INTERFACES incompatibility no longer enforced
-
-  11.natgw and 91.lvs will no longer fail if
-  CTDB_PARTIALLY_ONLINE_INTERFACES=yes.  The incompatibility is,
-  however, well documented.  This option will be removed in future and
-  replaced by sensible behaviour where public IP addresses simply
-  switch interfaces or become unavailable when interfaces are down.
-
-* Configuration file /etc/ctdb/sysconfig/ctdb is no longer supported
-
-GPO Improvements
-----------------
-
-The 'samba_gpoupdate' command (used in applying Group Policies to the
-Samba machine itself) has been renamed to "samba_gpupdate" and had the
-syntax changed to better match the same tool on Windows.
+  If the file no longer exists or the inode number changes then the
+  helper exits.  This triggers an election.
 
 
 REMOVED FEATURES
 ================
 
-%
+The smb.conf parameter "write cache size" has been removed.
+
+Since the in-memory write caching code was written, our write path has
+changed significantly. In particular we have gained very flexible
+support for async I/O, with the new linux io_uring interface in
+development.  The old write cache concept which cached data in main
+memory followed by a blocking pwrite no longer gives any improvement
+on modern systems, and may make performance worse on memory-contrained
+systems, so this functionality should not be enabled in core smbd
+code.
+
+In addition, it complicated the write code, which is a performance
+critical code path.
+
+If required for specialist purposes, it can be recreated as a VFS
+module.
+
+Retiring DES encryption types in Kerberos.
+------------------------------------------
+With this release, support for DES encryption types has been removed from
+Samba, and setting DES_ONLY flag for an account will cause Kerberos
+authentication to fail for that account (see RFC-6649).
+
+Samba-DC: DES keys no longer saved in DB.
+-----------------------------------------
+When a new password is set for an account, Samba DC will store random keys
+in DB instead of DES keys derived from the password.  If the account is being
+migrated to Windbows or to an older version of Samba in order to use DES keys,
+the password must be reset to make it work.
+
+Heimdal-DC: removal of weak-crypto.
+-----------------------------------
+Following removal of DES encryption types from Samba, the embedded Heimdal
+build has been updated to not compile weak crypto code (HEIM_WEAK_CRYPTO).
+
+vfs_netatalk: The netatalk VFS module has been removed.
+-------------------------------------------------------
+
+The netatalk VFS module has been removed. It was unmaintained and is not needed
+any more.
+
+BIND9_FLATFILE deprecated
+-------------------------
+
+The BIND9_FLATFILE DNS backend is deprecated in this release and will
+be removed in the future.  This was only practically useful on a single
+domain controller or under expert care and supervision.
+
+This release removes the 'rndc command' smb.conf parameter, which
+supported this configuration by writing out a list of DCs permitted to
+make changes to the DNS Zone and nudging the 'named' server if a new
+DC was added to the domain.  Administrators using BIND9_FLATFILE will
+need to maintain this manually from now on.
+
 
 smb.conf changes
 ================
 
-As the most popular Samba install platforms (Linux and FreeBSD) both
-support extended attributes by default, the parameters "map readonly",
-"store dos attributes" and "ea support" have had their defaults changed
-to allow better Windows fileserver compatibility in a default install.
+  Parameter Name                     Description                Default
+  --------------                     -----------                -------
 
-  Parameter Name                     Description             Default
-  --------------                     -----------             -------
-  map readonly                       Default changed              no
-  store dos attributes               Default changed             yes
-  ea support                         Default changed             yes
-  full_audit:success                 Default changed            none
-  full_audit:failure                 Default changed            none
+  elasticsearch:address              New                        localhost
+  elasticsearch:port                 New                        9200
+  elasticsearch:use tls              New                        No
+  elasticsearch:index                New                        _all
+  elasticsearch:mappings             New                        DATADIR/elasticsearch_mappings.json
+  elasticsearch:max results          New                        100
+  nfs4:acedup                        Changed default            merge
+  rndc command                       Removed
+  write cache size                   Removed
+  spotlight backend		     New			noindex
 
-VFS interface changes
-=====================
 
-The VFS ABI interface version has changed to 39. Function changes
-are:
+CHANGES SINCE 4.12.0rc4
+=======================
 
-SMB_VFS_FSYNC: Removed: Only async versions are used.
-SMB_VFS_READ: Removed: Only PREAD or async versions are used.
-SMB_VFS_WRITE: Removed: Only PWRITE or async versions are used.
-SMB_VFS_CHMOD_ACL: Removed: Only CHMOD is used.
-SMB_VFS_FCHMOD_ACL: Removed: Only FCHMOD is used.
+o  Andrew Bartlett <abartlet@samba.org>
+   * BUG 14258: dsdb: Correctly handle memory in objectclass_attrs.
 
-Any external VFS modules will need to be updated to match these
-changes in order to work with 4.9.x.
+
+CHANGES SINCE 4.12.0rc3
+=======================
+
+o  Jeremy Allison <jra@samba.org>
+   * BUG 14269: s3: DFS: Don't allow link deletion on a read-only share.
+
+o  Douglas Bagnall <douglas.bagnall@catalyst.net.nz>
+   * BUG 14284: pidl/wscript: configure should insist on Parse::Yapp::Driver.
+
+o  Andrew Bartlett <abartlet@samba.org>
+   * BUG 14270: ldb: Fix search with scope ONE and small result sets. 
+   * BUG 14284: build: Do not check if system perl modules should be bundled.
+
+o  Volker Lendecke <vl@samba.org>
+   * BUG 14285: smbd fails to handle EINTR from open(2) properly.
+
+o  Stefan Metzmacher <metze@samba.org>
+   * BUG 14270: ldb: version 2.1.1.
+
+
+CHANGES SINCE 4.12.0rc2
+=======================
+
+o  Jeremy Allison <jra@samba.org>
+   * BUG 14282: Set getting and setting of MS-DFS redirects on the filesystem
+     to go through two new VFS functions SMB_VFS_CREATE_DFS_PATHAT() and
+     SMB_VFS_READ_DFS_PATHAT().
+
+o  Andrew Bartlett <abartlet@samba.org>
+   * BUG 14255: bootstrap: Remove un-used dependency python3-crypto.
+
+o  Volker Lendecke <vl@samba.org>
+   * BUG 14247: Fix CID 1458418 and 1458420.
+   * BUG 14281: lib: Fix a shutdown crash with "clustering = yes".
+
+o  Stefan Metzmacher <metze@samba.org>
+   * BUG 14247: Winbind member (source3) fails local SAM auth with empty domain
+     name.
+   * BUG 14265: winbindd: Handle missing idmap in getgrgid().
+   * BUG 14271: Don't use forward declaration for GnuTLS typedefs.
+   * BUG 14280: Add io_uring vfs module.
+
+o  Andreas Schneider <asn@samba.org>
+   * BUG 14250: libcli:smb: Improve check for gnutls_aead_cipher_(en|de)cryptv2.
+
+
+CHANGES SINCE 4.12.0rc1
+=======================
+
+o  Jeremy Allison <jra@samba.org>
+   * BUG 14239: s3: lib: nmblib. Clean up and harden nmb packet processing.
+
+o  Andreas Schneider <asn@samba.org>
+   * BUG 14253: lib:util: Log mkdir error on correct debug levels.
+
 
 CHANGES SINCE 4.9.0rc5
 ======================
@@ -693,7 +497,7 @@ o  Martin Schwenke <martin@meltin.net>
 KNOWN ISSUES
 ============
 
-https://wiki.samba.org/index.php/Release_Planning_for_Samba_4.9#Release_blocking_bugs
+https://wiki.samba.org/index.php/Release_Planning_for_Samba_4.12#Release_blocking_bugs
 
 
 #######################################

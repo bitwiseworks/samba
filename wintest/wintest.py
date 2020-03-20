@@ -1,10 +1,15 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 '''automated testing library for testing Samba against windows'''
 
-import pexpect, subprocess
+import pexpect
+import subprocess
 import optparse
-import sys, os, time, re
+import sys
+import os
+import time
+import re
+
 
 class wintest():
     '''testing of Samba against windows VMs'''
@@ -44,7 +49,7 @@ class wintest():
 
     def getvar(self, varname):
         '''return a substitution variable'''
-        if not varname in self.vars:
+        if varname not in self.vars:
             return None
         return self.vars[varname]
 
@@ -53,9 +58,9 @@ class wintest():
         for v in ['VM', 'HOSTNAME', 'USER', 'PASS', 'SNAPSHOT', 'REALM', 'DOMAIN', 'IP']:
             vname = '%s_%s' % (vm, v)
             if vname in self.vars:
-                self.setvar("%s_%s" % (prefix,v), self.substitute("${%s}" % vname))
+                self.setvar("%s_%s" % (prefix, v), self.substitute("${%s}" % vname))
             else:
-                self.vars.pop("%s_%s" % (prefix,v), None)
+                self.vars.pop("%s_%s" % (prefix, v), None)
 
         if self.getvar("WIN_REALM"):
             self.setvar("WIN_REALM", self.getvar("WIN_REALM").upper())
@@ -81,7 +86,7 @@ class wintest():
             if colon == -1:
                 raise RuntimeError("Invalid config line '%s'" % line)
             varname = line[0:colon].strip()
-            value   = line[colon+1:].strip()
+            value   = line[colon + 1:].strip()
             self.setvar(varname, value)
 
     def list_steps_mode(self):
@@ -127,8 +132,8 @@ class wintest():
             var_end = text.find("}", var_start)
             if var_end == -1:
                 return text
-            var_name = text[var_start+2:var_end]
-            if not var_name in self.vars:
+            var_name = text[var_start + 2:var_end]
+            if var_name not in self.vars:
                 raise RuntimeError("Unknown substitution variable ${%s}" % var_name)
             text = text.replace("${%s}" % var_name, self.vars[var_name])
         return text
@@ -174,14 +179,13 @@ class wintest():
         if output:
             return subprocess.Popen([cmd], shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, cwd=dir).communicate()[0]
         if isinstance(cmd, list):
-            shell=False
+            shell = False
         else:
-            shell=True
+            shell = True
         if checkfail:
             return subprocess.check_call(cmd, shell=shell, cwd=dir)
         else:
             return subprocess.call(cmd, shell=shell, cwd=dir)
-
 
     def run_child(self, cmd, dir="."):
         '''create a child and return the Popen handle to it'''
@@ -192,9 +196,9 @@ class wintest():
         else:
             self.info('$ ' + cmd)
         if isinstance(cmd, list):
-            shell=False
+            shell = False
         else:
-            shell=True
+            shell = True
         os.chdir(dir)
         ret = subprocess.Popen(cmd, shell=shell, stderr=subprocess.STDOUT)
         os.chdir(cwd)
@@ -302,7 +306,7 @@ class wintest():
     def named_supports_gssapi_keytab(self):
         '''see if named supports tkey-gssapi-keytab'''
         self.write_file("${PREFIX}/named.conf.test",
-                     'options { tkey-gssapi-keytab "test"; };')
+                        'options { tkey-gssapi-keytab "test"; };')
         try:
             self.run_cmd("${NAMED_CHECKCONF} ${PREFIX}/named.conf.test")
         except subprocess.CalledProcessError:
@@ -325,7 +329,7 @@ nameserver %s
         self.write_file('/etc/resolv.conf.wintest', contents, mode='a')
         self.write_file('/etc/resolv.conf.wintest-bak', contents)
         self.run_cmd("mv -f /etc/resolv.conf.wintest /etc/resolv.conf")
-        self.resolv_conf_backup = '/etc/resolv.conf.wintest-bak';
+        self.resolv_conf_backup = '/etc/resolv.conf.wintest-bak'
 
     def configure_bind(self, kerberos_support=False, include=None):
         self.chdir('${PREFIX}')
@@ -341,11 +345,11 @@ nameserver %s
         elif self.getvar('NAMESERVER_BACKEND') != 'SAMBA_INTERNAL':
             if self.named_supports_gssapi_keytab():
                 self.setvar("NAMED_TKEY_OPTION",
-                         'tkey-gssapi-keytab "${PREFIX}/bind-dns/dns.keytab";')
+                            'tkey-gssapi-keytab "${PREFIX}/bind-dns/dns.keytab";')
             else:
                 self.info("LCREALM=${LCREALM}")
                 self.setvar("NAMED_TKEY_OPTION",
-                         '''tkey-gssapi-credential "DNS/${LCREALM}";
+                            '''tkey-gssapi-credential "DNS/${LCREALM}";
                             tkey-domain "${LCREALM}";
                  ''')
             self.putenv('KEYTAB_FILE', '${PREFIX}/bind-dns/dns.keytab')
@@ -394,10 +398,10 @@ controls {
 
 ${NAMED_INCLUDE}
 ''')
-        
+
         if self.getvar('NAMESERVER_BACKEND') == 'SAMBA_INTERNAL':
-              self.write_file('etc/named.conf',
-                         '''
+            self.write_file('etc/named.conf',
+                            '''
 zone "%s" IN {
       type forward;
       forward only;
@@ -406,15 +410,14 @@ zone "%s" IN {
       };
 };
 ''' % (self.getvar('LCREALM'), self.getvar('INTERFACE_IP')),
-                     mode='a')
-          
+                   mode='a')
 
         # add forwarding for the windows domains
         domains = self.get_domains()
 
         for d in domains:
             self.write_file('etc/named.conf',
-                         '''
+                            '''
 zone "%s" IN {
       type forward;
       forward only;
@@ -424,7 +427,6 @@ zone "%s" IN {
 };
 ''' % (d, domains[d]),
                      mode='a')
-
 
         self.write_file("etc/rndc.conf", '''
 # Start of rndc.conf
@@ -440,14 +442,12 @@ options {
 };
 ''')
 
-
     def stop_bind(self):
         '''Stop our private BIND from listening and operating'''
         self.rndc_cmd("stop", checkfail=False)
         self.port_wait("${NAMED_INTERFACE_IP}", 53, wait_for_fail=True)
 
         self.run_cmd("rm -rf var/named")
-
 
     def start_bind(self):
         '''restart the test environment version of bind'''
@@ -475,7 +475,6 @@ options {
             self.info("restoring /etc/resolv.conf")
             self.run_cmd("mv -f %s /etc/resolv.conf" % self.resolv_conf_backup)
 
-
     def vm_poweroff(self, vmname, checkfail=True):
         '''power off a VM'''
         self.setvar('VMNAME', vmname)
@@ -495,7 +494,7 @@ options {
     def ping_wait(self, hostname):
         '''wait for a hostname to come up on the network'''
         hostname = self.substitute(hostname)
-        loops=10
+        loops = 10
         while loops > 0:
             try:
                 self.run_cmd("ping -c 1 -w 10 %s" % hostname)
@@ -515,8 +514,8 @@ options {
             child.close()
             i = child.exitstatus
             if wait_for_fail:
-                #wait for timeout or fail
-                if i == None or i > 0:
+                # wait for timeout or fail
+                if i is None or i > 0:
                     return
             else:
                 if i == 0:
@@ -655,7 +654,6 @@ options {
         child.expect([pexpect.EOF, pexpect.TIMEOUT], timeout=5)
         return True
 
-
     def resolve_ip(self, hostname, retries=60, delay=5):
         '''resolve an IP given a hostname, assuming NBT'''
         while retries > 0:
@@ -671,7 +669,6 @@ options {
             time.sleep(delay)
             self.info("retrying (retries=%u delay=%u)" % (retries, delay))
         raise RuntimeError("Failed to resolve IP of %s" % hostname)
-
 
     def open_telnet(self, hostname, username, password, retries=60, delay=5, set_time=False, set_ip=False,
                     disable_firewall=True, run_tlntadmn=True, set_noexpire=False):
@@ -740,7 +737,7 @@ options {
             if set_dns:
                 set_dns = False
                 if self.set_dns(child):
-                    continue;
+                    continue
             if set_route:
                 child.sendline('route add 0.0.0.0 mask 0.0.0.0 ${WIN_DEFAULT_GATEWAY}')
                 child.expect("C:")
@@ -819,7 +816,6 @@ options {
                 ret.append(self.vars[v])
         return ret
 
-
     def run_dcpromo_as_first_dc(self, vm, func_level=None):
         self.setwinvars(vm)
         self.info("Configuring a windows VM ${WIN_VM} at the first DC in the domain using dcpromo")
@@ -838,7 +834,7 @@ options {
 
         """This server must therefore not yet be a directory server, so we must promote it"""
         child.sendline("copy /Y con answers.txt")
-        child.sendline('''
+        child.sendline(b'''
 [DCInstall]
 ; New forest promotion
 ReplicaOrNewDomain=Domain
@@ -866,7 +862,7 @@ RebootOnCompletion=No
         i = child.expect(["You must restart this computer", "failed", "Active Directory Domain Services was not installed", "C:", pexpect.TIMEOUT], timeout=240)
         if i == 1 or i == 2:
             raise Exception("dcpromo failed")
-        if i == 4: # timeout
+        if i == 4:  # timeout
             child = self.open_telnet("${WIN_HOSTNAME}", "administrator", "${WIN_PASS}")
 
         child.sendline("shutdown -r -t 0")
@@ -880,13 +876,12 @@ RebootOnCompletion=No
         # Give DNS registration a kick
         child.sendline("ipconfig /registerdns")
 
-        self.retry_cmd("host -t SRV _ldap._tcp.${WIN_REALM} ${WIN_IP}", ['has SRV record'], retries=60, delay=5 )
-
+        self.retry_cmd("host -t SRV _ldap._tcp.${WIN_REALM} ${WIN_IP}", ['has SRV record'], retries=60, delay=5)
 
     def start_winvm(self, vm):
         '''start a Windows VM'''
         self.setwinvars(vm)
-        
+
         self.info("Joining a windows box to the domain")
         self.vm_poweroff("${WIN_VM}", checkfail=False)
         self.vm_restore("${WIN_VM}", "${WIN_SNAPSHOT}")
@@ -899,8 +894,8 @@ RebootOnCompletion=No
             child.sendline("ipconfig /flushdns")
             child.expect("C:")
             child.sendline("netdom join ${WIN_HOSTNAME} /Domain:%s /UserD:%s /PasswordD:%s" % (domain, username, password))
-            i = child.expect(["The command completed successfully", 
-                             "The specified domain either does not exist or could not be contacted."], timeout=120)
+            i = child.expect(["The command completed successfully",
+                              "The specified domain either does not exist or could not be contacted."], timeout=120)
             if i == 0:
                 break
             time.sleep(10)
@@ -913,7 +908,6 @@ RebootOnCompletion=No
         child.sendline("ipconfig /registerdns")
         child.expect("Registration of the DNS resource records for all adapters of this computer has been initiated. Any errors will be reported in the Event Viewer")
         child.expect("C:")
-
 
     def test_remote_smbclient(self, vm, username="${WIN_USER}", password="${WIN_PASS}", args=""):
         '''test smbclient against remote server'''
@@ -931,7 +925,6 @@ RebootOnCompletion=No
         child.sendline("net use t: \\\\${HOSTNAME}.%s\\test" % realm)
         child.expect("The command completed successfully")
 
-
     def setup(self, testname, subdir):
         '''setup for main tests, parsing command line'''
         self.parser.add_option("--conf", type='string', default='', help='config file')
@@ -945,12 +938,12 @@ RebootOnCompletion=No
         self.parser.add_option("--nocleanup", action='store_true', default=False, help='disable cleanup code')
         self.parser.add_option("--use-ntvfs", action='store_true', default=False, help='use NTVFS for the fileserver')
         self.parser.add_option("--dns-backend", type="choice",
-            choices=["SAMBA_INTERNAL", "BIND9_FLATFILE", "BIND9_DLZ", "NONE"],
-            help="The DNS server backend. SAMBA_INTERNAL is the builtin name server (default), " \
-                 "BIND9_FLATFILE uses bind9 text database to store zone information, " \
-                 "BIND9_DLZ uses samba4 AD to store zone information, " \
-                 "NONE skips the DNS setup entirely (not recommended)",
-            default="SAMBA_INTERNAL")
+                               choices=["SAMBA_INTERNAL", "BIND9_FLATFILE", "BIND9_DLZ", "NONE"],
+                               help="The DNS server backend. SAMBA_INTERNAL is the builtin name server (default), "
+                               "BIND9_FLATFILE uses bind9 text database to store zone information, "
+                               "BIND9_DLZ uses samba4 AD to store zone information, "
+                               "NONE skips the DNS setup entirely (not recommended)",
+                               default="SAMBA_INTERNAL")
 
         self.opts, self.args = self.parser.parse_args()
 

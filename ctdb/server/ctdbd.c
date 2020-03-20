@@ -38,6 +38,7 @@
 #include "common/reqid.h"
 #include "common/system.h"
 #include "common/common.h"
+#include "common/path.h"
 #include "common/logging.h"
 #include "common/logging_conf.h"
 
@@ -100,9 +101,16 @@ static struct ctdb_context *ctdb_init(struct tevent_context *ev)
 		return NULL;
 	}
 
-	ret = ctdb_set_socketname(ctdb, CTDB_SOCKET);
-	if (ret != 0) {
-		DBG_ERR("ctdb_set_socketname failed.\n");
+	ctdb->daemon.name = path_socket(ctdb, "ctdbd");
+	if (ctdb->daemon.name == NULL) {
+		DBG_ERR("Memory allocation error\n");
+		talloc_free(ctdb);
+		return NULL;
+	}
+
+	ctdbd_pidfile = path_pidfile(ctdb, "ctdbd");
+	if (ctdbd_pidfile == NULL) {
+		DBG_ERR("Memory allocation error\n");
 		talloc_free(ctdb);
 		return NULL;
 	}
@@ -144,13 +152,13 @@ static struct ctdb_context *ctdb_init(struct tevent_context *ev)
 int main(int argc, const char *argv[])
 {
 	struct ctdb_context *ctdb = NULL;
-	int interactive = 0;
-	const char *ctdb_socket;
+	int interactive_opt = 0;
+	bool interactive = false;
 
 	struct poptOption popt_options[] = {
 		POPT_AUTOHELP
-		{ "interactive", 'i', POPT_ARG_NONE, &interactive, 0,
-		  "don't fork", NULL },
+		{ "interactive", 'i', POPT_ARG_NONE, &interactive_opt, 0,
+		  "don't fork, log to stderr", NULL },
 		POPT_TABLEEND
 	};
 	int opt, ret;
@@ -160,7 +168,7 @@ int main(int argc, const char *argv[])
 	const char *ctdb_base;
 	struct conf_context *conf;
 	const char *logging_location;
-	const char *t;
+	const char *test_mode;
 	bool ok;
 
 	/*
@@ -217,6 +225,8 @@ int main(int argc, const char *argv[])
 		}
 	}
 
+	interactive = (interactive_opt != 0);
+
 	/*
 	 * Configuration file handling
 	 */
@@ -231,6 +241,8 @@ int main(int argc, const char *argv[])
 	 * Logging setup/options
 	 */
 
+	test_mode = getenv("CTDB_TEST_MODE");
+
 	/* Log to stderr (ignoring configuration) when running as interactive */
 	if (interactive) {
 		logging_location = "file:";
@@ -239,7 +251,7 @@ int main(int argc, const char *argv[])
 		logging_location = logging_conf_location(conf);
 	}
 
-	if (strcmp(logging_location, "syslog") != 0) {
+	if (strcmp(logging_location, "syslog") != 0 && test_mode == NULL) {
 		/* This can help when CTDB logging is misconfigured */
 		syslog(LOG_DAEMON|LOG_NOTICE,
 		       "CTDB logging to location %s",
@@ -299,8 +311,28 @@ int main(int argc, const char *argv[])
 	 */
 
 	ctdb->db_directory = ctdb_config.dbdir_volatile;
+	ok = directory_exist(ctdb->db_directory);
+	if (! ok) {
+		D_ERR("Volatile database directory %s does not exist\n",
+		      ctdb->db_directory);
+		goto fail;
+	}
+
 	ctdb->db_directory_persistent = ctdb_config.dbdir_persistent;
+	ok = directory_exist(ctdb->db_directory_persistent);
+	if (! ok) {
+		D_ERR("Persistent database directory %s does not exist\n",
+		      ctdb->db_directory_persistent);
+		goto fail;
+	}
+
 	ctdb->db_directory_state = ctdb_config.dbdir_state;
+	ok = directory_exist(ctdb->db_directory_state);
+	if (! ok) {
+		D_ERR("State database directory %s does not exist\n",
+		      ctdb->db_directory_state);
+		goto fail;
+	}
 
 	if (ctdb_config.lock_debug_script != NULL) {
 		ret = setenv("CTDB_DEBUG_LOCKS",
@@ -356,32 +388,17 @@ int main(int argc, const char *argv[])
 	 * Testing and debug options
 	 */
 
-	/* Environment variable overrides default */
-	ctdbd_pidfile = getenv("CTDB_PIDFILE");
-	if (ctdbd_pidfile == NULL) {
-		ctdbd_pidfile = CTDB_RUNDIR "/ctdbd.pid";
-	}
-
-	/* Environment variable overrides default */
-	ctdb_socket = getenv("CTDB_SOCKET");
-	if (ctdb_socket == NULL) {
-		ctdb_socket = CTDB_SOCKET;
-	}
-	ret = ctdb_set_socketname(ctdb, ctdb_socket);
-	if (ret == -1) {
-		D_ERR("ctdb_set_socketname() failed\n");
-		goto fail;
-	}
-
-	t = getenv("CTDB_TEST_MODE");
-	if (t != NULL) {
+	if (test_mode != NULL) {
 		ctdb->do_setsched = false;
 		ctdb->do_checkpublicip = false;
 		fast_start = true;
 	}
 
+	/* Don't fork when running in test mode */
+	interactive = interactive || test_mode != NULL;
+
 	/* start the protocol running (as a child) */
-	return ctdb_start_daemon(ctdb, interactive?false:true);
+	return ctdb_start_daemon(ctdb, !interactive);
 
 fail:
 	talloc_free(ctdb);

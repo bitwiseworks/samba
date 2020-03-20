@@ -111,6 +111,7 @@ static bool gp_reg_entry_from_file_entry(TALLOC_CTX *mem_ctx,
 	struct registry_value *data = NULL;
 	struct gp_registry_entry *entry = NULL;
 	enum gp_reg_action action = GP_REG_ACTION_NONE;
+	enum ndr_err_code ndr_err;
 
 	ZERO_STRUCTP(*reg_entry);
 
@@ -119,7 +120,18 @@ static bool gp_reg_entry_from_file_entry(TALLOC_CTX *mem_ctx,
 		return false;
 
 	data->type = r->type;
-	data->data = data_blob_talloc(data, r->data, r->size);
+
+	ndr_err = ndr_push_union_blob(
+		&data->data,
+		mem_ctx,
+		&r->data,
+		r->type,
+		(ndr_push_flags_fn_t)ndr_push_winreg_Data);
+	if (!NDR_ERR_CODE_IS_SUCCESS(ndr_err)) {
+		DBG_WARNING("ndr_push_winreg_Data failed: %s\n",
+			    ndr_errstr(ndr_err));
+		return false;
+	}
 
 	entry = talloc_zero(mem_ctx, struct gp_registry_entry);
 	if (!entry)
@@ -289,7 +301,7 @@ static NTSTATUS registry_process_group_policy(TALLOC_CTX *mem_ctx,
 	size_t num_entries = 0;
 	char *unix_path = NULL;
 	const struct GROUP_POLICY_OBJECT *gpo;
-	char *gpo_cache_path = cache_path(GPO_CACHE_DIR);
+	char *gpo_cache_path = cache_path(talloc_tos(), GPO_CACHE_DIR);
 	if (gpo_cache_path == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}

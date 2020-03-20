@@ -20,12 +20,13 @@
 */
 
 #include "includes.h"
-#include "popt_common.h"
+#include "popt_common_cmdline.h"
 #include "rpc_client/cli_pipe.h"
 #include "../librpc/gen_ndr/ndr_srvsvc_c.h"
 #include "libsmb/libsmb.h"
 #include "libsmb/namequery.h"
 #include "libsmb/clirap.h"
+#include "../libcli/smb/smbXcli_base.h"
 
 static int use_bcast;
 
@@ -231,6 +232,10 @@ static bool get_shares(char *server_name, const struct user_auth_info *user_info
 	if (get_rpc_shares(cli, add_name, &shares))
 		return True;
 
+	if (smbXcli_conn_protocol(cli->conn) > PROTOCOL_NT1) {
+		return false;
+	}
+
         if (!cli_RNetShareEnum(cli, add_name, &shares))
                 return False;
 
@@ -292,9 +297,30 @@ int main(int argc, char *argv[])
 	const char **argv_const = discard_const_p(const char *, argv);
 	struct poptOption long_options[] = {
 		POPT_AUTOHELP
-		{ "broadcast", 'b', POPT_ARG_VAL, &use_bcast, True, "Use broadcast instead of using the master browser" },
-		{ "domains", 'D', POPT_ARG_VAL, &level, LEV_WORKGROUP, "List only domains (workgroups) of tree" },
-		{ "servers", 'S', POPT_ARG_VAL, &level, LEV_SERVER, "List domains(workgroups) and servers of tree" },
+		{
+			.longName   = "broadcast",
+			.shortName  = 'b',
+			.argInfo    = POPT_ARG_VAL,
+			.arg        = &use_bcast,
+			.val        = True,
+			.descrip    = "Use broadcast instead of using the master browser" ,
+		},
+		{
+			.longName   = "domains",
+			.shortName  = 'D',
+			.argInfo    = POPT_ARG_VAL,
+			.arg        = &level,
+			.val        = LEV_WORKGROUP,
+			.descrip    = "List only domains (workgroups) of tree" ,
+		},
+		{
+			.longName   = "servers",
+			.shortName  = 'S',
+			.argInfo    = POPT_ARG_VAL,
+			.arg        = &level,
+			.val        = LEV_SERVER,
+			.descrip    = "List domains(workgroups) and servers of tree" ,
+		},
 		POPT_COMMON_SAMBA
 		POPT_COMMON_CREDENTIALS
 		POPT_TABLEEND
@@ -319,11 +345,13 @@ int main(int argc, char *argv[])
 	/* Now do our stuff */
 
         if (!print_tree(popt_get_cmdline_auth_info())) {
+		poptFreeContext(pc);
 		TALLOC_FREE(frame);
                 return 1;
 	}
 
 	popt_free_cmdline_auth_info();
+	poptFreeContext(pc);
 	TALLOC_FREE(frame);
 	return 0;
 }

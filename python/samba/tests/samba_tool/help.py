@@ -20,6 +20,8 @@
 import re
 from samba.tests.samba_tool.base import SambaToolCmdTest
 from samba.tests import BlackboxProcessError
+from samba.tests import check_help_consistency
+from samba.compat import get_string
 
 
 class HelpTestCase(SambaToolCmdTest):
@@ -47,7 +49,7 @@ class HelpTestCase(SambaToolCmdTest):
                 except BlackboxProcessError as e:
                     output = e.stdout
                     failed_commands.append(c)
-
+                output = get_string(output)
                 tail = output.partition('Available subcommands:')[2]
                 subcommands = re.findall(r'^\s*([\w-]+)\s+-', tail,
                                          re.MULTILINE)
@@ -62,7 +64,14 @@ class HelpTestCase(SambaToolCmdTest):
                     output2 = e.stdout
                     failed_commands.append(c)
 
+                output2 = get_string(output2)
                 self.assertEqual(output, output2)
+
+                err = check_help_consistency(output,
+                                             options_start='Options:',
+                                             options_end='Available subcommands:')
+                if err is not None:
+                    self.fail("consistency error with %s:\n%s" % (line, err))
 
             if not new_commands:
                 break

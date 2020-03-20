@@ -30,6 +30,11 @@ import samba
 from subprocess import call
 from ldb import LdbError
 from samba.tests.password_test import PasswordCommon
+from samba.dcerpc.windows_event_ids import (
+    EVT_ID_SUCCESSFUL_LOGON,
+    EVT_ID_UNSUCCESSFUL_LOGON,
+    EVT_LOGON_NETWORK
+)
 
 USER_NAME = "authlogtestuser"
 USER_PASS = samba.generate_random_password(32, 32)
@@ -40,7 +45,6 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
     def setUp(self):
         super(AuthLogPassChangeTests, self).setUp()
 
-        self.remoteAddress = os.environ["CLIENT_IP"]
         self.server_ip = os.environ["SERVER_IP"]
 
         host = "ldap://%s" % os.environ["SERVER"]
@@ -81,7 +85,11 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
                     (msg["Authentication"]["serviceDescription"] ==
                         "SAMR Password Change") and
                     (msg["Authentication"]["authDescription"] ==
-                        "samr_ChangePasswordUser3"))
+                        "samr_ChangePasswordUser3") and
+                    (msg["Authentication"]["eventId"] ==
+                        EVT_ID_SUCCESSFUL_LOGON) and
+                    (msg["Authentication"]["logonType"] ==
+                        EVT_LOGON_NETWORK))
 
         creds = self.insta_creds(template=self.get_credentials())
 
@@ -89,15 +97,11 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
         net = Net(creds, lp, server=self.server_ip)
         password = "newPassword!!42"
 
-        net.change_password(newpassword=password.encode('utf-8'),
+        net.change_password(newpassword=password,
                             username=USER_NAME,
                             oldpassword=USER_PASS)
-
-        messages = self.waitForMessages(isLastExpectedMessage)
-        print("Received %d messages" % len(messages))
-        self.assertEquals(8,
-                          len(messages),
-                          "Did not receive the expected number of messages")
+        self.assertTrue(self.waitForMessages(isLastExpectedMessage),
+                        "Did not receive the expected message")
 
     def test_admin_change_password_new_password_fails_restriction(self):
         def isLastExpectedMessage(msg):
@@ -107,7 +111,11 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
                     (msg["Authentication"]["serviceDescription"] ==
                         "SAMR Password Change") and
                     (msg["Authentication"]["authDescription"] ==
-                        "samr_ChangePasswordUser3"))
+                        "samr_ChangePasswordUser3") and
+                    (msg["Authentication"]["eventId"] ==
+                        EVT_ID_UNSUCCESSFUL_LOGON) and
+                    (msg["Authentication"]["logonType"] ==
+                        EVT_LOGON_NETWORK))
 
         creds = self.insta_creds(template=self.get_credentials())
 
@@ -117,18 +125,15 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
 
         exception_thrown = False
         try:
-            net.change_password(newpassword=password.encode('utf-8'),
+            net.change_password(newpassword=password,
                                 oldpassword=USER_PASS,
                                 username=USER_NAME)
         except Exception:
             exception_thrown = True
         self.assertEquals(True, exception_thrown,
                           "Expected exception not thrown")
-
-        messages = self.waitForMessages(isLastExpectedMessage)
-        self.assertEquals(8,
-                          len(messages),
-                          "Did not receive the expected number of messages")
+        self.assertTrue(self.waitForMessages(isLastExpectedMessage),
+                        "Did not receive the expected message")
 
     def test_admin_change_password_unknown_user(self):
         def isLastExpectedMessage(msg):
@@ -138,7 +143,11 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
                     (msg["Authentication"]["serviceDescription"] ==
                         "SAMR Password Change") and
                     (msg["Authentication"]["authDescription"] ==
-                        "samr_ChangePasswordUser3"))
+                        "samr_ChangePasswordUser3") and
+                    (msg["Authentication"]["eventId"] ==
+                        EVT_ID_UNSUCCESSFUL_LOGON) and
+                    (msg["Authentication"]["logonType"] ==
+                        EVT_LOGON_NETWORK))
 
         creds = self.insta_creds(template=self.get_credentials())
 
@@ -148,7 +157,7 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
 
         exception_thrown = False
         try:
-            net.change_password(newpassword=password.encode('utf-8'),
+            net.change_password(newpassword=password,
                                 oldpassword=USER_PASS,
                                 username="badUser")
         except Exception:
@@ -156,10 +165,8 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
         self.assertEquals(True, exception_thrown,
                           "Expected exception not thrown")
 
-        messages = self.waitForMessages(isLastExpectedMessage)
-        self.assertEquals(8,
-                          len(messages),
-                          "Did not receive the expected number of messages")
+        self.assertTrue(self.waitForMessages(isLastExpectedMessage),
+                        "Did not receive the expected message")
 
     def test_admin_change_password_bad_original_password(self):
         def isLastExpectedMessage(msg):
@@ -169,7 +176,11 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
                     (msg["Authentication"]["serviceDescription"] ==
                         "SAMR Password Change") and
                     (msg["Authentication"]["authDescription"] ==
-                        "samr_ChangePasswordUser3"))
+                        "samr_ChangePasswordUser3") and
+                    (msg["Authentication"]["eventId"] ==
+                        EVT_ID_UNSUCCESSFUL_LOGON) and
+                    (msg["Authentication"]["logonType"] ==
+                        EVT_LOGON_NETWORK))
 
         creds = self.insta_creds(template=self.get_credentials())
 
@@ -179,7 +190,7 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
 
         exception_thrown = False
         try:
-            net.change_password(newpassword=password.encode('utf-8'),
+            net.change_password(newpassword=password,
                                 oldpassword="badPassword",
                                 username=USER_NAME)
         except Exception:
@@ -187,10 +198,8 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
         self.assertEquals(True, exception_thrown,
                           "Expected exception not thrown")
 
-        messages = self.waitForMessages(isLastExpectedMessage)
-        self.assertEquals(8,
-                          len(messages),
-                          "Did not receive the expected number of messages")
+        self.assertTrue(self.waitForMessages(isLastExpectedMessage),
+                        "Did not receive the expected message")
 
     # net rap password changes are broken, but they trigger enough of the
     # server side behaviour to exercise the code paths of interest.
@@ -204,7 +213,11 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
                     (msg["Authentication"]["status"] ==
                         "NT_STATUS_WRONG_PASSWORD") and
                     (msg["Authentication"]["authDescription"] ==
-                        "OemChangePasswordUser2"))
+                        "OemChangePasswordUser2") and
+                    (msg["Authentication"]["eventId"] ==
+                        EVT_ID_UNSUCCESSFUL_LOGON) and
+                    (msg["Authentication"]["logonType"] ==
+                        EVT_LOGON_NETWORK))
 
         username = os.environ["USERNAME"]
         server = os.environ["SERVER"]
@@ -214,11 +227,8 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
         call(["bin/net", "rap", server_param,
               "password", USER_NAME, "notMyPassword", "notGoingToBeMyPassword",
               server, creds, "--option=client ipc max protocol=nt1"])
-
-        messages = self.waitForMessages(isLastExpectedMessage)
-        self.assertEquals(7,
-                          len(messages),
-                          "Did not receive the expected number of messages")
+        self.assertTrue(self.waitForMessages(isLastExpectedMessage),
+                        "Did not receive the expected message")
 
     def test_ldap_change_password(self):
         def isLastExpectedMessage(msg):
@@ -227,7 +237,11 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
                     (msg["Authentication"]["serviceDescription"] ==
                         "LDAP Password Change") and
                     (msg["Authentication"]["authDescription"] ==
-                        "LDAP Modify"))
+                        "LDAP Modify") and
+                    (msg["Authentication"]["eventId"] ==
+                        EVT_ID_SUCCESSFUL_LOGON) and
+                    (msg["Authentication"]["logonType"] ==
+                        EVT_LOGON_NETWORK))
 
         new_password = samba.generate_random_password(32, 32)
         self.ldb.modify_ldif(
@@ -238,11 +252,8 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
             "add: userPassword\n" +
             "userPassword: " + new_password + "\n")
 
-        messages = self.waitForMessages(isLastExpectedMessage)
-        print("Received %d messages" % len(messages))
-        self.assertEquals(4,
-                          len(messages),
-                          "Did not receive the expected number of messages")
+        self.assertTrue(self.waitForMessages(isLastExpectedMessage),
+                        "Did not receive the expected message")
 
     #
     # Currently this does not get logged, so we expect to only see the log
@@ -268,11 +279,8 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
             (num, msg) = e.args
             pass
 
-        messages = self.waitForMessages(isLastExpectedMessage)
-        print("Received %d messages" % len(messages))
-        self.assertEquals(3,
-                          len(messages),
-                          "Did not receive the expected number of messages")
+        self.assertTrue(self.waitForMessages(isLastExpectedMessage),
+                        "Did not receive the expected message")
 
     def test_ldap_change_password_bad_original_password(self):
         def isLastExpectedMessage(msg):
@@ -282,7 +290,11 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
                     (msg["Authentication"]["serviceDescription"] ==
                         "LDAP Password Change") and
                     (msg["Authentication"]["authDescription"] ==
-                        "LDAP Modify"))
+                        "LDAP Modify") and
+                    (msg["Authentication"]["eventId"] ==
+                        EVT_ID_UNSUCCESSFUL_LOGON) and
+                    (msg["Authentication"]["logonType"] ==
+                        EVT_LOGON_NETWORK))
 
         new_password = samba.generate_random_password(32, 32)
         try:
@@ -298,8 +310,5 @@ class AuthLogPassChangeTests(samba.tests.auth_log_base.AuthLogTestBase):
             (num, msg) = e1.args
             pass
 
-        messages = self.waitForMessages(isLastExpectedMessage)
-        print("Received %d messages" % len(messages))
-        self.assertEquals(4,
-                          len(messages),
-                          "Did not receive the expected number of messages")
+        self.assertTrue(self.waitForMessages(isLastExpectedMessage),
+                        "Did not receive the expected message")

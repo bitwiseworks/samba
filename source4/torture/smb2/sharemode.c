@@ -34,14 +34,38 @@ struct hold_sharemode_info {
 	const char *filename;
 	struct smb2_handle handle;
 } hold_sharemode_table[] = {
-	{ "",	 BASEDIRHOLD "\\N"	},
-	{ "R",	 BASEDIRHOLD "\\R"	},
-	{ "W",	 BASEDIRHOLD "\\W"	},
-	{ "D",	 BASEDIRHOLD "\\D"	},
-	{ "RW",  BASEDIRHOLD "\\RW"	},
-	{ "RD",  BASEDIRHOLD "\\RD"	},
-	{ "WD",  BASEDIRHOLD "\\WD"	},
-	{ "RWD", BASEDIRHOLD "\\RWD"	},
+	{
+		.sharemode = "",
+		.filename  = BASEDIRHOLD "\\N",
+	},
+	{
+		.sharemode = "R",
+		.filename  = BASEDIRHOLD "\\R",
+	},
+	{
+		.sharemode = "W",
+		.filename  = BASEDIRHOLD "\\W",
+	},
+	{
+		.sharemode = "D",
+		.filename  = BASEDIRHOLD "\\D",
+	},
+	{
+		.sharemode = "RW",
+		.filename  = BASEDIRHOLD "\\RW",
+	},
+	{
+		.sharemode = "RD",
+		.filename  = BASEDIRHOLD "\\RD",
+	},
+	{
+		.sharemode = "WD",
+		.filename  = BASEDIRHOLD "\\WD",
+	},
+	{
+		.sharemode = "RWD",
+		.filename  = BASEDIRHOLD "\\RWD",
+	},
 };
 
 static void signal_handler(struct tevent_context *ev,
@@ -162,12 +186,17 @@ bool torture_smb2_check_sharemode(struct torture_context *tctx)
 	struct smb2_create create = { };
 	NTSTATUS status;
 	bool ret = true;
+	int error = 0;
 
 	sharemode_string = torture_setting_string(tctx, "sharemode", "RWD");
 	sharemode = smb2_util_share_access(sharemode_string);
 
 	access_string = torture_setting_string(tctx, "access", "0xf01ff");
-	access = strtoul(access_string, NULL, 0);
+	access = smb_strtoul(access_string, NULL, 0, &error, SMB_STR_STANDARD);
+	if (error != 0) {
+		torture_comment(tctx, "Initializing access failed.\n");
+		return false;
+	}
 
 	filename = torture_setting_string(tctx, "filename", "testfile");
 	operation = torture_setting_string(tctx, "operation", "WD");
@@ -439,7 +468,8 @@ struct sharemode_info {
  * sharemode, second open with potentially conflicting access.
  */
 static bool test_smb2_sharemode_access(struct torture_context *tctx,
-				       struct smb2_tree *tree)
+				       struct smb2_tree *tree1,
+				       struct smb2_tree *tree2)
 {
 	const char *fname = "test_sharemode";
 	NTSTATUS status;
@@ -468,7 +498,7 @@ static bool test_smb2_sharemode_access(struct torture_context *tctx,
 		create1.in.create_flags = NTCREATEX_FLAGS_EXTENDED;
 		create1.in.oplock_level = SMB2_OPLOCK_LEVEL_NONE;
 
-		status = smb2_create(tree, tctx, &create1);
+		status = smb2_create(tree1, tctx, &create1);
 
 		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 						"CREATE file failed\n");
@@ -487,7 +517,7 @@ static bool test_smb2_sharemode_access(struct torture_context *tctx,
 		create2.in.create_flags = NTCREATEX_FLAGS_EXTENDED;
 		create2.in.oplock_level = SMB2_OPLOCK_LEVEL_NONE;
 
-		status = smb2_create(tree, tctx, &create2);
+		status = smb2_create(tree2, tctx, &create2);
 		expected_status = info->expect_ok ?
 			NT_STATUS_OK : NT_STATUS_SHARING_VIOLATION;
 		torture_assert_ntstatus_equal_goto(tctx, status,
@@ -495,13 +525,13 @@ static bool test_smb2_sharemode_access(struct torture_context *tctx,
 						   done, "Unexpected status on "
 						   "second create.\n");
 
-		status = smb2_util_close(tree, create1.out.file.handle);
+		status = smb2_util_close(tree1, create1.out.file.handle);
 		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 						"Failed to close "
 						"first handle.\n");
 
 		if (info->expect_ok) {
-			status = smb2_util_close(tree, create2.out.file.handle);
+			status = smb2_util_close(tree2, create2.out.file.handle);
 			torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 							"Failed to close  "
 							"second handle.\n");
@@ -509,17 +539,18 @@ static bool test_smb2_sharemode_access(struct torture_context *tctx,
 	}
 
 done:
-	smb2_util_unlink(tree, fname);
+	smb2_util_unlink(tree1, fname);
 	return ret;
 }
 
 /*
  * Test conflicting sharemodes through SMB2: First open file with
- * different access masks, second open requests potentially conflict
+ * different access masks, second open requests potentially conflicting
  * sharemode.
  */
 static bool test_smb2_access_sharemode(struct torture_context *tctx,
-					 struct smb2_tree *tree)
+				       struct smb2_tree *tree1,
+				       struct smb2_tree *tree2)
 {
 	const char *fname = "test_sharemode";
 	NTSTATUS status;
@@ -549,7 +580,7 @@ static bool test_smb2_access_sharemode(struct torture_context *tctx,
 		create1.in.create_flags = NTCREATEX_FLAGS_EXTENDED;
 		create1.in.oplock_level = SMB2_OPLOCK_LEVEL_NONE;
 
-		status = smb2_create(tree, tctx, &create1);
+		status = smb2_create(tree1, tctx, &create1);
 
 		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 						"CREATE file failed\n");
@@ -567,7 +598,7 @@ static bool test_smb2_access_sharemode(struct torture_context *tctx,
 		create2.in.create_flags = NTCREATEX_FLAGS_EXTENDED;
 		create2.in.oplock_level = SMB2_OPLOCK_LEVEL_NONE;
 
-		status = smb2_create(tree, tctx, &create2);
+		status = smb2_create(tree2, tctx, &create2);
 
 		expected_status = info->expect_ok ?
 			NT_STATUS_OK : NT_STATUS_SHARING_VIOLATION;
@@ -576,13 +607,13 @@ static bool test_smb2_access_sharemode(struct torture_context *tctx,
 						   done, "Unexpected status on "
 						   "second create.\n");
 
-		status = smb2_util_close(tree, create1.out.file.handle);
+		status = smb2_util_close(tree1, create1.out.file.handle);
 		torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 						"Failed to close "
 						"first handle.\n");
 
 		if (info->expect_ok) {
-			status = smb2_util_close(tree, create2.out.file.handle);
+			status = smb2_util_close(tree2, create2.out.file.handle);
 			torture_assert_ntstatus_ok_goto(tctx, status, ret, done,
 							"Failed to close "
 							"second handle.\n");
@@ -590,7 +621,7 @@ static bool test_smb2_access_sharemode(struct torture_context *tctx,
 	}
 
 done:
-	smb2_util_unlink(tree, fname);
+	smb2_util_unlink(tree1, fname);
 	return ret;
 }
 
@@ -598,9 +629,9 @@ struct torture_suite *torture_smb2_sharemode_init(TALLOC_CTX *ctx)
 {
 	struct torture_suite *suite = torture_suite_create(ctx, "sharemode");
 
-	torture_suite_add_1smb2_test(suite, "sharemode-access",
+	torture_suite_add_2smb2_test(suite, "sharemode-access",
 				     test_smb2_sharemode_access);
-	torture_suite_add_1smb2_test(suite, "access-sharemode",
+	torture_suite_add_2smb2_test(suite, "access-sharemode",
 				     test_smb2_access_sharemode);
 
 	suite->description = talloc_strdup(suite, "SMB2-SHAREMODE tests");

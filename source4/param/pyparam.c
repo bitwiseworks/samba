@@ -63,7 +63,7 @@ static PyObject *py_lp_ctx_get_helper(struct loadparm_context *lp_ctx, const cha
 			if (value == NULL) {
 			return NULL;
 			}
-			return PyStr_FromString(value);
+			return PyUnicode_FromString(value);
 		}
 
 		parm = lpcfg_parm_struct(lp_ctx, param_name);
@@ -83,7 +83,7 @@ static PyObject *py_lp_ctx_get_helper(struct loadparm_context *lp_ctx, const cha
 		value = lpcfg_get_parametric(lp_ctx, NULL, type, option);
 		if (value == NULL)
 			return NULL;
-		return PyStr_FromString(value);
+		return PyUnicode_FromString(value);
 	} else {
 		/* its a global parameter */
 		parm = lpcfg_parm_struct(lp_ctx, param_name);
@@ -100,10 +100,10 @@ static PyObject *py_lp_ctx_get_helper(struct loadparm_context *lp_ctx, const cha
     /* construct and return the right type of python object */
     switch (parm->type) {
     case P_CHAR:
-	return PyStr_FromFormat("%c", *(char *)parm_ptr);
+	return PyUnicode_FromFormat("%c", *(char *)parm_ptr);
     case P_STRING:
     case P_USTRING:
-	return PyStr_FromString(*(char **)parm_ptr);
+	return PyUnicode_FromString(*(char **)parm_ptr);
     case P_BOOL:
 	return PyBool_FromLong(*(bool *)parm_ptr);
     case P_BOOLREV:
@@ -115,7 +115,7 @@ static PyObject *py_lp_ctx_get_helper(struct loadparm_context *lp_ctx, const cha
     case P_ENUM:
 	for (i=0; parm->enum_list[i].name; i++) {
 	    if (*(int *)parm_ptr == parm->enum_list[i].value) {
-		return PyStr_FromString(parm->enum_list[i].name);
+		return PyUnicode_FromString(parm->enum_list[i].name);
 	    }
 	}
 	return NULL;
@@ -133,7 +133,7 @@ static PyObject *py_lp_ctx_get_helper(struct loadparm_context *lp_ctx, const cha
 	    pylist = PyList_New(str_list_length(strlist));
 	    for (j = 0; strlist[j]; j++) 
 		PyList_SetItem(pylist, j, 
-			       PyStr_FromString(strlist[j]));
+			       PyUnicode_FromString(strlist[j]));
 	    return pylist;
 	}
     }
@@ -225,7 +225,7 @@ static PyObject *py_lp_ctx_private_path(PyObject *self, PyObject *args)
 		return NULL;
 
 	path = lpcfg_private_path(NULL, PyLoadparmContext_AsLoadparmContext(self), name);
-	ret = PyStr_FromString(path);
+	ret = PyUnicode_FromString(path);
 	talloc_free(path);
 
 	return ret;
@@ -240,7 +240,7 @@ static PyObject *py_lp_ctx_services(PyObject *self, PyObject *unused)
 	for (i = 0; i < lpcfg_numservices(lp_ctx); i++) {
 		struct loadparm_service *service = lpcfg_servicebynum(lp_ctx, i);
 		if (service != NULL) {
-			PyList_SetItem(ret, i, PyStr_FromString(lpcfg_servicename(service)));
+			PyList_SetItem(ret, i, PyUnicode_FromString(lpcfg_servicename(service)));
 		}
 	}
 	return ret;
@@ -255,7 +255,7 @@ static PyObject *py_lp_ctx_server_role(PyObject *self, PyObject *unused)
 	role = lpcfg_server_role(lp_ctx);
 	role_str = server_role_str(role);
 
-	return PyStr_FromString(role_str);
+	return PyUnicode_FromString(role_str);
 }
 
 static PyObject *py_lp_dump(PyObject *self, PyObject *args)
@@ -347,7 +347,7 @@ static PyObject *py_lp_dump_a_parameter(PyObject *self, PyObject *args)
 
 static PyObject *py_lp_log_level(PyObject *self, PyObject *unused)
 {
-	int ret = DEBUGLEVEL_CLASS[DBGC_CLASS];
+	int ret = debuglevel_get();
 	return PyInt_FromLong(ret);
 }
 
@@ -355,7 +355,7 @@ static PyObject *py_lp_log_level(PyObject *self, PyObject *unused)
 static PyObject *py_samdb_url(PyObject *self, PyObject *unused)
 {
 	struct loadparm_context *lp_ctx = PyLoadparmContext_AsLoadparmContext(self);
-	return PyStr_FromFormat("tdb://%s/sam.ldb", lpcfg_private_dir(lp_ctx));
+	return PyUnicode_FromFormat("tdb://%s/sam.ldb", lpcfg_private_dir(lp_ctx));
 }
 
 static PyObject *py_cache_path(PyObject *self, PyObject *args)
@@ -375,7 +375,31 @@ static PyObject *py_cache_path(PyObject *self, PyObject *args)
 			     "Unable to access cache %s", name);
 		return NULL;
 	}
-	ret = PyStr_FromString(path);
+	ret = PyUnicode_FromString(path);
+	talloc_free(path);
+
+	return ret;
+}
+
+static PyObject *py_state_path(PyObject *self, PyObject *args)
+{
+	struct loadparm_context *lp_ctx =
+		PyLoadparmContext_AsLoadparmContext(self);
+	char *name = NULL;
+	char *path = NULL;
+	PyObject *ret = NULL;
+
+	if (!PyArg_ParseTuple(args, "s", &name)) {
+		return NULL;
+	}
+
+	path = lpcfg_state_path(NULL, lp_ctx, name);
+	if (!path) {
+		PyErr_Format(PyExc_RuntimeError,
+			     "Unable to access cache %s", name);
+		return NULL;
+	}
+	ret = PyUnicode_FromString(path);
 	talloc_free(path);
 
 	return ret;
@@ -419,6 +443,9 @@ static PyMethodDef py_lp_ctx_methods[] = {
 	{ "cache_path", py_cache_path, METH_VARARGS,
 		"S.cache_path(name) -> string\n"
 		"Returns a path in the Samba cache directory." },
+	{ "state_path", py_state_path, METH_VARARGS,
+		"S.state_path(name) -> string\n"
+		"Returns a path in the Samba state directory." },
 	{ NULL }
 };
 
@@ -433,14 +460,20 @@ static PyObject *py_lp_ctx_config_file(PyObject *self, void *closure)
 	if (configfile == NULL)
 		Py_RETURN_NONE;
 	else
-		return PyStr_FromString(configfile);
+		return PyUnicode_FromString(configfile);
 }
 
 static PyGetSetDef py_lp_ctx_getset[] = {
-	{ discard_const_p(char, "default_service"), (getter)py_lp_ctx_default_service, NULL, NULL },
-	{ discard_const_p(char, "configfile"), (getter)py_lp_ctx_config_file, NULL,
-	  discard_const_p(char, "Name of last config file that was loaded.") },
-	{ NULL }
+	{
+		.name = discard_const_p(char, "default_service"),
+		.get  = (getter)py_lp_ctx_default_service,
+	},
+	{
+		.name = discard_const_p(char, "configfile"),
+		.get  = (getter)py_lp_ctx_config_file,
+		.doc  = discard_const_p(char, "Name of last config file that was loaded.")
+	},
+	{ .name = NULL }
 };
 
 static PyObject *py_lp_ctx_new(PyTypeObject *type, PyObject *args, PyObject *kwargs)
@@ -501,11 +534,11 @@ static Py_ssize_t py_lp_ctx_len(PyObject *self)
 static PyObject *py_lp_ctx_getitem(PyObject *self, PyObject *name)
 {
 	struct loadparm_service *service;
-	if (!(PyStr_Check(name) || PyUnicode_Check(name))) {
+	if (!PyUnicode_Check(name)) {
 		PyErr_SetString(PyExc_TypeError, "Only string subscripts are supported");
 		return NULL;
 	}
-	service = lpcfg_service(PyLoadparmContext_AsLoadparmContext(self), PyStr_AsString(name));
+	service = lpcfg_service(PyLoadparmContext_AsLoadparmContext(self), PyUnicode_AsUTF8(name));
 	if (service == NULL) {
 		PyErr_SetString(PyExc_KeyError, "No such section");
 		return NULL;
@@ -581,36 +614,36 @@ PyTypeObject PyLoadparmService = {
 	.tp_flags = Py_TPFLAGS_DEFAULT,
 };
 
-static PyObject *py_default_path(PyObject *self)
+static PyObject *py_default_path(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-	return PyStr_FromString(lp_default_path());
+	return PyUnicode_FromString(lp_default_path());
 }
 
-static PyObject *py_setup_dir(PyObject *self)
+static PyObject *py_setup_dir(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-	return PyStr_FromString(dyn_SETUPDIR);
+	return PyUnicode_FromString(dyn_SETUPDIR);
 }
 
-static PyObject *py_modules_dir(PyObject *self)
+static PyObject *py_modules_dir(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-	return PyStr_FromString(dyn_MODULESDIR);
+	return PyUnicode_FromString(dyn_MODULESDIR);
 }
 
-static PyObject *py_bin_dir(PyObject *self)
+static PyObject *py_bin_dir(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-	return PyStr_FromString(dyn_BINDIR);
+	return PyUnicode_FromString(dyn_BINDIR);
 }
 
-static PyObject *py_sbin_dir(PyObject *self)
+static PyObject *py_sbin_dir(PyObject *self, PyObject *Py_UNUSED(ignored))
 {
-	return PyStr_FromString(dyn_SBINDIR);
+	return PyUnicode_FromString(dyn_SBINDIR);
 }
 
 static PyMethodDef pyparam_methods[] = {
-	{ "default_path", (PyCFunction)py_default_path, METH_NOARGS, 
+	{ "default_path", (PyCFunction)py_default_path, METH_NOARGS,
 		"Returns the default smb.conf path." },
 	{ "setup_dir", (PyCFunction)py_setup_dir, METH_NOARGS,
-		"Returns the compiled in location of provision tempates." },
+		"Returns the compiled in location of provision templates." },
 	{ "modules_dir", (PyCFunction)py_modules_dir, METH_NOARGS,
 		"Returns the compiled in location of modules." },
 	{ "bin_dir", (PyCFunction)py_bin_dir, METH_NOARGS,

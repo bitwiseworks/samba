@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 #
 # enabled the Recycle Bin optional feature
 #
@@ -50,4 +50,4 @@ msg["enableOptionalFeature"] = ldb.MessageElement(
      ldb.FLAG_MOD_ADD, "enableOptionalFeature")
 res = sam_ldb.modify(msg)
 
-print "Recycle Bin feature enabled"
+print("Recycle Bin feature enabled")

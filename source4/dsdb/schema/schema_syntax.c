@@ -2541,7 +2541,7 @@ static const struct dsdb_syntax dsdb_syntaxes[] = {
 		.validate_ldb		= dsdb_syntax_INT64_validate_ldb,
 		.equality               = "integerMatch",
 		.comment                = "Large Integer",
-		.ldb_syntax             = LDB_SYNTAX_INTEGER,
+		.ldb_syntax             = LDB_SYNTAX_ORDERED_INTEGER,
 		.auto_normalise		= true
 	},{
 		.name			= "String(NT-Sec-Desc)",
@@ -2640,7 +2640,7 @@ static const struct dsdb_syntax dsdb_syntaxes[] = {
 const struct dsdb_syntax *find_syntax_map_by_ad_oid(const char *ad_oid)
 {
 	unsigned int i;
-	for (i=0; dsdb_syntaxes[i].ldap_oid; i++) {
+	for (i=0; i < ARRAY_SIZE(dsdb_syntaxes); i++) {
 		if (strcasecmp(ad_oid, dsdb_syntaxes[i].attributeSyntax_oid) == 0) {
 			return &dsdb_syntaxes[i];
 		}
@@ -2651,7 +2651,7 @@ const struct dsdb_syntax *find_syntax_map_by_ad_oid(const char *ad_oid)
 const struct dsdb_syntax *find_syntax_map_by_ad_syntax(int oMSyntax)
 {
 	unsigned int i;
-	for (i=0; dsdb_syntaxes[i].ldap_oid; i++) {
+	for (i=0; i < ARRAY_SIZE(dsdb_syntaxes); i++) {
 		if (oMSyntax == dsdb_syntaxes[i].oMSyntax) {
 			return &dsdb_syntaxes[i];
 		}
@@ -2662,7 +2662,7 @@ const struct dsdb_syntax *find_syntax_map_by_ad_syntax(int oMSyntax)
 const struct dsdb_syntax *find_syntax_map_by_standard_oid(const char *standard_oid)
 {
 	unsigned int i;
-	for (i=0; dsdb_syntaxes[i].ldap_oid; i++) {
+	for (i=0; i < ARRAY_SIZE(dsdb_syntaxes); i++) {
 		if (strcasecmp(standard_oid, dsdb_syntaxes[i].ldap_oid) == 0) {
 			return &dsdb_syntaxes[i];
 		}
@@ -2797,24 +2797,3 @@ WERROR dsdb_attribute_drsuapi_to_ldb(struct ldb_context *ldb,
 
 	return sa->syntax->drsuapi_to_ldb(&syntax_ctx, sa, in, mem_ctx, out);
 }
-
-WERROR dsdb_attribute_ldb_to_drsuapi(struct ldb_context *ldb,
-				     const struct dsdb_schema *schema,
-				     const struct ldb_message_element *in,
-				     TALLOC_CTX *mem_ctx,
-				     struct drsuapi_DsReplicaAttribute *out)
-{
-	const struct dsdb_attribute *sa;
-	struct dsdb_syntax_ctx syntax_ctx;
-
-	sa = dsdb_attribute_by_lDAPDisplayName(schema, in->name);
-	if (!sa) {
-		return WERR_DS_ATT_NOT_DEF_IN_SCHEMA;
-	}
-
-	/* use default syntax conversion context */
-	dsdb_syntax_ctx_init(&syntax_ctx, ldb, schema);
-
-	return sa->syntax->ldb_to_drsuapi(&syntax_ctx, sa, in, mem_ctx, out);
-}
-

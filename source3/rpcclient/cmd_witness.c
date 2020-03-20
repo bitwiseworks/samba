@@ -88,7 +88,7 @@ static WERROR cmd_witness_GetInterfaceList(struct rpc_pipe_client *cli,
 			d_printf(" V2");
 			break;
 		default:
-			d_printf(" Unsuported Version (0x%08x)", interfaces[n].version);
+			d_printf(" Unsupported Version (0x%08x)", interfaces[n].version);
 		}
 
 		d_printf("\n");
@@ -115,13 +115,61 @@ static WERROR cmd_witness_Register(struct rpc_pipe_client *cli,
 	int c;
 	poptContext optCon;
 	struct poptOption optionsTable[] = {
-		{"version", 'v', POPT_ARG_LONG|POPT_ARGFLAG_SHOW_DEFAULT, &version, WITNESS_V2, "witness version", "version"},
-		{"V1", '1', POPT_ARG_LONG|POPT_ARG_VAL, &version, WITNESS_V1, "witness version 1", NULL},
-		{"V2", '2', POPT_ARG_LONG|POPT_ARG_VAL, &version, WITNESS_V2, "witness version 2", NULL},
-		{"net", 'n', POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT, &net_name, 0, "net name", NULL},
-		{"ip",  'i', POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT, &ip_addr, 0, "ip address", NULL},
-		{"client", 'c', POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT|POPT_ARGFLAG_OPTIONAL, &client_name, 0, "client name", NULL},
-		{ NULL, 0, 0, NULL, 0 }
+		{
+			.longName   = "version",
+			.shortName  = 'v',
+			.argInfo    = POPT_ARG_LONG|POPT_ARGFLAG_SHOW_DEFAULT,
+			.arg        = &version,
+			.val        = WITNESS_V2,
+			.descrip    = "witness version",
+			.argDescrip = "version"
+		},
+		{
+			.longName   = "V1",
+			.shortName  = '1',
+			.argInfo    = POPT_ARG_LONG|POPT_ARG_VAL,
+			.arg        = &version,
+			.val        = WITNESS_V1,
+			.descrip    = "witness version 1",
+			.argDescrip = NULL
+		},
+		{
+			.longName   = "V2",
+			.shortName  = '2',
+			.argInfo    = POPT_ARG_LONG|POPT_ARG_VAL,
+			.arg        = &version,
+			.val        = WITNESS_V2,
+			.descrip    = "witness version 2",
+			.argDescrip = NULL
+		},
+		{
+			.longName   = "net",
+			.shortName  = 'n',
+			.argInfo    = POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT,
+			.arg        = &net_name,
+			.val        = 0,
+			.descrip    = "net name",
+			.argDescrip = NULL
+		},
+		{
+			.longName   = "ip",
+			.shortName  =  'i',
+			.argInfo    = POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT,
+			.arg        = &ip_addr,
+			.val        = 0,
+			.descrip    = "ip address",
+			.argDescrip = NULL
+		},
+		{
+			.longName   = "client",
+			.shortName  = 'c',
+			.argInfo    = POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT|POPT_ARGFLAG_OPTIONAL,
+			.arg        = &client_name,
+			.val        = 0,
+			.descrip    = "client name",
+			.argDescrip = NULL
+		},
+		POPT_TABLEEND
 	};
 
 	use_only_one_rpc_pipe_hack(cli);
@@ -165,6 +213,7 @@ static WERROR cmd_witness_Register(struct rpc_pipe_client *cli,
 	d_printf("%x:%s\n", hnd.handle_type, GUID_string(frame, &hnd.uuid));
 
 done:
+	poptFreeContext(optCon);
 	talloc_free(frame);
 	return result;
 }
@@ -188,16 +237,80 @@ static WERROR cmd_witness_RegisterEx(struct rpc_pipe_client *cli,
 	int c;
 	poptContext optCon;
 	struct poptOption optionsTable[] = {
-		{"version", 'v', POPT_ARG_LONG|POPT_ARGFLAG_SHOW_DEFAULT, &version, WITNESS_V2, "witness version", "version"},
-		{"V1", '1', POPT_ARG_LONG|POPT_ARG_VAL, &version, WITNESS_V1, "witness version 1", NULL},
-		{"V2", '2', POPT_ARG_LONG|POPT_ARG_VAL, &version, WITNESS_V2, "witness version 2", NULL},
-		{"net", 'n', POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT, &net_name, 0, "net name", NULL},
-		{"ip",  'i', POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT, &ip_addr, 0, "ip address", NULL},
-		{"share", 's', POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT, &share_name, 0, "share name", NULL},
-		{"client", 'c', POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT|POPT_ARGFLAG_OPTIONAL, &client_name, 0, "client name", NULL},
-		{"flags", 'f', POPT_ARG_LONG|POPT_ARGFLAG_OR|POPT_ARGFLAG_SHOW_DEFAULT, &flags, 0, "flags", NULL},
-		{"timeout", 't', POPT_ARG_LONG|POPT_ARGFLAG_SHOW_DEFAULT, &timeout, 0, "timeout", NULL},
-		{ NULL, 0, 0, NULL, 0 }
+		{
+			.longName   = "version",
+			.shortName  = 'v',
+			.argInfo    = POPT_ARG_LONG|POPT_ARGFLAG_SHOW_DEFAULT,
+			.arg        = &version,
+			.val        = WITNESS_V2,
+			.descrip    = "witness version",
+			.argDescrip = "version"
+		},
+		{
+			.longName   = "V1",
+			.shortName  = '1',
+			.argInfo    = POPT_ARG_LONG|POPT_ARG_VAL,
+			.arg        = &version,
+			.val        = WITNESS_V1,
+			.descrip    = "witness version 1",
+		},
+		{
+			.longName   = "V2",
+			.shortName  = '2',
+			.argInfo    = POPT_ARG_LONG|POPT_ARG_VAL,
+			.arg        = &version,
+			.val        = WITNESS_V2,
+			.descrip    = "witness version 2",
+		},
+		{
+			.longName   = "net",
+			.shortName  = 'n',
+			.argInfo    = POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT,
+			.arg        = &net_name,
+			.val        = 0,
+			.descrip    = "net name",
+		},
+		{
+			.longName   = "ip",
+			.shortName  = 'i',
+			.argInfo    = POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT,
+			.arg        = &ip_addr,
+			.val        = 0,
+			.descrip    = "ip address",
+		},
+		{
+			.longName   = "share",
+			.shortName  = 's',
+			.argInfo    = POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT,
+			.arg        = &share_name,
+			.val        = 0,
+			.descrip    = "share name",
+		},
+		{
+			.longName   = "client",
+			.shortName  = 'c',
+			.argInfo    = POPT_ARG_STRING|POPT_ARGFLAG_SHOW_DEFAULT|POPT_ARGFLAG_OPTIONAL,
+			.arg        = &client_name,
+			.val        = 0,
+			.descrip    = "client name",
+		},
+		{
+			.longName   = "flags",
+			.shortName  = 'f',
+			.argInfo    = POPT_ARG_LONG|POPT_ARGFLAG_OR|POPT_ARGFLAG_SHOW_DEFAULT,
+			.arg        = &flags,
+			.val        = 0,
+			.descrip    = "flags",
+		},
+		{
+			.longName   = "timeout",
+			.shortName  = 't',
+			.argInfo    = POPT_ARG_LONG|POPT_ARGFLAG_SHOW_DEFAULT,
+			.arg        = &timeout,
+			.val        = 0,
+			.descrip    = "timeout",
+		},
+		POPT_TABLEEND
 	};
 
 	use_only_one_rpc_pipe_hack(cli);
@@ -438,13 +551,62 @@ done:
 }
 
 struct cmd_set witness_commands[] = {
-	{"WITNESS"},
-	{"GetInterfaceList", RPC_RTYPE_WERROR, NULL, &cmd_witness_GetInterfaceList, &ndr_table_witness, NULL, "", ""},
-	{"Register", RPC_RTYPE_WERROR, NULL, &cmd_witness_Register, &ndr_table_witness, NULL, "", ""},
-	{"UnRegister", RPC_RTYPE_WERROR, NULL, &cmd_witness_UnRegister, &ndr_table_witness, NULL, "", ""},
-	{"AsyncNotify", RPC_RTYPE_WERROR, NULL, &cmd_witness_AsyncNotify, &ndr_table_witness, NULL, "", ""},
-	{"RegisterEx", RPC_RTYPE_WERROR, NULL, &cmd_witness_RegisterEx, &ndr_table_witness, NULL, "", ""},
-	{NULL}
+	{
+		.name = "WITNESS",
+	},
+	{
+		.name               = "GetInterfaceList",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = &cmd_witness_GetInterfaceList,
+		.table              = &ndr_table_witness,
+		.rpc_pipe           = NULL,
+		.description        = "",
+		.usage              = "",
+	},
+	{
+		.name               = "Register",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = &cmd_witness_Register,
+		.table              = &ndr_table_witness,
+		.rpc_pipe           = NULL,
+		.description        = "",
+		.usage              = "",
+	},
+	{
+		.name               = "UnRegister",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = &cmd_witness_UnRegister,
+		.table              = &ndr_table_witness,
+		.rpc_pipe           = NULL,
+		.description        = "",
+		.usage              = "",
+	},
+	{
+		.name               = "AsyncNotify",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = &cmd_witness_AsyncNotify,
+		.table              = &ndr_table_witness,
+		.rpc_pipe           = NULL,
+		.description        = "",
+		.usage              = "",
+	},
+	{
+		.name               = "RegisterEx",
+		.returntype         = RPC_RTYPE_WERROR,
+		.ntfn               = NULL,
+		.wfn                = &cmd_witness_RegisterEx,
+		.table              = &ndr_table_witness,
+		.rpc_pipe           = NULL,
+		.description        = "",
+		.usage              = "",
+	},
+	{
+		.name = NULL,
+	}
 };
 
 /*

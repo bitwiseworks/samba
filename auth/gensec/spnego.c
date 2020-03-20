@@ -72,7 +72,7 @@ struct spnego_neg_ops {
 	 * 'in_next'. Note that 'in_mem_ctx' is just passed as a hint, the
 	 * caller should treat 'in_next' as const and don't attempt to free the
 	 * content.  NT_STATUS_OK indicates the finish hook should be invoked
-	 * directly withing the need of gensec_update() on the subcontext.
+	 * directly within the need of gensec_update() on the subcontext.
 	 * Every other error indicates an error that's returned to the caller.
 	 */
 	NTSTATUS (*start_fn)(struct gensec_security *gensec_security,
@@ -90,7 +90,7 @@ struct spnego_neg_ops {
 	 * 'in_next'. Note that 'in_mem_ctx' is just passed as a hint, the
 	 * caller should treat 'in_next' as const and don't attempt to free the
 	 * content.  NT_STATUS_OK indicates the finish hook should be invoked
-	 * directly withing the need of gensec_update() on the subcontext.
+	 * directly within the need of gensec_update() on the subcontext.
 	 * Every other error indicates an error that's returned to the caller.
 	 */
 	NTSTATUS (*step_fn)(struct gensec_security *gensec_security,
@@ -136,6 +136,7 @@ struct spnego_state {
 	bool done_mic_check;
 
 	bool simulate_w2k;
+	bool no_optimistic;
 
 	/*
 	 * The following is used to implement
@@ -187,6 +188,10 @@ static NTSTATUS gensec_spnego_client_start(struct gensec_security *gensec_securi
 
 	spnego_state->simulate_w2k = gensec_setting_bool(gensec_security->settings,
 						"spnego", "simulate_w2k", false);
+	spnego_state->no_optimistic = gensec_setting_bool(gensec_security->settings,
+							  "spnego",
+							  "client_no_optimistic",
+							  false);
 
 	gensec_security->private_data = spnego_state;
 	return NT_STATUS_OK;
@@ -511,7 +516,11 @@ static NTSTATUS gensec_spnego_client_negTokenInit_start(
 	}
 
 	n->mech_idx = 0;
-	n->mech_types = spnego_in->negTokenInit.mechTypes;
+
+	/* Do not use server mech list as it isn't protected. Instead, get all
+	 * supported mechs (excluding SPNEGO). */
+	n->mech_types = gensec_security_oids(gensec_security, n,
+					     GENSEC_OID_SPNEGO);
 	if (n->mech_types == NULL) {
 		return NT_STATUS_INVALID_PARAMETER;
 	}
@@ -658,13 +667,30 @@ static NTSTATUS gensec_spnego_client_negTokenInit_finish(
 					DATA_BLOB *out)
 {
 	struct spnego_data spnego_out;
-	const char *my_mechs[] = {NULL, NULL};
+	const char * const *mech_types = NULL;
 	bool ok;
 
-	my_mechs[0] = spnego_state->neg_oid;
+	if (n->mech_types == NULL) {
+		DBG_WARNING("No mech_types list\n");
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
+	for (mech_types = n->mech_types; *mech_types != NULL; mech_types++) {
+		int cmp = strcmp(*mech_types, spnego_state->neg_oid);
+
+		if (cmp == 0) {
+			break;
+		}
+	}
+
+	if (*mech_types == NULL) {
+		DBG_ERR("Can't find selected sub mechanism in mech_types\n");
+		return NT_STATUS_INVALID_PARAMETER;
+	}
+
 	/* compose reply */
 	spnego_out.type = SPNEGO_NEG_TOKEN_INIT;
-	spnego_out.negTokenInit.mechTypes = my_mechs;
+	spnego_out.negTokenInit.mechTypes = mech_types;
 	spnego_out.negTokenInit.reqFlags = data_blob_null;
 	spnego_out.negTokenInit.reqFlagsPadding = 0;
 	spnego_out.negTokenInit.mechListMIC = data_blob_null;
@@ -676,7 +702,7 @@ static NTSTATUS gensec_spnego_client_negTokenInit_finish(
 	}
 
 	ok = spnego_write_mech_types(spnego_state,
-				     my_mechs,
+				     mech_types,
 				     &spnego_state->mech_types);
 	if (!ok) {
 		DBG_ERR("failed to write mechTypes\n");
@@ -873,8 +899,6 @@ static NTSTATUS gensec_spnego_client_negTokenTarg_finish(
 	DATA_BLOB mech_list_mic = data_blob_null;
 	NTSTATUS status;
 	struct spnego_data spnego_out;
-
-	status = sub_status;
 
 	if (!spnego_state->sub_sec_ready) {
 		/*
@@ -1293,6 +1317,10 @@ static NTSTATUS gensec_spnego_server_negTokenInit_step(
 			 */
 			spnego_state->downgraded = true;
 			spnego_state->mic_requested = true;
+		}
+
+		if (sub_in.length == 0) {
+			spnego_state->no_optimistic = true;
 		}
 
 		/*
@@ -1923,6 +1951,21 @@ static void gensec_spnego_update_pre(struct tevent_req *req)
 		 * blob and NT_STATUS_OK.
 		 */
 		state->sub.status = NT_STATUS_OK;
+	} else if (spnego_state->state_position == SPNEGO_CLIENT_START &&
+		   spnego_state->no_optimistic) {
+		/*
+		 * Skip optimistic token per conf.
+		 */
+		state->sub.status = NT_STATUS_MORE_PROCESSING_REQUIRED;
+	} else if (spnego_state->state_position == SPNEGO_SERVER_START &&
+		   state->sub.in.length == 0 && spnego_state->no_optimistic) {
+		/*
+		 * If we didn't like the mechanism for which the client sent us
+		 * an optimistic token, or if he didn't send any, don't call
+		 * the sub mechanism just yet.
+		 */
+		state->sub.status = NT_STATUS_MORE_PROCESSING_REQUIRED;
+		spnego_state->no_optimistic = false;
 	} else {
 		/*
 		 * MORE_PROCESSING_REQUIRED =>

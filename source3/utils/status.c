@@ -44,10 +44,12 @@
 #include "librpc/gen_ndr/open_files.h"
 #include "smbd/smbd.h"
 #include "librpc/gen_ndr/notify.h"
-#include "lib/conn_tdb.h"
+#include "conn_tdb.h"
 #include "serverid.h"
 #include "status_profile.h"
 #include "smbd/notifyd/notifyd.h"
+#include "cmdline_contexts.h"
+#include "locking/leases_db.h"
 
 #define SMB_MAXPIDS		2048
 static uid_t 		Ucrit_uid = 0;               /* added by OH */
@@ -91,7 +93,7 @@ static unsigned int Ucrit_checkPid(struct server_id pid)
 		return 1;
 
 	for (i=0;i<Ucrit_MaxPid;i++) {
-		if (serverid_equal(&pid, &Ucrit_pid[i])) {
+		if (server_id_equal(&pid, &Ucrit_pid[i])) {
 			return 1;
 		}
 	}
@@ -116,13 +118,12 @@ static bool Ucrit_addPid( struct server_id pid )
 	return True;
 }
 
-static int print_share_mode(const struct share_mode_entry *e,
-			    const struct file_id *id,
-			    const char *sharepath,
-			    const char *fname,
-			    const char *sname,
-			    void *dummy)
+static int print_share_mode(struct file_id fid,
+			    const struct share_mode_data *d,
+			    const struct share_mode_entry *e,
+			    void *private_data)
 {
+	bool resolve_uids = *((bool *)private_data);
 	static int count;
 
 	if (do_checks && !is_valid_share_mode_entry(e)) {
@@ -131,7 +132,7 @@ static int print_share_mode(const struct share_mode_entry *e,
 
 	if (count==0) {
 		d_printf("Locked files:\n");
-		d_printf("Pid          Uid        DenyMode   Access      R/W        Oplock           SharePath   Name   Time\n");
+		d_printf("Pid          User(ID)   DenyMode   Access      R/W        Oplock           SharePath   Name   Time\n");
 		d_printf("--------------------------------------------------------------------------------------------------\n");
 	}
 	count++;
@@ -144,15 +145,19 @@ static int print_share_mode(const struct share_mode_entry *e,
 	if (Ucrit_checkPid(e->pid)) {
 		struct server_id_buf tmp;
 		d_printf("%-11s  ", server_id_str_buf(e->pid, &tmp));
-		d_printf("%-9u  ", (unsigned int)e->uid);
+		if (resolve_uids) {
+			d_printf("%-14s  ", uidtoname(e->uid));
+		} else {
+			d_printf("%-9u  ", (unsigned int)e->uid);
+		}
 		switch (map_share_mode_to_deny_mode(e->share_access,
 						    e->private_options)) {
 			case DENY_NONE: d_printf("DENY_NONE  "); break;
 			case DENY_ALL:  d_printf("DENY_ALL   "); break;
 			case DENY_DOS:  d_printf("DENY_DOS   "); break;
 			case DENY_READ: d_printf("DENY_READ  "); break;
-			case DENY_WRITE:printf("DENY_WRITE "); break;
-			case DENY_FCB:  d_printf("DENY_FCB "); break;
+			case DENY_WRITE:d_printf("DENY_WRITE "); break;
+			case DENY_FCB:  d_printf("DENY_FCB   "); break;
 			default: {
 				d_printf("unknown-please report ! "
 					 "e->share_access = 0x%x, "
@@ -182,21 +187,38 @@ static int print_share_mode(const struct share_mode_entry *e,
 		} else if (e->op_type & LEVEL_II_OPLOCK) {
 			d_printf("LEVEL_II        ");
 		} else if (e->op_type == LEASE_OPLOCK) {
-			uint32_t lstate = e->lease->current_state;
-			d_printf("LEASE(%s%s%s)%s%s%s      ",
-				 (lstate & SMB2_LEASE_READ)?"R":"",
-				 (lstate & SMB2_LEASE_WRITE)?"W":"",
-				 (lstate & SMB2_LEASE_HANDLE)?"H":"",
-				 (lstate & SMB2_LEASE_READ)?"":" ",
-				 (lstate & SMB2_LEASE_WRITE)?"":" ",
-				 (lstate & SMB2_LEASE_HANDLE)?"":" ");
+			NTSTATUS status;
+			uint32_t lstate;
+
+			status = leases_db_get(
+				&e->client_guid,
+				&e->lease_key,
+				&d->id,
+				&lstate, /* current_state */
+				NULL, /* breaking */
+				NULL, /* breaking_to_requested */
+				NULL, /* breaking_to_required */
+				NULL, /* lease_version */
+				NULL); /* epoch */
+
+			if (NT_STATUS_IS_OK(status)) {
+				d_printf("LEASE(%s%s%s)%s%s%s      ",
+					 (lstate & SMB2_LEASE_READ)?"R":"",
+					 (lstate & SMB2_LEASE_WRITE)?"W":"",
+					 (lstate & SMB2_LEASE_HANDLE)?"H":"",
+					 (lstate & SMB2_LEASE_READ)?"":" ",
+					 (lstate & SMB2_LEASE_WRITE)?"":" ",
+					 (lstate & SMB2_LEASE_HANDLE)?"":" ");
+			} else {
+				d_printf("LEASE STATE UNKNOWN");
+			}
 		} else {
 			d_printf("NONE            ");
 		}
 
 		d_printf(" %s   %s%s   %s",
-			 sharepath, fname,
-			 sname ? sname : "",
+			 d->servicepath, d->base_name,
+			 (d->stream_name != NULL) ? d->stream_name : "",
 			 time_to_asc((time_t)e->time.tv_sec));
 	}
 
@@ -219,8 +241,6 @@ static void print_brl(struct file_id id,
 	} lock_types[] = {
 		{ READ_LOCK, "R" },
 		{ WRITE_LOCK, "W" },
-		{ PENDING_READ_LOCK, "PR" },
-		{ PENDING_WRITE_LOCK, "PW" },
 		{ UNLOCK_LOCK, "U" }
 	};
 	const char *desc="X";
@@ -228,6 +248,7 @@ static void print_brl(struct file_id id,
 	char *fname = NULL;
 	struct share_mode_lock *share_mode;
 	struct server_id_buf tmp;
+	struct file_id_buf ftmp;
 
 	if (count==0) {
 		d_printf("Byte range locks:\n");
@@ -260,7 +281,8 @@ static void print_brl(struct file_id id,
 	}
 
 	d_printf("%-10s %-15s %-4s %-9jd %-9jd %-24s %-24s\n",
-		 server_id_str_buf(pid, &tmp), file_id_string_tos(&id),
+		 server_id_str_buf(pid, &tmp),
+		 file_id_str_buf(id, &ftmp),
 		 desc,
 		 (intmax_t)start, (intmax_t)size,
 		 sharepath, fname);
@@ -502,33 +524,129 @@ static bool print_notify_rec(const char *path, struct server_id server,
 	return true;
 }
 
+enum {
+	OPT_RESOLVE_UIDS = 1000,
+};
+
 int main(int argc, const char *argv[])
 {
 	int c;
 	int profile_only = 0;
 	bool show_processes, show_locks, show_shares;
 	bool show_notify = false;
-	poptContext pc;
+	bool resolve_uids = false;
+	poptContext pc = NULL;
 	struct poptOption long_options[] = {
 		POPT_AUTOHELP
-		{"processes",	'p', POPT_ARG_NONE,	NULL, 'p', "Show processes only" },
-		{"verbose",	'v', POPT_ARG_NONE, 	NULL, 'v', "Be verbose" },
-		{"locks",	'L', POPT_ARG_NONE,	NULL, 'L', "Show locks only" },
-		{"shares",	'S', POPT_ARG_NONE,	NULL, 'S', "Show shares only" },
-		{"notify",	'N', POPT_ARG_NONE,	NULL, 'N', "Show notifies" },
-		{"user", 	'u', POPT_ARG_STRING,	&username, 'u', "Switch to user" },
-		{"brief",	'b', POPT_ARG_NONE, 	NULL, 'b', "Be brief" },
-		{"profile",     'P', POPT_ARG_NONE, NULL, 'P', "Do profiling" },
-		{"profile-rates", 'R', POPT_ARG_NONE, NULL, 'R', "Show call rates" },
-		{"byterange",	'B', POPT_ARG_NONE,	NULL, 'B', "Include byte range locks"},
-		{"numeric",	'n', POPT_ARG_NONE,	NULL, 'n', "Numeric uid/gid"},
-		{"fast",	'f', POPT_ARG_NONE,	NULL, 'f', "Skip checks if processes still exist"},
+		{
+			.longName   = "processes",
+			.shortName  = 'p',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'p',
+			.descrip    = "Show processes only",
+		},
+		{
+			.longName   = "verbose",
+			.shortName  = 'v',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'v',
+			.descrip    = "Be verbose",
+		},
+		{
+			.longName   = "locks",
+			.shortName  = 'L',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'L',
+			.descrip    = "Show locks only",
+		},
+		{
+			.longName   = "shares",
+			.shortName  = 'S',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'S',
+			.descrip    = "Show shares only",
+		},
+		{
+			.longName   = "notify",
+			.shortName  = 'N',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'N',
+			.descrip    = "Show notifies",
+		},
+		{
+			.longName   = "user",
+			.shortName  = 'u',
+			.argInfo    = POPT_ARG_STRING,
+			.arg        = &username,
+			.val        = 'u',
+			.descrip    = "Switch to user",
+		},
+		{
+			.longName   = "brief",
+			.shortName  = 'b',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'b',
+			.descrip    = "Be brief",
+		},
+		{
+			.longName   = "profile",
+			.shortName  =     'P',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'P',
+			.descrip    = "Do profiling",
+		},
+		{
+			.longName   = "profile-rates",
+			.shortName  = 'R',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'R',
+			.descrip    = "Show call rates",
+		},
+		{
+			.longName   = "byterange",
+			.shortName  = 'B',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'B',
+			.descrip    = "Include byte range locks"
+		},
+		{
+			.longName   = "numeric",
+			.shortName  = 'n',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'n',
+			.descrip    = "Numeric uid/gid"
+		},
+		{
+			.longName   = "fast",
+			.shortName  = 'f',
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = 'f',
+			.descrip    = "Skip checks if processes still exist"
+		},
+		{
+			.longName   = "resolve-uids",
+			.shortName  = 0,
+			.argInfo    = POPT_ARG_NONE,
+			.arg        = NULL,
+			.val        = OPT_RESOLVE_UIDS,
+			.descrip    = "Try to resolve UIDs to usernames"
+		},
 		POPT_COMMON_SAMBA
 		POPT_TABLEEND
 	};
 	TALLOC_CTX *frame = talloc_stackframe();
 	int ret = 0;
-	struct tevent_context *ev;
 	struct messaging_context *msg_ctx = NULL;
 	char *db_path;
 	bool ok;
@@ -591,6 +709,9 @@ int main(int argc, const char *argv[])
 		case 'f':
 			do_checks = false;
 			break;
+		case OPT_RESOLVE_UIDS:
+			resolve_uids = true;
+			break;
 		}
 	}
 
@@ -607,28 +728,9 @@ int main(int argc, const char *argv[])
 		d_printf("using configfile = %s\n", get_dyn_CONFIGFILE());
 	}
 
-	if (!lp_load_initial_only(get_dyn_CONFIGFILE())) {
-		fprintf(stderr, "Can't load %s - run testparm to debug it\n",
-			get_dyn_CONFIGFILE());
-		ret = -1;
-		goto done;
-	}
-
-
-	/*
-	 * This implicitly initializes the global ctdbd connection,
-	 * usable by the db_open() calls further down.
-	 */
-	ev = samba_tevent_context_init(NULL);
-	if (ev == NULL) {
-		fprintf(stderr, "samba_tevent_context_init failed\n");
-		ret = -1;
-		goto done;
-	}
-
-	msg_ctx = messaging_init(NULL, ev);
+	msg_ctx = cmdline_messaging_context(get_dyn_CONFIGFILE());
 	if (msg_ctx == NULL) {
-		fprintf(stderr, "messaging_init failed\n");
+		fprintf(stderr, "Could not initialize messaging, not root?\n");
 		ret = -1;
 		goto done;
 	}
@@ -644,11 +746,13 @@ int main(int argc, const char *argv[])
 		case 'P':
 			/* Dump profile data */
 			ok = status_profile_dump(verbose);
-			return ok ? 0 : 1;
+			ret = ok ? 0 : 1;
+			goto done;
 		case 'R':
 			/* Continuously display rate-converted data */
 			ok = status_profile_rates(verbose);
-			return ok ? 0 : 1;
+			ret = ok ? 0 : 1;
+			goto done;
 		default:
 			break;
 	}
@@ -686,7 +790,7 @@ int main(int argc, const char *argv[])
 		int result;
 		struct db_context *db;
 
-		db_path = lock_path("locking.tdb");
+		db_path = lock_path(talloc_tos(), "locking.tdb");
 		if (db_path == NULL) {
 			d_printf("Out of memory - exiting\n");
 			ret = -1;
@@ -714,7 +818,7 @@ int main(int argc, const char *argv[])
 			goto done;
 		}
 
-		result = share_entry_forall(print_share_mode, NULL);
+		result = share_entry_forall(print_share_mode, &resolve_uids);
 
 		if (result == 0) {
 			d_printf("No locked files\n");
@@ -744,6 +848,7 @@ int main(int argc, const char *argv[])
 	}
 
 done:
+	poptFreeContext(pc);
 	TALLOC_FREE(frame);
 	return ret;
 }

@@ -18,22 +18,22 @@
 #
 # Based on the EchoServer example from python docs
 from __future__ import print_function
-import SocketServer
-import time
+from samba.compat import SocketServer
 import sys
 from threading import Timer
 from samba.dcerpc import dns
 import samba.ndr as ndr
-import random
 import re
 
 VERBOSE = False
+
 
 def debug(msg):
     if VERBOSE:
         sys.stdout.flush()
         print("\033[00;36m%s\033[00m" % msg)
         sys.stdout.flush()
+
 
 timeout = 0
 
@@ -76,7 +76,7 @@ class DnsHandler(SocketServer.BaseRequestHandler):
         debug("%s: %s wrote:" % (SERVER_ID, self.client_address[0]))
 
         global timeout
-        m = re.match('^timeout\s+([\d.]+)$', data.strip())
+        m = re.match(b'^timeout\s+([\d.]+)$', data.strip())
         if m:
             timeout = float(m.group(1))
             debug("timing out at %s" % timeout)
@@ -85,10 +85,12 @@ class DnsHandler(SocketServer.BaseRequestHandler):
         t = Timer(timeout, self.really_handle, [data, socket])
         t.start()
 
+
 def main():
     global SERVER_ID
     host, port, SERVER_ID = sys.argv[1:]
     server = SocketServer.UDPServer((host, int(port)), DnsHandler)
     server.serve_forever()
+
 
 main()

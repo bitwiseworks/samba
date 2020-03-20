@@ -79,7 +79,8 @@ static char **get_logged_on_userlist(TALLOC_CTX *mem_ctx)
 		for (i = 0; i < num_users; i++) {
 			/* getutxent can return multiple user entries for the
 			 * same user, so ignore any dups */
-			if (strcmp(u->ut_user, usr_infos[i].name) == 0) {
+			int cmp = strncmp(u->ut_user, usr_infos[i].name, sizeof(u->ut_user));
+			if (cmp == 0) {
 				break;
 			}
 		}
@@ -345,6 +346,8 @@ static struct wkssvc_NetWkstaInfo102 *create_wks_info_102(TALLOC_CTX *mem_ctx)
 WERROR _wkssvc_NetWkstaGetInfo(struct pipes_struct *p,
 			       struct wkssvc_NetWkstaGetInfo *r)
 {
+	struct dom_sid_buf buf;
+
 	switch (r->in.level) {
 	case 100:
 		/* Level 100 can be allowed from anyone including anonymous
@@ -362,8 +365,9 @@ WERROR _wkssvc_NetWkstaGetInfo(struct pipes_struct *p,
 				 "101\n"));
 			DEBUGADD(3,(" - does not have sid for Authenticated "
 				    "Users %s:\n",
-				    sid_string_dbg(
-					    &global_sid_Authenticated_Users)));
+				    dom_sid_str_buf(
+					    &global_sid_Authenticated_Users,
+					    &buf)));
 			security_token_debug(DBGC_CLASS, 3,
 					    p->session_info->security_token);
 			return WERR_ACCESS_DENIED;
@@ -381,7 +385,9 @@ WERROR _wkssvc_NetWkstaGetInfo(struct pipes_struct *p,
 				 "102\n"));
 			DEBUGADD(3,(" - does not have sid for Administrators "
 				    "group %s, sids are:\n",
-				    sid_string_dbg(&global_sid_Builtin_Administrators)));
+				    dom_sid_str_buf(
+					    &global_sid_Builtin_Administrators,
+					    &buf)));
 			security_token_debug(DBGC_CLASS, 3,
 					    p->session_info->security_token);
 			return WERR_ACCESS_DENIED;
@@ -563,10 +569,13 @@ WERROR _wkssvc_NetWkstaEnumUsers(struct pipes_struct *p,
 	/* This with any level should only be allowed from a domain administrator */
 	if (!nt_token_check_sid(&global_sid_Builtin_Administrators,
 				p->session_info->security_token)) {
+		struct dom_sid_buf buf;
 		DEBUG(1,("User not allowed for NetWkstaEnumUsers\n"));
 		DEBUGADD(3,(" - does not have sid for Administrators group "
-			    "%s\n", sid_string_dbg(
-				    &global_sid_Builtin_Administrators)));
+			    "%s\n",
+			    dom_sid_str_buf(
+				    &global_sid_Builtin_Administrators,
+				    &buf)));
 		security_token_debug(DBGC_CLASS, 3, p->session_info->security_token);
 		return WERR_ACCESS_DENIED;
 	}

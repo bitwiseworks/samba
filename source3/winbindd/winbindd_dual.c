@@ -242,7 +242,7 @@ static void wb_child_request_waited(struct tevent_req *subreq)
 
 	tevent_fd_set_flags(state->child->monitor_fde, 0);
 
-	subreq = wb_simple_trans_send(state, server_event_context(), NULL,
+	subreq = wb_simple_trans_send(state, global_event_context(), NULL,
 				      state->child->sock, state->request);
 	if (tevent_req_nomem(subreq, req)) {
 		return;
@@ -757,13 +757,16 @@ void setup_child(struct winbindd_domain *domain, struct winbindd_child *child,
 		 const char *logprefix,
 		 const char *logname)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+
 	if (logprefix && logname) {
 		char *logbase = NULL;
 
-		if (*lp_logfile(talloc_tos())) {
+		if (*lp_logfile(talloc_tos(), lp_sub)) {
 			char *end = NULL;
 
-			if (asprintf(&logbase, "%s", lp_logfile(talloc_tos())) < 0) {
+			if (asprintf(&logbase, "%s", lp_logfile(talloc_tos(), lp_sub)) < 0) {
 				smb_panic("Internal error: asprintf failed");
 			}
 
@@ -1188,7 +1191,7 @@ static void account_lockout_policy_handler(struct tevent_context *ctx,
 			 nt_errstr(result)));
 	}
 
-	child->lockout_policy_event = tevent_add_timer(server_event_context(), NULL,
+	child->lockout_policy_event = tevent_add_timer(global_event_context(), NULL,
 						      timeval_current_ofs(3600, 0),
 						      account_lockout_policy_handler,
 						      child);
@@ -1271,7 +1274,7 @@ static void machine_password_change_handler(struct tevent_context *ctx,
 					    struct timeval now,
 					    void *private_data)
 {
-	struct messaging_context *msg_ctx = server_messaging_context();
+	struct messaging_context *msg_ctx = global_messaging_context();
 	struct winbindd_child *child =
 		(struct winbindd_child *)private_data;
 	struct rpc_pipe_client *netlogon_pipe = NULL;
@@ -1353,7 +1356,7 @@ static void machine_password_change_handler(struct tevent_context *ctx,
 	}
 
 done:
-	child->machine_password_change_event = tevent_add_timer(server_event_context(), NULL,
+	child->machine_password_change_event = tevent_add_timer(global_event_context(), NULL,
 							      next_change,
 							      machine_password_change_handler,
 							      child);
@@ -1497,14 +1500,14 @@ NTSTATUS winbindd_reinit_after_fork(const struct winbindd_child *myself,
 	NTSTATUS status;
 
 	status = reinit_after_fork(
-		server_messaging_context(),
-		server_event_context(),
+		global_messaging_context(),
+		global_event_context(),
 		true, NULL);
 	if (!NT_STATUS_IS_OK(status)) {
 		DEBUG(0,("reinit_after_fork() failed\n"));
 		return status;
 	}
-	initialize_password_db(true, server_event_context());
+	initialize_password_db(true, global_event_context());
 
 	close_conns_after_fork();
 
@@ -1523,24 +1526,24 @@ NTSTATUS winbindd_reinit_after_fork(const struct winbindd_child *myself,
 	CatchChild();
 
 	/* Don't handle the same messages as our parent. */
-	messaging_deregister(server_messaging_context(),
+	messaging_deregister(global_messaging_context(),
 			     MSG_SMB_CONF_UPDATED, NULL);
-	messaging_deregister(server_messaging_context(),
+	messaging_deregister(global_messaging_context(),
 			     MSG_SHUTDOWN, NULL);
-	messaging_deregister(server_messaging_context(),
+	messaging_deregister(global_messaging_context(),
 			     MSG_WINBIND_OFFLINE, NULL);
-	messaging_deregister(server_messaging_context(),
+	messaging_deregister(global_messaging_context(),
 			     MSG_WINBIND_ONLINE, NULL);
-	messaging_deregister(server_messaging_context(),
+	messaging_deregister(global_messaging_context(),
 			     MSG_WINBIND_ONLINESTATUS, NULL);
-	messaging_deregister(server_messaging_context(),
+	messaging_deregister(global_messaging_context(),
 			     MSG_WINBIND_DUMP_DOMAIN_LIST, NULL);
-	messaging_deregister(server_messaging_context(),
+	messaging_deregister(global_messaging_context(),
 			     MSG_DEBUG, NULL);
 
-	messaging_deregister(server_messaging_context(),
+	messaging_deregister(global_messaging_context(),
 			     MSG_WINBIND_DOMAIN_OFFLINE, NULL);
-	messaging_deregister(server_messaging_context(),
+	messaging_deregister(global_messaging_context(),
 			     MSG_WINBIND_DOMAIN_ONLINE, NULL);
 
 	/* We have destroyed all events in the winbindd_event_context
@@ -1672,8 +1675,8 @@ static bool fork_domain_child(struct winbindd_child *child)
 			return false;
 		}
 
-		child->monitor_fde = tevent_add_fd(server_event_context(),
-						   server_event_context(),
+		child->monitor_fde = tevent_add_fd(global_event_context(),
+						   global_event_context(),
 						   fdpair[1],
 						   TEVENT_FD_READ,
 						   child_socket_readable,
@@ -1718,16 +1721,16 @@ static bool fork_domain_child(struct winbindd_child *child)
 	}
 
 	/* Handle online/offline messages. */
-	messaging_register(server_messaging_context(), NULL,
+	messaging_register(global_messaging_context(), NULL,
 			   MSG_WINBIND_OFFLINE, child_msg_offline);
-	messaging_register(server_messaging_context(), NULL,
+	messaging_register(global_messaging_context(), NULL,
 			   MSG_WINBIND_ONLINE, child_msg_online);
-	messaging_register(server_messaging_context(), NULL,
+	messaging_register(global_messaging_context(), NULL,
 			   MSG_DEBUG, debug_message);
-	messaging_register(server_messaging_context(), NULL,
+	messaging_register(global_messaging_context(), NULL,
 			   MSG_WINBIND_IP_DROPPED,
 			   winbind_msg_ip_dropped);
-	messaging_register(server_messaging_context(), NULL,
+	messaging_register(global_messaging_context(), NULL,
 			   MSG_WINBIND_DISCONNECT_DC,
 			   winbind_msg_disconnect_dc);
 
@@ -1782,7 +1785,7 @@ static bool fork_domain_child(struct winbindd_child *child)
 		}
 
 		child->lockout_policy_event = tevent_add_timer(
-			server_event_context(), NULL, timeval_zero(),
+			global_event_context(), NULL, timeval_zero(),
 			account_lockout_policy_handler,
 			child);
 	}
@@ -1796,13 +1799,13 @@ static bool fork_domain_child(struct winbindd_child *child)
 		if (calculate_next_machine_pwd_change(child->domain->name,
 						       &next_change)) {
 			child->machine_password_change_event = tevent_add_timer(
-				server_event_context(), NULL, next_change,
+				global_event_context(), NULL, next_change,
 				machine_password_change_handler,
 				child);
 		}
 	}
 
-	fde = tevent_add_fd(server_event_context(), NULL, state.cli.sock,
+	fde = tevent_add_fd(global_event_context(), NULL, state.cli.sock,
 			    TEVENT_FD_READ, child_handler, &state);
 	if (fde == NULL) {
 		DEBUG(1, ("tevent_add_fd failed\n"));
@@ -1814,7 +1817,7 @@ static bool fork_domain_child(struct winbindd_child *child)
 		int ret;
 		TALLOC_CTX *frame = talloc_stackframe();
 
-		ret = tevent_loop_once(server_event_context());
+		ret = tevent_loop_once(global_event_context());
 		if (ret != 0) {
 			DEBUG(1, ("tevent_loop_once failed: %s\n",
 				  strerror(errno)));

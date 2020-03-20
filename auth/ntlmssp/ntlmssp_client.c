@@ -25,7 +25,6 @@ struct auth_session_info;
 
 #include "includes.h"
 #include "auth/ntlmssp/ntlmssp.h"
-#include "../lib/crypto/crypto.h"
 #include "../libcli/auth/libcli_auth.h"
 #include "auth/credentials/credentials.h"
 #include "auth/gensec/gensec.h"
@@ -35,6 +34,10 @@ struct auth_session_info;
 #include "../librpc/gen_ndr/ndr_ntlmssp.h"
 #include "../auth/ntlmssp/ntlmssp_ndr.h"
 #include "../nsswitch/libwbclient/wbclient.h"
+
+#include "lib/crypto/gnutls_helpers.h"
+#include <gnutls/gnutls.h>
+#include <gnutls/crypto.h>
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_AUTH
@@ -248,7 +251,8 @@ NTSTATUS ntlmssp_client_challenge(struct gensec_security *gensec_security,
 	const NTTIME *server_timestamp = NULL;
 	uint8_t mic_buffer[NTLMSSP_MIC_SIZE] = { 0, };
 	DATA_BLOB mic_blob = data_blob_const(mic_buffer, sizeof(mic_buffer));
-	HMACMD5Context ctx;
+	gnutls_hmac_hd_t hmac_hnd = NULL;
+	int rc;
 
 	TALLOC_CTX *mem_ctx = talloc_new(out_mem_ctx);
 	if (!mem_ctx) {
@@ -339,6 +343,22 @@ NTSTATUS ntlmssp_client_challenge(struct gensec_security *gensec_security,
 			dump_data(2, in.data, in.length);
 			talloc_free(mem_ctx);
 			return NT_STATUS_INVALID_PARAMETER;
+		}
+	}
+
+	if (DEBUGLEVEL >= 10) {
+		struct CHALLENGE_MESSAGE *challenge =
+			talloc(ntlmssp_state, struct CHALLENGE_MESSAGE);
+		if (challenge != NULL) {
+			NTSTATUS status;
+			challenge->NegotiateFlags = chal_flags;
+			status = ntlmssp_pull_CHALLENGE_MESSAGE(
+					&in, challenge, challenge);
+			if (NT_STATUS_IS_OK(status)) {
+				NDR_PRINT_DEBUG(CHALLENGE_MESSAGE,
+						challenge);
+			}
+			TALLOC_FREE(challenge);
 		}
 	}
 
@@ -653,12 +673,20 @@ NTSTATUS ntlmssp_client_challenge(struct gensec_security *gensec_security,
 	    && ntlmssp_state->allow_lm_key && lm_session_key.length == 16) {
 		DATA_BLOB new_session_key = data_blob_talloc(mem_ctx, NULL, 16);
 		if (lm_response.length == 24) {
-			SMBsesskeygen_lm_sess_key(lm_session_key.data, lm_response.data,
-						  new_session_key.data);
+			nt_status = SMBsesskeygen_lm_sess_key(lm_session_key.data,
+							      lm_response.data,
+							      new_session_key.data);
+			if (!NT_STATUS_IS_OK(nt_status)) {
+				return nt_status;
+			}
 		} else {
 			static const uint8_t zeros[24];
-			SMBsesskeygen_lm_sess_key(lm_session_key.data, zeros,
-						  new_session_key.data);
+			nt_status = SMBsesskeygen_lm_sess_key(lm_session_key.data,
+                                                              zeros,
+                                                              new_session_key.data);
+			if (!NT_STATUS_IS_OK(nt_status)) {
+				return nt_status;
+			}
 		}
 		session_key = new_session_key;
 		dump_data_pw("LM session key\n", session_key.data, session_key.length);
@@ -670,17 +698,43 @@ NTSTATUS ntlmssp_client_challenge(struct gensec_security *gensec_security,
 	if (ntlmssp_state->neg_flags & NTLMSSP_NEGOTIATE_KEY_EXCH) {
 		/* Make up a new session key */
 		uint8_t client_session_key[16];
-		generate_secret_buffer(client_session_key, sizeof(client_session_key));
+		gnutls_cipher_hd_t cipher_hnd;
+		gnutls_datum_t enc_session_key = {
+			.data = session_key.data,
+			.size = session_key.length,
+		};
+
+		generate_random_buffer(client_session_key, sizeof(client_session_key));
 
 		/* Encrypt the new session key with the old one */
 		encrypted_session_key = data_blob_talloc(ntlmssp_state,
 							 client_session_key, sizeof(client_session_key));
 		dump_data_pw("KEY_EXCH session key:\n", encrypted_session_key.data, encrypted_session_key.length);
-		arcfour_crypt(encrypted_session_key.data, session_key.data, encrypted_session_key.length);
+
+		rc = gnutls_cipher_init(&cipher_hnd,
+					GNUTLS_CIPHER_ARCFOUR_128,
+					&enc_session_key,
+					NULL);
+		if (rc < 0) {
+			nt_status = gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+			ZERO_ARRAY(client_session_key);
+			goto done;
+		}
+		rc = gnutls_cipher_encrypt(cipher_hnd,
+					   encrypted_session_key.data,
+					   encrypted_session_key.length);
+		gnutls_cipher_deinit(cipher_hnd);
+		if (rc < 0) {
+			nt_status = gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+			ZERO_ARRAY(client_session_key);
+			goto done;
+		}
+
 		dump_data_pw("KEY_EXCH session key (enc):\n", encrypted_session_key.data, encrypted_session_key.length);
 
 		/* Mark the new session key as the 'real' session key */
 		session_key = data_blob_talloc(mem_ctx, client_session_key, sizeof(client_session_key));
+		ZERO_ARRAY(client_session_key);
 	}
 
 	/* this generates the actual auth packet */
@@ -702,6 +756,22 @@ NTSTATUS ntlmssp_client_challenge(struct gensec_security *gensec_security,
 		return nt_status;
 	}
 
+	if (DEBUGLEVEL >= 10) {
+		struct AUTHENTICATE_MESSAGE *authenticate =
+			talloc(ntlmssp_state, struct AUTHENTICATE_MESSAGE);
+		if (authenticate != NULL) {
+			NTSTATUS status;
+			authenticate->NegotiateFlags = ntlmssp_state->neg_flags;
+			status = ntlmssp_pull_AUTHENTICATE_MESSAGE(
+				out, authenticate, authenticate);
+			if (NT_STATUS_IS_OK(status)) {
+				NDR_PRINT_DEBUG(AUTHENTICATE_MESSAGE,
+						authenticate);
+			}
+			TALLOC_FREE(authenticate);
+		}
+	}
+
 	/*
 	 * We always include the MIC, even without:
 	 * av_flags->Value.AvFlags |= NTLMSSP_AVFLAG_MIC_IN_AUTHENTICATE_MESSAGE;
@@ -709,18 +779,45 @@ NTSTATUS ntlmssp_client_challenge(struct gensec_security *gensec_security,
 	 *
 	 * This matches a Windows client.
 	 */
-	hmac_md5_init_limK_to_64(session_key.data,
-				 session_key.length,
-				 &ctx);
-	hmac_md5_update(ntlmssp_state->negotiate_blob.data,
-			ntlmssp_state->negotiate_blob.length,
-			&ctx);
-	hmac_md5_update(in.data, in.length, &ctx);
-	hmac_md5_update(out->data, out->length, &ctx);
-	hmac_md5_final(mic_buffer, &ctx);
-	memcpy(out->data + NTLMSSP_MIC_OFFSET, mic_buffer, NTLMSSP_MIC_SIZE);
+	rc = gnutls_hmac_init(&hmac_hnd,
+			      GNUTLS_MAC_MD5,
+			 session_key.data,
+			 MIN(session_key.length, 64));
+	if (rc < 0) {
+		nt_status = gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		goto done;
+	}
 
+	rc = gnutls_hmac(hmac_hnd,
+			 ntlmssp_state->negotiate_blob.data,
+			 ntlmssp_state->negotiate_blob.length);
+	if (rc < 0) {
+		gnutls_hmac_deinit(hmac_hnd, NULL);
+		nt_status = gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		goto done;
+	}
+	rc = gnutls_hmac(hmac_hnd, in.data, in.length);
+	if (rc < 0) {
+		gnutls_hmac_deinit(hmac_hnd, NULL);
+		nt_status = gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		goto done;
+	}
+	rc = gnutls_hmac(hmac_hnd, out->data, out->length);
+	if (rc < 0) {
+		gnutls_hmac_deinit(hmac_hnd, NULL);
+		nt_status = gnutls_error_to_ntstatus(rc, NT_STATUS_NTLM_BLOCKED);
+		goto done;
+	}
+
+	gnutls_hmac_deinit(hmac_hnd, mic_buffer);
+
+	memcpy(out->data + NTLMSSP_MIC_OFFSET, mic_buffer, NTLMSSP_MIC_SIZE);
+	ZERO_ARRAY(mic_buffer);
+
+	nt_status = NT_STATUS_OK;
 done:
+	ZERO_ARRAY_LEN(ntlmssp_state->negotiate_blob.data,
+		       ntlmssp_state->negotiate_blob.length);
 	data_blob_free(&ntlmssp_state->negotiate_blob);
 
 	ntlmssp_state->session_key = session_key;
@@ -744,7 +841,7 @@ done:
 	}
 
 	talloc_free(mem_ctx);
-	return NT_STATUS_OK;
+	return nt_status;
 }
 
 NTSTATUS gensec_ntlmssp_client_start(struct gensec_security *gensec_security)

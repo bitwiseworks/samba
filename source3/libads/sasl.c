@@ -216,7 +216,6 @@ static ADS_STATUS ads_sasl_spnego_gensec_bind(ADS_STRUCT *ads,
 	}
 
 	rc = LDAP_SASL_BIND_IN_PROGRESS;
-	nt_status = NT_STATUS_MORE_PROCESSING_REQUIRED;
 	if (use_spnego_principal) {
 		blob_in = data_blob_dup_talloc(talloc_tos(), server_blob);
 		if (blob_in.length == 0) {
@@ -366,8 +365,10 @@ static ADS_STATUS ads_init_gssapi_cred(ADS_STRUCT *ads, gss_cred_id_t *cred)
 		return ADS_SUCCESS;
 	}
 
-	kerr = krb5_init_context(&kctx);
+	kerr = smb_krb5_init_context_common(&kctx);
 	if (kerr) {
+	    DBG_ERR("kerberos init context failed (%s)\n",
+		    error_message(kerr));
 		return ADS_ERROR_KRB5(kerr);
 	}
 

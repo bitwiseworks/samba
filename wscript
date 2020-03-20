@@ -1,16 +1,16 @@
 #!/usr/bin/env python
 
-srcdir = '.'
-blddir = 'bin'
+top = '.'
+out = 'bin'
 
 APPNAME='samba'
 VERSION=None
 
 import sys, os, tempfile
-sys.path.insert(0, srcdir+"/buildtools/wafsamba")
-import wafsamba, Options, samba_dist, samba_git, Scripting, Utils, samba_version
-import Logs, samba_utils
+sys.path.insert(0, top+"/buildtools/wafsamba")
 import shutil
+import wafsamba, samba_dist, samba_git, samba_version, samba_utils
+from waflib import Options, Scripting, Logs, Context, Errors
 
 samba_dist.DIST_DIRS('.')
 samba_dist.DIST_BLACKLIST('.gitignore .bzrignore source4/selftest/provisions')
@@ -32,16 +32,14 @@ def system_mitkrb5_callback(option, opt, value, parser):
         del parser.rargs[:len(value)]
         setattr(parser.values, option.dest, value)
 
-def set_options(opt):
+def options(opt):
     opt.BUILTIN_DEFAULT('NONE')
     opt.PRIVATE_EXTENSION_DEFAULT('samba4')
-    opt.RECURSE('lib/audit_logging')
     opt.RECURSE('lib/replace')
     opt.RECURSE('dynconfig')
     opt.RECURSE('packaging')
     opt.RECURSE('lib/ldb')
     opt.RECURSE('selftest')
-    opt.RECURSE('source4/lib/tls')
     opt.RECURSE('source4/dsdb/samdb/ldb_modules')
     opt.RECURSE('pidl')
     opt.RECURSE('source3')
@@ -56,6 +54,14 @@ def set_options(opt):
                    help='build Samba with system MIT Kerberos. ' +
                         'You may specify list of paths where Kerberos is installed (e.g. /usr/local /usr/kerberos) to search krb5-config',
                    action='callback', callback=system_mitkrb5_callback, dest='with_system_mitkrb5', default=False)
+
+    opt.add_option('--with-experimental-mit-ad-dc',
+                   help='Enable the experimental MIT Kerberos-backed AD DC.  ' +
+                   'Note that security patches are not issued for this configuration',
+                   action='store_true',
+                   dest='with_experimental_mit_ad_dc',
+                   default=False)
+
     opt.add_option('--with-system-mitkdc',
                    help=('Specify the path to the krb5kdc binary from MIT Kerberos'),
                    type="string",
@@ -100,9 +106,16 @@ def set_options(opt):
 
     gr = opt.option_group('developer options')
 
-    opt.tool_options('python') # options for disabling pyc or pyo compilation
+    opt.load('python') # options for disabling pyc or pyo compilation
     # enable options related to building python extensions
 
+    opt.add_option('--with-json',
+                   action='store_true', dest='with_json',
+                   help=("Build with JSON support (default=True). This "
+                         "requires the jansson development headers."))
+    opt.add_option('--without-json',
+                   action='store_false', dest='with_json',
+                   help=("Build without JSON support."))
 
 def configure(conf):
     version = samba_version.load_version(env=conf.env)
@@ -116,10 +129,10 @@ def configure(conf):
         conf.env.DEVELOPER = True
         # if we are in a git tree without a pre-commit hook, install a
         # simple default.
-        pre_commit_hook = os.path.join(srcdir, '.git/hooks/pre-commit')
+        pre_commit_hook = os.path.join(Context.g_module.top, '.git/hooks/pre-commit')
         if (os.path.isdir(os.path.dirname(pre_commit_hook)) and
             not os.path.exists(pre_commit_hook)):
-            shutil.copy(os.path.join(srcdir, 'script/git-hooks/pre-commit-hook'),
+            shutil.copy(os.path.join(Context.g_module.top, 'script/git-hooks/pre-commit-hook'),
                         pre_commit_hook)
 
     conf.ADD_EXTRA_INCLUDES('#include/public #source4 #lib #source4/lib #source4/include #include #lib/replace')
@@ -128,16 +141,17 @@ def configure(conf):
     conf.RECURSE('lib/replace')
 
     conf.RECURSE('examples/fuse')
+    conf.RECURSE('examples/winexe')
 
     conf.SAMBA_CHECK_PERL(mandatory=True)
     conf.find_program('xsltproc', var='XSLTPROC')
 
     if conf.env.disable_python:
         if not (Options.options.without_ad_dc):
-            raise Utils.WafError('--disable-python requires --without-ad-dc')
+            raise Errors.WafError('--disable-python requires --without-ad-dc')
 
-    conf.SAMBA_CHECK_PYTHON(mandatory=True, version=(2, 6, 0))
-    conf.SAMBA_CHECK_PYTHON_HEADERS(mandatory=(not conf.env.disable_python))
+    conf.SAMBA_CHECK_PYTHON()
+    conf.SAMBA_CHECK_PYTHON_HEADERS()
 
     if sys.platform == 'darwin' and not conf.env['HAVE_ENVIRON_DECL']:
         # Mac OSX needs to have this and it's also needed that the python is compiled with this
@@ -145,58 +159,56 @@ def configure(conf):
         if not conf.CHECK_SHLIB_W_PYTHON("Checking if -fno-common is needed"):
             conf.ADD_CFLAGS('-fno-common')
         if not conf.CHECK_SHLIB_W_PYTHON("Checking if -undefined dynamic_lookup is not need"):
-            conf.env.append_value('shlib_LINKFLAGS', ['-undefined', 'dynamic_lookup'])
+            conf.env.append_value('cshlib_LINKFLAGS', ['-undefined', 'dynamic_lookup'])
 
     if sys.platform == 'darwin':
         conf.ADD_LDFLAGS('-framework CoreFoundation')
 
-    if int(conf.env['PYTHON_VERSION'][0]) >= 3:
-        raise Utils.WafError('Python version 3.x is not supported by Samba yet')
-
     conf.RECURSE('dynconfig')
     conf.RECURSE('selftest')
+
+    conf.CHECK_CFG(package='zlib', minversion='1.2.3',
+                   args='--cflags --libs',
+                   mandatory=True)
+    conf.CHECK_FUNCS_IN('inflateInit2', 'z')
 
     if conf.CHECK_FOR_THIRD_PARTY():
         conf.RECURSE('third_party')
     else:
-        if not conf.CHECK_ZLIB():
-            raise Utils.WafError('zlib development packages have not been found.\nIf third_party is installed, check that it is in the proper place.')
-        else:
-            conf.define('USING_SYSTEM_ZLIB',1)
 
         if not conf.CHECK_POPT():
-            raise Utils.WafError('popt development packages have not been found.\nIf third_party is installed, check that it is in the proper place.')
+            raise Errors.WafError('popt development packages have not been found.\nIf third_party is installed, check that it is in the proper place.')
         else:
             conf.define('USING_SYSTEM_POPT', 1)
 
         if not conf.CHECK_CMOCKA():
-            raise Utils.WafError('cmocka development packages has not been found.\nIf third_party is installed, check that it is in the proper place.')
+            raise Errors.WafError('cmocka development packages has not been found.\nIf third_party is installed, check that it is in the proper place.')
         else:
             conf.define('USING_SYSTEM_CMOCKA', 1)
 
         if conf.CONFIG_GET('ENABLE_SELFTEST'):
             if not conf.CHECK_SOCKET_WRAPPER():
-                raise Utils.WafError('socket_wrapper package has not been found.\nIf third_party is installed, check that it is in the proper place.')
+                raise Errors.WafError('socket_wrapper package has not been found.\nIf third_party is installed, check that it is in the proper place.')
             else:
                 conf.define('USING_SYSTEM_SOCKET_WRAPPER', 1)
 
             if not conf.CHECK_NSS_WRAPPER():
-                raise Utils.WafError('nss_wrapper package has not been found.\nIf third_party is installed, check that it is in the proper place.')
+                raise Errors.WafError('nss_wrapper package has not been found.\nIf third_party is installed, check that it is in the proper place.')
             else:
                 conf.define('USING_SYSTEM_NSS_WRAPPER', 1)
 
             if not conf.CHECK_RESOLV_WRAPPER():
-                raise Utils.WafError('resolv_wrapper package has not been found.\nIf third_party is installed, check that it is in the proper place.')
+                raise Errors.WafError('resolv_wrapper package has not been found.\nIf third_party is installed, check that it is in the proper place.')
             else:
                 conf.define('USING_SYSTEM_RESOLV_WRAPPER', 1)
 
             if not conf.CHECK_UID_WRAPPER():
-                raise Utils.WafError('uid_wrapper package has not been found.\nIf third_party is installed, check that it is in the proper place.')
+                raise Errors.WafError('uid_wrapper package has not been found.\nIf third_party is installed, check that it is in the proper place.')
             else:
                 conf.define('USING_SYSTEM_UID_WRAPPER', 1)
 
             if not conf.CHECK_PAM_WRAPPER():
-                raise Utils.WafError('pam_wrapper package has not been found.\nIf third_party is installed, check that it is in the proper place.')
+                raise Errors.WafError('pam_wrapper package has not been found.\nIf third_party is installed, check that it is in the proper place.')
             else:
                 conf.define('USING_SYSTEM_PAM_WRAPPER', 1)
 
@@ -210,31 +222,37 @@ def configure(conf):
         conf.DEFINE('AD_DC_BUILD_IS_ENABLED', 1)
 
     if Options.options.with_system_mitkrb5:
+        if not Options.options.with_experimental_mit_ad_dc and \
+           not Options.options.without_ad_dc:
+            raise Errors.WafError('The MIT Kerberos build of Samba as an AD DC ' +
+                                  'is experimental. Therefore '
+                                  '--with-system-mitkrb5 requires either ' +
+                                  '--with-experimental-mit-ad-dc or ' +
+                                  '--without-ad-dc')
+
         conf.PROCESS_SEPARATE_RULE('system_mitkrb5')
+
     if not (Options.options.without_ad_dc or Options.options.with_system_mitkrb5):
         conf.DEFINE('AD_DC_BUILD_IS_ENABLED', 1)
 
     if Options.options.with_system_heimdalkrb5:
         if Options.options.with_system_mitkrb5:
-            raise Utils.WafError('--with-system-heimdalkrb5 conflicts with ' +
-                                 '--with-system-mitkrb5')
+            raise Errors.WafError('--with-system-heimdalkrb5 conflicts with ' +
+                                  '--with-system-mitkrb5')
         if not Options.options.without_ad_dc:
-            raise Utils.WafError('--with-system-heimdalkrb5 requires ' +
-                                 '--without-ad-dc')
+            raise Errors.WafError('--with-system-heimdalkrb5 requires ' +
+                                  '--without-ad-dc')
         conf.env.SYSTEM_LIBS += ('heimdal', 'asn1', 'com_err', 'roken',
                                  'hx509', 'wind', 'gssapi', 'hcrypto',
                                  'krb5', 'heimbase', 'asn1_compile',
                                  'compile_et', 'kdc', 'hdb', 'heimntlm')
+        conf.PROCESS_SEPARATE_RULE('system_heimdal')
 
-    # Only process heimdal_build for non-MIT KRB5 builds
-    # When MIT KRB5 checks are done as above, conf.env.KRB5_VENDOR will be set
-    # to the lowcased output of 'krb5-config --vendor'.
-    # If it is not set or the output is 'heimdal', we are dealing with
-    # system-provided or embedded Heimdal build
-    if conf.CONFIG_GET('KRB5_VENDOR') in (None, 'heimdal'):
-        conf.RECURSE('source4/heimdal_build')
-    conf.RECURSE('lib/audit_logging')
-    conf.RECURSE('source4/lib/tls')
+    if not conf.CONFIG_GET('KRB5_VENDOR'):
+        conf.PROCESS_SEPARATE_RULE('embedded_heimdal')
+
+    conf.PROCESS_SEPARATE_RULE('system_gnutls')
+
     conf.RECURSE('source4/dsdb/samdb/ldb_modules')
     conf.RECURSE('source4/ntvfs/sysdep')
     conf.RECURSE('lib/util')
@@ -250,12 +268,12 @@ def configure(conf):
                 conf.DEFINE('WITH_NTVFS_FILESERVER', 1)
         if Options.options.with_ntvfs_fileserver == False:
             if not (Options.options.without_ad_dc):
-                raise Utils.WafError('--without-ntvfs-fileserver conflicts with --enable-selftest while building the AD DC')
+                raise Errors.WafError('--without-ntvfs-fileserver conflicts with --enable-selftest while building the AD DC')
         conf.RECURSE('testsuite/unittests')
 
     if Options.options.with_ntvfs_fileserver == True:
         if Options.options.without_ad_dc:
-            raise Utils.WafError('--with-ntvfs-fileserver conflicts with --without-ad-dc')
+            raise Errors.WafError('--with-ntvfs-fileserver conflicts with --without-ad-dc')
         conf.DEFINE('WITH_NTVFS_FILESERVER', 1)
 
     if Options.options.with_pthreadpool:
@@ -265,12 +283,35 @@ def configure(conf):
             Logs.warn("pthreadpool support cannot be enabled when pthread support was not found")
             conf.undefine('WITH_PTHREADPOOL')
 
+    conf.SET_TARGET_TYPE('jansson', 'EMPTY')
+
+    if Options.options.with_json != False:
+        if conf.CHECK_CFG(package='jansson', args='--cflags --libs',
+                          msg='Checking for jansson'):
+            conf.CHECK_FUNCS_IN('json_object', 'jansson')
+
+    if not conf.CONFIG_GET('HAVE_JSON_OBJECT'):
+        if Options.options.with_json != False:
+            conf.fatal("Jansson JSON support not found. "
+                       "Try installing libjansson-dev or jansson-devel. "
+                       "Otherwise, use --without-json to build without "
+                       "JSON support. "
+                       "JSON support is required for the JSON "
+                       "formatted audit log feature, the AD DC, and "
+                       "the JSON printers of the net utility")
+        if not Options.options.without_ad_dc:
+            raise Errors.WafError('--without-json requires --without-ad-dc. '
+                                 'Jansson JSON library is required for '
+                                 'building the AD DC')
+        Logs.info("Building without Jansson JSON log support")
+
     conf.RECURSE('source3')
     conf.RECURSE('lib/texpect')
     conf.RECURSE('python')
     if conf.env.with_ctdb:
         conf.RECURSE('ctdb')
     conf.RECURSE('lib/socket')
+    conf.RECURSE('lib/mscat')
     conf.RECURSE('packaging')
 
     conf.SAMBA_CHECK_UNDEFINED_SYMBOL_FLAGS()
@@ -280,7 +321,7 @@ def configure(conf):
     # allows us to find problems on our development hosts faster.
     # It also results in faster load time.
 
-    conf.env.asneeded_ldflags = conf.ADD_LDFLAGS('-Wl,--as-needed', testflags=True)
+    conf.add_as_needed()
 
     if not conf.CHECK_NEED_LC("-lc not needed"):
         conf.ADD_LDFLAGS('-lc', testflags=False)
@@ -289,7 +330,7 @@ def configure(conf):
                            define='SUMMARY_PASSES',
                            addmain=False,
                            msg='Checking configure summary'):
-        raise Utils.WafError('configure summary failed')
+        raise Errors.WafError('configure summary failed')
 
     if Options.options.enable_pie != False:
         if Options.options.enable_pie == True:
@@ -315,23 +356,23 @@ def configure(conf):
 
 def etags(ctx):
     '''build TAGS file using etags'''
-    import Utils
-    source_root = os.path.dirname(Utils.g_module.root_path)
+    from waflib import Utils
+    source_root = os.path.dirname(Context.g_module.root_path)
     cmd = 'rm -f %s/TAGS && (find %s -name "*.[ch]" | egrep -v \.inst\. | xargs -n 100 etags -a)' % (source_root, source_root)
     print("Running: %s" % cmd)
     status = os.system(cmd)
     if os.WEXITSTATUS(status):
-        raise Utils.WafError('etags failed')
+        raise Errors.WafError('etags failed')
 
 def ctags(ctx):
     "build 'tags' file using ctags"
-    import Utils
-    source_root = os.path.dirname(Utils.g_module.root_path)
+    from waflib import Utils
+    source_root = os.path.dirname(Context.g_module.root_path)
     cmd = 'ctags --python-kinds=-i $(find %s -name "*.[ch]" | grep -v "*_proto\.h" | egrep -v \.inst\.) $(find %s -name "*.py")' % (source_root, source_root)
     print("Running: %s" % cmd)
     status = os.system(cmd)
     if os.WEXITSTATUS(status):
-        raise Utils.WafError('ctags failed')
+        raise Errors.WafError('ctags failed')
 
 
 # putting this here enabled build in the list
@@ -360,7 +401,7 @@ def pydoctor(ctx):
     print("Running: %s" % cmd)
     status = os.system(cmd)
     if os.WEXITSTATUS(status):
-        raise Utils.WafError('pydoctor failed')
+        raise Errors.WafError('pydoctor failed')
 
 
 def pep8(ctx):
@@ -369,7 +410,7 @@ def pep8(ctx):
     print("Running: %s" % cmd)
     status = os.system(cmd)
     if os.WEXITSTATUS(status):
-        raise Utils.WafError('pep8 failed')
+        raise Errors.WafError('pep8 failed')
 
 
 def wafdocs(ctx):
@@ -378,14 +419,13 @@ def wafdocs(ctx):
     os.system('pwd')
     list = recursive_dirlist('../buildtools/wafsamba', '.', pattern='*.py')
 
-    cmd='PYTHONPATH=bin/python pydoctor --project-name=wafsamba --project-url=http://www.samba.org --make-html --docformat=restructuredtext'
     print(list)
-    for f in list:
-        cmd += ' --add-module %s' % f
+    cmd='PYTHONPATH=bin/python pydoctor --project-name=wafsamba --project-url=http://www.samba.org --make-html --docformat=restructuredtext' +\
+        "".join(' --add-module %s' % f for f in list)
     print("Running: %s" % cmd)
     status = os.system(cmd)
     if os.WEXITSTATUS(status):
-        raise Utils.WafError('wafdocs failed')
+        raise Errors.WafError('wafdocs failed')
 
 
 def dist():
@@ -395,14 +435,14 @@ def dist():
     os.system("make -C ctdb manpages")
     samba_dist.DIST_FILES('ctdb/doc:ctdb/doc', extend=True)
 
-    os.system("DOC_VERSION='" + sambaversion.STRING + "' " + srcdir + "/release-scripts/build-manpages-nogit")
+    os.system("DOC_VERSION='" + sambaversion.STRING + "' " + Context.g_module.top + "/release-scripts/build-manpages-nogit")
     samba_dist.DIST_FILES('bin/docs:docs', extend=True)
 
     if sambaversion.IS_SNAPSHOT:
         # write .distversion file and add to tar
-        if not os.path.isdir(blddir):
-            os.makedirs(blddir)
-        distversionf = tempfile.NamedTemporaryFile(mode='w', prefix='.distversion',dir=blddir)
+        if not os.path.isdir(Context.g_module.out):
+            os.makedirs(Context.g_module.out)
+        distversionf = tempfile.NamedTemporaryFile(mode='w', prefix='.distversion',dir=Context.g_module.out)
         for field in sambaversion.vcs_fields:
             distveroption = field + '=' + str(sambaversion.vcs_fields[field])
             distversionf.write(distveroption + '\n')
@@ -418,9 +458,6 @@ def dist():
 def distcheck():
     '''test that distribution tarball builds and installs'''
     samba_version.load_version(env=None)
-    import Scripting
-    d = Scripting.distcheck
-    d()
 
 def wildcard_cmd(cmd):
     '''called on a unknown command'''
@@ -439,8 +476,8 @@ def reconfigure(ctx):
     samba_utils.reconfigure(ctx)
 
 
-if os.path.isdir(os.path.join(srcdir, ".git")):
+if os.path.isdir(os.path.join(top, ".git")):
     # Check if there are submodules that are checked out but out of date.
-    for submodule, status in samba_git.read_submodule_status(srcdir):
+    for submodule, status in samba_git.read_submodule_status(top):
         if status == "out-of-date":
-            raise Utils.WafError("some submodules are out of date. Please run 'git submodule update'")
+            raise Errors.WafError("some submodules are out of date. Please run 'git submodule update'")

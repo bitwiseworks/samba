@@ -135,7 +135,9 @@ int net_usershare_usage(struct net_context *c, int argc, const char **argv)
 
 static char *get_basepath(TALLOC_CTX *ctx)
 {
-	char *basepath = lp_usershare_path(ctx);
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
+	char *basepath = lp_usershare_path(ctx, lp_sub);
 
 	if (!basepath) {
 		return NULL;
@@ -152,6 +154,8 @@ static char *get_basepath(TALLOC_CTX *ctx)
 
 static int net_usershare_delete(struct net_context *c, int argc, const char **argv)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	char *us_path;
 	char *sharename;
 
@@ -174,7 +178,7 @@ static int net_usershare_delete(struct net_context *c, int argc, const char **ar
 
 	us_path = talloc_asprintf(talloc_tos(),
 				"%s/%s",
-				lp_usershare_path(talloc_tos()),
+				lp_usershare_path(talloc_tos(), lp_sub),
 				sharename);
 	if (!us_path) {
 		TALLOC_FREE(sharename);
@@ -446,12 +450,14 @@ static int info_fn(struct file_list *fl, void *priv)
 			}
 
 		} else {
-			fstring sidstr;
-			sid_to_fstring(sidstr,
-				       &psd->dacl->aces[num_aces].trustee);
-			acl_str = talloc_asprintf_append(acl_str,
-						"%s",
-						sidstr);
+			struct dom_sid_buf sidstr;
+
+			acl_str = talloc_asprintf_append(
+				acl_str,
+				"%s",
+				dom_sid_str_buf(
+					&psd->dacl->aces[num_aces].trustee,
+					&sidstr));
 			if (!acl_str) {
 				return -1;
 			}
@@ -816,6 +822,7 @@ static int net_usershare_add(struct net_context *c, int argc, const char **argv)
 
 	for (i = 0; i < num_aces; i++) {
 		struct dom_sid sid;
+		struct dom_sid_buf buf;
 		const char *pcolon = strchr_m(pacl, ':');
 		const char *name;
 
@@ -879,7 +886,10 @@ static int net_usershare_add(struct net_context *c, int argc, const char **argv)
 			}
 		}
 		us_acl = talloc_asprintf_append(
-			us_acl, "%s:%c,", sid_string_tos(&sid), pcolon[1]);
+			us_acl,
+			"%s:%c,",
+			dom_sid_str_buf(&sid, &buf),
+			pcolon[1]);
 
 		/* Move to the next ACL entry. */
 		if (pcolon[2] == ',') {
@@ -1076,6 +1086,8 @@ static int net_usershare_list(struct net_context *c, int argc,
 
 int net_usershare(struct net_context *c, int argc, const char **argv)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	DIR *dp;
 
 	struct functable func[] = {
@@ -1121,13 +1133,13 @@ int net_usershare(struct net_context *c, int argc, const char **argv)
 		return -1;
 	}
 
-	dp = opendir(lp_usershare_path(talloc_tos()));
+	dp = opendir(lp_usershare_path(talloc_tos(), lp_sub));
 	if (!dp) {
 		int err = errno;
 		d_fprintf(stderr,
 			_("net usershare: cannot open usershare directory %s. "
 			  "Error %s\n"),
-			lp_usershare_path(talloc_tos()), strerror(err) );
+			lp_usershare_path(talloc_tos(), lp_sub), strerror(err) );
 		if (err == EACCES) {
 			d_fprintf(stderr,
 				_("You do not have permission to create a "

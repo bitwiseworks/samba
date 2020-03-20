@@ -80,8 +80,6 @@ int map_errno_from_nt_status(NTSTATUS status);
 
 struct file_id vfs_file_id_from_sbuf(connection_struct *conn, const SMB_STRUCT_STAT *sbuf);
 
-#include "lib/gencache.h"
-
 /* The following definitions come from lib/interface.c  */
 
 bool ismyaddr(const struct sockaddr *ip);
@@ -140,12 +138,13 @@ struct named_mutex *grab_named_mutex(TALLOC_CTX *mem_ctx, const char *name,
 
 /* The following definitions come from lib/sharesec.c  */
 
-bool share_info_db_init(void);
+NTSTATUS share_info_db_init(void);
 struct security_descriptor *get_share_security_default( TALLOC_CTX *ctx, size_t *psize, uint32_t def_access);
 struct security_descriptor *get_share_security( TALLOC_CTX *ctx, const char *servicename,
 			      size_t *psize);
-bool set_share_security(const char *share_name, struct security_descriptor *psd);
-bool delete_share_security(const char *servicename);
+NTSTATUS set_share_security(const char *share_name,
+			    struct security_descriptor *psd);
+NTSTATUS delete_share_security(const char *servicename);
 bool share_access_check(const struct security_token *token,
 			const char *sharename,
 			uint32_t desired_access,
@@ -185,12 +184,12 @@ char *talloc_sub_specified(TALLOC_CTX *mem_ctx,
 char *talloc_sub_advanced(TALLOC_CTX *mem_ctx,
 			  const char *servicename, const char *user,
 			  const char *connectpath, gid_t gid,
+			  const char *str);
+char *talloc_sub_full(TALLOC_CTX *mem_ctx,
+			  const char *servicename, const char *user,
+			  const char *connectpath, gid_t gid,
 			  const char *smb_name, const char *domain_name,
 			  const char *str);
-void standard_sub_advanced(const char *servicename, const char *user,
-			   const char *connectpath, gid_t gid,
-			   const char *smb_name, const char *domain_name,
-			   char *str, size_t len);
 
 /* The following definitions come from lib/sysquotas.c  */
 
@@ -205,6 +204,9 @@ int sys_set_vfs_quota(const char *path, const char *bdev, enum SMB_QUOTA_TYPE qt
 int sys_get_xfs_quota(const char *path, const char *bdev, enum SMB_QUOTA_TYPE qtype, unid_t id, SMB_DISK_QUOTA *dp);
 int sys_set_xfs_quota(const char *path, const char *bdev, enum SMB_QUOTA_TYPE qtype, unid_t id, SMB_DISK_QUOTA *dp);
 
+int sys_get_jfs2_quota(const char *path, const char *bdev, enum SMB_QUOTA_TYPE qtype, unid_t id, SMB_DISK_QUOTA *dp);
+int sys_set_jfs2_quota(const char *path, const char *bdev, enum SMB_QUOTA_TYPE qtype, unid_t id, SMB_DISK_QUOTA *dp);
+
 int sys_get_nfs_quota(const char *path, const char *bdev,
 		      enum SMB_QUOTA_TYPE qtype,
 		      unid_t id, SMB_DISK_QUOTA *dp);
@@ -218,8 +220,13 @@ ssize_t sys_send(int s, const void *msg, size_t len, int flags);
 ssize_t sys_recvfrom(int s, void *buf, size_t len, int flags, struct sockaddr *from, socklen_t *fromlen);
 int sys_fcntl_ptr(int fd, int cmd, void *arg);
 int sys_fcntl_long(int fd, int cmd, long arg);
+int sys_fcntl_int(int fd, int cmd, int arg);
 void update_stat_ex_mtime(struct stat_ex *dst, struct timespec write_ts);
+void update_stat_ex_itime(struct stat_ex *dst, struct timespec itime);
 void update_stat_ex_create_time(struct stat_ex *dst, struct timespec create_time);
+void update_stat_ex_file_id(struct stat_ex *dst, uint64_t file_id);
+void update_stat_ex_from_saved_stat(struct stat_ex *dst,
+				    const struct stat_ex *src);
 int sys_stat(const char *fname, SMB_STRUCT_STAT *sbuf,
 	     bool fake_dir_create_times);
 int sys_fstat(int fd, SMB_STRUCT_STAT *sbuf,
@@ -228,9 +235,10 @@ int sys_lstat(const char *fname,SMB_STRUCT_STAT *sbuf,
 	      bool fake_dir_create_times);
 int sys_posix_fallocate(int fd, off_t offset, off_t len);
 int sys_fallocate(int fd, uint32_t mode, off_t offset, off_t len);
-void kernel_flock(int fd, uint32_t share_mode, uint32_t access_mask);
+void kernel_flock(int fd, uint32_t share_access, uint32_t access_mask);
 DIR *sys_fdopendir(int fd);
 int sys_mknod(const char *path, mode_t mode, SMB_DEV_T dev);
+int sys_mknodat(int dirfd, const char *path, mode_t mode, SMB_DEV_T dev);
 char *sys_getwd(void);
 void set_effective_capability(enum smbd_capability capability);
 void drop_effective_capability(enum smbd_capability capability);
@@ -259,7 +267,8 @@ bool getgroups_unix_user(TALLOC_CTX *mem_ctx, const char *user,
 
 /* The following definitions come from lib/tallocmsg.c  */
 
-void register_msg_pool_usage(struct messaging_context *msg_ctx);
+void register_msg_pool_usage(TALLOC_CTX *mem_ctx,
+			     struct messaging_context *msg_ctx);
 
 /* The following definitions come from lib/time.c  */
 
@@ -279,6 +288,10 @@ void srv_put_dos_date2(char *buf,int offset, time_t unixdate);
 void srv_put_dos_date3(char *buf,int offset,time_t unixdate);
 void round_timespec(enum timestamp_set_resolution res, struct timespec *ts);
 void put_long_date_timespec(enum timestamp_set_resolution res, char *p, struct timespec ts);
+void put_long_date_full_timespec(enum timestamp_set_resolution res,
+				 char *p,
+				 const struct timespec *ts);
+struct timespec pull_long_date_full_timespec(const char *p);
 void put_long_date(char *p, time_t t);
 void dos_filetime_timespec(struct timespec *tsp);
 time_t make_unix_date(const void *date_ptr, int zone_offset);
@@ -292,7 +305,6 @@ void TimeInit(void);
 void get_process_uptime(struct timeval *ret_time);
 void get_startup_time(struct timeval *ret_time);
 time_t nt_time_to_unix_abs(const NTTIME *nt);
-time_t uint64s_nt_time_to_unix_abs(const uint64_t *src);
 void unix_to_nt_time_abs(NTTIME *nt, time_t t);
 const char *time_to_asc(const time_t t);
 const char *display_time(NTTIME nttime);
@@ -331,7 +343,6 @@ ssize_t message_push_blob(uint8_t **outbuf, DATA_BLOB blob);
 char *unix_clean_name(TALLOC_CTX *ctx, const char *s);
 char *clean_name(TALLOC_CTX *ctx, const char *s);
 ssize_t write_data_at_offset(int fd, const char *buffer, size_t N, off_t pos);
-int set_blocking(int fd, bool set);
 NTSTATUS init_before_fork(void);
 NTSTATUS reinit_after_fork(struct messaging_context *msg_ctx,
 			   struct tevent_context *ev_ctx,
@@ -362,7 +373,7 @@ void set_namearray(name_compare_entry **ppname_array, const char *namelist);
 void free_namearray(name_compare_entry *name_array);
 bool fcntl_lock(int fd, int op, off_t offset, off_t count, int type);
 bool fcntl_getlock(int fd, int op, off_t *poffset, off_t *pcount, int *ptype, pid_t *ppid);
-int map_process_lock_to_ofd_lock(int op, bool *use_ofd_locks);
+int map_process_lock_to_ofd_lock(int op);
 bool is_myname(const char *s);
 void ra_lanman_string( const char *native_lanman );
 const char *get_remote_arch_str(void);
@@ -393,7 +404,6 @@ uint32_t map_share_mode_to_deny_mode(uint32_t share_access, uint32_t private_opt
 
 #include "lib/util_procid.h"
 
-#define serverid_equal(p1, p2) server_id_equal(p1,p2)
 struct server_id interpret_pid(const char *pid_string);
 bool is_offset_safe(const char *buf_base, size_t buf_len, char *ptr, size_t off);
 char *get_safe_ptr(const char *buf_base, size_t buf_len, char *ptr, size_t off);
@@ -417,6 +427,8 @@ bool map_open_params_to_ntcreate(const char *smb_base_fname,
 				 uint32_t *pcreate_options,
 				 uint32_t *pprivate_flags);
 struct security_unix_token *copy_unix_token(TALLOC_CTX *ctx, const struct security_unix_token *tok);
+struct security_unix_token *root_unix_token(TALLOC_CTX *mem_ctx);
+char *utok_string(TALLOC_CTX *mem_ctx, const struct security_unix_token *tok);
 bool dir_check_ftype(uint32_t mode, uint32_t dirtype);
 
 /* The following definitions come from lib/util_builtin.c  */
@@ -469,9 +481,6 @@ bool is_setuid_root(void) ;
 /* The following definitions come from lib/util_sid.c  */
 
 char *sid_to_fstring(fstring sidstr_out, const struct dom_sid *sid);
-char *sid_string_talloc(TALLOC_CTX *mem_ctx, const struct dom_sid *sid);
-char *sid_string_dbg(const struct dom_sid *sid);
-char *sid_string_tos(const struct dom_sid *sid);
 bool sid_linearize(uint8_t *outbuf, size_t len, const struct dom_sid *sid);
 bool non_mappable_sid(struct dom_sid *sid);
 char *sid_binstring_hex_talloc(TALLOC_CTX *mem_ctx, const struct dom_sid *sid);
@@ -561,7 +570,6 @@ int get_remote_hostname(const struct tsocket_address *remote_address,
 int create_pipe_sock(const char *socket_dir,
 		     const char *socket_name,
 		     mode_t dir_perms);
-int create_tcpip_socket(const struct sockaddr_storage *ifss, uint16_t *port);
 const char *get_mydnsfullname(void);
 bool is_myname_or_ipaddr(const char *s);
 int poll_one_fd(int fd, int events, int timeout, int *revents);
@@ -579,7 +587,6 @@ size_t str_charnum(const char *s);
 bool trim_char(char *s,char cfront,char cback);
 bool strhasupper(const char *s);
 bool strhaslower(const char *s);
-char *StrnCpy(char *dest,const char *src,size_t n);
 bool in_list(const char *s, const char *list, bool casesensitive);
 void fstring_sub(char *s,const char *pattern,const char *insert);
 char *realloc_string_sub2(char *string,
@@ -617,9 +624,6 @@ size_t strlen_m(const char *s);
 size_t strlen_m_term(const char *s);
 size_t strlen_m_term_null(const char *s);
 int fstr_sprintf(fstring s, const char *fmt, ...);
-bool str_list_sub_basic( char **list, const char *smb_name,
-			 const char *domain_name );
-bool str_list_substitute(char **list, const char *pattern, const char *insert);
 
 char *ipstr_list_make(char **ipstr_list,
 			const struct ip_service *ip_list,
@@ -731,9 +735,18 @@ NTSTATUS trust_pw_change(struct netlogon_creds_cli_context *context,
 
 /* The following definitions come from param/loadparm.c  */
 
+const struct loadparm_substitution *loadparm_s3_global_substitution(void);
+
+char *lp_parm_substituted_string(TALLOC_CTX *mem_ctx,
+				 const struct loadparm_substitution *lp_sub,
+				 int snum,
+				 const char *type,
+				 const char *option,
+				 const char *def);
+
 #include "source3/param/param_proto.h"
 
-char *lp_servicename(TALLOC_CTX *ctx, int);
+char *lp_servicename(TALLOC_CTX *ctx, const struct loadparm_substitution *, int);
 const char *lp_const_servicename(int);
 bool lp_autoloaded(int);
 const char *lp_dnsdomain(void);
@@ -760,7 +773,6 @@ int lp_wi_scan_global_parametrics(
 		   void *private_data),
 	void *private_data);
 
-char *lp_parm_talloc_string(TALLOC_CTX *ctx, int snum, const char *type, const char *option, const char *def);
 const char *lp_parm_const_string(int snum, const char *type, const char *option, const char *def);
 struct loadparm_service;
 const char *lp_parm_const_string_service(struct loadparm_service *service, const char *type,
@@ -852,7 +864,9 @@ bool lp_preferred_master(void);
 void lp_remove_service(int snum);
 void lp_copy_service(int snum, const char *new_name);
 int lp_default_server_announce(void);
-const char *lp_printername(TALLOC_CTX *ctx, int snum);
+const char *lp_printername(TALLOC_CTX *ctx,
+			   const struct loadparm_substitution *lp_sub,
+			   int snum);
 void lp_set_logfile(const char *name);
 int lp_maxprintjobs(int snum);
 const char *lp_printcapname(void);
@@ -860,7 +874,6 @@ bool lp_disable_spoolss( void );
 void lp_set_spoolss_state( uint32_t state );
 uint32_t lp_get_spoolss_state( void );
 struct smb_signing_state;
-bool lp_use_sendfile(int snum, struct smb_signing_state *signing_state);
 void set_use_sendfile(int snum, bool val);
 void lp_set_mangling_method(const char *new_method);
 bool lp_posix_pathnames(void);
@@ -868,7 +881,6 @@ void lp_set_posix_pathnames(void);
 enum brl_flavour lp_posix_cifsu_locktype(files_struct *fsp);
 void lp_set_posix_default_cifsx_readwrite_locktype(enum brl_flavour val);
 int lp_min_receive_file_size(void);
-char* lp_perfcount_module(TALLOC_CTX *ctx);
 void widelinks_warning(int snum);
 const char *lp_ncalrpc_dir(void);
 void _lp_set_server_role(int server_role);
@@ -888,10 +900,10 @@ uint32_t get_int_param( const char* param );
 char* get_string_param( const char* param );
 
 /* The following definitions come from lib/server_contexts.c  */
-struct tevent_context *server_event_context(void);
-void server_event_context_free(void);
-struct messaging_context *server_messaging_context(void);
-void server_messaging_context_free(void);
+struct tevent_context *global_event_context(void);
+void global_event_context_free(void);
+struct messaging_context *global_messaging_context(void);
+void global_messaging_context_free(void);
 
 /* The following definitions come from lib/sessionid_tdb.c  */
 struct sessionid;
@@ -899,11 +911,6 @@ NTSTATUS sessionid_traverse_read(int (*fn)(const char *key,
 					   struct sessionid *session,
 					   void *private_data),
 				 void *private_data);
-
-/* The following definitions come from utils/passwd_util.c  */
-
-char *stdin_new_passwd( void);
-char *get_pass( const char *prompt, bool stdin_get);
 
 /* The following definitions come from lib/avahi.c */
 
@@ -983,6 +990,7 @@ struct smb_filename *cp_smb_filename_nostream(TALLOC_CTX *mem_ctx,
 				     const struct smb_filename *in);
 bool is_ntfs_stream_smb_fname(const struct smb_filename *smb_fname);
 bool is_ntfs_default_stream_smb_fname(const struct smb_filename *smb_fname);
+bool is_named_stream(const struct smb_filename *smb_fname);
 bool is_invalid_windows_ea_name(const char *name);
 bool ea_list_has_invalid_name(struct ea_list *ea_list);
 bool split_stream_filename(TALLOC_CTX *ctx,
@@ -998,9 +1006,6 @@ void unbecome_root(void);
 /* The following definitions come from lib/smbd_shim.c */
 
 int find_service(TALLOC_CTX *ctx, const char *service_in, char **p_service_out);
-void cancel_pending_lock_requests_by_fid(files_struct *fsp,
-			struct byte_range_lock *br_lck,
-			enum file_close_type close_type);
 void send_stat_cache_delete_message(struct messaging_context *msg_ctx,
 				    const char *name);
 NTSTATUS can_delete_directory_fsp(files_struct *fsp);
@@ -1012,5 +1017,12 @@ void contend_level2_oplocks_begin(files_struct *fsp,
 				  enum level2_contention_type type);
 void contend_level2_oplocks_end(files_struct *fsp,
 				enum level2_contention_type type);
+
+/* The following definitions come from lib/per_thread_cwd.c */
+
+void per_thread_cwd_check(void);
+bool per_thread_cwd_supported(void);
+void per_thread_cwd_disable(void);
+void per_thread_cwd_activate(void);
 
 #endif /*  _PROTO_H_  */

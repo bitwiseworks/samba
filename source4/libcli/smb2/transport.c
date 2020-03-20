@@ -293,7 +293,24 @@ static void smb2_request_done(struct tevent_req *subreq)
 
 	req->status = smb2cli_req_recv(req->subreq, req, &req->recv_iov, NULL, 0);
 	if (NT_STATUS_EQUAL(req->status, STATUS_PENDING)) {
+		struct timeval endtime = smbXcli_req_endtime(subreq);
+		bool ok;
+
 		req->cancel.can_cancel = true;
+		if (timeval_is_zero(&endtime)) {
+			return;
+		}
+
+		ok = tevent_req_set_endtime(
+			subreq, req->transport->ev, endtime);
+		if (!ok) {
+			req->status = NT_STATUS_INTERNAL_ERROR;
+			req->state = SMB2_REQUEST_ERROR;
+			if (req->async.fn) {
+				req->async.fn(req);
+			}
+			return;
+		}
 		return;
 	}
 	TALLOC_FREE(req->subreq);
@@ -491,6 +508,14 @@ static void idle_handler(struct tevent_context *ev,
 
 	transport->idle.func(transport, transport->idle.private_data);
 
+	if (transport->idle.func == NULL) {
+		return;
+	}
+
+	if (!smbXcli_conn_is_connected(transport->conn)) {
+		return;
+	}
+
 	next = timeval_current_ofs_usec(transport->idle.period);
 	transport->idle.te = tevent_add_timer(transport->ev,
 					      transport,
@@ -509,6 +534,15 @@ void smb2_transport_idle_handler(struct smb2_transport *transport,
 				 void *private_data)
 {
 	TALLOC_FREE(transport->idle.te);
+	ZERO_STRUCT(transport->idle);
+
+	if (idle_func == NULL) {
+		return;
+	}
+
+	if (!smbXcli_conn_is_connected(transport->conn)) {
+		return;
+	}
 
 	transport->idle.func = idle_func;
 	transport->idle.private_data = private_data;

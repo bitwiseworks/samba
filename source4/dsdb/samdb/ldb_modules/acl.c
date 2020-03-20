@@ -185,7 +185,7 @@ done:
 	}
 
 	/*
-	 * Check this after the modules have be initalised so we
+	 * Check this after the modules have be initialised so we
 	 * can actually read the backend DB.
 	 */
 	data->userPassword_support
@@ -2170,9 +2170,11 @@ static int acl_search(struct ldb_module *module, struct ldb_request *req)
 	}
 
 	data = talloc_get_type(ldb_module_get_private(ac->module), struct acl_private);
-	if (data != NULL) {
-		ac->userPassword = data->userPassword_support;
+	if (data == NULL) {
+		return ldb_error(ldb, LDB_ERR_OPERATIONS_ERROR,
+				 "acl_private data is missing");
 	}
+	ac->userPassword = data->userPassword_support;
 
 	ret = acl_search_update_confidential_attrs(ac, data);
 	if (ret != LDB_SUCCESS) {

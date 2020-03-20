@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 from __future__ import print_function
@@ -20,6 +20,7 @@ from ldb import ERR_UNWILLING_TO_PERFORM, ERR_OPERATIONS_ERROR
 from samba.samdb import SamDB
 from samba.tests import delete_force
 from samba import dsdb
+from samba.compat import get_string
 
 parser = optparse.OptionParser("deletetest.py [options] <host|file>")
 sambaopts = options.SambaOptions(parser)
@@ -41,10 +42,11 @@ host = args[0]
 lp = sambaopts.get_loadparm()
 creds = credopts.get_credentials(lp)
 
+
 class BaseDeleteTests(samba.tests.TestCase):
 
     def GUID_string(self, guid):
-        return self.ldb.schema_format_value("objectGUID", guid)
+        return get_string(self.ldb.schema_format_value("objectGUID", guid))
 
     def setUp(self):
         super(BaseDeleteTests, self).setUp()
@@ -63,7 +65,7 @@ class BaseDeleteTests(samba.tests.TestCase):
         self.assertEquals(len(res), 1)
         return res[0]
 
-    def search_dn(self,dn):
+    def search_dn(self, dn):
         print("SEARCH by DN %s" % dn)
 
         res = self.ldb.search(expression="(objectClass=*)",
@@ -83,7 +85,7 @@ class BasicDeleteTests(BaseDeleteTests):
     def del_attr_values(self, delObj):
         print("Checking attributes for %s" % delObj["dn"])
 
-        self.assertEquals(delObj["isDeleted"][0],"TRUE")
+        self.assertEquals(str(delObj["isDeleted"][0]), "TRUE")
         self.assertTrue(not("objectCategory" in delObj))
         self.assertTrue(not("sAMAccountType" in delObj))
 
@@ -91,12 +93,12 @@ class BasicDeleteTests(BaseDeleteTests):
         print("Checking for preserved attributes list")
 
         preserved_list = ["nTSecurityDescriptor", "attributeID", "attributeSyntax", "dNReferenceUpdate", "dNSHostName",
-        "flatName", "governsID", "groupType", "instanceType", "lDAPDisplayName", "legacyExchangeDN",
-        "isDeleted", "isRecycled", "lastKnownParent", "msDS-LastKnownRDN", "mS-DS-CreatorSID",
-        "mSMQOwnerID", "nCName", "objectClass", "distinguishedName", "objectGUID", "objectSid",
-        "oMSyntax", "proxiedObjectName", "name", "replPropertyMetaData", "sAMAccountName",
-        "securityIdentifier", "sIDHistory", "subClassOf", "systemFlags", "trustPartner", "trustDirection",
-        "trustType", "trustAttributes", "userAccountControl", "uSNChanged", "uSNCreated", "whenCreated"]
+                          "flatName", "governsID", "groupType", "instanceType", "lDAPDisplayName", "legacyExchangeDN",
+                          "isDeleted", "isRecycled", "lastKnownParent", "msDS-LastKnownRDN", "mS-DS-CreatorSID",
+                          "mSMQOwnerID", "nCName", "objectClass", "distinguishedName", "objectGUID", "objectSid",
+                          "oMSyntax", "proxiedObjectName", "name", "replPropertyMetaData", "sAMAccountName",
+                          "securityIdentifier", "sIDHistory", "subClassOf", "systemFlags", "trustPartner", "trustDirection",
+                          "trustType", "trustAttributes", "userAccountControl", "uSNChanged", "uSNCreated", "whenCreated"]
 
         for a in liveObj:
             if a in preserved_list:
@@ -104,14 +106,14 @@ class BasicDeleteTests(BaseDeleteTests):
 
     def check_rdn(self, liveObj, delObj, rdnName):
         print("Checking for correct rDN")
-        rdn=liveObj[rdnName][0]
-        rdn2=delObj[rdnName][0]
-        name2=delObj["name"][0]
-        dn_rdn=delObj.dn.get_rdn_value()
-        guid=liveObj["objectGUID"][0]
-        self.assertEquals(rdn2, rdn + "\nDEL:" + self.GUID_string(guid))
-        self.assertEquals(name2, rdn + "\nDEL:" + self.GUID_string(guid))
-        self.assertEquals(name2, dn_rdn)
+        rdn = liveObj[rdnName][0]
+        rdn2 = delObj[rdnName][0]
+        name2 = delObj["name"][0]
+        dn_rdn = delObj.dn.get_rdn_value()
+        guid = liveObj["objectGUID"][0]
+        self.assertEquals(str(rdn2), ("%s\nDEL:%s" % (rdn, self.GUID_string(guid))))
+        self.assertEquals(str(name2), ("%s\nDEL:%s" % (rdn, self.GUID_string(guid))))
+        self.assertEquals(str(name2), dn_rdn)
 
     def delete_deleted(self, ldb, dn):
         print("Testing the deletion of the already deleted dn %s" % dn)
@@ -153,21 +155,21 @@ class BasicDeleteTests(BaseDeleteTests):
 
         try:
             res = self.ldb.search("cn=ldaptestcontainer," + self.base_dn,
-                             scope=SCOPE_BASE, attrs=[])
+                                  scope=SCOPE_BASE, attrs=[])
             self.fail()
         except LdbError as e2:
             (num, _) = e2.args
             self.assertEquals(num, ERR_NO_SUCH_OBJECT)
         try:
             res = self.ldb.search("cn=entry1,cn=ldaptestcontainer," + self.base_dn,
-                             scope=SCOPE_BASE, attrs=[])
+                                  scope=SCOPE_BASE, attrs=[])
             self.fail()
         except LdbError as e3:
             (num, _) = e3.args
             self.assertEquals(num, ERR_NO_SUCH_OBJECT)
         try:
             res = self.ldb.search("cn=entry2,cn=ldaptestcontainer," + self.base_dn,
-                             scope=SCOPE_BASE, attrs=[])
+                                  scope=SCOPE_BASE, attrs=[])
             self.fail()
         except LdbError as e4:
             (num, _) = e4.args
@@ -180,7 +182,7 @@ class BasicDeleteTests(BaseDeleteTests):
         # Performs some protected object delete testing
 
         res = self.ldb.search(base="", expression="", scope=SCOPE_BASE,
-                         attrs=["dsServiceName", "dNSHostName"])
+                              attrs=["dsServiceName", "dNSHostName"])
         self.assertEquals(len(res), 1)
 
         # Delete failing since DC's nTDSDSA object is protected
@@ -192,7 +194,7 @@ class BasicDeleteTests(BaseDeleteTests):
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
         res = self.ldb.search(self.base_dn, attrs=["rIDSetReferences"],
-                         expression="(&(objectClass=computer)(dNSHostName=" + res[0]["dNSHostName"][0] + "))")
+                              expression="(&(objectClass=computer)(dNSHostName=" + str(res[0]["dNSHostName"][0]) + "))")
         self.assertEquals(len(res), 1)
 
         # Deletes failing since DC's rIDSet object is protected
@@ -238,7 +240,7 @@ class BasicDeleteTests(BaseDeleteTests):
             self.assertEquals(num, ERR_NOT_ALLOWED_ON_NON_LEAF)
 
         res = self.ldb.search("cn=Partitions," + self.configuration_dn, attrs=[],
-                         expression="(nCName=%s)" % self.base_dn)
+                              expression="(nCName=%s)" % self.base_dn)
         self.assertEquals(len(res), 1)
 
         try:
@@ -270,6 +272,7 @@ class BasicDeleteTests(BaseDeleteTests):
             (num, _) = e15.args
             self.assertEquals(num, ERR_UNWILLING_TO_PERFORM)
 
+
 class BasicTreeDeleteTests(BasicDeleteTests):
 
     def setUp(self):
@@ -277,7 +280,7 @@ class BasicTreeDeleteTests(BasicDeleteTests):
 
         # user current time in ms to make unique objects
         import time
-        marker = str(int(round(time.time()*1000)))
+        marker = str(int(round(time.time() * 1000)))
         usr1_name = "u_" + marker
         usr2_name = "u2_" + marker
         grp_name = "g1_" + marker
@@ -316,45 +319,45 @@ class BasicTreeDeleteTests(BasicDeleteTests):
             "objectclass": "group",
             "description": "test group",
             "samaccountname": grp_name,
-            "member": [ self.usr1, self.usr2 ],
-            "isDeleted": "FALSE" })
+            "member": [self.usr1, self.usr2],
+            "isDeleted": "FALSE"})
 
         self.ldb.add({
             "dn": self.sit1,
-            "objectclass": "site" })
+            "objectclass": "site"})
 
         self.ldb.add({
             "dn": self.ss1,
-            "objectclass": ["applicationSiteSettings", "nTDSSiteSettings"] })
+            "objectclass": ["applicationSiteSettings", "nTDSSiteSettings"]})
 
         self.ldb.add({
             "dn": self.srv1,
-            "objectclass": "serversContainer" })
+            "objectclass": "serversContainer"})
 
         self.ldb.add({
             "dn": self.srv2,
-            "objectClass": "server" })
+            "objectClass": "server"})
 
         self.objLive1 = self.search_dn(self.usr1)
-        self.guid1=self.objLive1["objectGUID"][0]
+        self.guid1 = self.objLive1["objectGUID"][0]
 
         self.objLive2 = self.search_dn(self.usr2)
-        self.guid2=self.objLive2["objectGUID"][0]
+        self.guid2 = self.objLive2["objectGUID"][0]
 
         self.objLive3 = self.search_dn(self.grp1)
-        self.guid3=self.objLive3["objectGUID"][0]
+        self.guid3 = self.objLive3["objectGUID"][0]
 
         self.objLive4 = self.search_dn(self.sit1)
-        self.guid4=self.objLive4["objectGUID"][0]
+        self.guid4 = self.objLive4["objectGUID"][0]
 
         self.objLive5 = self.search_dn(self.ss1)
-        self.guid5=self.objLive5["objectGUID"][0]
+        self.guid5 = self.objLive5["objectGUID"][0]
 
         self.objLive6 = self.search_dn(self.srv1)
-        self.guid6=self.objLive6["objectGUID"][0]
+        self.guid6 = self.objLive6["objectGUID"][0]
 
         self.objLive7 = self.search_dn(self.srv2)
-        self.guid7=self.objLive7["objectGUID"][0]
+        self.guid7 = self.objLive7["objectGUID"][0]
 
         self.deleted_objects_config_dn \
             = self.ldb.get_wellknown_dn(self.ldb.get_config_basedn(),
@@ -377,8 +380,8 @@ class BasicTreeDeleteTests(BasicDeleteTests):
         self.deleted_objects_domain_dn \
             = self.ldb.get_wellknown_dn(self.ldb.get_default_basedn(),
                                         dsdb.DS_GUID_DELETED_OBJECTS_CONTAINER)
-        sites_obj = self.search_dn("cn=sites,%s" \
-                                        % self.ldb.get_config_basedn())
+        sites_obj = self.search_dn("cn=sites,%s"
+                                   % self.ldb.get_config_basedn())
         self.sites_dn = sites_obj.dn
         self.sites_guid \
             = sites_obj["objectGUID"][0]
@@ -489,7 +492,6 @@ class BasicTreeDeleteTests(BasicDeleteTests):
         self.assertEqual(objDeleted7["parentGUID"][0],
                          objDeleted6["objectGUID"][0])
 
-
         objDeleted1 = self.search_guid(self.guid1)
         objDeleted2 = self.search_guid(self.guid2)
         objDeleted3 = self.search_guid(self.guid3)
@@ -555,8 +557,7 @@ class BasicTreeDeleteTests(BasicDeleteTests):
         self.assertFalse("CN=Deleted Objects" in str(objDeleted7.dn))
 
 
-
-if not "://" in host:
+if "://" not in host:
     if os.path.isfile(host):
         host = "tdb://%s" % host
     else:

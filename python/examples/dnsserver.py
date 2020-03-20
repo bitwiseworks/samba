@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # script to test the dnsserver RPC protocol
 
@@ -74,7 +74,6 @@ if __name__ == "__main__":
                                        newname,
                                        addrecbuf,
                                        None)
-
 
     print("querying the NS record")
     res = dns_conn.DnssrvEnumRecords2(0x00070000,

@@ -27,9 +27,10 @@ bld.SAMBA_BINARY('test_unique_object_sids',
             cmocka
             DSDB_MODULE_HELPERS
         ''',
-        install=False)
-bld.SAMBA_BINARY('test_encrypted_secrets',
+        for_selftest=True)
+bld.SAMBA_BINARY('test_encrypted_secrets_tdb',
         source='tests/test_encrypted_secrets.c',
+        cflags='-DTEST_BE=\"tdb\"',
         deps='''
             talloc
             samba-util
@@ -39,7 +40,21 @@ bld.SAMBA_BINARY('test_encrypted_secrets',
             gnutls
             DSDB_MODULE_HELPERS
         ''',
-        install=False)
+        for_selftest=True)
+if conf.env.HAVE_LMDB:
+    bld.SAMBA_BINARY('test_encrypted_secrets_mdb',
+            source='tests/test_encrypted_secrets.c',
+            cflags='-DTEST_BE=\"mdb\"',
+            deps='''
+                talloc
+                samba-util
+                samdb-common
+                samdb
+                cmocka
+                gnutls
+                DSDB_MODULE_HELPERS
+            ''',
+            for_selftest=True)
 
 if bld.AD_DC_BUILD_IS_ENABLED():
     bld.PROCESS_SEPARATE_RULE("server")

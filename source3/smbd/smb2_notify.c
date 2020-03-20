@@ -94,7 +94,7 @@ NTSTATUS smbd_smb2_request_process_notify(struct smbd_smb2_request *req)
 		return smbd_smb2_request_error(req, NT_STATUS_FILE_CLOSED);
 	}
 
-	subreq = smbd_smb2_notify_send(req, req->ev_ctx,
+	subreq = smbd_smb2_notify_send(req, req->sconn->ev_ctx,
 				       req, in_fsp,
 				       in_flags,
 				       in_output_buffer_length,
@@ -263,6 +263,7 @@ static struct tevent_req *smbd_smb2_notify_send(TALLOC_CTX *mem_ctx,
 	if (fsp->notify == NULL) {
 
 		status = change_notify_create(fsp,
+					      in_output_buffer_length,
 					      in_completion_filter,
 					      recursive);
 		if (!NT_STATUS_IS_OK(status)) {
@@ -355,7 +356,7 @@ static void smbd_smb2_notify_reply(struct smb_request *smbreq,
 		}
 	}
 
-	tevent_req_defer_callback(req, state->smb2req->ev_ctx);
+	tevent_req_defer_callback(req, state->smb2req->sconn->ev_ctx);
 
 	if (!NT_STATUS_IS_OK(state->status)) {
 		tevent_req_nterror(req, state->status);

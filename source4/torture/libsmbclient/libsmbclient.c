@@ -18,6 +18,7 @@
 */
 
 #include "includes.h"
+#include "system/dir.h"
 #include "torture/smbtorture.h"
 #include "auth/credentials/credentials.h"
 #include "lib/cmdline/popt_common.h"
@@ -40,24 +41,83 @@ static void debug_callback(void *private_ptr, int level, const char *msg)
 	return;
 }
 
+static void auth_callback(const char *srv,
+			  const char *shr,
+			  char *wg, int wglen,
+			  char *un, int unlen,
+			  char *pw, int pwlen)
+{
+	const char *workgroup =
+		cli_credentials_get_domain(popt_get_cmdline_credentials());
+	const char *username =
+		cli_credentials_get_username(popt_get_cmdline_credentials());
+	const char *password =
+		cli_credentials_get_password(popt_get_cmdline_credentials());
+
+	if (workgroup != NULL) {
+		snprintf(wg, wglen, "%s", workgroup);
+	}
+
+	if (username != NULL) {
+		snprintf(un, unlen, "%s", username);
+	}
+
+	if (password != NULL) {
+		snprintf(pw, pwlen, "%s", password);
+	}
+};
+
 bool torture_libsmbclient_init_context(struct torture_context *tctx,
 				       SMBCCTX **ctx_p)
 {
-	SMBCCTX *ctx;
+	const char *workgroup =
+		cli_credentials_get_domain(popt_get_cmdline_credentials());
+	const char *username =
+		cli_credentials_get_username(popt_get_cmdline_credentials());
+	const char *client_proto =
+		torture_setting_string(tctx, "clientprotocol", NULL);
+	SMBCCTX *ctx = NULL;
+	SMBCCTX *p = NULL;
+	bool ok = true;
 
 	ctx = smbc_new_context();
-	torture_assert(tctx, ctx, "failed to get new context");
-	torture_assert(tctx, smbc_init_context(ctx), "failed to init context");
+	torture_assert_not_null_goto(tctx,
+				     ctx,
+				     ok,
+				     out,
+				     "Failed to create new context");
+
+	p = smbc_init_context(ctx);
+	torture_assert_not_null_goto(tctx,
+				     p,
+				     ok,
+				     out,
+				     "Failed to initialize context");
 
 	smbc_setDebug(ctx, DEBUGLEVEL);
 	smbc_setOptionDebugToStderr(ctx, 1);
 
-	smbc_setUser(ctx,
-		     cli_credentials_get_username(popt_get_cmdline_credentials()));
+	if (workgroup != NULL) {
+		smbc_setWorkgroup(ctx, workgroup);
+	}
+	if (username != NULL) {
+		smbc_setUser(ctx, username);
+	}
+
+	smbc_setFunctionAuthData(ctx, auth_callback);
+
+	if (client_proto != NULL) {
+		smbc_setOptionProtocols(ctx, client_proto, client_proto);
+	}
 
 	*ctx_p = ctx;
 
-	return true;
+out:
+	if (!ok) {
+		smbc_free_context(ctx, 1);
+	}
+
+	return ok;
 }
 
 static bool torture_libsmbclient_version(struct torture_context *tctx)
@@ -316,6 +376,572 @@ static bool torture_libsmbclient_readdirplus(struct torture_context *tctx)
 	return true;
 }
 
+static bool torture_libsmbclient_readdirplus_seek(struct torture_context *tctx)
+{
+	SMBCCTX *ctx;
+	int ret = -1;
+	int dhandle = -1;
+	int fhandle = -1;
+	const char *dname = NULL;
+	const char *full_filename[100] = {0};
+	const char *filename[100] = {0};
+	const struct libsmb_file_info *direntries[102] = {0};
+	unsigned int i = 0;
+	const char *smburl = torture_setting_string(tctx, "smburl", NULL);
+	bool success = false;
+	off_t telldir_50 = (off_t)-1;
+	off_t telldir_20 = (off_t)-1;
+	size_t getdentries_size = 0;
+	struct smbc_dirent *getdentries = NULL;
+	struct smbc_dirent *dirent_20 = NULL;
+	const struct libsmb_file_info *direntries_20 = NULL;
+	const struct libsmb_file_info *direntriesplus_20 = NULL;
+	const char *plus2_stat_path = NULL;
+	struct stat st = {0};
+	struct stat st2 = {0};
+
+	if (smburl == NULL) {
+		torture_fail(tctx,
+			"option --option=torture:smburl="
+			"smb://user:password@server/share missing\n");
+	}
+
+	DEBUG(0,("torture_libsmbclient_readdirplus_seek start\n"));
+
+	torture_assert(tctx, torture_libsmbclient_init_context(tctx, &ctx), "");
+	smbc_set_context(ctx);
+
+	dname = talloc_asprintf(tctx,
+				"%s/rd_seek",
+				smburl);
+	if (dname == NULL) {
+		torture_fail_goto(tctx,
+			done,
+			"talloc fail\n");
+	}
+
+	/* Ensure the files don't exist. */
+	for (i = 0; i < 100; i++) {
+		filename[i] = talloc_asprintf(tctx,
+				"test_readdirplus_%u.txt",
+				i);
+		if (filename[i] == NULL) {
+			torture_fail_goto(tctx,
+				done,
+				"talloc fail\n");
+		}
+		full_filename[i] = talloc_asprintf(tctx,
+				"%s/%s",
+				dname,
+				filename[i]);
+		if (full_filename[i] == NULL) {
+			torture_fail_goto(tctx,
+				done,
+				"talloc fail\n");
+		}
+		(void)smbc_unlink(full_filename[i]);
+	}
+	/* Ensure the directory doesn't exist. */
+	(void)smbc_rmdir(dname);
+
+	/* Create containing directory. */
+	ret = smbc_mkdir(dname, 0777);
+	if (ret != 0) {
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"failed to create directory '%s': %s",
+				dname,
+				strerror(errno)));
+	}
+
+	DEBUG(0,("torture_libsmbclient_readdirplus_seek create\n"));
+
+	/* Create them. */
+	for (i = 0; i < 100; i++) {
+		fhandle = smbc_creat(full_filename[i], 0666);
+		if (fhandle < 0) {
+			torture_fail_goto(tctx,
+				done,
+				talloc_asprintf(tctx,
+					"failed to create file '%s': %s",
+					full_filename[i],
+					strerror(errno)));
+		}
+		ret = smbc_close(fhandle);
+		torture_assert_int_equal_goto(tctx,
+			ret,
+			0,
+			success,
+			done,
+			talloc_asprintf(tctx,
+				"failed to close handle for '%s'",
+				full_filename[i]));
+	}
+
+	DEBUG(0,("torture_libsmbclient_readdirplus_seek enum\n"));
+
+	/* Now enumerate the directory. */
+	dhandle = smbc_opendir(dname);
+	if (dhandle < 0) {
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"failed to obtain "
+				"directory handle for '%s' : %s",
+				dname,
+				strerror(errno)));
+	}
+
+	/* Read all the files. 100 we created plus . and .. */
+	for (i = 0; i < 102; i++) {
+		bool found = false;
+		unsigned int j;
+
+		direntries[i] = smbc_readdirplus(dhandle);
+		if (direntries[i] == NULL) {
+			break;
+		}
+
+		/* Store at offset 50. */
+		if (i == 50) {
+			telldir_50 = smbc_telldir(dhandle);
+			if (telldir_50 == (off_t)-1) {
+				torture_fail_goto(tctx,
+					done,
+					talloc_asprintf(tctx,
+						"telldir failed file %s\n",
+						direntries[i]->name));
+			}
+		}
+
+		if (ISDOT(direntries[i]->name)) {
+			continue;
+		}
+		if (ISDOTDOT(direntries[i]->name)) {
+			continue;
+		}
+
+		/* Ensure all our files exist. */
+		for (j = 0; j < 100; j++) {
+			if (strcmp(direntries[i]->name,
+				filename[j]) == 0) {
+				found = true;
+			}
+		}
+		if (!found) {
+			torture_fail_goto(tctx,
+				done,
+				talloc_asprintf(tctx,
+					"failed to find file %s\n",
+					direntries[i]->name));
+		}
+	}
+
+	/*
+	 * We're seeking on in-memory lists here, so
+	 * whilst the handle is open we really should
+	 * get the same files back in the same order.
+	 */
+
+	ret = smbc_lseekdir(dhandle, telldir_50);
+	torture_assert_int_equal_goto(tctx,
+		ret,
+		0,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"failed to seek (50) directory handle for '%s'",
+			dname));
+
+	DEBUG(0,("torture_libsmbclient_readdirplus_seek seek\n"));
+
+	for (i = 51; i < 102; i++) {
+		const struct libsmb_file_info *entry =
+				smbc_readdirplus(dhandle);
+		if (entry != direntries[i]) {
+			torture_fail_goto(tctx,
+				done,
+				talloc_asprintf(tctx,
+					"after seek - failed to find "
+					"file %s - got %s\n",
+					direntries[i]->name,
+					entry->name));
+		}
+	}
+
+	/* Seek back to the start. */
+	ret = smbc_lseekdir(dhandle, 0);
+	torture_assert_int_equal_goto(tctx,
+		ret,
+		0,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"failed to seek directory handle to start for '%s'",
+			dname));
+
+	/*
+	 * Mix getdents/readdir/readdirplus with lseek to ensure
+	 * we get the same result.
+	 */
+
+	/* Allocate the space for 20 entries.
+	 * Tricky as we need to allocate 20 struct smbc_dirent's + space
+	 * for the name lengths.
+	 */
+	getdentries_size = 20 * (sizeof(struct smbc_dirent) +
+				strlen("test_readdirplus_1000.txt") + 1);
+
+	getdentries = (struct smbc_dirent *)talloc_array_size(tctx,
+						getdentries_size,
+						1);
+
+	ret = smbc_getdents(dhandle, getdentries, getdentries_size);
+	torture_assert_goto(tctx,
+		(ret != -1),
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"smbd_getdents(1) for '%s' failed\n",
+			dname));
+
+	telldir_20 = smbc_telldir(dhandle);
+	if (telldir_20 == (off_t)-1) {
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"telldir (20) failed\n"));
+	}
+	/* Read another 20. */
+	ret = smbc_getdents(dhandle, getdentries, getdentries_size);
+	torture_assert_goto(tctx,
+		(ret != -1),
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"smbd_getdents(2) for '%s' failed\n",
+			dname));
+
+	/* Seek back to 20. */
+	ret = smbc_lseekdir(dhandle, telldir_20);
+	torture_assert_int_equal_goto(tctx,
+		ret,
+		0,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"failed to seek (20) directory handle for '%s'",
+			dname));
+
+	/* Read with readdir. */
+	dirent_20 = smbc_readdir(dhandle);
+	if (dirent_20 == NULL) {
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"smbc_readdir (20) failed\n"));
+	}
+
+	/* Ensure the getdents and readdir names are the same. */
+	ret = strcmp(dirent_20->name, getdentries[0].name);
+	if (ret != 0) {
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"after seek (20) readdir name missmatch "
+				"file %s - got %s\n",
+				dirent_20->name,
+				getdentries[0].name));
+	}
+
+	/* Seek back to 20. */
+	ret = smbc_lseekdir(dhandle, telldir_20);
+	torture_assert_int_equal_goto(tctx,
+		ret,
+		0,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"failed to seek (20) directory handle for '%s'",
+			dname));
+	/* Read with readdirplus. */
+	direntries_20 = smbc_readdirplus(dhandle);
+	if (direntries_20 == NULL) {
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"smbc_readdirplus (20) failed\n"));
+	}
+
+	/* Ensure the readdirplus and readdir names are the same. */
+	ret = strcmp(dirent_20->name, direntries_20->name);
+	if (ret != 0) {
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"after seek (20) readdirplus name missmatch "
+				"file %s - got %s\n",
+				dirent_20->name,
+				direntries_20->name));
+	}
+
+	/* Seek back to 20. */
+	ret = smbc_lseekdir(dhandle, telldir_20);
+	torture_assert_int_equal_goto(tctx,
+		ret,
+		0,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"failed to seek (20) directory handle for '%s'",
+			dname));
+
+	/* Read with readdirplus2. */
+	direntriesplus_20 = smbc_readdirplus2(dhandle, &st2);
+	if (direntriesplus_20 == NULL) {
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"smbc_readdirplus2 (20) failed\n"));
+	}
+
+	/* Ensure the readdirplus2 and readdirplus names are the same. */
+	ret = strcmp(direntries_20->name, direntriesplus_20->name);
+	if (ret != 0) {
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"after seek (20) readdirplus2 name missmatch "
+				"file %s - got %s\n",
+				dirent_20->name,
+				direntries_20->name));
+	}
+
+	/* Ensure doing stat gets the same data. */
+	plus2_stat_path = talloc_asprintf(tctx,
+				"%s/%s",
+				dname,
+				direntriesplus_20->name);
+	if (plus2_stat_path == NULL) {
+		torture_fail_goto(tctx,
+			done,
+			"talloc fail\n");
+	}
+
+	ret = smbc_stat(plus2_stat_path, &st);
+	torture_assert_int_equal_goto(tctx,
+		ret,
+		0,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"failed to stat file '%s'",
+			plus2_stat_path));
+
+	torture_assert_int_equal(tctx,
+		st.st_ino,
+		st2.st_ino,
+		talloc_asprintf(tctx,
+			"file %s mismatched ino value "
+			"stat got %"PRIx64" readdirplus2 got %"PRIx64"" ,
+			plus2_stat_path,
+			(uint64_t)st.st_ino,
+			(uint64_t)st2.st_ino));
+
+	torture_assert_int_equal(tctx,
+		st.st_dev,
+		st2.st_dev,
+		talloc_asprintf(tctx,
+			"file %s mismatched dev value "
+			"stat got %"PRIx64" readdirplus2 got %"PRIx64"" ,
+			plus2_stat_path,
+			(uint64_t)st.st_dev,
+			(uint64_t)st2.st_dev));
+
+	ret = smbc_closedir(dhandle);
+	torture_assert_int_equal(tctx,
+		ret,
+		0,
+		talloc_asprintf(tctx,
+			"failed to close directory handle for '%s'",
+			dname));
+
+	dhandle = -1;
+	success = true;
+
+  done:
+
+	/* Clean up. */
+	if (dhandle != -1) {
+		smbc_closedir(dhandle);
+	}
+	for (i = 0; i < 100; i++) {
+		if (full_filename[i] != NULL) {
+			smbc_unlink(full_filename[i]);
+		}
+	}
+	if (dname != NULL) {
+		smbc_rmdir(dname);
+	}
+
+	smbc_free_context(ctx, 1);
+
+	return success;
+}
+
+#ifndef SMBC_FILE_MODE
+#define SMBC_FILE_MODE (S_IFREG | 0444)
+#endif
+
+static bool torture_libsmbclient_readdirplus2(struct torture_context *tctx)
+{
+	SMBCCTX *ctx;
+	int dhandle = -1;
+	int fhandle = -1;
+	bool found = false;
+	bool success = false;
+	const char *filename = NULL;
+	struct stat st2 = {0};
+	struct stat st = {0};
+	int ret;
+	const char *smburl = torture_setting_string(tctx, "smburl", NULL);
+
+	if (smburl == NULL) {
+		torture_fail(tctx,
+			"option --option=torture:smburl="
+			"smb://user:password@server/share missing\n");
+	}
+
+	torture_assert_goto(tctx, torture_libsmbclient_init_context(tctx, &ctx), success, done, "");
+	smbc_set_context(ctx);
+
+	filename = talloc_asprintf(tctx,
+			"%s/test_readdirplus.txt",
+			smburl);
+	if (filename == NULL) {
+		torture_fail_goto(tctx, done, "talloc fail\n");
+	}
+
+	/* Ensure the file doesn't exist. */
+	smbc_unlink(filename);
+
+	/* Create it. */
+	fhandle = smbc_creat(filename, 0666);
+	if (fhandle < 0) {
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"failed to create file '%s': %s",
+				filename,
+				strerror(errno)));
+	}
+	ret = smbc_close(fhandle);
+	torture_assert_int_equal_goto(tctx,
+		ret,
+		0,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"failed to close handle for '%s'",
+			filename));
+
+	dhandle = smbc_opendir(smburl);
+	if (dhandle < 0) {
+		int saved_errno = errno;
+		smbc_unlink(filename);
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"failed to obtain "
+				"directory handle for '%s' : %s",
+				smburl,
+				strerror(saved_errno)));
+	}
+
+	/* readdirplus2 to ensure we see the new file. */
+	for (;;) {
+		const struct libsmb_file_info *exstat =
+			smbc_readdirplus2(dhandle, &st2);
+		if (exstat == NULL) {
+			break;
+		}
+
+		if (strcmp(exstat->name, "test_readdirplus.txt") == 0) {
+			found = true;
+			break;
+		}
+	}
+
+	if (!found) {
+		smbc_unlink(filename);
+		torture_fail_goto(tctx,
+			done,
+			talloc_asprintf(tctx,
+				"failed to find file '%s'",
+				filename));
+	}
+
+	/* Ensure mode is as expected. */
+	/*
+	 * New file gets SMBC_FILE_MODE plus
+	 * archive bit -> S_IXUSR
+	 * !READONLY -> S_IWUSR.
+	 */
+	torture_assert_int_equal_goto(tctx,
+		st2.st_mode,
+		SMBC_FILE_MODE|S_IXUSR|S_IWUSR,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"file %s st_mode should be 0%o, got 0%o'",
+			filename,
+			SMBC_FILE_MODE|S_IXUSR|S_IWUSR,
+			(unsigned int)st2.st_mode));
+
+	/* Ensure smbc_stat() gets the same data. */
+	ret = smbc_stat(filename, &st);
+	torture_assert_int_equal_goto(tctx,
+		ret,
+		0,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"failed to stat file '%s'",
+			filename));
+
+	torture_assert_int_equal_goto(tctx,
+		st2.st_ino,
+		st.st_ino,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"filename '%s' ino missmatch. "
+			"From smbc_readdirplus2 = %"PRIx64" "
+			"From smbc_stat = %"PRIx64"",
+			filename,
+			(uint64_t)st2.st_ino,
+			(uint64_t)st.st_ino));
+
+
+	/* Remove it again. */
+	smbc_unlink(filename);
+	ret = smbc_closedir(dhandle);
+	torture_assert_int_equal_goto(tctx,
+		ret,
+		0,
+		success,
+		done,
+		talloc_asprintf(tctx,
+			"failed to close directory handle for '%s'",
+			filename));
+	success = true;
+
+  done:
+	smbc_free_context(ctx, 1);
+	return success;
+}
+
 bool torture_libsmbclient_configuration(struct torture_context *tctx)
 {
 	SMBCCTX *ctx;
@@ -505,6 +1131,62 @@ done:
 	return ok;
 }
 
+static bool torture_libsmbclient_list_shares(struct torture_context *tctx)
+{
+	const char *smburl = torture_setting_string(tctx, "smburl", NULL);
+	struct smbc_dirent *dirent = NULL;
+	SMBCCTX *ctx = NULL;
+	int dhandle = -1;
+	bool ipc_share_found = false;
+	bool ok = true;
+
+	if (smburl == NULL) {
+		torture_fail(tctx,
+			     "option --option=torture:smburl="
+			     "smb://user:password@server missing\n");
+	}
+
+	ok = torture_libsmbclient_init_context(tctx, &ctx);
+	torture_assert_goto(tctx,
+			    ok,
+			    ok,
+			    out,
+			    "Failed to init context");
+	smbc_set_context(ctx);
+
+	torture_comment(tctx, "Listing: %s\n", smburl);
+	dhandle = smbc_opendir(smburl);
+	torture_assert_int_not_equal_goto(tctx,
+					  dhandle,
+					  -1,
+					  ok,
+					  out,
+					  "Failed to open smburl");
+
+	while((dirent = smbc_readdir(dhandle)) != NULL) {
+		torture_comment(tctx, "DIR: %s\n", dirent->name);
+		torture_assert_not_null_goto(tctx,
+					     dirent->name,
+					     ok,
+					     out,
+					     "Failed to read name");
+
+		if (strequal(dirent->name, "IPC$")) {
+			ipc_share_found = true;
+		}
+	}
+
+	torture_assert_goto(tctx,
+			    ipc_share_found,
+			    ok,
+			    out,
+			    "Failed to list IPC$ share");
+
+out:
+	smbc_closedir(dhandle);
+	return ok;
+}
+
 NTSTATUS torture_libsmbclient_init(TALLOC_CTX *ctx)
 {
 	struct torture_suite *suite;
@@ -517,8 +1199,13 @@ NTSTATUS torture_libsmbclient_init(TALLOC_CTX *ctx)
 	torture_suite_add_simple_test(suite, "setConfiguration", torture_libsmbclient_setConfiguration);
 	torture_suite_add_simple_test(suite, "options", torture_libsmbclient_options);
 	torture_suite_add_simple_test(suite, "opendir", torture_libsmbclient_opendir);
+	torture_suite_add_simple_test(suite, "list_shares", torture_libsmbclient_list_shares);
 	torture_suite_add_simple_test(suite, "readdirplus",
 		torture_libsmbclient_readdirplus);
+	torture_suite_add_simple_test(suite, "readdirplus_seek",
+		torture_libsmbclient_readdirplus_seek);
+	torture_suite_add_simple_test(suite, "readdirplus2",
+		torture_libsmbclient_readdirplus2);
 
 	suite->description = talloc_strdup(suite, "libsmbclient interface tests");
 

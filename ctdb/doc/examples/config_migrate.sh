@@ -209,6 +209,7 @@ CTDB_NOTIFY_SCRIPT
 CTDB_PUBLIC_INTERFACE
 CTDB_MAX_PERSISTENT_CHECK_ERRORS
 CTDB_SHUTDOWN_TIMEOUT
+CTDB_MONITOR_SWAP_USAGE
 EOF
 }
 
@@ -262,7 +263,6 @@ CTDB_MAX_CORRUPT_DB_BACKUPS
 # 05.system
 CTDB_MONITOR_FILESYSTEM_USAGE
 CTDB_MONITOR_MEMORY_USAGE
-CTDB_MONITOR_SWAP_USAGE
 # debug_hung_scripts.sh
 CTDB_DEBUG_HUNG_SCRIPT_STACKPAT
 EOF
@@ -323,7 +323,6 @@ TickleUpdateInterval
 TraverseTimeout
 VacuumFastPathCount
 VacuumInterval
-VacuumLimit
 VacuumMaxRunTime
 VerboseMemoryNames
 EOF
@@ -336,6 +335,7 @@ check_removed_tunable ()
 
 	grep -Fiqx "$_tunable" <<EOF
 NoIPHostOnAllDisabled
+VacuumLimit
 EOF
 }
 

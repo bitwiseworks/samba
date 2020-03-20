@@ -172,9 +172,8 @@ NTSTATUS schedule_aio_read_and_X(connection_struct *conn,
 		return NT_STATUS_RETRY;
 	}
 
-	/* Only do this on non-chained and non-chaining reads not using the
-	 * write cache. */
-        if (req_is_in_chain(smbreq) || (lp_write_cache_size(SNUM(conn)) != 0)) {
+	/* Only do this on non-chained and non-chaining reads */
+        if (req_is_in_chain(smbreq)) {
 		return NT_STATUS_RETRY;
 	}
 
@@ -206,7 +205,7 @@ NTSTATUS schedule_aio_read_and_X(connection_struct *conn,
 	aio_ex->nbyte = smb_maxcnt;
 	aio_ex->offset = startpos;
 
-	req = SMB_VFS_PREAD_SEND(aio_ex, smbreq->ev_ctx,
+	req = SMB_VFS_PREAD_SEND(aio_ex, fsp->conn->sconn->ev_ctx,
 				 fsp,
 				 smb_buf(aio_ex->outbuf.data) + 1 /* pad */,
 				 smb_maxcnt, startpos);
@@ -428,9 +427,8 @@ NTSTATUS schedule_aio_write_and_X(connection_struct *conn,
 		return NT_STATUS_RETRY;
 	}
 
-	/* Only do this on non-chained and non-chaining writes not using the
-	 * write cache. */
-        if (req_is_in_chain(smbreq) || (lp_write_cache_size(SNUM(conn)) != 0)) {
+	/* Only do this on non-chained and non-chaining writes */
+        if (req_is_in_chain(smbreq)) {
 		return NT_STATUS_RETRY;
 	}
 
@@ -459,7 +457,7 @@ NTSTATUS schedule_aio_write_and_X(connection_struct *conn,
 	aio_ex->nbyte = numtowrite;
 	aio_ex->offset = startpos;
 
-	req = pwrite_fsync_send(aio_ex, smbreq->ev_ctx, fsp,
+	req = pwrite_fsync_send(aio_ex, fsp->conn->sconn->ev_ctx, fsp,
 				data, numtowrite, startpos,
 				aio_ex->write_through);
 	if (req == NULL) {
@@ -622,12 +620,16 @@ bool cancel_smb2_aio(struct smb_request *smbreq)
 	}
 
 	/*
-	 * We let the aio request run. Setting fsp to NULL has the
-	 * effect that the _done routines don't send anything out.
+	 * We let the aio request run and don't try to cancel it which means
+	 * processing of the SMB2 request must continue as normal, cf MS-SMB2
+	 * 3.3.5.16:
+	 *
+	 *   If the target request is not successfully canceled, processing of
+	 *   the target request MUST continue and no response is sent to the
+	 *   cancel request.
 	 */
 
-	aio_ex->fsp = NULL;
-	return true;
+	return false;
 }
 
 static void aio_pread_smb2_done(struct tevent_req *req);
@@ -669,11 +671,6 @@ NTSTATUS schedule_smb2_aio_read(connection_struct *conn,
 		return NT_STATUS_RETRY;
 	}
 
-	/* Only do this on reads not using the write cache. */
-	if (lp_write_cache_size(SNUM(conn)) != 0) {
-		return NT_STATUS_RETRY;
-	}
-
 	if (smbd_smb2_is_compound(smbreq->smb2req)) {
 		return NT_STATUS_RETRY;
 	}
@@ -701,7 +698,7 @@ NTSTATUS schedule_smb2_aio_read(connection_struct *conn,
 	aio_ex->nbyte = smb_maxcnt;
 	aio_ex->offset = startpos;
 
-	req = SMB_VFS_PREAD_SEND(aio_ex, smbreq->ev_ctx, fsp,
+	req = SMB_VFS_PREAD_SEND(aio_ex, fsp->conn->sconn->ev_ctx, fsp,
 				 preadbuf->data, smb_maxcnt, startpos);
 	if (req == NULL) {
 		DEBUG(0, ("smb2: SMB_VFS_PREAD_SEND failed. "
@@ -745,14 +742,6 @@ static void aio_pread_smb2_done(struct tevent_req *req)
 
 	DEBUG(10, ("pread_recv returned %d, err = %s\n", (int)nread,
 		   (nread == -1) ? strerror(vfs_aio_state.error) : "no error"));
-
-	if (fsp == NULL) {
-		DEBUG(3, ("%s: request cancelled (mid[%ju])\n",
-			  __func__, (uintmax_t)aio_ex->smbreq->mid));
-		TALLOC_FREE(aio_ex);
-		tevent_req_nterror(subreq, NT_STATUS_INTERNAL_ERROR);
-		return;
-	}
 
 	/* Common error or success code processing for async or sync
 	   read returns. */
@@ -817,11 +806,6 @@ NTSTATUS schedule_aio_smb2_write(connection_struct *conn,
 		return NT_STATUS_RETRY;
 	}
 
-	/* Only do this on writes not using the write cache. */
-	if (lp_write_cache_size(SNUM(conn)) != 0) {
-		return NT_STATUS_RETRY;
-	}
-
 	if (smbd_smb2_is_compound(smbreq->smb2req)) {
 		return NT_STATUS_RETRY;
 	}
@@ -850,7 +834,7 @@ NTSTATUS schedule_aio_smb2_write(connection_struct *conn,
 	aio_ex->nbyte = in_data.length;
 	aio_ex->offset = in_offset;
 
-	req = pwrite_fsync_send(aio_ex, smbreq->ev_ctx, fsp,
+	req = pwrite_fsync_send(aio_ex, fsp->conn->sconn->ev_ctx, fsp,
 				in_data.data, in_data.length, in_offset,
 				write_through);
 	if (req == NULL) {
@@ -908,14 +892,6 @@ static void aio_pwrite_smb2_done(struct tevent_req *req)
 
 	DEBUG(10, ("pwrite_recv returned %d, err = %s\n", (int)nwritten,
 		   (nwritten == -1) ? strerror(err) : "no error"));
-
-	if (fsp == NULL) {
-		DEBUG(3, ("%s: request cancelled (mid[%ju])\n",
-			  __func__, (uintmax_t)aio_ex->smbreq->mid));
-		TALLOC_FREE(aio_ex);
-		tevent_req_nterror(subreq, NT_STATUS_INTERNAL_ERROR);
-		return;
-	}
 
 	mark_file_modified(fsp);
 

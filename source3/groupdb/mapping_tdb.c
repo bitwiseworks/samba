@@ -53,7 +53,7 @@ static bool init_group_mapping(void)
 		return true;
 	}
 
-	tdb_path = state_path("group_mapping.tdb");
+	tdb_path = state_path(talloc_tos(), "group_mapping.tdb");
 	if (tdb_path == NULL) {
 		return false;
 	}
@@ -67,7 +67,7 @@ static bool init_group_mapping(void)
 		return false;
 	}
 
-	ldb_path = state_path("group_mapping.ldb");
+	ldb_path = state_path(talloc_tos(), "group_mapping.ldb");
 	if (ldb_path == NULL) {
 		talloc_free(tdb_path);
 		return false;
@@ -133,15 +133,10 @@ static bool init_group_mapping(void)
 
 static char *group_mapping_key(TALLOC_CTX *mem_ctx, const struct dom_sid *sid)
 {
-	char sidstr[DOM_SID_STR_BUFLEN];
-	int len;
+	struct dom_sid_buf sidstr;
 
-	len = dom_sid_string_buf(sid, sidstr, sizeof(sidstr));
-	if (len >= sizeof(sidstr)) {
-		return NULL;
-	}
-
-	return talloc_asprintf(mem_ctx, "%s%s", GROUP_PREFIX, sidstr);
+	return talloc_asprintf(
+		mem_ctx, "%s%s", GROUP_PREFIX, dom_sid_str_buf(sid, &sidstr));
 }
 
 /****************************************************************************
@@ -403,8 +398,9 @@ static int collect_map(struct db_record *rec, void *private_data)
 
 	if ((state->domsid != NULL) &&
 	    (dom_sid_compare_domain(state->domsid, &map->sid) != 0)) {
+		struct dom_sid_buf buf;
 		DEBUG(11,("enum_group_mapping: group %s is not in domain\n",
-			  sid_string_dbg(&map->sid)));
+			  dom_sid_str_buf(&map->sid, &buf)));
 		TALLOC_FREE(map);
 		return 0;
 	}
@@ -456,16 +452,16 @@ static bool enum_group_mapping(const struct dom_sid *domsid,
 static NTSTATUS one_alias_membership(const struct dom_sid *member,
 			       struct dom_sid **sids, size_t *num)
 {
-	fstring tmp;
+	struct dom_sid_buf tmp;
 	fstring key;
 	char *string_sid;
 	TDB_DATA dbuf;
 	const char *p;
-	NTSTATUS status = NT_STATUS_OK;
+	NTSTATUS status;
 	TALLOC_CTX *frame = talloc_stackframe();
 
 	slprintf(key, sizeof(key), "%s%s", MEMBEROF_PREFIX,
-		 sid_to_fstring(tmp, member));
+		 dom_sid_str_buf(member, &tmp));
 
 	status = dbwrap_fetch_bystring(db, frame, key, &dbuf);
 	if (!NT_STATUS_IS_OK(status)) {
@@ -537,7 +533,7 @@ static NTSTATUS add_aliasmem(const struct dom_sid *alias, const struct dom_sid *
 {
 	GROUP_MAP *map;
 	char *key;
-	fstring string_sid;
+	struct dom_sid_buf string_sid;
 	char *new_memberstring;
 	struct db_record *rec;
 	NTSTATUS status;
@@ -564,10 +560,8 @@ static NTSTATUS add_aliasmem(const struct dom_sid *alias, const struct dom_sid *
 	if (is_aliasmem(alias, member))
 		return NT_STATUS_MEMBER_IN_ALIAS;
 
-	sid_to_fstring(string_sid, member);
-
 	key = talloc_asprintf(talloc_tos(), "%s%s", MEMBEROF_PREFIX,
-			      string_sid);
+			      dom_sid_str_buf(member, &string_sid));
 	if (key == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -588,13 +582,13 @@ static NTSTATUS add_aliasmem(const struct dom_sid *alias, const struct dom_sid *
 
 	value = dbwrap_record_get_value(rec);
 
-	sid_to_fstring(string_sid, alias);
+	dom_sid_str_buf(alias, &string_sid);
 
 	if (value.dptr != NULL) {
 		new_memberstring = talloc_asprintf(
-			key, "%s %s", (char *)(value.dptr), string_sid);
+			key, "%s %s", (char *)(value.dptr), string_sid.buf);
 	} else {
-		new_memberstring = talloc_strdup(key, string_sid);
+		new_memberstring = talloc_strdup(key, string_sid.buf);
 	}
 
 	if (new_memberstring == NULL) {
@@ -737,7 +731,7 @@ static NTSTATUS del_aliasmem(const struct dom_sid *alias, const struct dom_sid *
 	bool found = False;
 	char *member_string;
 	char *key;
-	fstring sid_string;
+	struct dom_sid_buf sid_string;
 
 	if (dbwrap_transaction_start(db) != 0) {
 		DEBUG(0, ("transaction_start failed\n"));
@@ -768,9 +762,11 @@ static NTSTATUS del_aliasmem(const struct dom_sid *alias, const struct dom_sid *
 
 	num -= 1;
 
-	sid_to_fstring(sid_string, member);
-
-	key = talloc_asprintf(sids, "%s%s", MEMBEROF_PREFIX, sid_string);
+	key = talloc_asprintf(
+		sids,
+		"%s%s",
+		MEMBEROF_PREFIX,
+		dom_sid_str_buf(member, &sid_string));
 	if (key == NULL) {
 		TALLOC_FREE(sids);
 		status = NT_STATUS_NO_MEMORY;
@@ -791,10 +787,10 @@ static NTSTATUS del_aliasmem(const struct dom_sid *alias, const struct dom_sid *
 
 	for (i=0; i<num; i++) {
 
-		sid_to_fstring(sid_string, &sids[i]);
-
 		member_string = talloc_asprintf_append_buffer(
-			member_string, " %s", sid_string);
+			member_string,
+			" %s",
+			dom_sid_str_buf(&sids[i], &sid_string));
 
 		if (member_string == NULL) {
 			TALLOC_FREE(sids);
@@ -861,9 +857,9 @@ static int convert_ldb_record(TDB_CONTEXT *ltdb, TDB_DATA key,
 	size_t len;
 	char *name;
 	char *val;
-	char *q;
 	uint32_t num_mem = 0;
 	struct dom_sid *members = NULL;
+	int error = 0;
 
 	p = (uint8_t *)data.dptr;
 	if (data.dsize < 8) {
@@ -978,8 +974,12 @@ static int convert_ldb_record(TDB_CONTEXT *ltdb, TDB_DATA key,
 			/* we ignore unknown or uninteresting attributes
 			 * (objectclass, etc.) */
 			if (strcasecmp_m(name, "gidNumber") == 0) {
-				map->gid = strtoul(val, &q, 10);
-				if (*q) {
+				map->gid = smb_strtoul(val,
+						       NULL,
+						       10,
+						       &error,
+						       SMB_STR_FULL_STR_CONV);
+				if (error != 0) {
 					errno = EIO;
 					goto failed;
 				}
@@ -989,8 +989,13 @@ static int convert_ldb_record(TDB_CONTEXT *ltdb, TDB_DATA key,
 					goto failed;
 				}
 			} else if (strcasecmp_m(name, "sidNameUse") == 0) {
-				map->sid_name_use = strtoul(val, &q, 10);
-				if (*q) {
+				map->sid_name_use =
+					smb_strtoul(val,
+						    NULL,
+						    10,
+						    &error,
+						    SMB_STR_FULL_STR_CONV);
+				if (error != 0) {
 					errno = EIO;
 					goto failed;
 				}
@@ -1084,7 +1089,7 @@ static bool mapping_switch(const char *ldb_path)
 	}
 
 	/* now rename the old db out of the way */
-	new_path = state_path("group_mapping.ldb.replaced");
+	new_path = state_path(talloc_tos(), "group_mapping.ldb.replaced");
 	if (!new_path) {
 		goto failed;
 	}

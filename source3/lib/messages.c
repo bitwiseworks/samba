@@ -97,10 +97,9 @@ struct messaging_context {
 	struct tevent_req **waiters;
 	size_t num_waiters;
 
-	void *msg_dgm_ref;
-	void *msg_ctdb_ref;
-
 	struct server_id_db *names_db;
+
+	TALLOC_CTX *per_process_talloc_ctx;
 };
 
 static struct messaging_rec *messaging_rec_dup(TALLOC_CTX *mem_ctx,
@@ -206,7 +205,7 @@ static bool messaging_register_event_context(struct messaging_context *ctx,
 			continue;
 		}
 
-		if (tevent_context_same_loop(reg->ev, ev)) {
+		if (reg->ev == ev) {
 			reg->refcount += 1;
 			return true;
 		}
@@ -255,7 +254,7 @@ static bool messaging_deregister_event_context(struct messaging_context *ctx,
 			continue;
 		}
 
-		if (tevent_context_same_loop(reg->ev, ev)) {
+		if (reg->ev == ev) {
 			reg->refcount -= 1;
 
 			if (reg->refcount == 0) {
@@ -365,11 +364,6 @@ static bool messaging_alert_event_contexts(struct messaging_context *ctx)
 		 * alternatively would be to track whether the
 		 * immediate has already been scheduled. For
 		 * now, avoid that complexity here.
-		 *
-		 * reg->ev and ctx->event_ctx can't
-		 * be wrapper tevent_context pointers
-		 * so we don't need to use
-		 * tevent_context_same_loop().
 		 */
 
 		if (reg->ev == ctx->event_ctx) {
@@ -485,10 +479,11 @@ static NTSTATUS messaging_init_internal(TALLOC_CTX *mem_ctx,
 {
 	TALLOC_CTX *frame;
 	struct messaging_context *ctx;
-	NTSTATUS status = NT_STATUS_UNSUCCESSFUL;
+	NTSTATUS status;
 	int ret;
 	const char *lck_path;
 	const char *priv_path;
+	void *ref;
 	bool ok;
 
 	/*
@@ -498,13 +493,7 @@ static NTSTATUS messaging_init_internal(TALLOC_CTX *mem_ctx,
 
 	sec_init();
 
-	if (tevent_context_is_wrapper(ev)) {
-		/* This is really a programmer error! */
-		DBG_ERR("Should not be used with a wrapper tevent context\n");
-		return NT_STATUS_INVALID_PARAMETER;
-	}
-
-	lck_path = lock_path("msg.lock");
+	lck_path = lock_path(talloc_tos(), "msg.lock");
 	if (lck_path == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -548,21 +537,28 @@ static NTSTATUS messaging_init_internal(TALLOC_CTX *mem_ctx,
 
 	ctx->event_ctx = ev;
 
+	ctx->per_process_talloc_ctx = talloc_new(ctx);
+	if (ctx->per_process_talloc_ctx == NULL) {
+		status = NT_STATUS_NO_MEMORY;
+		goto done;
+	}
+
 	ok = messaging_register_event_context(ctx, ev);
 	if (!ok) {
 		status = NT_STATUS_NO_MEMORY;
 		goto done;
 	}
 
-	ctx->msg_dgm_ref = messaging_dgm_ref(ctx,
-					     ctx->event_ctx,
-					     &ctx->id.unique_id,
-					     priv_path,
-					     lck_path,
-					     messaging_recv_cb,
-					     ctx,
-					     &ret);
-	if (ctx->msg_dgm_ref == NULL) {
+	ref = messaging_dgm_ref(
+		ctx->per_process_talloc_ctx,
+		ctx->event_ctx,
+		&ctx->id.unique_id,
+		priv_path,
+		lck_path,
+		messaging_recv_cb,
+		ctx,
+		&ret);
+	if (ref == NULL) {
 		DEBUG(2, ("messaging_dgm_ref failed: %s\n", strerror(ret)));
 		status = map_nt_error_from_unix(ret);
 		goto done;
@@ -571,11 +567,16 @@ static NTSTATUS messaging_init_internal(TALLOC_CTX *mem_ctx,
 
 #ifdef CLUSTER_SUPPORT
 	if (lp_clustering()) {
-		ctx->msg_ctdb_ref = messaging_ctdb_ref(
-			ctx, ctx->event_ctx,
-			lp_ctdbd_socket(), lp_ctdb_timeout(),
-			ctx->id.unique_id, messaging_recv_cb, ctx, &ret);
-		if (ctx->msg_ctdb_ref == NULL) {
+		ref = messaging_ctdb_ref(
+			ctx->per_process_talloc_ctx,
+			ctx->event_ctx,
+			lp_ctdbd_socket(),
+			lp_ctdb_timeout(),
+			ctx->id.unique_id,
+			messaging_recv_cb,
+			ctx,
+			&ret);
+		if (ref == NULL) {
 			DBG_NOTICE("messaging_ctdb_ref failed: %s\n",
 				   strerror(ret));
 			status = map_nt_error_from_unix(ret);
@@ -601,7 +602,7 @@ static NTSTATUS messaging_init_internal(TALLOC_CTX *mem_ctx,
 
 	/* Register some debugging related messages */
 
-	register_msg_pool_usage(ctx);
+	register_msg_pool_usage(ctx->per_process_talloc_ctx, ctx);
 	register_dmalloc_msgs(ctx);
 	debug_register_msgs(ctx);
 
@@ -635,15 +636,6 @@ struct messaging_context *messaging_init(TALLOC_CTX *mem_ctx,
 	return ctx;
 }
 
-NTSTATUS messaging_init_client(TALLOC_CTX *mem_ctx,
-			       struct tevent_context *ev,
-			       struct messaging_context **pmsg_ctx)
-{
-	return messaging_init_internal(mem_ctx,
-					ev,
-					pmsg_ctx);
-}
-
 struct server_id messaging_server_id(const struct messaging_context *msg_ctx)
 {
 	return msg_ctx->id;
@@ -656,36 +648,50 @@ NTSTATUS messaging_reinit(struct messaging_context *msg_ctx)
 {
 	int ret;
 	char *lck_path;
+	void *ref;
 
-	TALLOC_FREE(msg_ctx->msg_dgm_ref);
-	TALLOC_FREE(msg_ctx->msg_ctdb_ref);
+	TALLOC_FREE(msg_ctx->per_process_talloc_ctx);
+
+	msg_ctx->per_process_talloc_ctx = talloc_new(msg_ctx);
+	if (msg_ctx->per_process_talloc_ctx == NULL) {
+		return NT_STATUS_NO_MEMORY;
+	}
 
 	msg_ctx->id = (struct server_id) {
 		.pid = getpid(), .vnn = msg_ctx->id.vnn
 	};
 
-	lck_path = lock_path("msg.lock");
+	lck_path = lock_path(talloc_tos(), "msg.lock");
 	if (lck_path == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	msg_ctx->msg_dgm_ref = messaging_dgm_ref(
-		msg_ctx, msg_ctx->event_ctx, &msg_ctx->id.unique_id,
-		private_path("msg.sock"), lck_path,
-		messaging_recv_cb, msg_ctx, &ret);
+	ref = messaging_dgm_ref(
+		msg_ctx->per_process_talloc_ctx,
+		msg_ctx->event_ctx,
+		&msg_ctx->id.unique_id,
+		private_path("msg.sock"),
+		lck_path,
+		messaging_recv_cb,
+		msg_ctx,
+		&ret);
 
-	if (msg_ctx->msg_dgm_ref == NULL) {
+	if (ref == NULL) {
 		DEBUG(2, ("messaging_dgm_ref failed: %s\n", strerror(ret)));
 		return map_nt_error_from_unix(ret);
 	}
 
 	if (lp_clustering()) {
-		msg_ctx->msg_ctdb_ref = messaging_ctdb_ref(
-			msg_ctx, msg_ctx->event_ctx,
-			lp_ctdbd_socket(), lp_ctdb_timeout(),
-			msg_ctx->id.unique_id, messaging_recv_cb, msg_ctx,
+		ref = messaging_ctdb_ref(
+			msg_ctx->per_process_talloc_ctx,
+			msg_ctx->event_ctx,
+			lp_ctdbd_socket(),
+			lp_ctdb_timeout(),
+			msg_ctx->id.unique_id,
+			messaging_recv_cb,
+			msg_ctx,
 			&ret);
-		if (msg_ctx->msg_ctdb_ref == NULL) {
+		if (ref == NULL) {
 			DBG_NOTICE("messaging_ctdb_ref failed: %s\n",
 				   strerror(ret));
 			return map_nt_error_from_unix(ret);
@@ -693,6 +699,7 @@ NTSTATUS messaging_reinit(struct messaging_context *msg_ctx)
 	}
 
 	server_id_db_reinit(msg_ctx->names_db, msg_ctx->id);
+	register_msg_pool_usage(msg_ctx->per_process_talloc_ctx, msg_ctx);
 
 	return NT_STATUS_OK;
 }
@@ -915,7 +922,7 @@ static int send_all_fn(pid_t pid, void *private_data)
 	status = messaging_send_buf(state->msg_ctx, pid_to_procid(pid),
 				    state->msg_type, state->buf, state->len);
 	if (!NT_STATUS_IS_OK(status)) {
-		DBG_WARNING("messaging_send_buf to %ju failed: %s\n",
+		DBG_NOTICE("messaging_send_buf to %ju failed: %s\n",
 			    (uintmax_t)pid, nt_errstr(status));
 	}
 
@@ -1034,22 +1041,9 @@ struct tevent_req *messaging_filtered_read_send(
 	state->filter = filter;
 	state->private_data = private_data;
 
-	if (tevent_context_is_wrapper(ev) &&
-	    !tevent_context_same_loop(ev, msg_ctx->event_ctx))
-	{
-		/* This is really a programmer error! */
-		DBG_ERR("Wrapper tevent context doesn't use main context.\n");
-		tevent_req_error(req, EINVAL);
-		return tevent_req_post(req, ev);
-	}
-
 	/*
 	 * We have to defer the callback here, as we might be called from
-	 * within a different tevent_context than state->ev.
-	 *
-	 * This is important for two cases:
-	 * 1. nested event contexts, used by blocking ctdb calls
-	 * 2. possible impersonation using wrapper tevent contexts.
+	 * within a different tevent_context than state->ev
 	 */
 	tevent_req_defer_callback(req, state->ev);
 
@@ -1345,7 +1339,7 @@ static bool messaging_dispatch_waiters(struct messaging_context *msg_ctx,
 
 		state = tevent_req_data(
 			req, struct messaging_filtered_read_state);
-		if (tevent_context_same_loop(ev, state->ev) &&
+		if ((ev == state->ev) &&
 		    state->filter(rec, state->private_data)) {
 			messaging_filtered_read_done(req, rec);
 			return true;
@@ -1366,11 +1360,6 @@ static void messaging_dispatch_rec(struct messaging_context *msg_ctx,
 {
 	bool consumed;
 	size_t i;
-
-	/*
-	 * ev and msg_ctx->event_ctx can't be wrapper tevent_context pointers
-	 * so we don't need to use tevent_context_same_loop().
-	 */
 
 	if (ev == msg_ctx->event_ctx) {
 		consumed = messaging_dispatch_classic(msg_ctx, rec);

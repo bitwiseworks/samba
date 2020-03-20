@@ -99,7 +99,7 @@ class Ldb(_Ldb):
         # TODO set debug
         def msg(l, text):
             print(text)
-        #self.set_debug(msg)
+        # self.set_debug(msg)
 
         self.set_utf8_casefold()
 
@@ -140,7 +140,7 @@ class Ldb(_Ldb):
 
         try:
             res = self.search(base=dn, scope=ldb.SCOPE_SUBTREE, attrs=[],
-                      expression="(|(objectclass=user)(objectclass=computer))")
+                              expression="(|(objectclass=user)(objectclass=computer))")
         except ldb.LdbError as error:
             (errno, estr) = error.args
             if errno == ldb.ERR_NO_SUCH_OBJECT:
@@ -173,8 +173,8 @@ class Ldb(_Ldb):
         # Delete the 'visible' records, and the invisble 'deleted' records (if
         # this DB supports it)
         for msg in self.search(basedn, ldb.SCOPE_SUBTREE,
-                       "(&(|(objectclass=*)(distinguishedName=*))(!(distinguishedName=@BASEINFO)))",
-                       [], controls=["show_deleted:0", "show_recycled:0"]):
+                               "(&(|(objectclass=*)(distinguishedName=*))(!(distinguishedName=@BASEINFO)))",
+                               [], controls=["show_deleted:0", "show_recycled:0"]):
             try:
                 self.delete(msg.dn, ["relax:0"])
             except ldb.LdbError as error:
@@ -184,8 +184,8 @@ class Ldb(_Ldb):
                     raise
 
         res = self.search(basedn, ldb.SCOPE_SUBTREE,
-            "(&(|(objectclass=*)(distinguishedName=*))(!(distinguishedName=@BASEINFO)))",
-            [], controls=["show_deleted:0", "show_recycled:0"])
+                          "(&(|(objectclass=*)(distinguishedName=*))(!(distinguishedName=@BASEINFO)))",
+                          [], controls=["show_deleted:0", "show_recycled:0"])
         assert len(res) == 0
 
         # delete the specials
@@ -264,14 +264,14 @@ def check_all_substituted(text):
 
     :param text: The text to search for substitution variables
     """
-    if not "${" in text:
+    if "${" not in text:
         return
 
     var_start = text.find("${")
     var_end = text.find("}", var_start)
 
     raise Exception("Not all variables substituted: %s" %
-        text[var_start:var_end+1])
+                    text[var_start:var_end + 1])
 
 
 def read_and_sub_file(file_name, subst_vars):
@@ -280,7 +280,7 @@ def read_and_sub_file(file_name, subst_vars):
     :param file_name: File to be read (typically from setup directory)
      param subst_vars: Optional variables to subsitute in the file.
     """
-    data = open(file_name, 'r').read()
+    data = open(file_name, 'r', encoding="utf-8").read()
     if subst_vars is not None:
         data = substitute_var(data, subst_vars)
         check_all_substituted(data)
@@ -304,7 +304,10 @@ def setup_file(template, fname, subst_vars=None):
     finally:
         f.close()
 
+
 MAX_NETBIOS_NAME_LEN = 15
+
+
 def is_valid_netbios_char(c):
     return (c.isalnum() or c in " !#$%&'()-.@^_{}~")
 
@@ -336,8 +339,8 @@ def import_bundled_package(modulename, location, source_tree_container,
     """
     if in_source_tree():
         extra_path = os.path.join(source_tree_topdir(), source_tree_container,
-            location)
-        if not extra_path in sys.path:
+                                  location)
+        if extra_path not in sys.path:
             sys.path.insert(0, extra_path)
         sys.modules[modulename] = __import__(modulename)
     else:
@@ -356,28 +359,32 @@ def ensure_third_party_module(modulename, location):
         __import__(modulename)
     except ImportError:
         import_bundled_package(modulename, location,
-            source_tree_container="third_party",
-            namespace="samba.third_party")
+                               source_tree_container="third_party",
+                               namespace="samba.third_party")
 
 
 def dn_from_dns_name(dnsdomain):
     """return a DN from a DNS name domain/forest root"""
     return "DC=" + ",DC=".join(dnsdomain.split("."))
 
+
 def current_unix_time():
     return int(time.time())
+
 
 def string_to_byte_array(string):
     blob = [0] * len(string)
 
     for i in range(len(string)):
-        blob[i] = ord(string[i])
+        blob[i] = string[i] if isinstance(string[i], int) else ord(string[i])
 
     return blob
+
 
 def arcfour_encrypt(key, data):
     from samba.crypto import arcfour_crypt_blob
     return arcfour_crypt_blob(data, key)
+
 
 version = _glue.version
 interface_ips = _glue.interface_ips

@@ -22,50 +22,50 @@
 #include "lib/util/debug.h"
 #include "lib/util/samba_util.h"
 #include "lib/util/sys_rw.h"
-#include "lib/sys_popen.h"
+#include "lib/util/sys_popen.h"
 #include "lib/async_req/async_sock.h"
 #include "lib/util/tevent_unix.h"
 
-struct file_pload_state {
+struct file_ploadv_state {
 	struct tevent_context *ev;
 	size_t maxsize;
 	int fd;
 	uint8_t *buf;
 };
 
-static int file_pload_state_destructor(struct file_pload_state *s);
-static void file_pload_readable(struct tevent_req *subreq);
+static int file_ploadv_state_destructor(struct file_ploadv_state *s);
+static void file_ploadv_readable(struct tevent_req *subreq);
 
-struct tevent_req *file_pload_send(TALLOC_CTX *mem_ctx,
+struct tevent_req *file_ploadv_send(TALLOC_CTX *mem_ctx,
 				   struct tevent_context *ev,
-				   const char *syscmd, size_t maxsize)
+				   char * const argl[], size_t maxsize)
 {
-	struct tevent_req *req, *subreq;
-	struct file_pload_state *state;
+	struct tevent_req *req = NULL, *subreq = NULL;
+	struct file_ploadv_state *state = NULL;
 
-	req = tevent_req_create(mem_ctx, &state, struct file_pload_state);
+	req = tevent_req_create(mem_ctx, &state, struct file_ploadv_state);
 	if (req == NULL) {
 		return NULL;
 	}
 	state->ev = ev;
 	state->maxsize = maxsize;
 
-	state->fd = sys_popen(syscmd);
+	state->fd = sys_popenv(argl);
 	if (state->fd == -1) {
 		tevent_req_error(req, errno);
 		return tevent_req_post(req, ev);
 	}
-	talloc_set_destructor(state, file_pload_state_destructor);
+	talloc_set_destructor(state, file_ploadv_state_destructor);
 
 	subreq = wait_for_read_send(state, state->ev, state->fd, false);
 	if (tevent_req_nomem(subreq, req)) {
 		return tevent_req_post(req, ev);
 	}
-	tevent_req_set_callback(subreq, file_pload_readable, req);
+	tevent_req_set_callback(subreq, file_ploadv_readable, req);
 	return req;
 }
 
-static int file_pload_state_destructor(struct file_pload_state *s)
+static int file_ploadv_state_destructor(struct file_ploadv_state *s)
 {
 	if (s->fd != -1) {
 		sys_pclose(s->fd);
@@ -74,12 +74,12 @@ static int file_pload_state_destructor(struct file_pload_state *s)
 	return 0;
 }
 
-static void file_pload_readable(struct tevent_req *subreq)
+static void file_ploadv_readable(struct tevent_req *subreq)
 {
 	struct tevent_req *req = tevent_req_callback_data(
 		subreq, struct tevent_req);
-	struct file_pload_state *state = tevent_req_data(
-		req, struct file_pload_state);
+	struct file_ploadv_state *state = tevent_req_data(
+		req, struct file_ploadv_state);
 	uint8_t buf[1024];
 	uint8_t *tmp;
 	ssize_t nread;
@@ -131,14 +131,14 @@ static void file_pload_readable(struct tevent_req *subreq)
 	if (tevent_req_nomem(subreq, req)) {
 		return;
 	}
-	tevent_req_set_callback(subreq, file_pload_readable, req);
+	tevent_req_set_callback(subreq, file_ploadv_readable, req);
 }
 
-int file_pload_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
+int file_ploadv_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
 		    uint8_t **buf)
 {
-	struct file_pload_state *state = tevent_req_data(
-		req, struct file_pload_state);
+	struct file_ploadv_state *state = tevent_req_data(
+		req, struct file_ploadv_state);
 	int err;
 
 	if (tevent_req_is_unix_error(req, &err)) {
@@ -151,66 +151,20 @@ int file_pload_recv(struct tevent_req *req, TALLOC_CTX *mem_ctx,
 	return 0;
 }
 
-/**
- Load from a pipe into memory.
-**/
-
-static char *file_pload(const char *syscmd, size_t *size)
-{
-	int fd, n;
-	char *p;
-	char buf[1024];
-	size_t total;
-
-	fd = sys_popen(syscmd);
-	if (fd == -1) {
-		return NULL;
-	}
-
-	p = NULL;
-	total = 0;
-
-	while ((n = sys_read(fd, buf, sizeof(buf))) > 0) {
-		p = talloc_realloc(NULL, p, char, total + n + 1);
-		if (!p) {
-		        DEBUG(0,("file_pload: failed to expand buffer!\n"));
-			close(fd);
-			return NULL;
-		}
-		memcpy(p+total, buf, n);
-		total += n;
-	}
-
-	if (p) {
-		p[total] = 0;
-	}
-
-	/* FIXME: Perhaps ought to check that the command completed
-	 * successfully (returned 0); if not the data may be
-	 * truncated. */
-	sys_pclose(fd);
-
-	if (size) {
-		*size = total;
-	}
-
-	return p;
-}
-
-
 
 /**
  Load a pipe into memory and return an array of pointers to lines in the data
  must be freed with TALLOC_FREE.
 **/
 
-char **file_lines_pload(TALLOC_CTX *mem_ctx, const char *syscmd,
+char **file_lines_ploadv(TALLOC_CTX *mem_ctx,
+			char * const argl[],
 			int *numlines)
 {
-	char *p;
+	char *p = NULL;
 	size_t size;
 
-	p = file_pload(syscmd, &size);
+	p = file_ploadv(argl, &size);
 	if (!p) {
 		return NULL;
 	}

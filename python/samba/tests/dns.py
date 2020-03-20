@@ -22,6 +22,7 @@ from samba.ndr import ndr_unpack, ndr_pack
 from samba.samdb import SamDB
 from samba.auth import system_session
 import ldb
+from ldb import ERR_OPERATIONS_ERROR
 import os
 import sys
 import struct
@@ -35,6 +36,7 @@ from samba import werror, WERRORError
 from samba.tests.dns_base import DNSTest
 import samba.getopt as options
 import optparse
+
 
 parser = optparse.OptionParser("dns.py <server name> <server ip> [options]")
 sambaopts = options.SambaOptions(parser)
@@ -256,6 +258,25 @@ class TestSimpleQueries(DNSTest):
         (response, response_packet) =\
             self.dns_transaction_udp(p, host=server_ip)
         self.assert_dns_rcode_equals(response, dns.DNS_RCODE_OK)
+        self.assert_dns_opcode_equals(response, dns.DNS_OPCODE_QUERY)
+        # We don't get SOA records for single hosts
+        self.assertEquals(response.ancount, 0)
+        # But we do respond with an authority section
+        self.assertEqual(response.nscount, 1)
+
+    def test_soa_unknown_hostname_query(self):
+        "create a SOA query for an unknown hostname"
+        p = self.make_name_packet(dns.DNS_OPCODE_QUERY)
+        questions = []
+
+        name = "foobar.%s" % (self.get_dns_domain())
+        q = self.make_name_question(name, dns.DNS_QTYPE_SOA, dns.DNS_QCLASS_IN)
+        questions.append(q)
+
+        self.finish_name_packet(p, questions)
+        (response, response_packet) =\
+            self.dns_transaction_udp(p, host=server_ip)
+        self.assert_dns_rcode_equals(response, dns.DNS_RCODE_NXDOMAIN)
         self.assert_dns_opcode_equals(response, dns.DNS_OPCODE_QUERY)
         # We don't get SOA records for single hosts
         self.assertEquals(response.ancount, 0)
@@ -844,6 +865,129 @@ class TestComplexQueries(DNSTest):
         self.assertEquals(response.answers[1].name, name2)
         self.assertEquals(response.answers[1].rdata, name0)
 
+    def test_cname_loop(self):
+        cname1 = "cnamelooptestrec." + self.get_dns_domain()
+        cname2 = "cnamelooptestrec2." + self.get_dns_domain()
+        cname3 = "cnamelooptestrec3." + self.get_dns_domain()
+        self.make_dns_update(cname1, cname2, dnsp.DNS_TYPE_CNAME)
+        self.make_dns_update(cname2, cname3, dnsp.DNS_TYPE_CNAME)
+        self.make_dns_update(cname3, cname1, dnsp.DNS_TYPE_CNAME)
+
+        p = self.make_name_packet(dns.DNS_OPCODE_QUERY)
+        questions = []
+
+        q = self.make_name_question(cname1,
+                                    dns.DNS_QTYPE_A,
+                                    dns.DNS_QCLASS_IN)
+        questions.append(q)
+        self.finish_name_packet(p, questions)
+
+        (response, response_packet) =\
+            self.dns_transaction_udp(p, host=self.server_ip)
+
+        max_recursion_depth = 20
+        self.assertEquals(len(response.answers), max_recursion_depth)
+
+    # Make sure cname limit doesn't count other records.  This is a generic
+    # test called in tests below
+    def max_rec_test(self, rtype, rec_gen):
+        name = "limittestrec{0}.{1}".format(rtype, self.get_dns_domain())
+        limit = 20
+        num_recs_to_enter = limit + 5
+
+        for i in range(1, num_recs_to_enter+1):
+            ip = rec_gen(i)
+            self.make_dns_update(name, ip, rtype)
+
+        p = self.make_name_packet(dns.DNS_OPCODE_QUERY)
+        questions = []
+
+        q = self.make_name_question(name,
+                                    rtype,
+                                    dns.DNS_QCLASS_IN)
+        questions.append(q)
+        self.finish_name_packet(p, questions)
+
+        (response, response_packet) =\
+            self.dns_transaction_udp(p, host=self.server_ip)
+
+        self.assertEqual(len(response.answers), num_recs_to_enter)
+
+    def test_record_limit_A(self):
+        def ip4_gen(i):
+            return "127.0.0." + str(i)
+        self.max_rec_test(rtype=dns.DNS_QTYPE_A, rec_gen=ip4_gen)
+
+    def test_record_limit_AAAA(self):
+        def ip6_gen(i):
+            return "AAAA:0:0:0:0:0:0:" + str(i)
+        self.max_rec_test(rtype=dns.DNS_QTYPE_AAAA, rec_gen=ip6_gen)
+
+    def test_record_limit_SRV(self):
+        def srv_gen(i):
+            rec = dns.srv_record()
+            rec.priority = 1
+            rec.weight = 1
+            rec.port = 92
+            rec.target = "srvtestrec" + str(i)
+            return rec
+        self.max_rec_test(rtype=dns.DNS_QTYPE_SRV, rec_gen=srv_gen)
+
+    # Same as test_record_limit_A but with a preceding CNAME follow
+    def test_cname_limit(self):
+        cname1 = "cnamelimittestrec." + self.get_dns_domain()
+        cname2 = "cnamelimittestrec2." + self.get_dns_domain()
+        cname3 = "cnamelimittestrec3." + self.get_dns_domain()
+        ip_prefix = '127.0.0.'
+        limit = 20
+        num_recs_to_enter = limit + 5
+
+        self.make_dns_update(cname1, cname2, dnsp.DNS_TYPE_CNAME)
+        self.make_dns_update(cname2, cname3, dnsp.DNS_TYPE_CNAME)
+        num_arecs_to_enter = num_recs_to_enter - 2
+        for i in range(1, num_arecs_to_enter+1):
+            ip = ip_prefix + str(i)
+            self.make_dns_update(cname3, ip, dns.DNS_QTYPE_A)
+
+        p = self.make_name_packet(dns.DNS_OPCODE_QUERY)
+        questions = []
+
+        q = self.make_name_question(cname1,
+                                    dns.DNS_QTYPE_A,
+                                    dns.DNS_QCLASS_IN)
+        questions.append(q)
+        self.finish_name_packet(p, questions)
+
+        (response, response_packet) =\
+            self.dns_transaction_udp(p, host=self.server_ip)
+
+        self.assertEqual(len(response.answers), num_recs_to_enter)
+
+    # ANY query on cname record shouldn't follow the link
+    def test_cname_any_query(self):
+        cname1 = "cnameanytestrec." + self.get_dns_domain()
+        cname2 = "cnameanytestrec2." + self.get_dns_domain()
+        cname3 = "cnameanytestrec3." + self.get_dns_domain()
+
+        self.make_dns_update(cname1, cname2, dnsp.DNS_TYPE_CNAME)
+        self.make_dns_update(cname2, cname3, dnsp.DNS_TYPE_CNAME)
+
+        p = self.make_name_packet(dns.DNS_OPCODE_QUERY)
+        questions = []
+
+        q = self.make_name_question(cname1,
+                                    dns.DNS_QTYPE_ALL,
+                                    dns.DNS_QCLASS_IN)
+        questions.append(q)
+        self.finish_name_packet(p, questions)
+
+        (response, response_packet) =\
+            self.dns_transaction_udp(p, host=self.server_ip)
+
+        self.assertEqual(len(response.answers), 1)
+        self.assertEqual(response.answers[0].name, cname1)
+        self.assertEqual(response.answers[0].rdata, cname2)
+
 
 class TestInvalidQueries(DNSTest):
     def setUp(self):
@@ -863,7 +1007,7 @@ class TestInvalidQueries(DNSTest):
         try:
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, 0)
             s.connect((self.server_ip, 53))
-            s.send("", 0)
+            s.send(b"", 0)
         finally:
             if s is not None:
                 s.close()
@@ -941,7 +1085,6 @@ class TestZones(DNSTest):
                            lp=self.get_loadparm(),
                            session_info=system_session(),
                            credentials=self.creds)
-
         self.zone_dn = "DC=" + self.zone +\
                        ",CN=MicrosoftDNS,DC=DomainDNSZones," +\
                        str(self.samdb.get_default_basedn())
@@ -956,7 +1099,7 @@ class TestZones(DNSTest):
             if num != werror.WERR_DNS_ERROR_ZONE_DOES_NOT_EXIST:
                 raise
 
-    def create_zone(self, zone, aging_enabled=False):
+    def make_zone_obj(self, zone, aging_enabled=False):
         zone_create = dnsserver.DNS_RPC_ZONE_CREATE_INFO_LONGHORN()
         zone_create.pszZoneName = zone
         zone_create.dwZoneType = dnsp.DNS_ZONE_TYPE_PRIMARY
@@ -965,6 +1108,10 @@ class TestZones(DNSTest):
         zone_create.fDsIntegrated = 1
         zone_create.fLoadExisting = 1
         zone_create.fAllowUpdate = dnsp.DNS_ZONE_UPDATE_UNSECURE
+        return zone_create
+
+    def create_zone(self, zone, aging_enabled=False):
+        zone_create = self.make_zone_obj(zone, aging_enabled)
         try:
             client_version = dnsserver.DNS_CLIENT_VERSION_LONGHORN
             self.rpc_conn.DnssrvOperation2(client_version,
@@ -976,7 +1123,7 @@ class TestZones(DNSTest):
                                            dnsserver.DNSSRV_TYPEID_ZONE_CREATE,
                                            zone_create)
         except WERRORError as e:
-            self.fail(str(e))
+            self.fail(e)
 
     def set_params(self, **kwargs):
         zone = kwargs.pop('zone', None)
@@ -1000,7 +1147,7 @@ class TestZones(DNSTest):
                 self.fail(str(e))
 
     def ldap_modify_dnsrecs(self, name, func):
-        dn = 'DC={},{}'.format(name, self.zone_dn)
+        dn = 'DC={0},{1}'.format(name, self.zone_dn)
         dns_recs = self.ldap_get_dns_records(name)
         for rec in dns_recs:
             func(rec)
@@ -1018,11 +1165,20 @@ class TestZones(DNSTest):
         self.assertEqual(len(recs), 1)
         return recs[0]
 
+    def dns_tombstone(self, prefix, txt, zone):
+        name = prefix + "." + zone
+
+        to = dnsp.DnssrvRpcRecord()
+        to.dwTimeStamp = 1000
+        to.wType = dnsp.DNS_TYPE_TOMBSTONE
+
+        self.samdb.dns_replace(name, [to])
+
     def ldap_get_records(self, name):
         # The use of SCOPE_SUBTREE here avoids raising an exception in the
         # 0 results case for a test below.
 
-        expr = "(&(objectClass=dnsNode)(name={}))".format(name)
+        expr = "(&(objectClass=dnsNode)(name={0}))".format(name)
         return self.samdb.search(base=self.zone_dn, scope=ldb.SCOPE_SUBTREE,
                                  expression=expr, attrs=["*"])
 
@@ -1033,8 +1189,8 @@ class TestZones(DNSTest):
 
     def ldap_get_zone_settings(self):
         records = self.samdb.search(base=self.zone_dn, scope=ldb.SCOPE_BASE,
-                   expression="(&(objectClass=dnsZone)" +
-                                "(name={}))".format(self.zone),
+                                    expression="(&(objectClass=dnsZone)" +
+                                    "(name={0}))".format(self.zone),
                                     attrs=["dNSProperty"])
         self.assertEqual(len(records), 1)
         props = [ndr_unpack(dnsp.DnsProperty, r)
@@ -1120,13 +1276,13 @@ class TestZones(DNSTest):
 
         def mod_ts(rec):
             self.assertTrue(rec.dwTimeStamp > 0)
-            rec.dwTimeStamp -= interval / 2
+            rec.dwTimeStamp -= interval // 2
         self.ldap_modify_dnsrecs(name, mod_ts)
         update_during_norefresh = self.dns_update_record(name, txt)
 
         def mod_ts(rec):
             self.assertTrue(rec.dwTimeStamp > 0)
-            rec.dwTimeStamp -= interval + interval / 2
+            rec.dwTimeStamp -= interval + interval // 2
         self.ldap_modify_dnsrecs(name, mod_ts)
         update_during_refresh = self.dns_update_record(name, txt)
         self.assertEqual(update_during_norefresh.dwTimeStamp,
@@ -1206,19 +1362,22 @@ class TestZones(DNSTest):
         name, txt = 'agingtest', ['test txt']
         name2, txt2 = 'agingtest2', ['test txt2']
         name3, txt3 = 'agingtest3', ['test txt3']
+        name4, txt4 = 'agingtest4', ['test txt4']
+        name5, txt5 = 'agingtest5', ['test txt5']
+
         self.create_zone(self.zone, aging_enabled=True)
         interval = 10
         self.set_params(NoRefreshInterval=interval, RefreshInterval=interval,
                         Aging=1, zone=self.zone,
                         AllowUpdate=dnsp.DNS_ZONE_UPDATE_UNSECURE)
 
-        self.dns_update_record(name, txt),
+        self.dns_update_record(name, txt)
 
-        self.dns_update_record(name2, txt),
-        self.dns_update_record(name2, txt2),
+        self.dns_update_record(name2, txt)
+        self.dns_update_record(name2, txt2)
 
-        self.dns_update_record(name3, txt),
-        self.dns_update_record(name3, txt2),
+        self.dns_update_record(name3, txt)
+        self.dns_update_record(name3, txt2)
         last_update = self.dns_update_record(name3, txt3)
 
         # Modify txt1 of the first 2 names
@@ -1228,8 +1387,24 @@ class TestZones(DNSTest):
         self.ldap_modify_dnsrecs(name, mod_ts)
         self.ldap_modify_dnsrecs(name2, mod_ts)
 
+        # create a static dns record.
+        rec_buf = dnsserver.DNS_RPC_RECORD_BUF()
+        rec_buf.rec = TXTRecord(txt4)
+        self.rpc_conn.DnssrvUpdateRecord2(
+            dnsserver.DNS_CLIENT_VERSION_LONGHORN,
+            0,
+            self.server_ip,
+            self.zone,
+            name4,
+            rec_buf,
+            None)
+
+        # Create a tomb stoned record.
+        self.dns_update_record(name5, txt5)
+        self.dns_tombstone(name5, txt5, self.zone)
+
         self.ldap_get_dns_records(name3)
-        expr = "(dnsRecord:1.3.6.1.4.1.7165.4.5.3:={})"
+        expr = "(dnsRecord:1.3.6.1.4.1.7165.4.5.3:={0})"
         expr = expr.format(int(last_update.dwTimeStamp) - 1)
         try:
             res = self.samdb.search(base=self.zone_dn, scope=ldb.SCOPE_SUBTREE,
@@ -1239,14 +1414,100 @@ class TestZones(DNSTest):
         updated_names = {str(r.get('name')) for r in res}
         self.assertEqual(updated_names, set([name, name2]))
 
+    def test_dns_tombstone_custom_match_rule_no_records(self):
+        lp = self.get_loadparm()
+        self.samdb = SamDB(url=lp.samdb_url(), lp=lp,
+                           session_info=system_session(),
+                           credentials=self.creds)
+
+        self.create_zone(self.zone, aging_enabled=True)
+        interval = 10
+        self.set_params(NoRefreshInterval=interval, RefreshInterval=interval,
+                        Aging=1, zone=self.zone,
+                        AllowUpdate=dnsp.DNS_ZONE_UPDATE_UNSECURE)
+
+        expr = "(dnsRecord:1.3.6.1.4.1.7165.4.5.3:={0})"
+        expr = expr.format(1)
+
+        try:
+            res = self.samdb.search(base=self.zone_dn, scope=ldb.SCOPE_SUBTREE,
+                                    expression=expr, attrs=["*"])
+        except ldb.LdbError as e:
+            self.fail(str(e))
+        self.assertEqual(0, len(res))
+
     def test_dns_tombstone_custom_match_rule_fail(self):
         self.create_zone(self.zone, aging_enabled=True)
+        samdb = SamDB(url=lp.samdb_url(),
+                      lp=lp,
+                      session_info=system_session(),
+                      credentials=self.creds)
 
-        # The check here is that this does not blow up on silly input
+        # Property name in not dnsRecord
         expr = "(dnsProperty:1.3.6.1.4.1.7165.4.5.3:=1)"
-        res = self.samdb.search(base=self.zone_dn, scope=ldb.SCOPE_SUBTREE,
-                                expression=expr, attrs=["*"])
+        res = samdb.search(base=self.zone_dn, scope=ldb.SCOPE_SUBTREE,
+                           expression=expr, attrs=["*"])
         self.assertEquals(len(res), 0)
+
+        # No value for tombstone time
+        try:
+            expr = "(dnsRecord:1.3.6.1.4.1.7165.4.5.3:=)"
+            res = samdb.search(base=self.zone_dn, scope=ldb.SCOPE_SUBTREE,
+                               expression=expr, attrs=["*"])
+            self.assertEquals(len(res), 0)
+            self.fail("Exception: ldb.ldbError not generated")
+        except ldb.LdbError as e:
+            (num, msg) = e.args
+            self.assertEquals(num, ERR_OPERATIONS_ERROR)
+
+        # Tombstone time = -
+        try:
+            expr = "(dnsRecord:1.3.6.1.4.1.7165.4.5.3:=-)"
+            res = samdb.search(base=self.zone_dn, scope=ldb.SCOPE_SUBTREE,
+                               expression=expr, attrs=["*"])
+            self.assertEquals(len(res), 0)
+            self.fail("Exception: ldb.ldbError not generated")
+        except ldb.LdbError as e:
+            (num, _) = e.args
+            self.assertEquals(num, ERR_OPERATIONS_ERROR)
+
+        # Tombstone time longer than 64 characters
+        try:
+            expr = "(dnsRecord:1.3.6.1.4.1.7165.4.5.3:={0})"
+            expr = expr.format("1" * 65)
+            res = samdb.search(base=self.zone_dn, scope=ldb.SCOPE_SUBTREE,
+                               expression=expr, attrs=["*"])
+            self.assertEquals(len(res), 0)
+            self.fail("Exception: ldb.ldbError not generated")
+        except ldb.LdbError as e:
+            (num, _) = e.args
+            self.assertEquals(num, ERR_OPERATIONS_ERROR)
+
+        # Non numeric Tombstone time
+        try:
+            expr = "(dnsRecord:1.3.6.1.4.1.7165.4.5.3:=expired)"
+            res = samdb.search(base=self.zone_dn, scope=ldb.SCOPE_SUBTREE,
+                               expression=expr, attrs=["*"])
+            self.assertEquals(len(res), 0)
+            self.fail("Exception: ldb.ldbError not generated")
+        except ldb.LdbError as e:
+            (num, _) = e.args
+            self.assertEquals(num, ERR_OPERATIONS_ERROR)
+
+        # Non system session
+        try:
+            db = SamDB(url="ldap://" + self.server_ip,
+                       lp=self.get_loadparm(),
+                       credentials=self.creds)
+
+            expr = "(dnsRecord:1.3.6.1.4.1.7165.4.5.3:=2)"
+            res = db.search(base=self.zone_dn, scope=ldb.SCOPE_SUBTREE,
+                            expression=expr, attrs=["*"])
+            self.assertEquals(len(res), 0)
+            self.fail("Exception: ldb.ldbError not generated")
+        except ldb.LdbError as e:
+            (num, _) = e.args
+            self.assertEquals(num, ERR_OPERATIONS_ERROR)
 
     def test_basic_scavenging(self):
         lp = self.get_loadparm()
@@ -1262,26 +1523,51 @@ class TestZones(DNSTest):
         name, txt = 'agingtest', ['test txt']
         name2, txt2 = 'agingtest2', ['test txt2']
         name3, txt3 = 'agingtest3', ['test txt3']
+        name4, txt4 = 'agingtest4', ['test txt4']
+        name5, txt5 = 'agingtest5', ['test txt5']
         self.dns_update_record(name, txt)
         self.dns_update_record(name2, txt)
         self.dns_update_record(name2, txt2)
         self.dns_update_record(name3, txt)
         self.dns_update_record(name3, txt2)
+
+        # Create a tomb stoned record.
+        self.dns_update_record(name4, txt4)
+        self.dns_tombstone(name4, txt4, self.zone)
+        records = self.ldap_get_records(name4)
+        self.assertTrue("dNSTombstoned" in records[0])
+        self.assertEqual(records[0]["dNSTombstoned"][0], b"TRUE")
+
+        # Create an un-tombstoned record, with dnsTombstoned: FALSE
+        self.dns_update_record(name5, txt5)
+        self.dns_tombstone(name5, txt5, self.zone)
+        self.dns_update_record(name5, txt5)
+        records = self.ldap_get_records(name5)
+        self.assertTrue("dNSTombstoned" in records[0])
+        self.assertEqual(records[0]["dNSTombstoned"][0], b"FALSE")
+
         last_add = self.dns_update_record(name3, txt3)
 
         def mod_ts(rec):
             self.assertTrue(rec.dwTimeStamp > 0)
             if rec.data.str == txt:
                 rec.dwTimeStamp -= interval * 5
+
+        def mod_ts_all(rec):
+            rec.dwTimeStamp -= interval * 5
         self.ldap_modify_dnsrecs(name, mod_ts)
         self.ldap_modify_dnsrecs(name2, mod_ts)
         self.ldap_modify_dnsrecs(name3, mod_ts)
+        self.ldap_modify_dnsrecs(name5, mod_ts_all)
         self.assertTrue(callable(getattr(dsdb, '_scavenge_dns_records', None)))
         dsdb._scavenge_dns_records(self.samdb)
 
         recs = self.ldap_get_dns_records(name)
         self.assertEqual(len(recs), 1)
         self.assertEqual(recs[0].wType, dnsp.DNS_TYPE_TOMBSTONE)
+        records = self.ldap_get_records(name)
+        self.assertTrue("dNSTombstoned" in records[0])
+        self.assertEqual(records[0]["dNSTombstoned"][0], b"TRUE")
 
         recs = self.ldap_get_dns_records(name2)
         self.assertEqual(len(recs), 1)
@@ -1295,6 +1581,20 @@ class TestZones(DNSTest):
         self.assertEqual(recs[0].wType, dnsp.DNS_TYPE_TXT)
         self.assertEqual(recs[1].wType, dnsp.DNS_TYPE_TXT)
 
+        recs = self.ldap_get_dns_records(name4)
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0].wType, dnsp.DNS_TYPE_TOMBSTONE)
+        records = self.ldap_get_records(name4)
+        self.assertTrue("dNSTombstoned" in records[0])
+        self.assertEqual(records[0]["dNSTombstoned"][0], b"TRUE")
+
+        recs = self.ldap_get_dns_records(name5)
+        self.assertEqual(len(recs), 1)
+        self.assertEqual(recs[0].wType, dnsp.DNS_TYPE_TOMBSTONE)
+        records = self.ldap_get_records(name5)
+        self.assertTrue("dNSTombstoned" in records[0])
+        self.assertEqual(records[0]["dNSTombstoned"][0], b"TRUE")
+
         for make_it_work in [False, True]:
             inc = -1 if make_it_work else 1
 
@@ -1307,6 +1607,59 @@ class TestZones(DNSTest):
                 self.assertEqual(len(recs), 0)
             else:
                 self.assertEqual(len(recs), 1)
+
+    def test_fully_qualified_zone(self):
+
+        def create_zone_expect_exists(zone):
+            try:
+                zone_create = self.make_zone_obj(zone)
+                client_version = dnsserver.DNS_CLIENT_VERSION_LONGHORN
+                zc_type = dnsserver.DNSSRV_TYPEID_ZONE_CREATE
+                self.rpc_conn.DnssrvOperation2(client_version,
+                                               0,
+                                               self.server_ip,
+                                               None,
+                                               0,
+                                               'ZoneCreate',
+                                               zc_type,
+                                               zone_create)
+            except WERRORError as e:
+                enum, _ = e.args
+                if enum != werror.WERR_DNS_ERROR_ZONE_ALREADY_EXISTS:
+                    self.fail(e)
+                return
+            self.fail("Zone {} should already exist".format(zone))
+
+        # Create unqualified, then check creating qualified fails.
+        self.create_zone(self.zone)
+        create_zone_expect_exists(self.zone + '.')
+
+        # Same again, but the other way around.
+        self.create_zone(self.zone + '2.')
+        create_zone_expect_exists(self.zone + '2')
+
+        client_version = dnsserver.DNS_CLIENT_VERSION_LONGHORN
+        request_filter = dnsserver.DNS_ZONE_REQUEST_PRIMARY
+        tid = dnsserver.DNSSRV_TYPEID_DWORD
+        typeid, res = self.rpc_conn.DnssrvComplexOperation2(client_version,
+                                                            0,
+                                                            self.server_ip,
+                                                            None,
+                                                            'EnumZones',
+                                                            tid,
+                                                            request_filter)
+
+        self.delete_zone(self.zone)
+        self.delete_zone(self.zone + '2')
+
+        # Two zones should've been created, neither of them fully qualified.
+        zones_we_just_made = []
+        zones = [str(z.pszZoneName) for z in res.ZoneArray]
+        for zone in zones:
+            if zone.startswith(self.zone):
+                zones_we_just_made.append(zone)
+        self.assertEqual(len(zones_we_just_made), 2)
+        self.assertEqual(set(zones_we_just_made), {self.zone + '2', self.zone})
 
     def delete_zone(self, zone):
         self.rpc_conn.DnssrvOperation2(dnsserver.DNS_CLIENT_VERSION_LONGHORN,
@@ -1366,6 +1719,50 @@ class TestRPCRoundtrip(DNSTest):
     def tearDown(self):
         super(TestRPCRoundtrip, self).tearDown()
 
+    def rpc_update(self, fqn=None, data=None, wType=None, delete=False):
+        fqn = fqn or ("rpctestrec." + self.get_dns_domain())
+
+        rec = data_to_dns_record(wType, data)
+        add_rec_buf = dnsserver.DNS_RPC_RECORD_BUF()
+        add_rec_buf.rec = rec
+
+        add_arg = add_rec_buf
+        del_arg = None
+        if delete:
+            add_arg = None
+            del_arg = add_rec_buf
+
+        self.rpc_conn.DnssrvUpdateRecord2(
+            dnsserver.DNS_CLIENT_VERSION_LONGHORN,
+            0,
+            self.server_ip,
+            self.get_dns_domain(),
+            fqn,
+            add_arg,
+            del_arg)
+
+    def test_rpc_self_referencing_cname(self):
+        cname = "cnametest2_unqual_rec_loop"
+        cname_fqn = "%s.%s" % (cname, self.get_dns_domain())
+
+        try:
+            self.rpc_update(fqn=cname, data=cname_fqn,
+                            wType=dnsp.DNS_TYPE_CNAME, delete=True)
+        except WERRORError as e:
+            if e.args[0] != werror.WERR_DNS_ERROR_RECORD_DOES_NOT_EXIST:
+                self.fail("RPC DNS gaven wrong error on pre-test cleanup "
+                          "for self referencing CNAME: %s" % e.args[0])
+
+        try:
+            self.rpc_update(fqn=cname, wType=dnsp.DNS_TYPE_CNAME, data=cname_fqn)
+        except WERRORError as e:
+            if e.args[0] != werror.WERR_DNS_ERROR_CNAME_LOOP:
+                self.fail("RPC DNS gaven wrong error on insertion of "
+                          "self referencing CNAME: %s" % e.args[0])
+            return
+
+        self.fail("RPC DNS allowed insertion of self referencing CNAME")
+
     def test_update_add_txt_rpc_to_dns(self):
         prefix, txt = 'rpctextrec', ['"This is a test"']
 
@@ -1409,11 +1806,11 @@ class TestRPCRoundtrip(DNSTest):
         self.check_query_txt(prefix, txt)
         self.assertIsNotNone(
             dns_record_match(self.rpc_conn,
-                self.server_ip,
-                self.get_dns_domain(),
-                "%s.%s" % (prefix, self.get_dns_domain()),
-                dnsp.DNS_TYPE_TXT,
-                '"\\"This is a test\\"" "" ""'))
+                             self.server_ip,
+                             self.get_dns_domain(),
+                             "%s.%s" % (prefix, self.get_dns_domain()),
+                             dnsp.DNS_TYPE_TXT,
+                             '"\\"This is a test\\"" "" ""'))
 
         prefix, txt = 'pad2textrec', ['"This is a test"', '', '', 'more text']
         p = self.make_txt_update(prefix, txt)
@@ -1554,9 +1951,9 @@ class TestRPCRoundtrip(DNSTest):
         self.assert_dns_rcode_equals(response, dns.DNS_RCODE_OK)
         self.check_query_txt(prefix, ['NULL'])
         self.assertIsNotNone(dns_record_match(self.rpc_conn, self.server_ip,
-                             self.get_dns_domain(),
-                             "%s.%s" % (prefix, self.get_dns_domain()),
-                             dnsp.DNS_TYPE_TXT, '"NULL"'))
+                                              self.get_dns_domain(),
+                                              "%s.%s" % (prefix, self.get_dns_domain()),
+                                              dnsp.DNS_TYPE_TXT, '"NULL"'))
 
         prefix, txt = 'nulltextrec2', ['NULL\x00BYTE', 'NULL\x00BYTE']
         p = self.make_txt_update(prefix, txt)
@@ -1565,9 +1962,9 @@ class TestRPCRoundtrip(DNSTest):
         self.assert_dns_rcode_equals(response, dns.DNS_RCODE_OK)
         self.check_query_txt(prefix, ['NULL', 'NULL'])
         self.assertIsNotNone(dns_record_match(self.rpc_conn, self.server_ip,
-                             self.get_dns_domain(),
-                             "%s.%s" % (prefix, self.get_dns_domain()),
-                             dnsp.DNS_TYPE_TXT, '"NULL" "NULL"'))
+                                              self.get_dns_domain(),
+                                              "%s.%s" % (prefix, self.get_dns_domain()),
+                                              dnsp.DNS_TYPE_TXT, '"NULL" "NULL"'))
 
     def test_update_add_null_char_rpc_to_dns(self):
         prefix = 'rpcnulltextrec'
@@ -1610,9 +2007,9 @@ class TestRPCRoundtrip(DNSTest):
         self.assert_dns_rcode_equals(response, dns.DNS_RCODE_OK)
         self.check_query_txt(prefix, txt)
         self.assertIsNotNone(dns_record_match(self.rpc_conn, self.server_ip,
-                             self.get_dns_domain(),
-                             "%s.%s" % (prefix, self.get_dns_domain()),
-                             dnsp.DNS_TYPE_TXT, '"HIGH\xFFBYTE"'))
+                                              self.get_dns_domain(),
+                                              "%s.%s" % (prefix, self.get_dns_domain()),
+                                              dnsp.DNS_TYPE_TXT, '"HIGH\xFFBYTE"'))
 
     def test_update_add_hex_rpc_to_dns(self):
         prefix, txt = 'hextextrec', ['HIGH\xFFBYTE']
@@ -1656,9 +2053,9 @@ class TestRPCRoundtrip(DNSTest):
         self.assert_dns_rcode_equals(response, dns.DNS_RCODE_OK)
         self.check_query_txt(prefix, txt)
         self.assertIsNotNone(dns_record_match(self.rpc_conn, self.server_ip,
-                             self.get_dns_domain(),
-                             "%s.%s" % (prefix, self.get_dns_domain()),
-                             dnsp.DNS_TYPE_TXT, '"Th\\\\=is=is a test"'))
+                                              self.get_dns_domain(),
+                                              "%s.%s" % (prefix, self.get_dns_domain()),
+                                              dnsp.DNS_TYPE_TXT, '"Th\\\\=is=is a test"'))
 
     # This test fails against Windows as it eliminates slashes in RPC
     # One typical use for a slash is in records like 'var=value' to
@@ -1707,10 +2104,10 @@ class TestRPCRoundtrip(DNSTest):
         self.assert_dns_rcode_equals(response, dns.DNS_RCODE_OK)
         self.check_query_txt(prefix, txt)
         self.assertIsNotNone(dns_record_match(self.rpc_conn, self.server_ip,
-                             self.get_dns_domain(),
-                             "%s.%s" % (prefix, self.get_dns_domain()),
-                             dnsp.DNS_TYPE_TXT, '"\\"This is a test\\""' +
-                             ' "\\"and this is a test, too\\""'))
+                                              self.get_dns_domain(),
+                                              "%s.%s" % (prefix, self.get_dns_domain()),
+                                              dnsp.DNS_TYPE_TXT, '"\\"This is a test\\""' +
+                                              ' "\\"and this is a test, too\\""'))
 
     def test_update_add_two_rpc_to_dns(self):
         prefix, txt = 'textrec2', ['"This is a test"',
@@ -1719,8 +2116,8 @@ class TestRPCRoundtrip(DNSTest):
         name = "%s.%s" % (prefix, self.get_dns_domain())
 
         rec = data_to_dns_record(dnsp.DNS_TYPE_TXT,
-                                '"\\"This is a test\\""' +
-                                ' "\\"and this is a test, too\\""')
+                                 '"\\"This is a test\\""' +
+                                 ' "\\"and this is a test, too\\""')
         add_rec_buf = dnsserver.DNS_RPC_RECORD_BUF()
         add_rec_buf.rec = rec
         try:
@@ -1757,9 +2154,9 @@ class TestRPCRoundtrip(DNSTest):
         self.assert_dns_rcode_equals(response, dns.DNS_RCODE_OK)
         self.check_query_txt(prefix, txt)
         self.assertIsNotNone(dns_record_match(self.rpc_conn, self.server_ip,
-                             self.get_dns_domain(),
-                             "%s.%s" % (prefix, self.get_dns_domain()),
-                             dnsp.DNS_TYPE_TXT, ''))
+                                              self.get_dns_domain(),
+                                              "%s.%s" % (prefix, self.get_dns_domain()),
+                                              dnsp.DNS_TYPE_TXT, ''))
 
     def test_update_add_empty_rpc_to_dns(self):
         prefix, txt = 'rpcemptytextrec', []
@@ -1792,5 +2189,6 @@ class TestRPCRoundtrip(DNSTest):
                 name,
                 None,
                 add_rec_buf)
+
 
 TestProgram(module=__name__, opts=subunitopts)

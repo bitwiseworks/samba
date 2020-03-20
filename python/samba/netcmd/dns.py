@@ -26,6 +26,7 @@ from socket import inet_ntop
 from socket import AF_INET
 from socket import AF_INET6
 import shlex
+import struct
 
 from samba import remove_dc
 from samba.samdb import SamDB
@@ -36,10 +37,11 @@ from samba.netcmd import (
     CommandError,
     Option,
     SuperCommand,
-    )
+)
 from samba.dcerpc import dnsp, dnsserver
 
 from samba.dnsserver import ARecord, AAAARecord, PTRRecord, CNameRecord, NSRecord, MXRecord, SOARecord, SRVRecord, TXTRecord
+
 
 def dns_connect(server, lp, creds):
     if server.lower() == 'localhost':
@@ -85,54 +87,54 @@ def bitmap_string(module, bitmap_defs, value):
 
 
 def boot_method_string(boot_method):
-    enum_defs = [ 'DNS_BOOT_METHOD_UNINITIALIZED', 'DNS_BOOT_METHOD_FILE',
-                    'DNS_BOOT_METHOD_REGISTRY', 'DNS_BOOT_METHOD_DIRECTORY' ]
+    enum_defs = ['DNS_BOOT_METHOD_UNINITIALIZED', 'DNS_BOOT_METHOD_FILE',
+                 'DNS_BOOT_METHOD_REGISTRY', 'DNS_BOOT_METHOD_DIRECTORY']
     return enum_string(dnsserver, enum_defs, boot_method)
 
 
 def name_check_flag_string(check_flag):
-    enum_defs = [ 'DNS_ALLOW_RFC_NAMES_ONLY', 'DNS_ALLOW_NONRFC_NAMES',
-                    'DNS_ALLOW_MULTIBYTE_NAMES', 'DNS_ALLOW_ALL_NAMES' ]
+    enum_defs = ['DNS_ALLOW_RFC_NAMES_ONLY', 'DNS_ALLOW_NONRFC_NAMES',
+                 'DNS_ALLOW_MULTIBYTE_NAMES', 'DNS_ALLOW_ALL_NAMES']
     return enum_string(dnsserver, enum_defs, check_flag)
 
 
 def zone_type_string(zone_type):
-    enum_defs = [ 'DNS_ZONE_TYPE_CACHE', 'DNS_ZONE_TYPE_PRIMARY',
-                    'DNS_ZONE_TYPE_SECONDARY', 'DNS_ZONE_TYPE_STUB',
-                    'DNS_ZONE_TYPE_FORWARDER', 'DNS_ZONE_TYPE_SECONDARY_CACHE' ]
+    enum_defs = ['DNS_ZONE_TYPE_CACHE', 'DNS_ZONE_TYPE_PRIMARY',
+                 'DNS_ZONE_TYPE_SECONDARY', 'DNS_ZONE_TYPE_STUB',
+                 'DNS_ZONE_TYPE_FORWARDER', 'DNS_ZONE_TYPE_SECONDARY_CACHE']
     return enum_string(dnsp, enum_defs, zone_type)
 
 
 def zone_update_string(zone_update):
-    enum_defs = [ 'DNS_ZONE_UPDATE_OFF', 'DNS_ZONE_UPDATE_UNSECURE',
-                    'DNS_ZONE_UPDATE_SECURE' ]
+    enum_defs = ['DNS_ZONE_UPDATE_OFF', 'DNS_ZONE_UPDATE_UNSECURE',
+                 'DNS_ZONE_UPDATE_SECURE']
     return enum_string(dnsp, enum_defs, zone_update)
 
 
 def zone_secondary_security_string(security):
-    enum_defs = [ 'DNS_ZONE_SECSECURE_NO_SECURITY', 'DNS_ZONE_SECSECURE_NS_ONLY',
-                    'DNS_ZONE_SECSECURE_LIST_ONLY', 'DNS_ZONE_SECSECURE_NO_XFER' ]
+    enum_defs = ['DNS_ZONE_SECSECURE_NO_SECURITY', 'DNS_ZONE_SECSECURE_NS_ONLY',
+                 'DNS_ZONE_SECSECURE_LIST_ONLY', 'DNS_ZONE_SECSECURE_NO_XFER']
     return enum_string(dnsserver, enum_defs, security)
 
 
 def zone_notify_level_string(notify_level):
-    enum_defs = [ 'DNS_ZONE_NOTIFY_OFF', 'DNS_ZONE_NOTIFY_ALL_SECONDARIES',
-                    'DNS_ZONE_NOTIFY_LIST_ONLY' ]
+    enum_defs = ['DNS_ZONE_NOTIFY_OFF', 'DNS_ZONE_NOTIFY_ALL_SECONDARIES',
+                 'DNS_ZONE_NOTIFY_LIST_ONLY']
     return enum_string(dnsserver, enum_defs, notify_level)
 
 
 def dp_flags_string(dp_flags):
-    bitmap_defs = [ 'DNS_DP_AUTOCREATED', 'DNS_DP_LEGACY', 'DNS_DP_DOMAIN_DEFAULT',
-                'DNS_DP_FOREST_DEFAULT', 'DNS_DP_ENLISTED', 'DNS_DP_DELETED' ]
+    bitmap_defs = ['DNS_DP_AUTOCREATED', 'DNS_DP_LEGACY', 'DNS_DP_DOMAIN_DEFAULT',
+                   'DNS_DP_FOREST_DEFAULT', 'DNS_DP_ENLISTED', 'DNS_DP_DELETED']
     return bitmap_string(dnsserver, bitmap_defs, dp_flags)
 
 
 def zone_flags_string(flags):
-    bitmap_defs = [ 'DNS_RPC_ZONE_PAUSED', 'DNS_RPC_ZONE_SHUTDOWN',
-                    'DNS_RPC_ZONE_REVERSE', 'DNS_RPC_ZONE_AUTOCREATED',
-                    'DNS_RPC_ZONE_DSINTEGRATED', 'DNS_RPC_ZONE_AGING',
-                    'DNS_RPC_ZONE_UPDATE_UNSECURE', 'DNS_RPC_ZONE_UPDATE_SECURE',
-                    'DNS_RPC_ZONE_READONLY']
+    bitmap_defs = ['DNS_RPC_ZONE_PAUSED', 'DNS_RPC_ZONE_SHUTDOWN',
+                   'DNS_RPC_ZONE_REVERSE', 'DNS_RPC_ZONE_AUTOCREATED',
+                   'DNS_RPC_ZONE_DSINTEGRATED', 'DNS_RPC_ZONE_AGING',
+                   'DNS_RPC_ZONE_UPDATE_UNSECURE', 'DNS_RPC_ZONE_UPDATE_SECURE',
+                   'DNS_RPC_ZONE_READONLY']
     return bitmap_string(dnsserver, bitmap_defs, flags)
 
 
@@ -152,10 +154,10 @@ def dns_addr_array_string(array):
         return ret
     for i in range(array.AddrCount):
         if array.AddrArray[i].MaxSa[0] == 0x02:
-            x = "".join([chr(b) for b in array.AddrArray[i].MaxSa])[4:8]
+            x = struct.pack('4B', *array.AddrArray[i].MaxSa[4:8])
             addr = inet_ntop(AF_INET, x)
         elif array.AddrArray[i].MaxSa[0] == 0x17:
-            x = "".join([chr(b) for b in array.AddrArray[i].MaxSa])[8:24]
+            x = struct.pack('16B', *array.AddrArray[i].MaxSa[8:24])
             addr = inet_ntop(AF_INET6, x)
         else:
             addr = 'UNKNOWN'
@@ -214,18 +216,18 @@ def print_serverinfo(outf, typeid, serverinfo):
 
     if typeid != dnsserver.DNSSRV_TYPEID_SERVER_INFO:
         outf.write('  aipServerAddrs              : %s\n' %
-                    ip4_array_string(serverinfo.aipServerAddrs))
+                   ip4_array_string(serverinfo.aipServerAddrs))
         outf.write('  aipListenAddrs              : %s\n' %
-                    ip4_array_string(serverinfo.aipListenAddrs))
+                   ip4_array_string(serverinfo.aipListenAddrs))
         outf.write('  aipForwarders               : %s\n' %
-                    ip4_array_string(serverinfo.aipForwarders))
+                   ip4_array_string(serverinfo.aipForwarders))
     else:
         outf.write('  aipServerAddrs              : %s\n' %
-                    dns_addr_array_string(serverinfo.aipServerAddrs))
+                   dns_addr_array_string(serverinfo.aipServerAddrs))
         outf.write('  aipListenAddrs              : %s\n' %
-                    dns_addr_array_string(serverinfo.aipListenAddrs))
+                   dns_addr_array_string(serverinfo.aipListenAddrs))
         outf.write('  aipForwarders               : %s\n' %
-                    dns_addr_array_string(serverinfo.aipForwarders))
+                   dns_addr_array_string(serverinfo.aipForwarders))
 
     outf.write('  dwLogLevel                  : %d\n' % serverinfo.dwLogLevel)
     outf.write('  dwDebugLevel                : %d\n' % serverinfo.dwDebugLevel)
@@ -287,22 +289,22 @@ def print_zoneinfo(outf, typeid, zoneinfo):
     outf.write('  pszDataFile                 : %s\n' % zoneinfo.pszDataFile)
     if typeid != dnsserver.DNSSRV_TYPEID_ZONE_INFO:
         outf.write('  aipMasters                  : %s\n' %
-                    ip4_array_string(zoneinfo.aipMasters))
+                   ip4_array_string(zoneinfo.aipMasters))
     else:
         outf.write('  aipMasters                  : %s\n' %
-                    dns_addr_array_string(zoneinfo.aipMasters))
+                   dns_addr_array_string(zoneinfo.aipMasters))
     outf.write('  fSecureSecondaries          : %s\n' % zone_secondary_security_string(zoneinfo.fSecureSecondaries))
     outf.write('  fNotifyLevel                : %s\n' % zone_notify_level_string(zoneinfo.fNotifyLevel))
     if typeid != dnsserver.DNSSRV_TYPEID_ZONE_INFO:
         outf.write('  aipSecondaries              : %s\n' %
-                    ip4_array_string(zoneinfo.aipSecondaries))
+                   ip4_array_string(zoneinfo.aipSecondaries))
         outf.write('  aipNotify                   : %s\n' %
-                    ip4_array_string(zoneinfo.aipNotify))
+                   ip4_array_string(zoneinfo.aipNotify))
     else:
         outf.write('  aipSecondaries              : %s\n' %
-                    dns_addr_array_string(zoneinfo.aipSecondaries))
+                   dns_addr_array_string(zoneinfo.aipSecondaries))
         outf.write('  aipNotify                   : %s\n' %
-                    dns_addr_array_string(zoneinfo.aipNotify))
+                   dns_addr_array_string(zoneinfo.aipNotify))
     outf.write('  fUseWins                    : %s\n' % bool_string(zoneinfo.fUseWins))
     outf.write('  fUseNbstat                  : %s\n' % bool_string(zoneinfo.fUseNbstat))
     outf.write('  fAging                      : %s\n' % bool_string(zoneinfo.fAging))
@@ -311,10 +313,10 @@ def print_zoneinfo(outf, typeid, zoneinfo):
     outf.write('  dwAvailForScavengeTime      : %d\n' % zoneinfo.dwAvailForScavengeTime)
     if typeid != dnsserver.DNSSRV_TYPEID_ZONE_INFO:
         outf.write('  aipScavengeServers          : %s\n' %
-                    ip4_array_string(zoneinfo.aipScavengeServers))
+                   ip4_array_string(zoneinfo.aipScavengeServers))
     else:
         outf.write('  aipScavengeServers          : %s\n' %
-                    dns_addr_array_string(zoneinfo.aipScavengeServers))
+                   dns_addr_array_string(zoneinfo.aipScavengeServers))
 
     if typeid != dnsserver.DNSSRV_TYPEID_ZONE_INFO_W2K:
         outf.write('  dwRpcStructureVersion       : 0x%x\n' % zoneinfo.dwRpcStructureVersion)
@@ -322,10 +324,10 @@ def print_zoneinfo(outf, typeid, zoneinfo):
         outf.write('  fForwarderSlave             : %d\n' % zoneinfo.fForwarderSlave)
         if typeid != dnsserver.DNSSRV_TYPEID_ZONE_INFO:
             outf.write('  aipLocalMasters             : %s\n' %
-                        ip4_array_string(zoneinfo.aipLocalMasters))
+                       ip4_array_string(zoneinfo.aipLocalMasters))
         else:
             outf.write('  aipLocalMasters             : %s\n' %
-                        dns_addr_array_string(zoneinfo.aipLocalMasters))
+                       dns_addr_array_string(zoneinfo.aipLocalMasters))
         outf.write('  dwDpFlags                   : %s\n' % dp_flags_string(zoneinfo.dwDpFlags))
         outf.write('  pszDpFqdn                   : %s\n' % zoneinfo.pszDpFqdn)
         outf.write('  pwszZoneDn                  : %s\n' % zoneinfo.pwszZoneDn)
@@ -402,8 +404,6 @@ def print_dnsrecords(outf, records):
                 print_dns_record(outf, dns_rec)
 
 
-
-
 # Convert data into a dns record
 def data_to_dns_record(record_type, data):
     if record_type == dnsp.DNS_TYPE_A:
@@ -417,14 +417,14 @@ def data_to_dns_record(record_type, data):
     elif record_type == dnsp.DNS_TYPE_NS:
         rec = NSRecord(data)
     elif record_type == dnsp.DNS_TYPE_MX:
-        tmp = data.split(' ')
+        tmp = data.split()
         if len(tmp) != 2:
             raise CommandError('Data requires 2 elements - mail_server, preference')
         mail_server = tmp[0]
         preference = int(tmp[1])
         rec = MXRecord(mail_server, preference)
     elif record_type == dnsp.DNS_TYPE_SRV:
-        tmp = data.split(' ')
+        tmp = data.split()
         if len(tmp) != 4:
             raise CommandError('Data requires 4 elements - server, port, priority, weight')
         server = tmp[0]
@@ -433,7 +433,7 @@ def data_to_dns_record(record_type, data):
         weight = int(tmp[3])
         rec = SRVRecord(server, port, priority=priority, weight=weight)
     elif record_type == dnsp.DNS_TYPE_SOA:
-        tmp = data.split(' ')
+        tmp = data.split()
         if len(tmp) != 7:
             raise CommandError('Data requires 7 elements - nameserver, email, serial, '
                                'refresh, retry, expire, minimumttl')
@@ -538,7 +538,7 @@ class cmd_serverinfo(Command):
 
     synopsis = '%prog <server> [options]'
 
-    takes_args = [ 'server' ]
+    takes_args = ['server']
 
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
@@ -548,8 +548,8 @@ class cmd_serverinfo(Command):
 
     takes_options = [
         Option('--client-version', help='Client Version',
-                default='longhorn', metavar='w2k|dotnet|longhorn',
-                choices=['w2k','dotnet','longhorn'], dest='cli_ver'),
+               default='longhorn', metavar='w2k|dotnet|longhorn',
+               choices=['w2k', 'dotnet', 'longhorn'], dest='cli_ver'),
     ]
 
     def run(self, server, cli_ver, sambaopts=None, credopts=None,
@@ -570,7 +570,7 @@ class cmd_zoneinfo(Command):
 
     synopsis = '%prog <server> <zone> [options]'
 
-    takes_args = [ 'server', 'zone' ]
+    takes_args = ['server', 'zone']
 
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
@@ -580,8 +580,8 @@ class cmd_zoneinfo(Command):
 
     takes_options = [
         Option('--client-version', help='Client Version',
-                default='longhorn', metavar='w2k|dotnet|longhorn',
-                choices=['w2k','dotnet','longhorn'], dest='cli_ver'),
+               default='longhorn', metavar='w2k|dotnet|longhorn',
+               choices=['w2k', 'dotnet', 'longhorn'], dest='cli_ver'),
     ]
 
     def run(self, server, zone, cli_ver, sambaopts=None, credopts=None,
@@ -602,7 +602,7 @@ class cmd_zonelist(Command):
 
     synopsis = '%prog <server> [options]'
 
-    takes_args = [ 'server' ]
+    takes_args = ['server']
 
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
@@ -612,29 +612,29 @@ class cmd_zonelist(Command):
 
     takes_options = [
         Option('--client-version', help='Client Version',
-                default='longhorn', metavar='w2k|dotnet|longhorn',
-                choices=['w2k','dotnet','longhorn'], dest='cli_ver'),
+               default='longhorn', metavar='w2k|dotnet|longhorn',
+               choices=['w2k', 'dotnet', 'longhorn'], dest='cli_ver'),
         Option('--primary', help='List primary zones (default)',
-                action='store_true', dest='primary'),
+               action='store_true', dest='primary'),
         Option('--secondary', help='List secondary zones',
-                action='store_true', dest='secondary'),
+               action='store_true', dest='secondary'),
         Option('--cache', help='List cached zones',
-                action='store_true', dest='cache'),
+               action='store_true', dest='cache'),
         Option('--auto', help='List automatically created zones',
-                action='store_true', dest='auto'),
+               action='store_true', dest='auto'),
         Option('--forward', help='List forward zones',
-                action='store_true', dest='forward'),
+               action='store_true', dest='forward'),
         Option('--reverse', help='List reverse zones',
-                action='store_true', dest='reverse'),
+               action='store_true', dest='reverse'),
         Option('--ds', help='List directory integrated zones',
-                action='store_true', dest='ds'),
+               action='store_true', dest='ds'),
         Option('--non-ds', help='List non-directory zones',
-                action='store_true', dest='nonds')
+               action='store_true', dest='nonds')
     ]
 
     def run(self, server, cli_ver, primary=False, secondary=False, cache=False,
-                auto=False, forward=False, reverse=False, ds=False, nonds=False,
-                sambaopts=None, credopts=None, versionopts=None):
+            auto=False, forward=False, reverse=False, ds=False, nonds=False,
+            sambaopts=None, credopts=None, versionopts=None):
         request_filter = 0
 
         if primary:
@@ -664,10 +664,10 @@ class cmd_zonelist(Command):
         client_version = dns_client_version(cli_ver)
 
         typeid, res = dns_conn.DnssrvComplexOperation2(client_version,
-                                                        0, server, None,
-                                                        'EnumZones',
-                                                        dnsserver.DNSSRV_TYPEID_DWORD,
-                                                        request_filter)
+                                                       0, server, None,
+                                                       'EnumZones',
+                                                       dnsserver.DNSSRV_TYPEID_DWORD,
+                                                       request_filter)
 
         if client_version == dnsserver.DNS_CLIENT_VERSION_W2K:
             typeid = dnsserver.DNSSRV_TYPEID_ZONE_W2K
@@ -681,7 +681,7 @@ class cmd_zonecreate(Command):
 
     synopsis = '%prog <server> <zone> [options]'
 
-    takes_args = [ 'server', 'zone' ]
+    takes_args = ['server', 'zone']
 
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
@@ -691,8 +691,8 @@ class cmd_zonecreate(Command):
 
     takes_options = [
         Option('--client-version', help='Client Version',
-                default='longhorn', metavar='w2k|dotnet|longhorn',
-                choices=['w2k','dotnet','longhorn'], dest='cli_ver')
+               default='longhorn', metavar='w2k|dotnet|longhorn',
+               choices=['w2k', 'dotnet', 'longhorn'], dest='cli_ver')
     ]
 
     def run(self, server, zone, cli_ver, sambaopts=None, credopts=None,
@@ -758,7 +758,7 @@ class cmd_zonedelete(Command):
 
     synopsis = '%prog <server> <zone> [options]'
 
-    takes_args = [ 'server', 'zone' ]
+    takes_args = ['server', 'zone']
 
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
@@ -781,7 +781,7 @@ class cmd_zonedelete(Command):
                                             None)
         except WERRORError as e:
             if e.args[0] == werror.WERR_DNS_ERROR_ZONE_DOES_NOT_EXIST:
-                self.outf.write('Zone does not exist and so could not be deleted.')
+                raise CommandError('Zone does not exist and so could not be deleted.')
             raise e
 
         self.outf.write('Zone %s deleted successfully\n' % zone)
@@ -792,7 +792,7 @@ class cmd_query(Command):
 
     synopsis = '%prog <server> <zone> <name> <A|AAAA|CNAME|MX|NS|SOA|SRV|TXT|ALL> [options]'
 
-    takes_args = [ 'server', 'zone', 'name', 'rtype' ]
+    takes_args = ['server', 'zone', 'name', 'rtype']
 
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
@@ -802,19 +802,19 @@ class cmd_query(Command):
 
     takes_options = [
         Option('--authority', help='Search authoritative records (default)',
-                action='store_true', dest='authority'),
+               action='store_true', dest='authority'),
         Option('--cache', help='Search cached records',
-                action='store_true', dest='cache'),
+               action='store_true', dest='cache'),
         Option('--glue', help='Search glue records',
-                action='store_true', dest='glue'),
+               action='store_true', dest='glue'),
         Option('--root', help='Search root hints',
-                action='store_true', dest='root'),
+               action='store_true', dest='root'),
         Option('--additional', help='List additional records',
-                action='store_true', dest='additional'),
+               action='store_true', dest='additional'),
         Option('--no-children', help='Do not list children',
-                action='store_true', dest='no_children'),
+               action='store_true', dest='no_children'),
         Option('--only-children', help='List only children',
-                action='store_true', dest='only_children')
+               action='store_true', dest='only_children')
     ]
 
     def run(self, server, zone, name, rtype, authority=False, cache=False,
@@ -861,7 +861,7 @@ class cmd_query(Command):
                 None, record_type, select_flags, None, None)
         except WERRORError as e:
             if e.args[0] == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST:
-                self.outf.write('Record or zone does not exist.')
+                raise CommandError('Record or zone does not exist.')
             raise e
 
         print_dnsrecords(self.outf, res)
@@ -872,7 +872,7 @@ class cmd_roothints(Command):
 
     synopsis = '%prog <server> [<name>] [options]'
 
-    takes_args = [ 'server', 'name?' ]
+    takes_args = ['server', 'name?']
 
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
@@ -912,7 +912,7 @@ class cmd_add_record(Command):
 
     synopsis = '%prog <server> <zone> <name> <A|AAAA|PTR|CNAME|NS|MX|SRV|TXT> <data>'
 
-    takes_args = [ 'server', 'zone', 'name', 'rtype', 'data' ]
+    takes_args = ['server', 'zone', 'name', 'rtype', 'data']
 
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
@@ -923,7 +923,7 @@ class cmd_add_record(Command):
     def run(self, server, zone, name, rtype, data, sambaopts=None,
             credopts=None, versionopts=None):
 
-        if rtype.upper() not in ('A','AAAA','PTR','CNAME','NS','MX','SRV','TXT'):
+        if rtype.upper() not in ('A', 'AAAA', 'PTR', 'CNAME', 'NS', 'MX', 'SRV', 'TXT'):
             raise CommandError('Adding record of type %s is not supported' % rtype)
 
         record_type = dns_type_flag(rtype)
@@ -941,7 +941,7 @@ class cmd_add_record(Command):
                                          0, server, zone, name, add_rec_buf, None)
         except WERRORError as e:
             if e.args[0] == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST:
-                self.outf.write('Zone does not exist; record could not be added.\n')
+                raise CommandError('Zone does not exist; record could not be added.')
             raise e
 
         self.outf.write('Record added successfully\n')
@@ -964,7 +964,7 @@ class cmd_update_record(Command):
 
     synopsis = '%prog <server> <zone> <name> <A|AAAA|PTR|CNAME|NS|MX|SOA|SRV|TXT> <olddata> <newdata>'
 
-    takes_args = [ 'server', 'zone', 'name', 'rtype', 'olddata', 'newdata' ]
+    takes_args = ['server', 'zone', 'name', 'rtype', 'olddata', 'newdata']
 
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
@@ -973,9 +973,9 @@ class cmd_update_record(Command):
     }
 
     def run(self, server, zone, name, rtype, olddata, newdata,
-                sambaopts=None, credopts=None, versionopts=None):
+            sambaopts=None, credopts=None, versionopts=None):
 
-        if rtype.upper() not in ('A','AAAA','PTR','CNAME','NS','MX','SOA','SRV','TXT'):
+        if rtype.upper() not in ('A', 'AAAA', 'PTR', 'CNAME', 'NS', 'MX', 'SOA', 'SRV', 'TXT'):
             raise CommandError('Updating record of type %s is not supported' % rtype)
 
         record_type = dns_type_flag(rtype)
@@ -986,7 +986,7 @@ class cmd_update_record(Command):
         dns_conn = dns_connect(server, self.lp, self.creds)
 
         rec_match = dns_record_match(dns_conn, server, zone, name, record_type,
-                olddata)
+                                     olddata)
         if not rec_match:
             raise CommandError('Record or zone does not exist.')
 
@@ -1012,7 +1012,7 @@ class cmd_update_record(Command):
                                          del_rec_buf)
         except WERRORError as e:
             if e.args[0] == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST:
-                self.outf.write('Zone does not exist; record could not be updated.\n')
+                raise CommandError('Zone does not exist; record could not be updated.')
             raise e
 
         self.outf.write('Record updated successfully\n')
@@ -1034,7 +1034,7 @@ class cmd_delete_record(Command):
 
     synopsis = '%prog <server> <zone> <name> <A|AAAA|PTR|CNAME|NS|MX|SRV|TXT> <data>'
 
-    takes_args = [ 'server', 'zone', 'name', 'rtype', 'data' ]
+    takes_args = ['server', 'zone', 'name', 'rtype', 'data']
 
     takes_optiongroups = {
         "sambaopts": options.SambaOptions,
@@ -1044,7 +1044,7 @@ class cmd_delete_record(Command):
 
     def run(self, server, zone, name, rtype, data, sambaopts=None, credopts=None, versionopts=None):
 
-        if rtype.upper() not in ('A','AAAA','PTR','CNAME','NS','MX','SRV','TXT'):
+        if rtype.upper() not in ('A', 'AAAA', 'PTR', 'CNAME', 'NS', 'MX', 'SRV', 'TXT'):
             raise CommandError('Deleting record of type %s is not supported' % rtype)
 
         record_type = dns_type_flag(rtype)
@@ -1067,7 +1067,7 @@ class cmd_delete_record(Command):
                                          del_rec_buf)
         except WERRORError as e:
             if e.args[0] == werror.WERR_DNS_ERROR_NAME_DOES_NOT_EXIST:
-                self.outf.write('Zone does not exist; record could not be deleted.\n')
+                raise CommandError('Zone does not exist; record could not be deleted.')
             raise e
 
         self.outf.write('Record deleted successfully\n')
@@ -1105,13 +1105,7 @@ class cmd_cleanup_record(Command):
         lp = sambaopts.get_loadparm()
         creds = credopts.get_credentials(lp)
 
-        logger = self.get_logger()
-        if verbose:
-            logger.setLevel(logging.DEBUG)
-        elif quiet:
-            logger.setLevel(logging.WARNING)
-        else:
-            logger.setLevel(logging.INFO)
+        logger = self.get_logger(verbose=verbose, quiet=quiet)
 
         samdb = SamDB(url="ldap://%s" % server,
                       session_info=system_session(),

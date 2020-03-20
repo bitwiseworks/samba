@@ -44,6 +44,8 @@ USER_PASS = ''.join(random.choice(string.ascii_uppercase +
 
 # Calculate the MD5 password digest from the supplied user, realm and password
 #
+
+
 def calc_digest(user, realm, password):
     data = "%s:%s:%s" % (user, realm, password)
     if isinstance(data, text_type):
@@ -68,13 +70,13 @@ class UserCmdWdigestTestCase(SambaToolCmdTest):
         self.samdb = self.getSamDB(
             "-H", "ldap://%s" % os.environ["DC_SERVER"],
             "-U%s%%%s" % (os.environ["DC_USERNAME"],
-            os.environ["DC_PASSWORD"]))
+                          os.environ["DC_PASSWORD"]))
         self.dns_domain = self.samdb.domain_dns_name()
         res = self.samdb.search(
             base=self.samdb.get_config_basedn(),
             expression="ncName=%s" % self.samdb.get_default_basedn(),
             attrs=["nETBIOSName"])
-        self.netbios_domain = res[0]["nETBIOSName"][0]
+        self.netbios_domain = str(res[0]["nETBIOSName"][0])
         self.runsubcmd("user",
                        "create",
                        USER_NAME,
@@ -89,7 +91,7 @@ class UserCmdWdigestTestCase(SambaToolCmdTest):
         super(UserCmdWdigestTestCase, self).tearDown()
         self.runsubcmd("user", "delete", USER_NAME)
 
-    def _testWDigest(self,  attribute, expected, missing=False):
+    def _testWDigest(self, attribute, expected, missing=False):
 
         (result, out, err) = self.runsubcmd("user",
                                             "getpassword",
@@ -270,11 +272,11 @@ class UserCmdWdigestTestCase(SambaToolCmdTest):
                                USER_PASS)
         self._testWDigest(attribute, expected)
 
-
     # Hash14 MD5(LOWER(sAMAccountName),
     #            UPPER(DNSDomainName),
     #            password)
     #
+
     def test_Wdigest14(self):
         attribute = "virtualWDigest14"
         expected = calc_digest(USER_NAME.lower(),
@@ -420,6 +422,7 @@ class UserCmdWdigestTestCase(SambaToolCmdTest):
     #            "Digest",
     #            password)
     #
+
     def test_Wdigest27(self):
         attribute = "virtualWDigest27"
         name = "%s\\%s" % (self.netbios_domain, USER_NAME)

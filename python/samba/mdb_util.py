@@ -19,6 +19,7 @@
 import samba
 import subprocess
 import os
+from samba.netcmd import CommandError
 
 
 def mdb_copy(file1, file2):
@@ -26,15 +27,18 @@ def mdb_copy(file1, file2):
     """
     # Find the location of the mdb_copy tool
     dirs = os.getenv('PATH').split(os.pathsep)
+    found = False
     for d in dirs:
         toolpath = os.path.join(d, "mdb_copy")
         if os.path.exists(toolpath):
+            found = True
             break
 
-    mdb_copy_cmd = [toolpath, "-n", file1, "%s.copy.mdb" % file1]
-    status = subprocess.call(mdb_copy_cmd, close_fds=True, shell=False)
+    if not found:
+        raise CommandError("mdb_copy not found. "
+                           "You may need to install the lmdb-utils package")
 
-    if status == 0:
-        os.rename("%s.copy.mdb" % file1, file2)
-    else:
-        raise Exception("Error copying %d  %s" % (status, file1))
+    mdb_copy_cmd = [toolpath, "-n", file1, "%s.copy.mdb" % file1]
+    status = subprocess.check_call(mdb_copy_cmd, close_fds=True, shell=False)
+
+    os.rename("%s.copy.mdb" % file1, file2)

@@ -36,11 +36,31 @@ static struct ldb_context *ldb;
 bool show_index = false;
 bool validate_contents = false;
 
+static void print_data(TDB_DATA d)
+{
+	unsigned char *p = (unsigned char *)d.dptr;
+	int len = d.dsize;
+	while (len--) {
+		if (isprint(*p) && !strchr("\"\\", *p)) {
+			fputc(*p, stdout);
+		} else {
+			printf("\\%02X", *p);
+		}
+		p++;
+	}
+}
+
+static unsigned int pull_uint32(uint8_t *p)
+{
+       return p[0] | (p[1]<<8) | (p[2]<<16) | (p[3]<<24);
+}
+
+
 static int traverse_fn(TDB_CONTEXT *tdb, TDB_DATA key, TDB_DATA _dbuf, void *state)
 {
 	int ret, i, j;
 	struct ldb_dn *dn = state;
-	struct ldb_message *msg = talloc_zero(NULL, struct ldb_message);
+	struct ldb_message *msg = ldb_msg_new(NULL);
 	struct ldb_val dbuf = {
 		.data = _dbuf.dptr,
 		.length = _dbuf.dsize,
@@ -78,6 +98,10 @@ static int traverse_fn(TDB_CONTEXT *tdb, TDB_DATA key, TDB_DATA _dbuf, void *sta
 			return 0;
 		}
 	}
+
+	printf("# key: ");
+	print_data(key);
+	printf("\n# pack format: %#010x\n", pull_uint32(_dbuf.dptr));
 
 	if (!validate_contents || ldb_dn_is_special(msg->dn)) {
 		ldb_ldif_write_file(ldb, stdout, &ldif);
@@ -157,7 +181,9 @@ static void emergency_walk(TDB_DATA key, TDB_DATA dbuf, void *keyname)
 static int dump_tdb(const char *fname, struct ldb_dn *dn, bool emergency)
 {
 	TDB_CONTEXT *tdb;
-	struct tdb_logging_context logfn = { log_stderr };
+	struct tdb_logging_context logfn = {
+		.log_fn = log_stderr,
+	};
 
 	tdb = tdb_open_ex(fname, 0, 0, O_RDONLY, 0, &logfn, NULL);
 	if (!tdb) {

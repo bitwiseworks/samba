@@ -120,7 +120,6 @@ wbcErr wbcCtxInterfaceDetails(struct wbcContext *ctx,
 	if (wbc_status == WBC_ERR_DOMAIN_NOT_FOUND) {
 		/* maybe it's a standalone server */
 		domain = NULL;
-		wbc_status = WBC_ERR_SUCCESS;
 	} else {
 		BAIL_ON_WBC_ERROR(wbc_status);
 	}
@@ -893,4 +892,9 @@ wbcErr wbcAddNamedBlob(size_t *num_blobs,
 done:
 	wbcFreeMemory(blobs);
 	return wbc_status;
+}
+
+void wbcSetClientProcessName(const char *name)
+{
+	winbind_set_client_name(name);
 }

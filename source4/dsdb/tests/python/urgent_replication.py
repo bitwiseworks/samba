@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 from __future__ import print_function
@@ -9,7 +9,7 @@ import samba
 from samba.tests.subunitrun import TestProgram, SubunitOptions
 
 from ldb import (LdbError, ERR_NO_SUCH_OBJECT, Message,
-    MessageElement, Dn, FLAG_MOD_REPLACE)
+                 MessageElement, Dn, FLAG_MOD_REPLACE)
 import samba.tests
 import samba.dsdb as dsdb
 import samba.getopt as options
@@ -54,9 +54,9 @@ class UrgentReplicationTests(samba.tests.TestCase):
         """Test if the urgent replication is not activated when handling a non urgent object."""
         self.ldb.add({
             "dn": "cn=nonurgenttest,cn=users," + self.base_dn,
-            "objectclass":"user",
-            "samaccountname":"nonurgenttest",
-            "description":"nonurgenttest description"})
+            "objectclass": "user",
+            "samaccountname": "nonurgenttest",
+            "description": "nonurgenttest description"})
 
         # urgent replication should not be enabled when creating
         res = self.ldb.load_partition_usn(self.base_dn)
@@ -66,7 +66,7 @@ class UrgentReplicationTests(samba.tests.TestCase):
         m = Message()
         m.dn = Dn(self.ldb, "cn=nonurgenttest,cn=users," + self.base_dn)
         m["description"] = MessageElement("new description", FLAG_MOD_REPLACE,
-          "description")
+                                          "description")
         self.ldb.modify(m)
         res = self.ldb.load_partition_usn(self.base_dn)
         self.assertNotEquals(res["uSNHighest"], res["uSNUrgent"])
@@ -80,11 +80,11 @@ class UrgentReplicationTests(samba.tests.TestCase):
         """Test if the urgent replication is activated when handling a nTDSDSA object."""
         self.ldb.add({
             "dn": "cn=test server,cn=Servers,cn=Default-First-Site-Name,cn=Sites,%s" %
-                self.ldb.get_config_basedn(),
-            "objectclass":"server",
-            "cn":"test server",
-            "name":"test server",
-            "systemFlags":"50000000"}, ["relax:0"])
+            self.ldb.get_config_basedn(),
+            "objectclass": "server",
+            "cn": "test server",
+            "name": "test server",
+            "systemFlags": "50000000"}, ["relax:0"])
 
         self.ldb.add_ldif(
             """dn: cn=NTDS Settings test,cn=test server,cn=Servers,cn=Default-First-Site-Name,cn=Sites,cn=Configuration,%s""" % (self.base_dn) + """
@@ -102,7 +102,7 @@ systemFlags: 33554432""", ["relax:0"])
         m = Message()
         m.dn = Dn(self.ldb, "cn=NTDS Settings test,cn=test server,cn=Servers,cn=Default-First-Site-Name,cn=Sites,cn=Configuration," + self.base_dn)
         m["options"] = MessageElement("0", FLAG_MOD_REPLACE,
-          "options")
+                                      "options")
         self.ldb.modify(m)
         res = self.ldb.load_partition_usn("cn=Configuration," + self.base_dn)
         self.assertNotEquals(res["uSNHighest"], res["uSNUrgent"])
@@ -117,15 +117,15 @@ systemFlags: 33554432""", ["relax:0"])
     def test_crossRef_object(self):
         """Test if the urgent replication is activated when handling a crossRef object."""
         self.ldb.add({
-                      "dn": "CN=test crossRef,CN=Partitions,CN=Configuration,"+ self.base_dn,
-                      "objectClass": "crossRef",
-                      "cn": "test crossRef",
-                      "dnsRoot": self.get_loadparm().get("realm").lower(),
-                      "instanceType": "4",
-                      "nCName": self.base_dn,
-                      "showInAdvancedViewOnly": "TRUE",
-                      "name": "test crossRef",
-                      "systemFlags": "1"}, ["relax:0"])
+            "dn": "CN=test crossRef,CN=Partitions,CN=Configuration," + self.base_dn,
+            "objectClass": "crossRef",
+            "cn": "test crossRef",
+            "dnsRoot": self.get_loadparm().get("realm").lower(),
+            "instanceType": "4",
+            "nCName": self.base_dn,
+            "showInAdvancedViewOnly": "TRUE",
+            "name": "test crossRef",
+            "systemFlags": "1"}, ["relax:0"])
 
         # urgent replication should be enabled when creating
         res = self.ldb.load_partition_usn("cn=Configuration," + self.base_dn)
@@ -135,11 +135,10 @@ systemFlags: 33554432""", ["relax:0"])
         m = Message()
         m.dn = Dn(self.ldb, "cn=test crossRef,CN=Partitions,CN=Configuration," + self.base_dn)
         m["systemFlags"] = MessageElement("0", FLAG_MOD_REPLACE,
-          "systemFlags")
+                                          "systemFlags")
         self.ldb.modify(m)
         res = self.ldb.load_partition_usn("cn=Configuration," + self.base_dn)
         self.assertNotEquals(res["uSNHighest"], res["uSNUrgent"])
-
 
         # urgent replication should be enabled when deleting
         self.delete_force(self.ldb, "cn=test crossRef,CN=Partitions,CN=Configuration," + self.base_dn)
@@ -156,7 +155,7 @@ cn: test attributeSchema
 instanceType: 4
 isSingleValued: FALSE
 showInAdvancedViewOnly: FALSE
-attributeID: 1.3.6.1.4.1.7165.4.6.1.4.""" + str(random.randint(1,100000)) + """
+attributeID: 1.3.6.1.4.1.7165.4.6.1.4.""" + str(random.randint(1, 100000)) + """
 attributeSyntax: 2.5.5.12
 adminDisplayName: test attributeSchema
 adminDescription: test attributeSchema
@@ -174,7 +173,7 @@ name: test attributeSchema""")
         m = Message()
         m.dn = Dn(self.ldb, "CN=test attributeSchema,CN=Schema,CN=Configuration," + self.base_dn)
         m["lDAPDisplayName"] = MessageElement("updatedTestAttributeSchema", FLAG_MOD_REPLACE,
-          "lDAPDisplayName")
+                                              "lDAPDisplayName")
         self.ldb.modify(m)
         res = self.ldb.load_partition_usn("cn=Schema,cn=Configuration," + self.base_dn)
         self.assertEquals(res["uSNHighest"], res["uSNUrgent"])
@@ -188,7 +187,7 @@ objectClass: classSchema
 cn: test classSchema
 instanceType: 4
 subClassOf: top
-governsId: 1.3.6.1.4.1.7165.4.6.2.4.""" + str(random.randint(1,100000)) + """
+governsId: 1.3.6.1.4.1.7165.4.6.2.4.""" + str(random.randint(1, 100000)) + """
 rDNAttID: cn
 showInAdvancedViewOnly: TRUE
 adminDisplayName: test classSchema
@@ -211,11 +210,11 @@ defaultHidingValue: TRUE""")
         except LdbError:
             print("Not testing urgent replication when creating classSchema object ...\n")
 
-        # urgent replication should be enabled when modifying 
+        # urgent replication should be enabled when modifying
         m = Message()
         m.dn = Dn(self.ldb, "CN=test classSchema,CN=Schema,CN=Configuration," + self.base_dn)
         m["lDAPDisplayName"] = MessageElement("updatedTestClassSchema", FLAG_MOD_REPLACE,
-          "lDAPDisplayName")
+                                              "lDAPDisplayName")
         self.ldb.modify(m)
         res = self.ldb.load_partition_usn("cn=Schema,cn=Configuration," + self.base_dn)
         self.assertEquals(res["uSNHighest"], res["uSNUrgent"])
@@ -225,10 +224,10 @@ defaultHidingValue: TRUE""")
 
         self.ldb.add({
             "dn": "cn=test secret,cn=System," + self.base_dn,
-            "objectClass":"secret",
-            "cn":"test secret",
-            "name":"test secret",
-            "currentValue":"xxxxxxx"})
+            "objectClass": "secret",
+            "cn": "test secret",
+            "name": "test secret",
+            "currentValue": "xxxxxxx"})
 
         # urgent replication should be enabled when creating
         res = self.ldb.load_partition_usn(self.base_dn)
@@ -238,7 +237,7 @@ defaultHidingValue: TRUE""")
         m = Message()
         m.dn = Dn(self.ldb, "cn=test secret,cn=System," + self.base_dn)
         m["currentValue"] = MessageElement("yyyyyyyy", FLAG_MOD_REPLACE,
-          "currentValue")
+                                           "currentValue")
         self.ldb.modify(m)
         res = self.ldb.load_partition_usn(self.base_dn)
         self.assertEquals(res["uSNHighest"], res["uSNUrgent"])
@@ -269,12 +268,12 @@ rIDAvailablePool: 133001-1073741823""", ["relax:0"])
         m = Message()
         m.dn = Dn(self.ldb, "CN=RID Manager test,CN=System," + self.base_dn)
         m["systemFlags"] = MessageElement("0", FLAG_MOD_REPLACE,
-          "systemFlags")
+                                          "systemFlags")
         self.ldb.modify(m)
         res = self.ldb.load_partition_usn(self.base_dn)
         self.assertEquals(res["uSNHighest"], res["uSNUrgent"])
 
-        # urgent replication should NOT be enabled when deleting 
+        # urgent replication should NOT be enabled when deleting
         self.delete_force(self.ldb, "CN=RID Manager test,CN=System," + self.base_dn)
         res = self.ldb.load_partition_usn(self.base_dn)
         self.assertNotEquals(res["uSNHighest"], res["uSNUrgent"])
@@ -284,12 +283,12 @@ rIDAvailablePool: 133001-1073741823""", ["relax:0"])
 
         self.ldb.add({
             "dn": "cn=user UrgAttr test,cn=users," + self.base_dn,
-            "objectclass":"user",
-            "samaccountname":"user UrgAttr test",
-            "userAccountControl":str(dsdb.UF_NORMAL_ACCOUNT),
-            "lockoutTime":"0",
-            "pwdLastSet":"0",
-            "description":"urgent attributes test description"})
+            "objectclass": "user",
+            "samaccountname": "user UrgAttr test",
+            "userAccountControl": str(dsdb.UF_NORMAL_ACCOUNT),
+            "lockoutTime": "0",
+            "pwdLastSet": "0",
+            "description": "urgent attributes test description"})
 
         # urgent replication should NOT be enabled when creating
         res = self.ldb.load_partition_usn(self.base_dn)
@@ -298,8 +297,8 @@ rIDAvailablePool: 133001-1073741823""", ["relax:0"])
         # urgent replication should be enabled when modifying userAccountControl
         m = Message()
         m.dn = Dn(self.ldb, "cn=user UrgAttr test,cn=users," + self.base_dn)
-        m["userAccountControl"] = MessageElement(str(dsdb.UF_NORMAL_ACCOUNT+dsdb.UF_DONT_EXPIRE_PASSWD), FLAG_MOD_REPLACE,
-          "userAccountControl")
+        m["userAccountControl"] = MessageElement(str(dsdb.UF_NORMAL_ACCOUNT + dsdb.UF_DONT_EXPIRE_PASSWD), FLAG_MOD_REPLACE,
+                                                 "userAccountControl")
         self.ldb.modify(m)
         res = self.ldb.load_partition_usn(self.base_dn)
         self.assertEquals(res["uSNHighest"], res["uSNUrgent"])
@@ -308,7 +307,7 @@ rIDAvailablePool: 133001-1073741823""", ["relax:0"])
         m = Message()
         m.dn = Dn(self.ldb, "cn=user UrgAttr test,cn=users," + self.base_dn)
         m["lockoutTime"] = MessageElement("1", FLAG_MOD_REPLACE,
-          "lockoutTime")
+                                          "lockoutTime")
         self.ldb.modify(m)
         res = self.ldb.load_partition_usn(self.base_dn)
         self.assertEquals(res["uSNHighest"], res["uSNUrgent"])
@@ -317,7 +316,7 @@ rIDAvailablePool: 133001-1073741823""", ["relax:0"])
         m = Message()
         m.dn = Dn(self.ldb, "cn=user UrgAttr test,cn=users," + self.base_dn)
         m["pwdLastSet"] = MessageElement("-1", FLAG_MOD_REPLACE,
-          "pwdLastSet")
+                                         "pwdLastSet")
         self.ldb.modify(m)
         res = self.ldb.load_partition_usn(self.base_dn)
         self.assertEquals(res["uSNHighest"], res["uSNUrgent"])

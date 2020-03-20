@@ -224,9 +224,14 @@ static void interpret_interface(TALLOC_CTX *mem_ctx,
 			return;
 		}
 	} else {
-		char *endp = NULL;
-		unsigned long val = strtoul(p, &endp, 0);
-		if (p == endp || (endp && *endp != '\0')) {
+		int error = 0;
+
+		unsigned long val = smb_strtoul(p,
+						NULL,
+						0,
+						&error,
+						SMB_STR_FULL_STR_CONV);
+		if (error != 0) {
 			DEBUG(2,("interpret_interface: "
 				"can't determine netmask value from %s\n",
 				p));

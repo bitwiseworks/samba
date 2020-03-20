@@ -32,7 +32,6 @@
 #include "../librpc/gen_ndr/ndr_netlogon.h"
 #include "rpc_client/cli_netlogon.h"
 #include "smb_krb5.h"
-#include "../lib/crypto/arcfour.h"
 #include "../libcli/security/security.h"
 #include "ads.h"
 #include "../librpc/gen_ndr/krb5pac.h"
@@ -45,6 +44,13 @@
 #include "lib/afs/afs_funcs.h"
 #include "libsmb/samlogon_cache.h"
 #include "rpc_client/util_netlogon.h"
+#include "libads/krb5_errs.h"
+#include "param/param.h"
+#include "messaging/messaging.h"
+#include "lib/crypto/gnutls_helpers.h"
+
+#include "lib/crypto/gnutls_helpers.h"
+#include <gnutls/crypto.h>
 
 #undef DBGC_CLASS
 #define DBGC_CLASS DBGC_WINBIND
@@ -139,17 +145,13 @@ static NTSTATUS append_info3_as_txt(TALLOC_CTX *mem_ctx,
 	}
 
 	for (i=0; i < info3->sidcount; i++) {
-		char *sid;
+		struct dom_sid_buf sidbuf;
 
-		sid = dom_sid_string(frame, info3->sids[i].sid);
-		if (sid == NULL) {
-			status = NT_STATUS_NO_MEMORY;
-			goto out;
-		}
-
-		ex = talloc_asprintf_append_buffer(ex, "%s:0x%08X\n",
-						   sid,
-						   info3->sids[i].attributes);
+		ex = talloc_asprintf_append_buffer(
+			ex,
+			"%s:0x%08X\n",
+			dom_sid_str_buf(info3->sids[i].sid, &sidbuf),
+			info3->sids[i].attributes);
 		if (ex == NULL) {
 			status = NT_STATUS_NO_MEMORY;
 			goto out;
@@ -251,13 +253,15 @@ static NTSTATUS append_afs_token(TALLOC_CTX *mem_ctx,
 
 	{
 		struct dom_sid user_sid;
-		fstring sidstr;
+		struct dom_sid_buf sidstr;
 
 		sid_compose(&user_sid, info3->base.domain_sid,
 			    info3->base.rid);
-		sid_to_fstring(sidstr, &user_sid);
-		afsname = talloc_string_sub(mem_ctx, afsname,
-					    "%s", sidstr);
+		afsname = talloc_string_sub(
+			mem_ctx,
+			afsname,
+			"%s",
+			dom_sid_str_buf(&user_sid, &sidstr));
 	}
 
 	if (afsname == NULL) {
@@ -376,8 +380,10 @@ static NTSTATUS check_info3_in_group(struct netr_SamInfo3 *info3,
 	security_token_debug(DBGC_CLASS, 10, token);
 
 	for (i=0; i<num_require_membership_of_sid; i++) {
-		DEBUG(10, ("Checking SID %s\n", sid_string_dbg(
-				   &require_membership_of_sid[i])));
+		struct dom_sid_buf buf;
+		DEBUG(10, ("Checking SID %s\n",
+			   dom_sid_str_buf(&require_membership_of_sid[i],
+					   &buf)));
 		if (nt_token_check_sid(&require_membership_of_sid[i],
 				       token)) {
 			DEBUG(10, ("Access ok\n"));
@@ -415,6 +421,15 @@ struct winbindd_domain *find_auth_domain(uint8_t flags,
 
 	if (strequal(domain_name, get_global_sam_name())) {
 		return find_domain_from_name_noinit(domain_name);
+	}
+
+	if (lp_winbind_use_krb5_enterprise_principals()) {
+		/*
+		 * If we use enterprise principals
+		 * we always go trough our primary domain
+		 * and follow the WRONG_REALM replies.
+		 */
+		flags &= ~WBFLAG_PAM_CONTACT_TRUSTDOM;
 	}
 
 	/* we can auth against trusted domains */
@@ -575,6 +590,11 @@ static const char *generate_krb5_ccache(TALLOC_CTX *mem_ctx,
 			gen_cc = talloc_asprintf(
 				mem_ctx, "KEYRING:persistent:%d", uid);
 		}
+		if (strequal(type, "KCM")) {
+			gen_cc = talloc_asprintf(mem_ctx,
+						 "KCM:%d",
+						 uid);
+		}
 
 		if (strnequal(type, "FILE:/", 6) ||
 		    strnequal(type, "WRFILE:/", 8) ||
@@ -724,7 +744,20 @@ static NTSTATUS winbindd_raw_kerberos_login(TALLOC_CTX *mem_ctx,
 		return NT_STATUS_INVALID_PARAMETER;
 	}
 
-	principal_s = talloc_asprintf(mem_ctx, "%s@%s", name_user, realm);
+	if (lp_winbind_use_krb5_enterprise_principals() &&
+	    name_namespace[0] != '\0')
+	{
+		principal_s = talloc_asprintf(mem_ctx,
+					      "%s@%s@%s",
+					      name_user,
+					      name_namespace,
+					      realm);
+	} else {
+		principal_s = talloc_asprintf(mem_ctx,
+					      "%s@%s",
+					      name_user,
+					      realm);
+	}
 	if (principal_s == NULL) {
 		return NT_STATUS_NO_MEMORY;
 	}
@@ -1065,7 +1098,25 @@ static NTSTATUS winbindd_dual_pam_auth_cached(struct winbindd_domain *domain,
 		/* In this case we didn't store the nt_hash itself,
 		   but the MD5 combination of salt + nt_hash. */
 		uchar salted_hash[NT_HASH_LEN];
-		E_md5hash(cached_salt, new_nt_pass, salted_hash);
+		gnutls_hash_hd_t hash_hnd = NULL;
+		int rc;
+
+		rc = gnutls_hash_init(&hash_hnd, GNUTLS_DIG_MD5);
+		if (rc < 0) {
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HASH_NOT_SUPPORTED);
+		}
+
+		rc = gnutls_hash(hash_hnd, cached_salt, 16);
+		if (rc < 0) {
+			gnutls_hash_deinit(hash_hnd, NULL);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HASH_NOT_SUPPORTED);
+		}
+		rc = gnutls_hash(hash_hnd, new_nt_pass, 16);
+		if (rc < 0) {
+			gnutls_hash_deinit(hash_hnd, NULL);
+			return gnutls_error_to_ntstatus(rc, NT_STATUS_HASH_NOT_SUPPORTED);
+		}
+		gnutls_hash_deinit(hash_hnd, salted_hash);
 
 		password_good = (memcmp(cached_nt_pass, salted_hash,
 					NT_HASH_LEN) == 0);
@@ -1291,30 +1342,16 @@ static NTSTATUS winbindd_dual_pam_auth_kerberos(struct winbindd_domain *domain,
 
 	/* what domain should we contact? */
 
-	if ( IS_DC ) {
-		contact_domain = find_domain_from_name(name_namespace);
-		if (contact_domain == NULL) {
-			DEBUG(3, ("Authentication for domain for [%s] -> [%s]\\[%s] failed as %s is not a trusted domain\n",
-				  state->request->data.auth.user, name_domain, name_user, name_domain));
-			result = NT_STATUS_NO_SUCH_USER;
-			goto done;
-		}
-
+	if (lp_winbind_use_krb5_enterprise_principals()) {
+		contact_domain = find_auth_domain(0, name_namespace);
 	} else {
-		if (is_myname(name_domain)) {
-			DEBUG(3, ("Authentication for domain %s (local domain to this server) not supported at this stage\n", name_domain));
-			result =  NT_STATUS_NO_SUCH_USER;
-			goto done;
-		}
-
 		contact_domain = find_domain_from_name(name_namespace);
-		if (contact_domain == NULL) {
-			DEBUG(3, ("Authentication for domain for [%s] -> [%s]\\[%s] failed as %s is not a trusted domain\n",
-				  state->request->data.auth.user, name_domain, name_user, name_domain));
-
-			result =  NT_STATUS_NO_SUCH_USER;
-			goto done;
-		}
+	}
+	if (contact_domain == NULL) {
+		DEBUG(3, ("Authentication for domain for [%s] -> [%s]\\[%s] failed as %s is not a trusted domain\n",
+			  state->request->data.auth.user, name_domain, name_user, name_namespace));
+		result = NT_STATUS_NO_SUCH_USER;
+		goto done;
 	}
 
 	if (contact_domain->initialized &&
@@ -1327,7 +1364,8 @@ static NTSTATUS winbindd_dual_pam_auth_kerberos(struct winbindd_domain *domain,
 	}
 
 	if (!contact_domain->active_directory) {
-		DEBUG(3,("krb5 auth requested but domain is not Active Directory\n"));
+		DEBUG(3,("krb5 auth requested but domain (%s) is not Active Directory\n",
+		      contact_domain->name));
 		return NT_STATUS_INVALID_LOGON_TYPE;
 	}
 try_login:
@@ -1344,10 +1382,16 @@ done:
 
 static NTSTATUS winbindd_dual_auth_passdb(TALLOC_CTX *mem_ctx,
 					  uint32_t logon_parameters,
-					  const char *domain, const char *user,
+					  const char *domain,
+					  const char *user,
+					  const uint64_t logon_id,
+					  const char *client_name,
+					  const int client_pid,
 					  const DATA_BLOB *challenge,
 					  const DATA_BLOB *lm_resp,
 					  const DATA_BLOB *nt_resp,
+					  const struct tsocket_address *remote,
+					  const struct tsocket_address *local,
 					  bool interactive,
 					  uint8_t *pauthoritative,
 					  struct netr_SamInfo3 **pinfo3)
@@ -1355,11 +1399,9 @@ static NTSTATUS winbindd_dual_auth_passdb(TALLOC_CTX *mem_ctx,
 	struct auth_context *auth_context;
 	struct auth_serversupplied_info *server_info;
 	struct auth_usersupplied_info *user_info = NULL;
-	struct tsocket_address *local;
 	struct netr_SamInfo3 *info3;
 	NTSTATUS status;
 	bool ok;
-	int rc;
 	TALLOC_CTX *frame = talloc_stackframe();
 
 	/*
@@ -1367,23 +1409,8 @@ static NTSTATUS winbindd_dual_auth_passdb(TALLOC_CTX *mem_ctx,
 	 */
 	*pauthoritative = 1;
 
-	rc = tsocket_address_inet_from_strings(frame,
-					       "ip",
-					       "127.0.0.1",
-					       0,
-					       &local);
-	if (rc < 0) {
-		TALLOC_FREE(frame);
-		return NT_STATUS_NO_MEMORY;
-	}
-
-	/*
-	 * TODO: We should get the service description passed in from
-	 * the winbind client, so we can have "smb2", "squid" or "samr" logged
-	 * here.
-	 */
 	status = make_user_info(frame, &user_info, user, user, domain, domain,
-				lp_netbios_name(), local, local,
+				lp_netbios_name(), remote, local,
 				"winbind",
 				lm_resp, nt_resp, NULL, NULL,
 				NULL, AUTH_PASSWORD_RESPONSE);
@@ -1394,6 +1421,13 @@ static NTSTATUS winbindd_dual_auth_passdb(TALLOC_CTX *mem_ctx,
 	}
 
 	user_info->logon_parameters = logon_parameters;
+	user_info->logon_id = logon_id;
+	user_info->auth_description = talloc_asprintf(
+		frame, "PASSDB, %s, %d", client_name, client_pid);
+	if (user_info->auth_description == NULL) {
+		TALLOC_FREE(frame);
+		return NT_STATUS_NO_MEMORY;
+	}
 
 	/* We don't want any more mapping of the username */
 	user_info->mapped_state = True;
@@ -1459,6 +1493,7 @@ static NTSTATUS winbind_samlogon_retry_loop(struct winbindd_domain *domain,
 					    const char *password,
 					    const char *domainname,
 					    const char *workstation,
+					    const uint64_t logon_id,
 					    bool plaintext_given,
 					    const uint8_t chal[8],
 					    DATA_BLOB lm_response,
@@ -1571,6 +1606,7 @@ static NTSTATUS winbind_samlogon_retry_loop(struct winbindd_domain *domain,
 				username,
 				password,
 				workstation,
+				logon_id,
 				logon_type_i,
 				authoritative,
 				flags,
@@ -1585,6 +1621,7 @@ static NTSTATUS winbind_samlogon_retry_loop(struct winbindd_domain *domain,
 				username,
 				domainname,
 				workstation,
+				logon_id,
 				lm_response,
 				nt_response,
 				logon_type_i,
@@ -1601,6 +1638,7 @@ static NTSTATUS winbind_samlogon_retry_loop(struct winbindd_domain *domain,
 				username,
 				domainname,
 				workstation,
+				logon_id,
 				chal,
 				lm_response,
 				nt_response,
@@ -1627,7 +1665,7 @@ static NTSTATUS winbind_samlogon_retry_loop(struct winbindd_domain *domain,
 		}
 
 		/* if we get access denied, a possible cause was that we had
-		   and open connection to the DC, but someone changed our
+		   an open connection to the DC, but someone changed our
 		   machine account password out from underneath us using 'net
 		   rpc changetrustpw' */
 
@@ -1685,25 +1723,92 @@ static NTSTATUS winbind_samlogon_retry_loop(struct winbindd_domain *domain,
 	return NT_STATUS_OK;
 }
 
+static NTSTATUS nt_dual_auth_passdb(TALLOC_CTX *mem_ctx,
+				    fstring name_user,
+				    fstring name_domain,
+				    const char *pass,
+				    uint64_t logon_id,
+				    const char *client_name,
+				    const int client_pid,
+				    const struct tsocket_address *remote,
+				    const struct tsocket_address *local,
+				    uint8_t *authoritative,
+				    struct netr_SamInfo3 **info3)
+{
+	unsigned char local_nt_response[24];
+	uchar chal[8];
+	DATA_BLOB chal_blob;
+	DATA_BLOB lm_resp;
+	DATA_BLOB nt_resp;
+
+	/* do password magic */
+
+	generate_random_buffer(chal, sizeof(chal));
+	chal_blob = data_blob_const(chal, sizeof(chal));
+
+	if (lp_client_ntlmv2_auth()) {
+		DATA_BLOB server_chal;
+		DATA_BLOB names_blob;
+		server_chal = data_blob_const(chal, 8);
+
+		/* note that the 'workgroup' here is for the local
+		   machine.  The 'server name' must match the
+		   'workstation' passed to the actual SamLogon call.
+		*/
+		names_blob = NTLMv2_generate_names_blob(mem_ctx,
+							lp_netbios_name(),
+							lp_workgroup());
+
+		if (!SMBNTLMv2encrypt(mem_ctx, name_user, name_domain,
+				      pass, &server_chal, &names_blob,
+				      &lm_resp, &nt_resp, NULL, NULL)) {
+			data_blob_free(&names_blob);
+			DEBUG(0, ("SMBNTLMv2encrypt() failed!\n"));
+			return NT_STATUS_NO_MEMORY;
+		}
+		data_blob_free(&names_blob);
+	} else {
+		int rc;
+		lm_resp = data_blob_null;
+
+		rc = SMBNTencrypt(pass, chal, local_nt_response);
+		if (rc != 0) {
+			DEBUG(0, ("SMBNTencrypt() failed!\n"));
+			return gnutls_error_to_ntstatus(rc,
+				    NT_STATUS_ACCESS_DISABLED_BY_POLICY_OTHER);
+		}
+
+		nt_resp = data_blob_talloc(mem_ctx, local_nt_response,
+					   sizeof(local_nt_response));
+	}
+
+	return winbindd_dual_auth_passdb(talloc_tos(), 0, name_domain,
+					 name_user, logon_id, client_name,
+					 client_pid, &chal_blob, &lm_resp,
+					 &nt_resp, remote, local,
+					 true, /* interactive */
+					 authoritative, info3);
+}
+
 static NTSTATUS winbindd_dual_pam_auth_samlogon(
 	TALLOC_CTX *mem_ctx,
 	struct winbindd_domain *domain,
 	const char *user,
 	const char *pass,
+	uint64_t logon_id,
+	const char *client_name,
+	const int client_pid,
 	uint32_t request_flags,
+	const struct tsocket_address *remote,
+	const struct tsocket_address *local,
 	uint16_t *_validation_level,
 	union netr_Validation **_validation)
 {
-
-	uchar chal[8];
-	DATA_BLOB lm_resp;
-	DATA_BLOB nt_resp;
-	unsigned char local_nt_response[24];
 	fstring name_namespace, name_domain, name_user;
 	NTSTATUS result;
 	uint8_t authoritative = 0;
 	uint32_t flags = 0;
-	uint16_t validation_level;
+	uint16_t validation_level = 0;
 	union netr_Validation *validation = NULL;
 	struct netr_SamBaseInfo *base_info = NULL;
 	bool ok;
@@ -1727,50 +1832,12 @@ static NTSTATUS winbindd_dual_pam_auth_samlogon(
 	 * we need to check against domain->name.
 	 */
 	if (strequal(domain->name, get_global_sam_name())) {
-		DATA_BLOB chal_blob = data_blob_const(chal, sizeof(chal));
 		struct netr_SamInfo3 *info3 = NULL;
 
-		/* do password magic */
-
-		generate_random_buffer(chal, sizeof(chal));
-
-		if (lp_client_ntlmv2_auth()) {
-			DATA_BLOB server_chal;
-			DATA_BLOB names_blob;
-			server_chal = data_blob_const(chal, 8);
-
-			/* note that the 'workgroup' here is for the local
-			   machine.  The 'server name' must match the
-			   'workstation' passed to the actual SamLogon call.
-			*/
-			names_blob = NTLMv2_generate_names_blob(
-				mem_ctx, lp_netbios_name(), lp_workgroup());
-
-			if (!SMBNTLMv2encrypt(mem_ctx, name_user, name_domain,
-					      pass,
-					      &server_chal,
-					      &names_blob,
-					      &lm_resp, &nt_resp, NULL, NULL)) {
-				data_blob_free(&names_blob);
-				DEBUG(0, ("winbindd_pam_auth: SMBNTLMv2encrypt() failed!\n"));
-				result = NT_STATUS_NO_MEMORY;
-				goto done;
-			}
-			data_blob_free(&names_blob);
-		} else {
-			lm_resp = data_blob_null;
-			SMBNTencrypt(pass, chal, local_nt_response);
-
-			nt_resp = data_blob_talloc(mem_ctx, local_nt_response,
-						   sizeof(local_nt_response));
-		}
-
-		result = winbindd_dual_auth_passdb(
-			talloc_tos(), 0, name_domain, name_user,
-			&chal_blob, &lm_resp, &nt_resp,
-			true, /* interactive */
-			&authoritative,
-			&info3);
+		result = nt_dual_auth_passdb(mem_ctx, name_user, name_domain,
+					     pass, logon_id, client_name,
+					     client_pid, remote, local,
+					     &authoritative, &info3);
 
 		/*
 		 * We need to try the remote NETLOGON server if this is
@@ -1802,6 +1869,7 @@ static NTSTATUS winbindd_dual_pam_auth_samlogon(
 					     pass,
 					     name_domain,
 					     lp_netbios_name(),
+					     logon_id,
 					     true, /* plaintext_given */
 					     NULL,
 					     data_blob_null, data_blob_null,
@@ -1905,6 +1973,138 @@ done:
 	return result;
 }
 
+/*
+ * @brief build a tsocket_address for the remote address of the supplied socket
+ *
+ */
+static struct tsocket_address *get_remote_address(TALLOC_CTX *mem_ctx, int sock)
+{
+	struct sockaddr_storage st = {0};
+	struct sockaddr *sar = (struct sockaddr *)&st;
+	socklen_t sa_len = sizeof(st);
+	struct tsocket_address *remote = NULL;
+	int ret = 0;
+
+	ret = getpeername(sock, sar, &sa_len);
+	if (ret != 0) {
+		DBG_ERR("getpeername failed - %s", strerror(errno));
+		return NULL;
+	}
+	ret = tsocket_address_bsd_from_sockaddr(mem_ctx, sar, sa_len, &remote);
+	if (ret != 0) {
+		DBG_ERR("tsocket_address_bsd_from_sockaddr failed - %s",
+			strerror(errno));
+		return NULL;
+	}
+	return remote;
+}
+
+/*
+ * @brief build a tsocket_address for the local address of the supplied socket
+ *
+ */
+static struct tsocket_address *get_local_address(TALLOC_CTX *mem_ctx, int sock)
+{
+	struct sockaddr_storage st = {0};
+	struct sockaddr *sar = (struct sockaddr *)&st;
+	socklen_t sa_len = sizeof(st);
+	struct tsocket_address *local = NULL;
+	int ret = 0;
+
+	ret = getsockname(sock, sar, &sa_len);
+	if (ret != 0) {
+		DBG_ERR("getsockname failed - %s", strerror(errno));
+		return NULL;
+	}
+	ret = tsocket_address_bsd_from_sockaddr(mem_ctx, sar, sa_len, &local);
+	if (ret != 0) {
+		DBG_ERR("tsocket_address_bsd_from_sockaddr failed - %s",
+			strerror(errno));
+		return NULL;
+	}
+	return local;
+}
+
+/*
+ * @brief generate an authentication message in the logs.
+ *
+ */
+static void log_authentication(
+	TALLOC_CTX *mem_ctx,
+	const struct winbindd_domain *domain,
+	const struct winbindd_cli_state *state,
+	const struct timeval start_time,
+	const uint64_t logon_id,
+	const char *command,
+	const char *user_name,
+	const char *domain_name,
+	const char *workstation,
+	const DATA_BLOB lm_resp,
+	const DATA_BLOB nt_resp,
+	const struct tsocket_address *remote,
+	const struct tsocket_address *local,
+	NTSTATUS result)
+{
+
+	struct auth_usersupplied_info *ui = NULL;
+	struct dom_sid *sid = NULL;
+	struct loadparm_context *lp_ctx = NULL;
+	struct imessaging_context *msg_ctx = NULL;
+
+	ui = talloc_zero(mem_ctx, struct auth_usersupplied_info);
+	ui->logon_id = logon_id;
+	ui->service_description = "winbind";
+	ui->password.response.nt.length = nt_resp.length;
+	ui->password.response.nt.data = nt_resp.data;
+	ui->password.response.lanman.length = lm_resp.length;
+	ui->password.response.lanman.data = lm_resp.data;
+	if (nt_resp.length == 0 && lm_resp.length == 0) {
+		ui->password_state = AUTH_PASSWORD_PLAIN;
+	} else {
+		ui->password_state = AUTH_PASSWORD_RESPONSE;
+	}
+	/*
+	 * In the event of a failure ui->auth_description will be null,
+	 * the logging code handles this correctly so it can be ignored.
+	 */
+	ui->auth_description = talloc_asprintf(
+		ui,
+		"%s, %s, %d",
+		command,
+		state->request->client_name,
+		state->pid);
+	if (ui->auth_description == NULL) {
+		DBG_ERR("OOM Unable to create auth_description");
+	}
+	ui->client.account_name = user_name;
+	ui->client.domain_name = domain_name;
+	ui->workstation_name = workstation;
+	ui->remote_host = remote;
+	ui->local_host = local;
+
+	sid = dom_sid_parse_talloc(
+	    ui, state->response->data.auth.info3.dom_sid);
+	if (sid != NULL) {
+		sid_append_rid(sid, state->response->data.auth.info3.user_rid);
+	}
+
+	if (lp_auth_event_notification()) {
+		lp_ctx = loadparm_init_s3(ui, loadparm_s3_helpers());
+		msg_ctx = imessaging_client_init(
+		    ui, lp_ctx, global_event_context());
+	}
+	log_authentication_event(
+	    msg_ctx,
+	    lp_ctx,
+	    &start_time,
+	    ui,
+	    result,
+	    state->response->data.auth.info3.logon_dom,
+	    state->response->data.auth.info3.user_name,
+	    sid);
+	TALLOC_FREE(ui);
+}
+
 enum winbindd_result winbindd_dual_pam_auth(struct winbindd_domain *domain,
 					    struct winbindd_cli_state *state)
 {
@@ -1917,6 +2117,10 @@ enum winbindd_result winbindd_dual_pam_auth(struct winbindd_domain *domain,
 	union netr_Validation *validation = NULL;
 	NTSTATUS name_map_status = NT_STATUS_UNSUCCESSFUL;
 	bool ok;
+	uint64_t logon_id = 0;
+	const struct timeval start_time = timeval_current();
+	const struct tsocket_address *remote = NULL;
+	const struct tsocket_address *local = NULL;
 
 	/* Ensure null termination */
 	state->request->data.auth.user[sizeof(state->request->data.auth.user)-1]='\0';
@@ -1924,6 +2128,12 @@ enum winbindd_result winbindd_dual_pam_auth(struct winbindd_domain *domain,
 	/* Ensure null termination */
 	state->request->data.auth.pass[sizeof(state->request->data.auth.pass)-1]='\0';
 
+	/*
+	 * Generate a logon_id for this session.
+	 */
+	logon_id = generate_random_u64();
+	remote = get_remote_address(state->mem_ctx, state->sock);
+	local = get_local_address(state->mem_ctx, state->sock);
 	DEBUG(3, ("[%5lu]: dual pam auth %s\n", (unsigned long)state->pid,
 		  state->request->data.auth.user));
 
@@ -1933,7 +2143,7 @@ enum winbindd_result winbindd_dual_pam_auth(struct winbindd_domain *domain,
 					       state->request->data.auth.user,
 					       &mapped_user);
 
-	/* If the name normalization didnt' actually do anything,
+	/* If the name normalization didn't actually do anything,
 	   just use the original name */
 
 	if (!NT_STATUS_IS_OK(name_map_status) &&
@@ -2044,7 +2254,12 @@ sam_logon:
 			state->mem_ctx, domain,
 			state->request->data.auth.user,
 			state->request->data.auth.pass,
+			logon_id,
+			state->request->client_name,
+			state->pid,
 			state->request->flags,
+			remote,
+			local,
 			&validation_level,
 			&validation);
 
@@ -2243,6 +2458,26 @@ done:
 	      state->response->data.auth.nt_status_string,
 	      state->response->data.auth.pam_error));
 
+	/*
+	 * Log the winbind pam authentication, the logon_id will tie this to
+	 * any of the logons invoked from this request.
+	 */
+	log_authentication(
+	    state->mem_ctx,
+	    domain,
+	    state,
+	    start_time,
+	    logon_id,
+	    "PAM_AUTH",
+	    name_user,
+	    name_domain,
+	    NULL,
+	    data_blob_null,
+	    data_blob_null,
+	    remote,
+	    local,
+	    result);
+
 	return NT_STATUS_IS_OK(result) ? WINBINDD_OK : WINBINDD_ERROR;
 }
 
@@ -2253,9 +2488,14 @@ NTSTATUS winbind_dual_SamLogon(struct winbindd_domain *domain,
 			       const char *name_user,
 			       const char *name_domain,
 			       const char *workstation,
+			       const uint64_t logon_id,
+			       const char* client_name,
+			       const int client_pid,
 			       const uint8_t chal[8],
 			       DATA_BLOB lm_response,
 			       DATA_BLOB nt_response,
+			       const struct tsocket_address *remote,
+			       const struct tsocket_address *local,
 			       uint8_t *authoritative,
 			       bool skip_sam,
 			       uint32_t *flags,
@@ -2284,7 +2524,12 @@ NTSTATUS winbind_dual_SamLogon(struct winbindd_domain *domain,
 			talloc_tos(),
 			logon_parameters,
 			name_domain, name_user,
+			logon_id,
+			client_name,
+			client_pid,
 			&chal_blob, &lm_response, &nt_response,
+			remote,
+			local,
 			interactive,
 			authoritative,
 			&info3);
@@ -2317,6 +2562,7 @@ NTSTATUS winbind_dual_SamLogon(struct winbindd_domain *domain,
 					     name_domain,
 					     /* Bug #3248 - found by Stefan Burkei. */
 					     workstation, /* We carefully set this above so use it... */
+					     logon_id,
 					     false, /* plaintext_given */
 					     chal,
 					     lm_response,
@@ -2418,11 +2664,15 @@ enum winbindd_result winbindd_dual_pam_auth_crap(struct winbindd_domain *domain,
 	const char *name_user = NULL;
 	const char *name_domain = NULL;
 	const char *workstation;
+	uint64_t logon_id = 0;
 	uint8_t authoritative = 0;
 	uint32_t flags = 0;
 	uint16_t validation_level;
 	union netr_Validation *validation = NULL;
-	DATA_BLOB lm_resp, nt_resp;
+	DATA_BLOB lm_resp = { 0 }, nt_resp = { 0 };
+	const struct timeval start_time = timeval_current();
+	const struct tsocket_address *remote = NULL;
+	const struct tsocket_address *local = NULL;
 
 	/* This is child-only, so no check for privileged access is needed
 	   anymore */
@@ -2434,6 +2684,9 @@ enum winbindd_result winbindd_dual_pam_auth_crap(struct winbindd_domain *domain,
 	name_user = state->request->data.auth_crap.user;
 	name_domain = state->request->data.auth_crap.domain;
 	workstation = state->request->data.auth_crap.workstation;
+	logon_id = generate_random_u64();
+	remote = get_remote_address(state->mem_ctx, state->sock);
+	local = get_local_address(state->mem_ctx, state->sock);
 
 	DEBUG(3, ("[%5lu]: pam auth crap domain: %s user: %s\n", (unsigned long)state->pid,
 		  name_domain, name_user));
@@ -2471,9 +2724,14 @@ enum winbindd_result winbindd_dual_pam_auth_crap(struct winbindd_domain *domain,
 				       name_domain,
 				       /* Bug #3248 - found by Stefan Burkei. */
 				       workstation, /* We carefully set this above so use it... */
+				       logon_id,
+				       state->request->client_name,
+				       state->request->pid,
 				       state->request->data.auth_crap.chal,
 				       lm_resp,
 				       nt_resp,
+				       remote,
+				       local,
 				       &authoritative,
 				       false,
 				       &flags,
@@ -2524,6 +2782,25 @@ done:
 	}
 
 	set_auth_errors(state->response, result);
+	/*
+	 * Log the winbind pam authentication, the logon_id will tie this to
+	 * any of the logons invoked from this request.
+	 */
+	log_authentication(
+	    state->mem_ctx,
+	    domain,
+	    state,
+	    start_time,
+	    logon_id,
+	    "NTLM_AUTH",
+	    name_user,
+	    name_domain,
+	    workstation,
+	    lm_resp,
+            nt_resp,
+	    remote,
+	    local,
+	    result);
 
 	return NT_STATUS_IS_OK(result) ? WINBINDD_OK : WINBINDD_ERROR;
 }
@@ -2898,10 +3175,10 @@ static NTSTATUS extract_pac_vrfy_sigs(TALLOC_CTX *mem_ctx, DATA_BLOB pac_blob,
 	ZERO_STRUCT(entry);
 	ZERO_STRUCT(cursor);
 
-	k5ret = krb5_init_context(&krbctx);
+	k5ret = smb_krb5_init_context_common(&krbctx);
 	if (k5ret) {
-		DEBUG(1, ("Failed to initialize kerberos context: %s\n",
-			  error_message(k5ret)));
+		DBG_ERR("kerberos init context failed (%s)\n",
+			error_message(k5ret));
 		status = krb5_to_nt_status(k5ret);
 		goto out;
 	}
@@ -3055,6 +3332,7 @@ NTSTATUS winbindd_pam_auth_pac_verify(struct winbindd_cli_state *state,
 				info3_copy->base.logon_domain.string);
 		if (domain && domain->primary ) {
 			struct dom_sid user_sid;
+			struct dom_sid_buf buf;
 
 			sid_compose(&user_sid,
 				info3_copy->base.domain_sid,
@@ -3069,7 +3347,7 @@ NTSTATUS winbindd_pam_auth_pac_verify(struct winbindd_cli_state *state,
 			DBG_INFO("PAC for user %s\\%s SID %s primed cache\n",
 				info3_copy->base.logon_domain.string,
 				info3_copy->base.account_name.string,
-				sid_string_dbg(&user_sid));
+				dom_sid_str_buf(&user_sid, &buf));
 		}
 	}
 

@@ -22,14 +22,19 @@
 
 #include "libcli/util/pyerrors.h"
 
-#ifndef Py_TYPE /* Py_TYPE is only available on Python > 2.6 */
-#define Py_TYPE(ob)             (((PyObject*)(ob))->ob_type)
-#endif
-
-#define PY_CHECK_TYPE(type, var, fail) \
-	if (!PyObject_TypeCheck(var, type)) {\
-		PyErr_Format(PyExc_TypeError, __location__ ": Expected type '%s' for '%s' of type '%s'", (type)->tp_name, #var, Py_TYPE(var)->tp_name); \
-		fail; \
+#define PY_CHECK_TYPE(type, var, fail)					\
+	if (var == NULL) {						\
+		PyErr_Format(PyExc_TypeError,				\
+			     __location__				\
+			     ": Expected type '%s' for '%s', got NULL", \
+			     (type)->tp_name, #var);			\
+		fail;							\
+	} else if (!PyObject_TypeCheck(var, type)) {			\
+		PyErr_Format(PyExc_TypeError,				\
+			     __location__				\
+			     ": Expected type '%s' for '%s' of type '%s'", \
+			     (type)->tp_name, #var, Py_TYPE(var)->tp_name); \
+		fail;							\
 	}
 
 #define dom_sid0_Type dom_sid_Type
@@ -44,6 +49,7 @@ typedef struct {
 	TALLOC_CTX *mem_ctx;
 	struct dcerpc_pipe *pipe;
 	struct dcerpc_binding_handle *binding_handle;
+	struct tevent_context *ev;
 } dcerpc_InterfaceObject;
 
 

@@ -358,6 +358,7 @@ static void parse_extra_info(char *key, uint64_t *speed, uint32_t *cap,
 	while (key != NULL && *key != '\0') {
 		char *next_key;
 		char *val;
+		int error = 0;
 
 		next_key = strchr_m(key, ',');
 		if (next_key != NULL) {
@@ -369,7 +370,14 @@ static void parse_extra_info(char *key, uint64_t *speed, uint32_t *cap,
 			*val++ = 0;
 
 			if (strequal_m(key, "speed")) {
-				*speed = (uint64_t)strtoull(val, NULL, 0);
+				*speed = (uint64_t)smb_strtoull(val,
+								NULL,
+								0,
+								&error,
+								SMB_STR_STANDARD);
+				if (error != 0) {
+					DBG_DEBUG("Invalid speed value (%s)\n", val);
+				}
 			} else if (strequal_m(key, "capability")) {
 				if (strequal_m(val, "RSS")) {
 					*cap |= FSCTL_NET_IFACE_RSS_CAPABLE;
@@ -380,7 +388,14 @@ static void parse_extra_info(char *key, uint64_t *speed, uint32_t *cap,
 						    "'%s'\n", val);
 				}
 			} else if (strequal_m(key, "if_index")) {
-				*if_index = (uint32_t)strtoul(val, NULL, 0);
+				*if_index = (uint32_t)smb_strtoul(val,
+								  NULL,
+								  0,
+								  &error,
+								  SMB_STR_STANDARD);
+				if (error != 0) {
+					DBG_DEBUG("Invalid key value (%s)\n", val);
+				}
 			} else {
 				DBG_DEBUG("Key unknown: '%s'\n", key);
 			}
@@ -515,9 +530,11 @@ static void interpret_interface(char *token)
 			return;
 		}
 	} else {
-		char *endp = NULL;
-		unsigned long val = strtoul(p, &endp, 0);
-		if (p == endp || (endp && *endp != '\0')) {
+		int error = 0;
+		unsigned long val;
+
+		val = smb_strtoul(p, NULL, 0, &error, SMB_STR_FULL_STR_CONV);
+		if (error != 0) {
 			DEBUG(2,("interpret_interface: "
 				"can't determine netmask value from %s\n",
 				p));

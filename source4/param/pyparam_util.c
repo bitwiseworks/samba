@@ -34,14 +34,14 @@ _PUBLIC_ struct loadparm_context *lpcfg_from_py_object(TALLOC_CTX *mem_ctx, PyOb
 	PyTypeObject *lp_type;
 	bool is_lpobj;
 
-	if (PyStr_Check(py_obj) || PyUnicode_Check(py_obj)) {
+	if (PyUnicode_Check(py_obj)) {
 		lp_ctx = loadparm_init_global(false);
 		if (lp_ctx == NULL) {
 			return NULL;
 		}
-		if (!lpcfg_load(lp_ctx, PyStr_AsString(py_obj))) {
+		if (!lpcfg_load(lp_ctx, PyUnicode_AsUTF8(py_obj))) {
 			PyErr_Format(PyExc_RuntimeError, "Unable to load %s", 
-				     PyStr_AsString(py_obj));
+				     PyUnicode_AsUTF8(py_obj));
 			return NULL;
 		}
 		return lp_ctx;

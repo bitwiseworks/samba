@@ -42,12 +42,12 @@
 	DCESRV_FAULT(DCERPC_FAULT_OP_RNG_ERROR); \
 } while (0)
 
-#define DCESRV_INTERFACE_DRSUAPI_BIND(call, iface) \
-	dcesrv_interface_drsuapi_bind(call, iface)
-static NTSTATUS dcesrv_interface_drsuapi_bind(struct dcesrv_call_state *dce_call,
+#define DCESRV_INTERFACE_DRSUAPI_BIND(context, iface) \
+	dcesrv_interface_drsuapi_bind(context, iface)
+static NTSTATUS dcesrv_interface_drsuapi_bind(struct dcesrv_connection_context *context,
 					      const struct dcesrv_interface *iface)
 {
-	return dcesrv_interface_bind_require_privacy(dce_call, iface);
+	return dcesrv_interface_bind_require_privacy(context, iface);
 }
 
 /* 
@@ -90,7 +90,7 @@ static WERROR dcesrv_drsuapi_DsBind(struct dcesrv_call_state *dce_call, TALLOC_C
 		auth_info = system_session(dce_call->conn->dce_ctx->lp_ctx);
 		connected_as_system = true;
 	} else {
-		auth_info = dce_call->conn->auth_state.session_info;
+		auth_info = dcesrv_call_session_info(dce_call);
 	}
 
 	/*
@@ -293,7 +293,7 @@ static WERROR dcesrv_drsuapi_DsBind(struct dcesrv_call_state *dce_call, TALLOC_C
 	/*
 	 * allocate a bind handle
 	 */
-	handle = dcesrv_handle_new(dce_call->context, DRSUAPI_BIND_HANDLE);
+	handle = dcesrv_handle_create(dce_call, DRSUAPI_BIND_HANDLE);
 	W_ERROR_HAVE_NO_MEMORY(handle);
 	handle->data = talloc_steal(handle, b_state);
 
@@ -1011,15 +1011,17 @@ static WERROR dcesrv_drsuapi_DsExecuteKCC(struct dcesrv_call_state *dce_call, TA
 static WERROR dcesrv_drsuapi_DsReplicaGetInfo(struct dcesrv_call_state *dce_call, TALLOC_CTX *mem_ctx,
 		       struct drsuapi_DsReplicaGetInfo *r)
 {
+	struct auth_session_info *session_info =
+		dcesrv_call_session_info(dce_call);
 	enum security_user_level level;
 
 	if (!lpcfg_parm_bool(dce_call->conn->dce_ctx->lp_ctx, NULL,
 			 "drs", "disable_sec_check", false)) {
-		level = security_session_user_level(dce_call->conn->auth_state.session_info, NULL);
+		level = security_session_user_level(session_info, NULL);
 		if (level < SECURITY_DOMAIN_CONTROLLER) {
 			DEBUG(1,(__location__ ": Administrator access required for DsReplicaGetInfo\n"));
 			security_token_debug(DBGC_DRS_REPL, 2,
-					     dce_call->conn->auth_state.session_info->security_token);
+					     session_info->security_token);
 			return WERR_DS_DRA_ACCESS_DENIED;
 		}
 	}

@@ -21,6 +21,7 @@
 #include "idmap_cache.h"
 #include "../libcli/security/security.h"
 #include "../librpc/gen_ndr/idmap.h"
+#include "lib/gencache.h"
 
 /**
  * Find a sid2xid mapping
@@ -35,7 +36,7 @@
 bool idmap_cache_find_sid2unixid(const struct dom_sid *sid, struct unixid *id,
 				 bool *expired)
 {
-	fstring sidstr;
+	struct dom_sid_buf sidstr;
 	char *key;
 	char *value = NULL;
 	char *endptr;
@@ -44,7 +45,7 @@ bool idmap_cache_find_sid2unixid(const struct dom_sid *sid, struct unixid *id,
 	struct unixid tmp_id;
 
 	key = talloc_asprintf(talloc_tos(), "IDMAP/SID2XID/%s",
-			      sid_to_fstring(sidstr, sid));
+			      dom_sid_str_buf(sid, &sidstr));
 	if (key == NULL) {
 		return false;
 	}
@@ -194,82 +195,73 @@ struct idmap_cache_xid2sid_state {
 	bool ret;
 };
 
-static void idmap_cache_xid2sid_parser(time_t timeout, DATA_BLOB blob,
+static void idmap_cache_xid2sid_parser(const struct gencache_timeout *timeout,
+				       DATA_BLOB blob,
 				       void *private_data)
 {
 	struct idmap_cache_xid2sid_state *state =
 		(struct idmap_cache_xid2sid_state *)private_data;
 	char *value;
 
-	ZERO_STRUCTP(state->sid);
-	state->ret = false;
-
 	if ((blob.length == 0) || (blob.data[blob.length-1] != 0)) {
 		/*
 		 * Not a string, can't be a valid mapping
 		 */
+		state->ret = false;
 		return;
 	}
 
 	value = (char *)blob.data;
 
-	if (value[0] != '-') {
+	if ((value[0] == '-') && (value[1] == '\0')) {
+		/*
+		 * Return NULL SID, see comment to uid2sid
+		 */
+		*state->sid = (struct dom_sid) {0};
+		state->ret = true;
+	} else {
 		state->ret = string_to_sid(state->sid, value);
 	}
 	if (state->ret) {
-		*state->expired = (timeout <= time(NULL));
+		*state->expired = gencache_timeout_expired(timeout);
 	}
 }
 
 /**
- * Find a uid2sid mapping
- * @param[in] uid		the uid to map
+ * Find a xid2sid mapping
+ * @param[in] id		the unix id to map
  * @param[out] sid		where to put the result
  * @param[out] expired		is the cache entry expired?
  * @retval Was anything in the cache at all?
  *
  * If "is_null_sid(sid)", this was a negative mapping.
  */
-
-bool idmap_cache_find_uid2sid(uid_t uid, struct dom_sid *sid, bool *expired)
+bool idmap_cache_find_xid2sid(
+	const struct unixid *id, struct dom_sid *sid, bool *expired)
 {
+	struct idmap_cache_xid2sid_state state = {
+		.sid = sid, .expired = expired
+	};
 	fstring key;
-	struct idmap_cache_xid2sid_state state;
+	char c;
 
-	fstr_sprintf(key, "IDMAP/UID2SID/%d", (int)uid);
+	switch (id->type) {
+	case ID_TYPE_UID:
+		c = 'U';
+		break;
+	case ID_TYPE_GID:
+		c = 'G';
+		break;
+	default:
+		return false;
+	}
 
-	state.sid = sid;
-	state.expired = expired;
-	state.ret = false;
+	fstr_sprintf(key, "IDMAP/%cID2SID/%d", c, (int)id->id);
 
 	gencache_parse(key, idmap_cache_xid2sid_parser, &state);
 	return state.ret;
 }
 
-/**
- * Find a gid2sid mapping
- * @param[in] gid		the gid to map
- * @param[out] sid		where to put the result
- * @param[out] expired		is the cache entry expired?
- * @retval Was anything in the cache at all?
- *
- * If "is_null_sid(sid)", this was a negative mapping.
- */
-
-bool idmap_cache_find_gid2sid(gid_t gid, struct dom_sid *sid, bool *expired)
-{
-	fstring key;
-	struct idmap_cache_xid2sid_state state;
-
-	fstr_sprintf(key, "IDMAP/GID2SID/%d", (int)gid);
-
-	state.sid = sid;
-	state.expired = expired;
-	state.ret = false;
-
-	gencache_parse(key, idmap_cache_xid2sid_parser, &state);
-	return state.ret;
-}
 
 /**
  * Store a mapping in the idmap cache
@@ -287,11 +279,12 @@ void idmap_cache_set_sid2unixid(const struct dom_sid *sid, struct unixid *unix_i
 {
 	time_t now = time(NULL);
 	time_t timeout;
-	fstring sidstr, key, value;
+	fstring key, value;
 
 	if (!is_null_sid(sid)) {
+		struct dom_sid_buf sidstr;
 		fstr_sprintf(key, "IDMAP/SID2XID/%s",
-			     sid_to_fstring(sidstr, sid));
+			     dom_sid_str_buf(sid, &sidstr));
 		switch (unix_id->type) {
 		case ID_TYPE_UID:
 			fstr_sprintf(value, "%d:U", (int)unix_id->id);
@@ -411,6 +404,7 @@ bool idmap_cache_del_sid(const struct dom_sid *sid)
 	bool ret = true;
 	bool expired;
 	struct unixid id;
+	struct dom_sid_buf sidbuf;
 	const char *sid_key;
 
 	if (!idmap_cache_find_sid2unixid(sid, &id, &expired)) {
@@ -435,7 +429,7 @@ bool idmap_cache_del_sid(const struct dom_sid *sid)
 		}
 	}
 
-	sid_key = key_sid2xid_str(mem_ctx, dom_sid_string(mem_ctx, sid));
+	sid_key = key_sid2xid_str(mem_ctx, dom_sid_str_buf(sid, &sidbuf));
 	if (sid_key == NULL) {
 		return false;
 	}

@@ -336,7 +336,7 @@ static bool tdbsam_upgrade_next_rid(struct db_context *db)
 		return true;
 	}
 
-	db_path = state_path("winbindd_idmap.tdb");
+	db_path = state_path(talloc_tos(), "winbindd_idmap.tdb");
 	if (db_path == NULL) {
 		return false;
 	}
@@ -715,7 +715,7 @@ static bool tdb_delete_samacct_only( struct samu *sam_pass )
 static NTSTATUS tdbsam_delete_sam_account(struct pdb_methods *my_methods,
 					  struct samu *sam_pass)
 {
-	NTSTATUS        nt_status = NT_STATUS_UNSUCCESSFUL;
+	NTSTATUS        nt_status;
 	fstring 	keystr;
 	uint32_t	rid;
 	fstring		name;
@@ -1001,6 +1001,8 @@ static NTSTATUS tdbsam_rename_sam_account(struct pdb_methods *my_methods,
 					  struct samu *old_acct,
 					  const char *newname)
 {
+	const struct loadparm_substitution *lp_sub =
+		loadparm_s3_global_substitution();
 	struct samu      *new_acct = NULL;
 	char *rename_script = NULL;
 	int              rename_ret;
@@ -1013,7 +1015,7 @@ static NTSTATUS tdbsam_rename_sam_account(struct pdb_methods *my_methods,
 		return NT_STATUS_NO_MEMORY;
 	}
 
-	rename_script = lp_rename_user_script(new_acct);
+	rename_script = lp_rename_user_script(new_acct, lp_sub);
 	if (!rename_script) {
 		TALLOC_FREE(new_acct);
 		return NT_STATUS_NO_MEMORY;
@@ -1173,6 +1175,7 @@ static int tdbsam_collect_rids(struct db_record *rec, void *private_data)
 		private_data, struct tdbsam_search_state);
 	size_t prefixlen = strlen(RIDPREFIX);
 	uint32_t rid;
+	int error = 0;
 	TDB_DATA key;
 
 	key = dbwrap_record_get_key(rec);
@@ -1182,7 +1185,14 @@ static int tdbsam_collect_rids(struct db_record *rec, void *private_data)
 		return 0;
 	}
 
-	rid = strtoul((char *)key.dptr+prefixlen, NULL, 16);
+	rid = smb_strtoul((char *)key.dptr+prefixlen,
+			  NULL,
+			  16,
+			  &error,
+			  SMB_STR_STANDARD);
+	if (error != 0) {
+		return 0;
+	}
 
 	ADD_TO_LARGE_ARRAY(state, uint32_t, rid, &state->rids, &state->num_rids,
 			   &state->array_size);

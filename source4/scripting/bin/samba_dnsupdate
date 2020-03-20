@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # vim: expandtab
 #
 # update our DNS names using TSIG-GSS
@@ -49,9 +49,10 @@ from samba.dcerpc import netlogon, winbind
 from samba.netcmd.dns import cmd_dns
 from samba import gensec
 from samba.kcc import kcc_utils
+from samba.compat import get_string
+from samba.compat import text_type
 import ldb
 
-samba.ensure_third_party_module("dns", "dnspython")
 import dns.resolver
 import dns.exception
 
@@ -59,7 +60,7 @@ default_ttl = 900
 am_rodc = False
 error_count = 0
 
-parser = optparse.OptionParser("samba_dnsupdate")
+parser = optparse.OptionParser("samba_dnsupdate [options]")
 sambaopts = options.SambaOptions(parser)
 parser.add_option_group(sambaopts)
 parser.add_option_group(options.VersionOptions(parser))
@@ -90,40 +91,29 @@ lp = sambaopts.get_loadparm()
 
 domain = lp.get("realm")
 host = lp.get("netbios name")
-if opts.all_interfaces:
-    all_interfaces = True
-else:
-    all_interfaces = False
+all_interfaces = opts.all_interfaces
 
-if opts.current_ip:
-    IPs = opts.current_ip
-else:
-    IPs = samba.interface_ips(lp, all_interfaces)
+IPs = opts.current_ip or samba.interface_ips(lp, bool(all_interfaces)) or []
 
 nsupdate_cmd = lp.get('nsupdate command')
+dns_zone_scavenging = lp.get("dns zone scavenging")
 
 dns_zone_scavenging = lp.get("dns zone scavenging")
 
 if len(IPs) == 0:
-    print "No IP interfaces - skipping DNS updates"
+    print("No IP interfaces - skipping DNS updates\n")
+    parser.print_usage()
     sys.exit(0)
 
-if opts.rpc_server_ip:
-    rpc_server_ip = opts.rpc_server_ip
-else:
-    rpc_server_ip = IPs[0]
+rpc_server_ip = opts.rpc_server_ip or IPs[0]
 
-IP6s = []
-IP4s = []
-for i in IPs:
-    if i.find(':') != -1:
-        IP6s.append(i)
-    else:
-        IP4s.append(i)
+IP6s = [ip for ip in IPs if ':' in ip]
+IP4s = [ip for ip in IPs if ':' not in ip]
 
+smb_conf = sambaopts.get_loadparm_path()
 
 if opts.verbose:
-    print "IPs: %s" % IPs
+    print("IPs: %s" % IPs)
 
 def get_possible_rw_dns_server(creds, domain):
     """Get a list of possible read-write DNS servers, starting with
@@ -131,23 +121,18 @@ def get_possible_rw_dns_server(creds, domain):
        (4.6 and prior) do not maintain this value, so add NS servers
        as well"""
 
-    hostnames = []
     ans_soa = check_one_dns_name(domain, 'SOA')
-
     # Actually there is only one
-    for i in range(len(ans_soa)):
-        hostnames.append(str(ans_soa[i].mname).rstrip('.'))
+    hosts_soa = [str(a.mname).rstrip('.') for a in ans_soa]
 
     # This is not strictly legit, but old Samba domains may have an
     # unmaintained SOA record, so go for any NS that we can get a
     # ticket to.
     ans_ns = check_one_dns_name(domain, 'NS')
-
     # Actually there is only one
-    for i in range(len(ans_ns)):
-        hostnames.append(str(ans_ns[i].target).rstrip('.'))
+    hosts_ns = [str(a.target).rstrip('.') for a in ans_ns]
 
-    return hostnames
+    return hosts_soa + hosts_ns
 
 def get_krb5_rw_dns_server(creds, domain):
     """Get a list of read-write DNS servers that we can obtain a ticket
@@ -159,8 +144,7 @@ def get_krb5_rw_dns_server(creds, domain):
 
     rw_dns_servers = get_possible_rw_dns_server(creds, domain)
     # Actually there is only one
-    for i in range(len(rw_dns_servers)):
-        target_hostname = str(rw_dns_servers[i])
+    for i, target_hostname in enumerate(rw_dns_servers):
         settings = {}
         settings["lp_ctx"] = lp
         settings["target_hostname"] = target_hostname
@@ -171,18 +155,17 @@ def get_krb5_rw_dns_server(creds, domain):
         gensec_client.set_target_hostname(target_hostname)
         gensec_client.want_feature(gensec.FEATURE_SEAL)
         gensec_client.start_mech_by_sasl_name("GSSAPI")
-        server_to_client = ""
+        server_to_client = b""
         try:
             (client_finished, client_to_server) = gensec_client.update(server_to_client)
             if opts.verbose:
-                print "Successfully obtained Kerberos ticket to DNS/%s as %s" \
-                    % (target_hostname, creds.get_username())
+                print("Successfully obtained Kerberos ticket to DNS/%s as %s" \
+                    % (target_hostname, creds.get_username()))
             return target_hostname
         except RuntimeError:
             # Only raise an exception if they all failed
-            if i != len(rw_dns_servers) - 1:
-                pass
-            raise
+            if i == len(rw_dns_servers) - 1:
+                raise
 
 def get_credentials(lp):
     """# get credentials if we haven't got them already."""
@@ -194,10 +177,10 @@ def get_credentials(lp):
     creds.set_krb_forwardable(credentials.NO_KRB_FORWARDABLE)
     (tmp_fd, ccachename) = tempfile.mkstemp()
     try:
-        creds.get_named_ccache(lp, ccachename)
-
         if opts.use_file is not None:
             return
+
+        creds.get_named_ccache(lp, ccachename)
 
         # Now confirm we can get a ticket to the DNS server
         get_krb5_rw_dns_server(creds, sub_vars['DNSDOMAIN'] + '.')
@@ -262,7 +245,7 @@ def parse_dns_line(line, sub_vars):
     if line.startswith("SRV _ldap._tcp.pdc._msdcs.") and not samdb.am_pdc():
         # We keep this as compat to the dns_update_list of 4.0/4.1
         if opts.verbose:
-            print "Skipping PDC entry (%s) as we are not a PDC" % line
+            print("Skipping PDC entry (%s) as we are not a PDC" % line)
         return None
     subline = samba.substitute_var(line, sub_vars)
     if subline == '' or subline[0] == "#":
@@ -277,9 +260,7 @@ def hostname_match(h1, h2):
     return h1.lower().rstrip('.') == h2.lower().rstrip('.')
 
 def get_resolver(d=None):
-    resolv_conf = os.getenv('RESOLV_CONF')
-    if not resolv_conf:
-        resolv_conf = '/etc/resolv.conf'
+    resolv_conf = os.getenv('RESOLV_CONF', default='/etc/resolv.conf')
     resolver = dns.resolver.Resolver(filename=resolv_conf, configure=True)
 
     if d is not None and d.nameservers != []:
@@ -289,17 +270,16 @@ def get_resolver(d=None):
 
 def check_one_dns_name(name, name_type, d=None):
     resolver = get_resolver(d)
-    if d is not None and len(d.nameservers) == 0:
+    if d and not d.nameservers:
         d.nameservers = resolver.nameservers
-
-    ans = resolver.query(name, name_type)
-    return ans
+    # dns.resolver.Answer
+    return resolver.query(name, name_type)
 
 def check_dns_name(d):
     """check that a DNS entry exists."""
     normalised_name = d.name.rstrip('.') + '.'
     if opts.verbose:
-        print "Looking for DNS entry %s as %s" % (d, normalised_name)
+        print("Looking for DNS entry %s as %s" % (d, normalised_name))
 
     if opts.use_file is not None:
         try:
@@ -323,11 +303,11 @@ def check_dns_name(d):
         raise Exception("Unable to contact a working DNS server while looking for %s as %s" % (d, normalised_name))
     except dns.resolver.NXDOMAIN:
         if opts.verbose:
-            print "The DNS entry %s, queried as %s does not exist" % (d, normalised_name)
+            print("The DNS entry %s, queried as %s does not exist" % (d, normalised_name))
         return False
     except dns.resolver.NoAnswer:
         if opts.verbose:
-            print "The DNS entry %s, queried as %s does not hold this record type" % (d, normalised_name)
+            print("The DNS entry %s, queried as %s does not hold this record type" % (d, normalised_name))
         return False
     except dns.exception.DNSException:
         raise Exception("Failure while trying to resolve %s as %s" % (d, normalised_name))
@@ -349,7 +329,7 @@ def check_dns_name(d):
     elif d.type == 'SRV':
         for rdata in ans:
             if opts.verbose:
-                print "Checking %s against %s" % (rdata, d)
+                print("Checking %s against %s" % (rdata, d))
             if hostname_match(rdata.target, d.dest):
                 if str(rdata.port) == str(d.port):
                     return True
@@ -358,7 +338,7 @@ def check_dns_name(d):
                     d.existing_weight = str(rdata.weight)
 
     if opts.verbose:
-        print "Lookup of %s succeeded, but we failed to find a matching DNS entry for %s" % (normalised_name, d)
+        print("Lookup of %s succeeded, but we failed to find a matching DNS entry for %s" % (normalised_name, d))
 
     return False
 
@@ -375,7 +355,7 @@ def get_subst_vars(samdb):
     vars['SITE']      = samdb.server_site_name()
     res = samdb.search(base=samdb.get_default_basedn(), scope=SCOPE_BASE, attrs=["objectGUID"])
     guid = samdb.schema_format_value("objectGUID", res[0]['objectGUID'][0])
-    vars['DOMAINGUID'] = guid
+    vars['DOMAINGUID'] = get_string(guid)
 
     vars['IF_DC'] = ""
     vars['IF_RWDC'] = "# "
@@ -442,10 +422,10 @@ def call_nsupdate(d, op="add"):
 
     assert(op in ["add", "delete"])
 
-    if opts.verbose:
-        print "Calling nsupdate for %s (%s)" % (d, op)
-
     if opts.use_file is not None:
+        if opts.verbose:
+            print("Use File instead of nsupdate for %s (%s)" % (d, op))
+
         try:
             rfile = open(opts.use_file, 'r+')
         except IOError:
@@ -470,37 +450,27 @@ def call_nsupdate(d, op="add"):
         fcntl.lockf(rfile, fcntl.LOCK_UN)
         return
 
+    if opts.verbose:
+        print("Calling nsupdate for %s (%s)" % (d, op))
+
     normalised_name = d.name.rstrip('.') + '.'
 
     (tmp_fd, tmpfile) = tempfile.mkstemp()
     f = os.fdopen(tmp_fd, 'w')
 
-    # Getting this line right is really important.  When we are under
-    # resolv_wrapper, then we want to use RESOLV_CONF and the
-    # nameserver therein. The issue is that this parameter forces us
-    # to only ever use that server, and not some other server that the
-    # NS record may point to, even as we get a ticket to that other
-    # server.
+    resolver = get_resolver(d)
+
+    # Local the zone for this name
+    zone = dns.resolver.zone_for_name(normalised_name,
+                                      resolver=resolver)
+
+    # Now find the SOA, or if we can't get a ticket to the SOA,
+    # any server with an NS record we can get a ticket for.
     #
-    # Therefore we must not set this in production, instead we want
-    # to find the name of a SOA for the zone and use that server.
-
-    if os.getenv('RESOLV_CONF') and d.nameservers != []:
-        f.write('server %s\n' % d.nameservers[0])
-    else:
-        resolver = get_resolver(d)
-
-        # Local the zone for this name
-        zone = dns.resolver.zone_for_name(normalised_name,
-                                          resolver=resolver)
-
-        # Now find the SOA, or if we can't get a ticket to the SOA,
-        # any server with an NS record we can get a ticket for.
-        #
-        # Thanks to the Kerberos Credentials cache this is not
-        # expensive inside the loop
-        server = get_krb5_rw_dns_server(creds, zone)
-        f.write('server %s\n' % server)
+    # Thanks to the Kerberos Credentials cache this is not
+    # expensive inside the loop
+    server = get_krb5_rw_dns_server(creds, zone)
+    f.write('server %s\n' % server)
 
     if d.type == "A":
         f.write("update %s %s %u A %s\n" % (op, normalised_name, default_ttl, d.ip))
@@ -562,11 +532,11 @@ def call_samba_tool(d, op="add", zone=None):
 
     if (sub_vars['DNSFOREST'] != sub_vars['DNSDOMAIN']) and \
        sub_vars['DNSFOREST'].endswith('.' + sub_vars['DNSDOMAIN']):
-        print "Refusing to use samba-tool when forest %s is under domain %s" \
-            % (sub_vars['DNSFOREST'], sub_vars['DNSDOMAIN'])
+        print("Refusing to use samba-tool when forest %s is under domain %s" \
+            % (sub_vars['DNSFOREST'], sub_vars['DNSDOMAIN']))
 
     if opts.verbose:
-        print "Calling samba-tool dns for %s (%s)" % (d, op)
+        print("Calling samba-tool dns for %s (%s)" % (d, op))
 
     normalised_name = d.name.rstrip('.') + '.'
     if zone is None:
@@ -581,7 +551,7 @@ def call_samba_tool(d, op="add", zone=None):
             zone = '_msdcs.' + sub_vars['DNSFOREST']
         else:
             if not normalised_name.endswith('.' + sub_vars['DNSDOMAIN'] + '.'):
-                print "Not Calling samba-tool dns for %s (%s), %s not in %s" % (d, op, normalised_name, sub_vars['DNSDOMAIN'] + '.')
+                print("Not Calling samba-tool dns for %s (%s), %s not in %s" % (d, op, normalised_name, sub_vars['DNSDOMAIN'] + '.'))
                 return False
             elif normalised_name.endswith('._msdcs.' + sub_vars['DNSFOREST'] + '.'):
                 zone = '_msdcs.' + sub_vars['DNSFOREST']
@@ -599,7 +569,7 @@ def call_samba_tool(d, op="add", zone=None):
         args = [rpc_server_ip, zone, short_name, "AAAA", d.ip]
     if d.type == "SRV":
         if op == "add" and d.existing_port is not None:
-            print "Not handling modify of exising SRV %s using samba-tool" % d
+            print("Not handling modify of existing SRV %s using samba-tool" % d)
             return False
             op = "update"
             args = [rpc_server_ip, zone, short_name, "SRV",
@@ -619,11 +589,14 @@ def call_samba_tool(d, op="add", zone=None):
     if d.type == "NS":
         args = [rpc_server_ip, zone, short_name, "NS", d.dest]
 
+    if smb_conf and args:
+        args += ["--configfile=" + smb_conf]
+
     global error_count
     try:
         cmd = cmd_dns()
         if opts.verbose:
-            print "Calling samba-tool dns %s -k no -P %s" % (op, args)
+            print("Calling samba-tool dns %s -k no -P %s" % (op, args))
         ret = cmd._run("dns", op, "-k", "no", "-P", *args)
         if ret == -1:
             if opts.fail_immediately:
@@ -639,6 +612,14 @@ def call_samba_tool(d, op="add", zone=None):
             print("Failed 'samba-tool dns' based update: %s : %s" % (str(d), estr))
         raise
 
+irpc_wb = None
+def cached_irpc_wb(lp):
+    global irpc_wb
+    if irpc_wb is not None:
+        return irpc_wb
+    irpc_wb = winbind.winbind("irpc:winbind_server", lp)
+    return irpc_wb
+
 def rodc_dns_update(d, t, op):
     '''a single DNS update via the RODC netlogon call'''
     global sub_vars
@@ -646,7 +627,7 @@ def rodc_dns_update(d, t, op):
     assert(op in ["add", "delete"])
 
     if opts.verbose:
-        print "Calling netlogon RODC update for %s" % d
+        print("Calling netlogon RODC update for %s" % d)
 
     typemap = {
         netlogon.NlDnsLdapAtSite       : netlogon.NlDnsInfoTypeNone,
@@ -658,7 +639,7 @@ def rodc_dns_update(d, t, op):
         netlogon.NlDnsGenericGcAtSite  : netlogon.NlDnsDomainNameAlias
         }
 
-    w = winbind.winbind("irpc:winbind_server", lp)
+    w = cached_irpc_wb(lp)
     dns_names = netlogon.NL_DNS_NAME_INFO_ARRAY()
     dns_names.count = 1
     name = netlogon.NL_DNS_NAME_INFO()
@@ -673,7 +654,7 @@ def rodc_dns_update(d, t, op):
     else:
         name.dns_register = False
     dns_names.names = [ name ]
-    site_name = sub_vars['SITE'].decode('utf-8')
+    site_name = text_type(sub_vars['SITE'])
 
     global error_count
 
@@ -685,6 +666,9 @@ def rodc_dns_update(d, t, op):
     except RuntimeError as reason:
         print("Error setting DNS entry of type %u: %s: %s" % (t, d, reason))
         error_count = error_count + 1
+
+    if opts.verbose:
+        print("Called netlogon RODC update for %s" % d)
 
     if error_count != 0 and opts.fail_immediately:
         sys.exit(1)
@@ -722,15 +706,9 @@ def call_rodc_update(d, op="add"):
 
 
 # get the list of DNS entries we should have
-if opts.update_list:
-    dns_update_list = opts.update_list
-else:
-    dns_update_list = lp.private_path('dns_update_list')
+dns_update_list = opts.update_list or lp.private_path('dns_update_list')
 
-if opts.update_cache:
-    dns_update_cache = opts.update_cache
-else:
-    dns_update_cache = lp.private_path('dns_update_cache')
+dns_update_cache = opts.update_cache or lp.private_path('dns_update_cache')
 
 krb5conf = None
 # only change the krb5.conf if we are not in selftest
@@ -740,7 +718,18 @@ if 'SOCKET_WRAPPER_DIR' not in os.environ:
     krb5conf = lp.private_path('krb5.conf')
     os.environ['KRB5_CONFIG'] = krb5conf
 
-file = open(dns_update_list, "r")
+try:
+    file = open(dns_update_list, "r")
+except OSError as e:
+    if opts.update_cache:
+        print("The specified update list does not exist")
+    else:
+        print("The server update list was not found, "
+              "and --update-list was not provided.")
+    print(e)
+    print()
+    parser.print_usage()
+    sys.exit(1)
 
 if opts.nosubs:
     sub_vars = {}
@@ -848,19 +837,19 @@ for d in dns_list:
     if not found:
         rebuild_cache = True
         if opts.verbose:
-            print "need cache add: %s" % d
+            print("need cache add: %s" % d)
     if dns_zone_scavenging:
         update_list.append(d)
         if opts.verbose:
-            print "scavenging requires update: %s" % d
+            print("scavenging requires update: %s" % d)
     elif opts.all_names:
         update_list.append(d)
         if opts.verbose:
-            print "force update: %s" % d
+            print("force update: %s" % d)
     elif not check_dns_name(d):
         update_list.append(d)
         if opts.verbose:
-            print "need update: %s" % d
+            print("need update: %s" % d)
 
 for c in cache_list:
     found = False
@@ -872,25 +861,25 @@ for c in cache_list:
         continue
     rebuild_cache = True
     if opts.verbose:
-        print "need cache remove: %s" % c
+        print("need cache remove: %s" % c)
     if not opts.all_names and not check_dns_name(c):
         continue
     delete_list.append(c)
     if opts.verbose:
-        print "need delete: %s" % c
+        print("need delete: %s" % c)
 
 if len(delete_list) == 0 and len(update_list) == 0 and not rebuild_cache:
     if opts.verbose:
-        print "No DNS updates needed"
+        print("No DNS updates needed")
     sys.exit(0)
 else:
     if opts.verbose:
-        print "%d DNS updates and %d DNS deletes needed" % (len(update_list), len(delete_list))
+        print("%d DNS updates and %d DNS deletes needed" % (len(update_list), len(delete_list)))
 
 use_samba_tool = opts.use_samba_tool
 use_nsupdate = opts.use_nsupdate
 # get our krb5 creds
-if len(delete_list) != 0 or len(update_list) != 0 and not opts.nocreds:
+if delete_list or update_list and not opts.nocreds:
     try:
         creds = get_credentials(lp)
     except RuntimeError as e:
@@ -902,7 +891,7 @@ if len(delete_list) != 0 or len(update_list) != 0 and not opts.nocreds:
         if use_nsupdate:
             raise
 
-        print "Failed to get Kerberos credentials, falling back to samba-tool: %s" % e
+        print("Failed to get Kerberos credentials, falling back to samba-tool: %s" % e)
         use_samba_tool = True
 
 
@@ -910,61 +899,62 @@ if len(delete_list) != 0 or len(update_list) != 0 and not opts.nocreds:
 for d in delete_list:
     if d.rpc or (not use_nsupdate and use_samba_tool):
         if opts.verbose:
-            print "update (samba-tool): %s" % d
+            print("update (samba-tool): %s" % d)
         call_samba_tool(d, op="delete", zone=d.zone)
 
     elif am_rodc:
         if d.name.lower() == domain.lower():
             if opts.verbose:
-                print "skip delete (rodc): %s" % d
+                print("skip delete (rodc): %s" % d)
             continue
         if not d.type in [ 'A', 'AAAA' ]:
             if opts.verbose:
-                print "delete (rodc): %s" % d
+                print("delete (rodc): %s" % d)
             call_rodc_update(d, op="delete")
         else:
             if opts.verbose:
-                print "delete (nsupdate): %s" % d
+                print("delete (nsupdate): %s" % d)
             call_nsupdate(d, op="delete")
     else:
         if opts.verbose:
-            print "delete (nsupdate): %s" % d
+            print("delete (nsupdate): %s" % d)
         call_nsupdate(d, op="delete")
 
 # ask nsupdate to add entries as needed
 for d in update_list:
     if d.rpc or (not use_nsupdate and use_samba_tool):
         if opts.verbose:
-            print "update (samba-tool): %s" % d
+            print("update (samba-tool): %s" % d)
         call_samba_tool(d, zone=d.zone)
 
     elif am_rodc:
         if d.name.lower() == domain.lower():
             if opts.verbose:
-                print "skip (rodc): %s" % d
+                print("skip (rodc): %s" % d)
             continue
         if not d.type in [ 'A', 'AAAA' ]:
             if opts.verbose:
-                print "update (rodc): %s" % d
+                print("update (rodc): %s" % d)
             call_rodc_update(d)
         else:
             if opts.verbose:
-                print "update (nsupdate): %s" % d
+                print("update (nsupdate): %s" % d)
             call_nsupdate(d)
     else:
         if opts.verbose:
-            print "update(nsupdate): %s" % d
+            print("update(nsupdate): %s" % d)
         call_nsupdate(d)
 
 if rebuild_cache:
-    print "Rebuilding cache at %s" % dns_update_cache
+    print("Rebuilding cache at %s" % dns_update_cache)
     (file_dir, file_name) = os.path.split(dns_update_cache)
     (tmp_fd, tmpfile) = tempfile.mkstemp(dir=file_dir, prefix=file_name, suffix="XXXXXX")
     wfile = os.fdopen(tmp_fd, 'a')
     for d in dns_list:
         if opts.verbose:
-            print "Adding %s to %s" % (str(d), file_name)
+            print("Adding %s to %s" % (str(d), file_name))
         wfile.write(str(d)+"\n")
+    wfile.flush()
     os.rename(tmpfile, dns_update_cache)
 fcntl.lockf(cfile, fcntl.LOCK_UN)
 

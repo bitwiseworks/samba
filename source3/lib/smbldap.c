@@ -278,7 +278,7 @@ void smbldap_set_bind_callback(struct smbldap_state *state,
 		       struct dom_sid *sid)
 {
 	DATA_BLOB blob;
-	bool ret;
+	ssize_t ret;
 
 	if (!smbldap_talloc_single_blob(talloc_tos(), ld, msg, attrib,
 					&blob)) {
@@ -286,7 +286,7 @@ void smbldap_set_bind_callback(struct smbldap_state *state,
 	}
 	ret = sid_parse(blob.data, blob.length, sid);
 	TALLOC_FREE(blob.data);
-	return ret;
+	return (ret != -1);
 }
 
  static int ldapmsg_destructor(LDAPMessage **result) {
@@ -1689,7 +1689,7 @@ int smbldap_search_suffix (struct smbldap_state *ldap_state,
 			   const char *filter, const char **search_attr,
 			   LDAPMessage ** result)
 {
-	return smbldap_search(ldap_state, lp_ldap_suffix(talloc_tos()),
+	return smbldap_search(ldap_state, lp_ldap_suffix(),
 			      LDAP_SCOPE_SUBTREE,
 			      filter, search_attr, 0, result);
 }

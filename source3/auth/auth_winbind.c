@@ -22,6 +22,7 @@
 
 #include "includes.h"
 #include "auth.h"
+#include "passdb.h"
 #include "nsswitch/libwbclient/wbclient.h"
 
 #undef DBGC_CLASS
@@ -110,13 +111,37 @@ static NTSTATUS check_winbind_security(const struct auth_context *auth_context,
 	}
 
 	if (wbc_status == WBC_ERR_WINBIND_NOT_AVAILABLE) {
-		struct auth_methods *auth_method =
-			(struct auth_methods *)my_private_data;
+		struct pdb_trusted_domain **domains = NULL;
+		uint32_t num_domains = 0;
+		NTSTATUS status;
 
-		if ( auth_method )
-			return auth_method->auth(auth_context, auth_method->private_data, 
-				mem_ctx, user_info, server_info);
-		return NT_STATUS_LOGON_FAILURE;
+		if (lp_server_role() == ROLE_DOMAIN_MEMBER) {
+			status = NT_STATUS_NO_LOGON_SERVERS;
+			DBG_ERR("winbindd not running - "
+				"but required as domain member: %s\n",
+				nt_errstr(status));
+			return status;
+		}
+
+		status = pdb_enum_trusted_domains(talloc_tos(), &num_domains, &domains);
+		if (!NT_STATUS_IS_OK(status)) {
+			DBG_ERR("pdb_enum_trusted_domains() failed - %s\n",
+				nt_errstr(status));
+			return status;
+		}
+		TALLOC_FREE(domains);
+
+		if (num_domains == 0) {
+			DBG_DEBUG("winbindd not running - ignoring without "
+				  "trusted domains\n");
+			return NT_STATUS_NOT_IMPLEMENTED;
+		}
+
+		status = NT_STATUS_NO_LOGON_SERVERS;
+		DBG_ERR("winbindd not running - "
+			"but required as DC with trusts: %s\n",
+			nt_errstr(status));
+		return status;
 	}
 
 	if (wbc_status == WBC_ERR_AUTH_ERROR) {
@@ -153,7 +178,10 @@ static NTSTATUS check_winbind_security(const struct auth_context *auth_context,
 }
 
 /* module initialisation */
-static NTSTATUS auth_init_winbind(struct auth_context *auth_context, const char *param, auth_methods **auth_method) 
+static NTSTATUS auth_init_winbind(
+	struct auth_context *auth_context,
+	const char *param,
+	struct auth_methods **auth_method)
 {
 	struct auth_methods *result;
 
@@ -163,16 +191,6 @@ static NTSTATUS auth_init_winbind(struct auth_context *auth_context, const char 
 	}
 	result->name = "winbind";
 	result->auth = check_winbind_security;
-
-	if (param && *param) {
-		/* we load the 'fallback' module - if winbind isn't here, call this
-		   module */
-		auth_methods *priv;
-		if (!load_auth_module(auth_context, param, &priv)) {
-			return NT_STATUS_UNSUCCESSFUL;
-		}
-		result->private_data = (void *)priv;
-	}
 
 	*auth_method = result;
 	return NT_STATUS_OK;

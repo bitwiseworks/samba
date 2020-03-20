@@ -30,6 +30,7 @@
 #include "lib/util/sys_rw.h"
 #include "lib/util/time.h"
 #include "lib/util/tevent_unix.h"
+#include "lib/util/util.h"
 
 #include "protocol/protocol.h"
 #include "protocol/protocol_api.h"
@@ -153,7 +154,7 @@ static bool recdb_persistent(struct recdb_context *recdb)
 
 struct recdb_add_traverse_state {
 	struct recdb_context *recdb;
-	int mypnn;
+	uint32_t mypnn;
 };
 
 static int recdb_add_traverse(uint32_t reqid, struct ctdb_ltdb_header *header,
@@ -303,8 +304,8 @@ struct recdb_file_traverse_state {
 	bool persistent;
 	bool failed;
 	int fd;
-	int max_size;
-	int num_buffers;
+	size_t max_size;
+	unsigned int num_buffers;
 };
 
 static int recdb_file_traverse(struct tdb_context *tdb,
@@ -396,7 +397,7 @@ struct pull_database_state {
 	struct recdb_context *recdb;
 	uint32_t pnn;
 	uint64_t srvid;
-	int num_records;
+	unsigned int num_records;
 	int result;
 };
 
@@ -774,7 +775,7 @@ struct push_database_new_state {
 	int fd;
 	int num_buffers;
 	int num_buffers_sent;
-	int num_records;
+	unsigned int num_records;
 };
 
 static void push_database_new_started(struct tevent_req *subreq);
@@ -1891,8 +1892,8 @@ static bool recover_db_recv(struct tevent_req *req)
 struct db_recovery_state {
 	struct tevent_context *ev;
 	struct ctdb_dbid_map *dbmap;
-	int num_replies;
-	int num_failed;
+	unsigned int num_replies;
+	unsigned int num_failed;
 };
 
 struct db_recovery_one_state {
@@ -1924,7 +1925,7 @@ static struct tevent_req *db_recovery_send(TALLOC_CTX *mem_ctx,
 {
 	struct tevent_req *req, *subreq;
 	struct db_recovery_state *state;
-	int i;
+	unsigned int i;
 
 	req = tevent_req_create(mem_ctx, &state, struct db_recovery_state);
 	if (req == NULL) {
@@ -2021,7 +2022,7 @@ done:
 	}
 }
 
-static bool db_recovery_recv(struct tevent_req *req, int *count)
+static bool db_recovery_recv(struct tevent_req *req, unsigned int *count)
 {
 	struct db_recovery_state *state = tevent_req_data(
 		req, struct db_recovery_state);
@@ -2063,7 +2064,7 @@ struct recovery_state {
 	struct ctdb_client_context *client;
 	uint32_t generation;
 	uint32_t *pnn_list;
-	int count;
+	unsigned int count;
 	uint32_t destnode;
 	struct ctdb_node_map *nodemap;
 	uint32_t *caps;
@@ -2255,7 +2256,8 @@ static void recovery_capabilities_done(struct tevent_req *subreq)
 	struct ctdb_reply_control **reply;
 	struct ctdb_req_control request;
 	int *err_list;
-	int ret, i;
+	unsigned int i;
+	int ret;
 	bool status;
 
 	status = ctdb_client_control_multi_recv(subreq, &ret, state, &err_list,
@@ -2359,8 +2361,8 @@ static void recovery_active_done(struct tevent_req *subreq)
 	struct ctdb_req_control request;
 	struct ctdb_vnn_map *vnnmap;
 	int *err_list;
-	int ret, i;
-	unsigned int count;
+	int ret;
+	unsigned int count, i;
 	bool status;
 
 	status = ctdb_client_control_multi_recv(subreq, &ret, NULL, &err_list,
@@ -2543,7 +2545,7 @@ static void recovery_db_recovery_done(struct tevent_req *subreq)
 		req, struct recovery_state);
 	struct ctdb_req_control request;
 	bool status;
-	int count;
+	unsigned int count;
 
 	status = db_recovery_recv(subreq, &count);
 	TALLOC_FREE(subreq);
@@ -2552,7 +2554,7 @@ static void recovery_db_recovery_done(struct tevent_req *subreq)
 
 	if (! status) {
 		uint32_t max_pnn = CTDB_UNKNOWN_PNN, max_credits = 0;
-		int i;
+		unsigned int i;
 
 		/* Bans are not enabled */
 		if (state->tun_list->enable_bans == 0) {
@@ -2571,22 +2573,28 @@ static void recovery_db_recovery_done(struct tevent_req *subreq)
 
 		/* If pulling database fails multiple times */
 		if (max_credits >= NUM_RETRIES) {
-			struct ctdb_req_message message;
+			struct ctdb_ban_state ban_state = {
+				.pnn = max_pnn,
+				.time = state->tun_list->recovery_ban_period,
+			};
 
-			D_ERR("Assigning banning credits to node %u\n",
-			      max_pnn);
+			D_ERR("Banning node %u for %u seconds\n",
+			      ban_state.pnn,
+			      ban_state.time);
 
-			message.srvid = CTDB_SRVID_BANNING;
-			message.data.pnn = max_pnn;
-
-			subreq = ctdb_client_message_send(
-					state, state->ev, state->client,
-					ctdb_client_pnn(state->client),
-					&message);
+			ctdb_req_control_set_ban_state(&request,
+						       &ban_state);
+			subreq = ctdb_client_control_send(state,
+							  state->ev,
+							  state->client,
+							  ban_state.pnn,
+							  TIMEOUT(),
+							  &request);
 			if (tevent_req_nomem(subreq, req)) {
 				return;
 			}
-			tevent_req_set_callback(subreq, recovery_failed_done,
+			tevent_req_set_callback(subreq,
+						recovery_failed_done,
 						req);
 		} else {
 			tevent_req_error(req, EIO);
@@ -2609,15 +2617,25 @@ static void recovery_failed_done(struct tevent_req *subreq)
 {
 	struct tevent_req *req = tevent_req_callback_data(
 		subreq, struct tevent_req);
+	struct recovery_state *state = tevent_req_data(
+		req, struct recovery_state);
+	struct ctdb_reply_control *reply;
 	int ret;
 	bool status;
 
-	status = ctdb_client_message_recv(subreq, &ret);
+	status = ctdb_client_control_recv(subreq, &ret, state, &reply);
 	TALLOC_FREE(subreq);
 	if (! status) {
-		D_ERR("failed to assign banning credits, ret=%d\n", ret);
+		D_ERR("failed to ban node, ret=%d\n", ret);
+		goto done;
 	}
 
+	ret = ctdb_reply_control_set_ban_state(reply);
+	if (ret != 0) {
+		D_ERR("control SET_BAN_STATE failed, ret=%d\n", ret);
+	}
+
+done:
 	tevent_req_error(req, EIO);
 }
 
@@ -2720,10 +2738,10 @@ int main(int argc, char *argv[])
 {
 	int write_fd;
 	const char *sockpath;
-	TALLOC_CTX *mem_ctx;
+	TALLOC_CTX *mem_ctx = NULL;
 	struct tevent_context *ev;
 	struct ctdb_client_context *client;
-	int ret;
+	int ret = 0;
 	struct tevent_req *req;
 	uint32_t generation;
 
@@ -2734,7 +2752,15 @@ int main(int argc, char *argv[])
 
 	write_fd = atoi(argv[1]);
 	sockpath = argv[2];
-	generation = (uint32_t)strtoul(argv[3], NULL, 0);
+	generation = (uint32_t)smb_strtoul(argv[3],
+					   NULL,
+					   0,
+					   &ret,
+					   SMB_STR_STANDARD);
+	if (ret != 0) {
+		fprintf(stderr, "recovery: unable to initialize generation\n");
+		goto failed;
+	}
 
 	mem_ctx = talloc_new(NULL);
 	if (mem_ctx == NULL) {

@@ -20,6 +20,7 @@
 #include "includes.h"
 #include "winbindd.h"
 #include "passdb/lookup_sid.h" /* only for LOOKUP_NAME_NO_NSS flag */
+#include "libcli/security/dom_sid.h"
 
 struct winbindd_getpwnam_state {
 	struct tevent_context *ev;
@@ -55,7 +56,10 @@ struct tevent_req *winbindd_getpwnam_send(TALLOC_CTX *mem_ctx,
 	/* Ensure null termination */
 	request->data.username[sizeof(request->data.username)-1]='\0';
 
-	DEBUG(3, ("getpwnam %s\n", request->data.username));
+	DBG_NOTICE("[%s (%u)] getpwnam %s\n",
+		   cli->client_name,
+		   (unsigned int)cli->pid,
+		   request->data.username);
 
 	domuser = request->data.username;
 
@@ -133,8 +137,10 @@ NTSTATUS winbindd_getpwnam_recv(struct tevent_req *req,
 	NTSTATUS status;
 
 	if (tevent_req_is_nterror(req, &status)) {
+		struct dom_sid_buf buf;
 		DEBUG(5, ("Could not convert sid %s: %s\n",
-			  sid_string_dbg(&state->sid), nt_errstr(status)));
+			  dom_sid_str_buf(&state->sid, &buf),
+			  nt_errstr(status)));
 		return status;
 	}
 	response->data.pw = state->pw;

@@ -1,5 +1,7 @@
 #!/usr/bin/env python
 
+provision = bld.pyembed_libname('PROVISION')
+samba_net = bld.pyembed_libname('samba-net')
 
 bld.SAMBA_SUBSYSTEM('TORTURE_UTIL',
 	source='util_smb.c',
@@ -57,6 +59,7 @@ bld.SAMBA_SUBSYSTEM('TORTURE_NDR',
                   ndr/samr.c
                   ndr/dfsblob.c
                   ndr/drsblobs.c
+                  ndr/dnsp.c
                   ndr/nbt.c
                   ndr/ntlmssp.c
                   ndr/string.c
@@ -74,12 +77,10 @@ bld.SAMBA_SUBSYSTEM('TORTURE_NDR',
 	enabled=bld.PYTHON_BUILD_IS_ENABLED()
 	)
 
-torture_rpc_backupkey = ''
-if bld.AD_DC_BUILD_IS_ENABLED():
-    if bld.CONFIG_SET('HAVE_GNUTLS_3_4_7'):
-        torture_rpc_backupkey = 'rpc/backupkey.c'
-    else:
-        torture_rpc_backupkey = 'rpc/backupkey_heimdal.c'
+bld.SAMBA_SUBSYSTEM('IREMOTEWINSPOOL_COMMON',
+                    source='rpc/iremotewinspool_common.c',
+                    deps='talloc',
+                    enabled=bld.PYTHON_BUILD_IS_ENABLED())
 
 bld.SAMBA_MODULE('torture_rpc',
                  source='''
@@ -113,7 +114,6 @@ bld.SAMBA_MODULE('torture_rpc',
                         rpc/remact.c
                         rpc/mgmt.c
                         rpc/scanner.c
-                        rpc/autoidl.c
                         rpc/countcalls.c
                         rpc/testjoin.c
                         rpc/schannel.c
@@ -137,7 +137,9 @@ bld.SAMBA_MODULE('torture_rpc',
                         rpc/clusapi.c
                         rpc/witness.c
                         rpc/iremotewinspool.c
-                        ''' + torture_rpc_backupkey + ntvfs_specific['source'],
+                        rpc/iremotewinspool_driver.c
+                        rpc/mdssvc.c
+                        rpc/backupkey.c''' + ntvfs_specific['source'],
                  autoproto='rpc/proto.h',
                  subsystem='smbtorture',
                  init_function='torture_rpc_init',
@@ -161,13 +163,11 @@ bld.SAMBA_MODULE('torture_rpc',
                       RPC_NDR_SPOOLSS
                       RPC_NDR_SRVSVC
                       RPC_NDR_WKSSVC
-                      RPC_NDR_ROT
                       RPC_NDR_DSSETUP
                       RPC_NDR_REMACT
                       RPC_NDR_OXIDRESOLVER
                       RPC_NDR_NTSVCS
-                      WB_HELPER
-                      samba-net
+                      %s
                       LIBCLI_AUTH
                       popt
                       POPT_CREDENTIALS
@@ -184,7 +184,11 @@ bld.SAMBA_MODULE('torture_rpc',
                       RPC_NDR_WITNESS
                       RPC_NDR_BACKUPKEY
                       RPC_NDR_WINSPOOL
-                      ''' + ntvfs_specific['deps'],
+                      IREMOTEWINSPOOL_COMMON
+                      printer_driver
+                      RPC_NDR_MDSSVC
+                      mdssvc
+                      ''' % samba_net + ntvfs_specific['deps'],
                  internal_module=True,
                  enabled=bld.PYTHON_BUILD_IS_ENABLED())
 
@@ -268,7 +272,7 @@ bld.SAMBA_MODULE('TORTURE_NET',
 	autoproto='libnet/proto.h',
 	subsystem='smbtorture',
 	init_function='torture_net_init',
-	deps='samba-net popt POPT_CREDENTIALS torture_rpc PROVISION',
+	deps='%s popt POPT_CREDENTIALS torture_rpc %s' % (provision, samba_net),
 	internal_module=True,
 	enabled=bld.PYTHON_BUILD_IS_ENABLED()
 	)
@@ -335,3 +339,12 @@ bld.SAMBA_BINARY('locktest',
 	deps='popt POPT_SAMBA POPT_CREDENTIALS samba-util LIBCLI_SMB samba-hostconfig param_options',
 	)
 
+bld.SAMBA_MODULE('TORTURE_DSDB',
+	source="../../source4/dsdb/common/tests/dsdb.c",
+	autoproto='dsdb_proto.h',
+	subsystem='smbtorture',
+	init_function='torture_dsdb_init',
+	deps="TORTURE_UTIL samba-util",
+	internal_module=True,
+	enabled=bld.PYTHON_BUILD_IS_ENABLED()
+	)

@@ -21,11 +21,6 @@
 #ifndef __NFS4_ACLS_H__
 #define __NFS4_ACLS_H__
 
-#define SMB_ACLTYPE_NONE 0
-#define SMB_ACLTYPE_UNKNOWN 1
-#define SMB_ACLTYPE_POSIX 2
-#define SMB_ACLTYPE_NFS4 4
-
 /* 
  * Following union captures the identity as 
  * used in the NFS4 ACL structures. 
@@ -142,6 +137,8 @@ uint32_t smb_get_naces(struct SMB4ACL_T *theacl);
 uint16_t smbacl4_get_controlflags(struct SMB4ACL_T *theacl);
 
 bool smbacl4_set_controlflags(struct SMB4ACL_T *theacl, uint16_t controlflags);
+
+bool nfs_ace_is_inherit(SMB_ACE4PROP_T *ace);
 
 NTSTATUS smb_fget_nt_acl_nfs4(files_struct *fsp,
 	const struct smbacl4_vfs_params *pparams,

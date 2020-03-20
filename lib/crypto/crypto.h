@@ -20,16 +20,8 @@
 #ifndef _SAMBA_CRYPTO_H_
 #define _SAMBA_CRYPTO_H_
 
-#include "../lib/crypto/crc32.h"
 #include "../lib/crypto/md4.h"
-#include "../lib/crypto/md5.h"
-#include "../lib/crypto/hmacmd5.h"
-#include "../lib/crypto/sha256.h"
-#include "../lib/crypto/hmacsha256.h"
-#include "../lib/crypto/arcfour.h"
 #include "../lib/crypto/aes.h"
 #include "../lib/crypto/aes_cmac_128.h"
-#include "../lib/crypto/aes_ccm_128.h"
-#include "../lib/crypto/aes_gcm_128.h"
 
 #endif /* _SAMBA_CRYPTO_H_ */

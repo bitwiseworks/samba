@@ -1222,14 +1222,14 @@ int ldb_msg_copy_attr(struct ldb_message *msg, const char *attr, const char *rep
 void ldb_msg_remove_element(struct ldb_message *msg, struct ldb_message_element *el)
 {
 	ptrdiff_t n = (el - msg->elements);
-	if (n >= msg->num_elements) {
-		/* should we abort() here? */
+	if (n >= msg->num_elements || n < 0) {
+		/* the element is not in the list. the caller is crazy. */
 		return;
 	}
-	if (n != msg->num_elements-1) {
-		memmove(el, el+1, ((msg->num_elements-1) - n)*sizeof(*el));
-	}
 	msg->num_elements--;
+	if (n != msg->num_elements) {
+		memmove(el, el+1, (msg->num_elements - n)*sizeof(*el));
+	}
 }
 
 
@@ -1303,8 +1303,10 @@ time_t ldb_string_to_time(const char *s)
 */
 int ldb_val_to_time(const struct ldb_val *v, time_t *t)
 {
-	char val[15] = {};
-	struct tm tm = {};
+	char val[15] = {0};
+	struct tm tm = {
+		.tm_year = 0,
+	};
 
 	if (v == NULL) {
 		return LDB_ERR_INVALID_ATTRIBUTE_SYNTAX;
